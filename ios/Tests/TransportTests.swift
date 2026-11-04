@@ -132,8 +132,13 @@ struct TransportTests {
     /// opening it again: its start is read back from earlier work.
     @Test func aBusyTurnKeepsItsStopPastTheBacklog() async throws {
         let route = posts
-        // work 1 to 1100: turn t9's start, then its steps; the backlog is the last 1000
-        let work: @Sendable (Int64) -> String = { seq in record("work", seq, body: seq == 1 ? #"{"kind":"turn.start","turn":"t9"}"# : #"{"kind":"turn.step","turn":"t9","text":"step \#(seq)"}"#) }
+        // work 1 to 1100: turn t9's start, then its steps; the backlog is the
+        // last 1000, and the 100 before it are large ones (about 60 KB each,
+        // within a record's 64 KiB): a page of them is 3 MB
+        let large = String(repeating: "x", count: 60_000)
+        let work: @Sendable (Int64) -> String = { seq in
+            record("work", seq, body: seq == 1 ? #"{"kind":"turn.start","turn":"t9"}"# : #"{"kind":"turn.step","turn":"t9","text":"\#(seq > 100 ? "step" : large)"}"#)
+        }
         let stub = Stub { seen, _ in
             switch seen.route {
             case "GET /api/f/chat--abc123/channels/work":
@@ -158,7 +163,10 @@ struct TransportTests {
             socket.push(#"{"type":"subscribed","channel":"work","next":1100,"more":false}"#)
             socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
             try await waitUntil("the turn running") { session.timeline.activeTurns == ["t9"] }
-            #expect(stub.seen.contains { $0.route == "GET /api/f/chat--abc123/channels/work" && $0.query == ["before": "101", "limit": "1000"] })
+            // read back in batches a response holds, until its start
+            let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/work" }.suffix(2).map(\.query)
+            #expect(asked == [["before": "101", "limit": "50"], ["before": "51", "limit": "50"]])
+            #expect(session.error == nil)
             await session.stop()
             #expect(stub.seen.last { $0.route == route }?.json["id"].string == "stop:t9")
             run.cancel()

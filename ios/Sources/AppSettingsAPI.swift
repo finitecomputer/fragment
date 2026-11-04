@@ -185,3 +185,47 @@ extension FragmentAPI {
         return file
     }
 }
+
+/// The person's export, as Settings follows it (cell/shell/exports.js): its
+/// latest view, asked again every `every` while it builds, its archive once
+/// downloaded, and a new one made at any time (`POST /api/export` replaces
+/// the last, so the file downloaded from it goes).
+@MainActor @Observable
+final class ExportModel {
+    let api: FragmentAPI
+    let every: Duration
+    private(set) var export: ExportView?
+    private(set) var file: URL?
+    private(set) var busy = false
+    var error: String?
+    init(api: FragmentAPI, every: Duration = .seconds(2)) { self.api = api; self.every = every }
+
+    var startLabel: String {
+        switch export?.state {
+        case "building": "Exporting…"
+        case "ready": "Export again"
+        default: "Export everything"
+        }
+    }
+    private func run(_ step: () async throws -> Void) async {
+        busy = true; error = nil; defer { busy = false }
+        do { try await step() } catch { self.error = error.localizedDescription }
+    }
+    func refresh() async { await run { export = try await api.export() } }
+    func start() async {
+        file = nil
+        await run { export = try await api.startExport() }
+    }
+    func download() async {
+        guard let export else { return }
+        await run { file = try await api.download(export) }
+    }
+    /// While it builds, its view again every `every`, until it is ready (or
+    /// failed, or gone), or the screen goes.
+    func follow() async {
+        while export?.state == "building" {
+            do { try await Task.sleep(for: every) } catch { return }
+            await refresh()
+        }
+    }
+}

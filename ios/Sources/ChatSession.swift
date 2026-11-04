@@ -121,7 +121,7 @@ final class ChatSession {
                                 caughtUp = true
                                 if timeline.records.filter({ $0.channel == "chat" }).count < Self.chatLast { hasEarlier = false }
                             } else if channel == "work" {
-                                await readTurnsBack()
+                                await earlierWork()
                             }
                         }
                     }
@@ -152,12 +152,16 @@ final class ChatSession {
 
     /// The backlog a chat first reads: its last messages, and a page of
     /// `work` (`CHANNEL_PAGE`), which holds a long turn's steps (up to 200
-    /// calls and 200 steps) and, mostly, its start (`readTurnsBack`).
+    /// calls and 200 steps) and, mostly, its start (`earlierWork`).
     static let chatLast = 50
     static let workPage = 1_000
-    /// Pages of earlier `work` read back for turns begun before the backlog,
-    /// as the web's chat page reads (templates/chat `earlierWork`).
-    static let turnPagesMax = 10
+    /// Earlier `work` is read in batches of this many: each record at most
+    /// `RECORD_BODY_MAX_BYTES` (64 KiB), so a batch stays within the 4 MiB
+    /// an answer may be here (`FragmentAPI.request`), which the HTTP route,
+    /// bounding its pages by count alone, does not promise.
+    static let workBatch = 50
+    /// Earlier `work` read back at most, a visit.
+    static let earlierWorkMax = 1_000
 
     private func subscribe(_ socket: LiveSocket, channel: String, after: Int64?) async throws {
         var body: [String: JSONValue] = ["type": .string("subscribe"), "channel": .string(channel)]
@@ -167,16 +171,24 @@ final class ChatSession {
         try await socket.send(.string(String(decoding: data, as: UTF8.self)))
     }
 
-    /// Earlier `work`, read until each turn the backlog shows work of has its
-    /// start or its end, so one begun before it still shows running (and
-    /// Stop). Bounded by `turnPagesMax`; a failure leaves it for the next
-    /// visit. What it reads only says which turns run: none is shown.
-    private func readTurnsBack() async {
-        for _ in 0..<Self.turnPagesMax {
-            guard !timeline.unresolvedTurns.isEmpty, let oldest = timeline.oldestWork, oldest > 1 else { return }
-            guard let page = try? await api.history(fragment.name, channel: "work", before: oldest, limit: Self.workPage) else { return }
+    /// Earlier `work`, read back as the web's chat page reads it
+    /// (templates/chat/site/chat.js `earlierWork`): until it reaches the
+    /// oldest message shown, and, here, also while a turn was read without
+    /// its start (a long turn's begun before the backlog), so it shows
+    /// running, and Stop, however the chat was opened. What it reads only
+    /// says which turns run; none of it is shown. Bounded by
+    /// `earlierWorkMax`; a failure leaves it for the next visit, and says so.
+    private func earlierWork() async {
+        var read = 0
+        while read < Self.earlierWorkMax, let oldest = timeline.oldestWork, oldest.seq > 1 {
+            let shownFrom = timeline.records.first { $0.channel == "chat" }?.at
+            guard timeline.awaitsAStart || shownFrom.map({ oldest.at >= $0 }) == true else { return }
+            let page: [ChannelRecord]
+            do { page = try await api.history(fragment.name, channel: "work", before: oldest.seq, limit: Self.workBatch) }
+            catch { self.error = "Earlier progress could not be read: " + error.localizedDescription; return }
             for record in page { timeline.learn(record) }
-            if page.count < Self.workPage { return }
+            read += page.count
+            if page.count < Self.workBatch { return }
         }
     }
 

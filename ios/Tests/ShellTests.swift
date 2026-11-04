@@ -103,6 +103,36 @@ struct ShellTests {
         await #expect(throws: APIError.self) { _ = try await api.download(elsewhere) }
     }
 
+    /// Settings follows a building export to ready on the same screen, then
+    /// downloads it; a new export stays at hand beside it and, made, drops
+    /// the file of the one it replaced (cell/shell/exports.js).
+    @Test func anExportIsFollowedToReadyAndCanBeMadeAgain() async throws {
+        let id = "0123456789abcdef"
+        let building = #"{"id":"\#(id)","state":"building","startedAt":1,"progress":{"done":1,"total":3,"bytes":5}}"#
+        let ready = #"{"id":"\#(id)","state":"ready","startedAt":1,"progress":{"done":3,"total":3,"bytes":11},"size":11,"readyAt":2,"expiresAt":3,"download":"/api/export/\#(id)/download"}"#
+        let stub = Stub { seen, before in
+            switch seen.route {
+            case "POST /api/export": return (200, building)
+            // ready on its third look, after the first export was asked for
+            case "GET /api/export": return (200, #"{"export":\#(before.filter { $0.route == seen.route }.count >= 2 ? ready : building)}"#)
+            case "GET /api/export/\(id)/download": return (200, "tar-archive")
+            default: return (404, "{}")
+            }
+        }
+        let model = ExportModel(api: try stub.api(), every: .milliseconds(10))
+        await model.start()
+        #expect(model.export?.state == "building" && model.startLabel == "Exporting…")
+        await model.follow()
+        #expect(model.export?.state == "ready" && model.startLabel == "Export again" && model.error == nil)
+        await model.download()
+        let file = try #require(model.file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "tar-archive")
+        await model.start()
+        #expect(model.export?.state == "building" && model.file == nil)
+        #expect(stub.seen.filter { $0.route == "POST /api/export" }.count == 2)
+    }
+
     @Test func aComputerSaysItsPhase() throws {
         let listed = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"computers":[{"computer":"c1","owner":"npub1me","image":"stub","phase":"wont_wake","generation":3,"agents":[]}],"support":null}"#.utf8))
         #expect(ComputerPhase.said(listed["computers"].array.first?["phase"].string) == "Won’t wake")

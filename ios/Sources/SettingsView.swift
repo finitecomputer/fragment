@@ -71,6 +71,11 @@ private struct SettingsDetail: View {
     @State private var error: String?
     @State private var confirmRestart = false
     @State private var notificationStatus = "Not enabled"
+    @State private var exports: ExportModel
+    init(section: SettingsSection, library: Library, api: FragmentAPI, open: @escaping (FragmentSummary) -> Void) {
+        self.section = section; self.library = library; self.api = api; self.open = open
+        _exports = State(initialValue: ExportModel(api: api))
+    }
     var body: some View {
         Form {
             if loading { ProgressView("Loading…") }
@@ -140,7 +145,7 @@ private struct SettingsDetail: View {
                 Button("Copy prompt", systemImage: "doc.on.doc") { UIPasteboard.general.string = prompt }
             }
         case .data:
-            ExportSection(api: api)
+            ExportSection(model: exports)
         case .device:
             Section("Notifications") {
                 LabeledContent("Reply notifications", value: notificationStatus)
@@ -160,6 +165,8 @@ private struct SettingsDetail: View {
         case .billing: path = "api/seat"
         case .computer: path = "api/computers"
         case .connections: path = "api/connections"
+        // the Form's pull to refresh asks the export again too
+        case .data: return await exports.refresh()
         default: return
         }
         do { value = try await api.request(path) } catch { self.error = error.localizedDescription }
@@ -175,40 +182,28 @@ private struct SettingsDetail: View {
     }
 }
 
-/// The person's export (docs/api.md, Export): made on the platform, then
-/// downloaded with this iPhone's own signature into a file of its own, and
-/// shared from there. Its download is a path on the platform, never a link
-/// anyone else could open.
+/// The person's export (docs/api.md, Export) as the web's Settings shows it
+/// (cell/shell/exports.js): made on the platform, followed while it builds,
+/// downloaded with this iPhone's own signature into a file of its own and
+/// shared from there, and made again at any time.
 private struct ExportSection: View {
-    let api: FragmentAPI
-    @State private var export: ExportView?
-    @State private var file: URL?
-    @State private var busy = false
-    @State private var error: String?
+    let model: ExportModel
     var body: some View {
         Section("Export") {
             Text("Download your fragments, messages, app data, and your computer’s newest save.")
-            LabeledContent("Status", value: export?.said ?? "No export yet")
-            if let export, export.state == "ready", export.download != nil {
-                if let file { ShareLink(item: file) { Label("Share export", systemImage: "square.and.arrow.up") } }
-                else { Button("Download export", systemImage: "arrow.down.circle") { Task { await download(export) } }.disabled(busy).accessibilityIdentifier("downloadExport") }
-            } else {
-                Button("Export everything", systemImage: "square.and.arrow.down") { Task { await start() } }
-                    .disabled(busy || export?.state == "building").accessibilityIdentifier("startExport")
+            LabeledContent("Status", value: model.export?.said ?? "No export yet")
+            if let export = model.export, export.state == "ready", export.download != nil {
+                if let file = model.file { ShareLink(item: file) { Label("Share export", systemImage: "square.and.arrow.up") } }
+                else { Button("Download export", systemImage: "arrow.down.circle") { Task { await model.download() } }.disabled(model.busy).accessibilityIdentifier("downloadExport") }
             }
-            if busy { ProgressView() }
-            if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            Button(model.startLabel, systemImage: "square.and.arrow.down") { Task { await model.start() } }
+                .disabled(model.busy || model.export?.state == "building").accessibilityIdentifier("startExport")
+            if model.busy { ProgressView() }
+            if let error = model.error { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
-        .task { await refresh() }
-        .refreshable { await refresh() }
+        .task { await model.refresh() }
+        .task(id: model.export?.state == "building") { await model.follow() }
     }
-    private func run(_ step: () async throws -> Void) async {
-        busy = true; error = nil; defer { busy = false }
-        do { try await step() } catch { self.error = error.localizedDescription }
-    }
-    private func refresh() async { await run { export = try await api.export() } }
-    private func start() async { await run { export = try await api.startExport(); file = nil } }
-    private func download(_ export: ExportView) async { await run { file = try await api.download(export) } }
 }
 
 /// A computer's `phase` (`ComputerView`, docs/api.md), as Settings says it.

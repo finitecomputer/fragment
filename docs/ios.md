@@ -149,13 +149,18 @@ phone's network: an attachment of at most 25 MiB, and an icon fitted inside
 256×256 on the phone, as the server would fit it.
 
 JSON text subscriptions match the Worker’s live protocol. A chat reads its last
-50 messages and a page of `work` (1000, `CHANNEL_PAGE`); which turns run is kept
-apart from the shown records, and a turn begun before that page has its start
-read back from earlier work (at most ten pages, as the web's chat page reads), so
-Stop shows for a long turn however it was opened. An archive's chats index is
+50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Which turns run follows
+the web's chat page (`templates/chat/site/chat.js`): a turn is its agent's and its
+id, a record counts only toward its own poster's turn, and a turn runs once its
+start is read and until its end is, in either order; this is kept apart from the
+shown records. Earlier work is read back as the web reads it, to the oldest message
+shown, and also while a turn was read without its start, in batches of 50 (each
+answer within the app's 4 MiB) and at most 1000 records a visit, so Stop shows for
+a long turn however the chat was opened. An archive's chats index is
 optional: an archive of other kinds alone has none, and a failed read never
-stops the list or its agents. An export downloads with the phone's signature to
-a file of its own, and is shared from there. Connected accounts follow the signed list watcher, discard
+stops the list or its agents. An export is followed while it builds (every two
+seconds, as the web's Settings), downloads with the phone's signature to a file of
+its own, is shared from there, and can be made again beside it. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not

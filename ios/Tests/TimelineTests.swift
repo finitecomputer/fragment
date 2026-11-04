@@ -64,4 +64,56 @@ struct TimelineTests {
         #expect(timeline.activeTurns.isEmpty)
         #expect(timeline.drafts.isEmpty)
     }
+
+    // ---- which turns run, as the web's chat page decides it (chat.js
+    // `turnOf`, control.js `running`), records read in any order ----
+    private func work(_ seq: Int64, _ kind: String, _ turn: String, by agent: String = "npub1a") -> ChannelRecord {
+        ChannelRecord(channel: "work", seq: seq, at: seq * 10, principal: agent, kind: "message", body: .object(["kind": .string(kind), "turn": .string(turn)]))
+    }
+
+    @Test func anEndBeforeItsStartCountsOnlyFromTheAgentThatBeganIt() {
+        // its own agent's end, read before its start (paging back): it ended
+        var same = Timeline()
+        same.learn(work(9, "turn.end", "t"))
+        #expect(same.awaitsAStart)
+        same.learn(work(1, "turn.start", "t"))
+        #expect(same.activeTurns.isEmpty && !same.awaitsAStart)
+        // another agent's end naming it: A's turn still runs once its start is read
+        var other = Timeline()
+        other.learn(work(9, "turn.end", "t", by: "npub1b"))
+        other.learn(work(5, "turn.step", "t"))
+        other.learn(work(1, "turn.start", "t"))
+        #expect(other.activeTurns == ["t"])
+        other.learn(work(12, "turn.end", "t"))
+        #expect(other.activeTurns.isEmpty)
+    }
+
+    /// Codex's probe: a 1000-record backlog that holds a boundary turn's end
+    /// (its start older), 499 whole turns and a busy turn's step, then the
+    /// page before it: the ended turn never runs again; the busy one does.
+    @Test func pagingBackNeverRevivesAnEndedTurn() {
+        var timeline = Timeline()
+        timeline.learn(work(1001, "turn.end", "boundary"))
+        for i in Int64(0)..<499 {
+            timeline.learn(work(1002 + 2 * i, "turn.start", "done\(i)"))
+            timeline.learn(work(1003 + 2 * i, "turn.end", "done\(i)"))
+        }
+        timeline.learn(work(2000, "turn.step", "busy"))
+        #expect(timeline.activeTurns.isEmpty && timeline.awaitsAStart)
+        for (seq, turn) in [(Int64(500), "boundary"), (Int64(990), "busy")] { timeline.learn(work(seq, "turn.start", turn)) }
+        #expect(timeline.activeTurns == ["busy"] && !timeline.awaitsAStart)
+    }
+
+    @Test func pastItsBoundOnlyTurnsBegunAndEndedGo() {
+        var timeline = Timeline()
+        timeline.learn(work(1_000_000, "turn.end", "late"))
+        for i in Int64(0)..<Int64(Timeline.maximumTurns + 10) {
+            timeline.learn(work(10 + 2 * i, "turn.start", "w\(i)"))
+            timeline.learn(work(11 + 2 * i, "turn.end", "w\(i)"))
+        }
+        #expect(timeline.turns.count == Timeline.maximumTurns)
+        // the end read without its start is kept: its start, read later, never runs
+        timeline.learn(work(1, "turn.start", "late"))
+        #expect(timeline.activeTurns.isEmpty)
+    }
 }
