@@ -553,7 +553,9 @@ iframe[data-blocked] { display: none; }
 .settings-section h2 { font: var(--type-title-3); position: absolute; top: -42px; left: 0; margin: 0; }
 .settings-section h2:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 4px; border-radius: 2px; }
 .settings-section > p { margin: 0; padding: 12px 2px; }
-.settings-section > p.muted { font: var(--type-body); color: var(--text-secondary); }
+/* a section's intro: the design's line-height (1.55, roomier than a row's
+   text), its lines kept even where it wraps */
+.settings-section > p.muted { font: var(--type-body); line-height: 1.55; color: var(--text-secondary); text-wrap: pretty; }
 .settings-section > .connector-tags { display: flex; gap: 6px; padding: 12px 2px 0; }
 .settings-section .settings-line { font: var(--type-body); display: flex; align-items: center; gap: 18px; width: 100%; padding: 15px 2px; margin: 0; border-bottom: 1px solid var(--border-strong); }
 .settings-line:last-child { border-bottom: 0; }
@@ -681,7 +683,7 @@ label.settings-line { cursor: pointer; }
 }
 /* settings' connections (Skyler's design, 2026-11-04): a card per provider,
    in two groups, each opening its sheet (connections.js connectionsSection) */
-.provider-group-head { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; width: 100%; margin: 14px 0 0; }
+.provider-group-head { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; width: 100%; margin: 14px 0 0; padding: 0 2px; }
 .provider-group-head h3 { margin: 0; font: var(--type-body-strong); }
 .provider-group-head p { margin: 0; font: var(--type-body-sm); color: var(--text-tertiary); }
 .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; width: 100%; }
