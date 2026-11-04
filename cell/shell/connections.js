@@ -1,5 +1,6 @@
 // a provider's name for people: google-places is Google Places, xai xAI
 import { KIND } from "./frame-messages.js";
+import { icon } from "./icons.js";
 
 const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
 export const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
@@ -11,7 +12,6 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   // may use it (all by default; a list narrows one agent), and this month's
   // calls by each agent, with an operator key's cost. Their agents use them
   // through the computer's swap, each with a placeholder of its own.
-  const PROVIDER_KIND = { connection: "Your account", operator: "The platform's key", own: "Your key" };
   const PROVIDER_STATE = {
     connected: "Connected",
     needs_reauthorization: "Needs reauthorization",
@@ -182,6 +182,27 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     };
     return pick;
   }
+  // ---- the section (Skyler's design, 2026-11-04): a card per provider, in
+  // two groups (the person's own accounts and keys; the platform's keys,
+  // included with their seat), each opening its sheet: its state and what
+  // changes it, which agents may use it, and its details. A press reloads
+  // settings, and the sheet open in this visit is shown again (`openSheet`),
+  // but after a Disconnect or Remove, whose notice is the page's.
+  let openSheet = null;
+  // "2026-11" as people say it: November
+  const monthName = (month) => {
+    const [y, m] = (month ?? "").split("-").map(Number);
+    return y && m ? new Date(Date.UTC(y, m - 1, 1)).toLocaleString(undefined, { month: "long", timeZone: "UTC" }) : "this month";
+  };
+  const callsSaid = (n) => `${n} ${n === 1 ? "call" : "calls"}`;
+  // what a call is charged (an operator key's `charged`, as the ledger charges it)
+  const perCall = (c) => (c ? money(Math.ceil(c.micros / c.per)) : null);
+  // its light: on while their agents may use it; amber while it waits on the
+  // person (connect again, or something they did not allow)
+  const lightOf = (p) => {
+    if (p.state === "needs_reauthorization" || (p.state === "connected" && p.missing?.length)) return "warn";
+    return ["connected", "set", "offered"].includes(p.state) ? "on" : "";
+  };
   function connectionsSection(linked, uses) {
     const s = section("Connections");
     s.id = "settings-connections";
@@ -192,190 +213,301 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     }
     s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
     const agents = computer()?.agents ?? [];
-    for (const p of offered) {
-      const row = el("div", "provider");
-      row.dataset.provider = p.provider;
-      row.dataset.kind = p.kind;
-      row.dataset.state = p.state;
-      const head = el("div", "provider-head");
-      const identity = el("div", "provider-identity");
-      // an own key signed in to is the person's account there, its models theirs to pick
-      const kind = p.signIn ? (p.models?.length ? "Your account: its models for your agents" : "Your account") : PROVIDER_KIND[p.kind] ?? p.kind;
-      identity.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", kind));
-      const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
-      const st = el("span", `provider-state ${p.state}`, stateName);
-      identity.append(st);
-      // which account a connection is: the person's sign-in here may be another
-      // (of several, each is named in its own row)
-      const several = Array.isArray(p.accounts);
-      if (p.account && !several) {
-        const account = el("span", "provider-account", p.account);
-        account.dataset.account = p.account;
-        identity.append(account);
-      }
-      head.append(identity);
-      row.append(head);
-      // the deployment's word on it (its catalog row's note), connected or not
-      if (p.note) row.append(el("span", "muted provider-detail provider-note", p.note));
-      const actions = el("div", "settings-actions");
-      const details = [];
-      // what a Connect press says: a blocked window, or a start refused; and
-      // a Disconnect or Remove that did not go through
-      const said = el("span", "muted provider-detail provider-said");
-      // Disconnect or Remove: settings then reload, and the row they show says
-      // whether the key is still there; one that failed says so in it
-      const removeKey = (button) => async () => {
-        const visit = visitOf();
-        button.disabled = true;
-        unremoved.delete(p.provider);
-        try {
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
-        } catch {
-          // kept only while its visit is the one shown: an older visit's
-          // answer never replaces a newer one's
-          if (visit === visitOf() && isOpen()) unremoved.set(p.provider, visit);
-        }
-        await reopenSettings();
-      };
-      if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
-        actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
-        details.push(said);
-      }
-      // of several, another while the platform takes more; each account is
-      // reconnected and disconnected in its own row
-      // theirs to use: none they disconnected (which Pipes may hold still)
-      const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
-      if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
-        const add = connectButton(p, `Add another ${providerName(p.provider)} account`, said, { add: true });
-        add.dataset.action = "add-account";
-        actions.append(add);
-        details.push(said);
-      }
-      // what the person left unticked when they connected it: a reconnect
-      // asks for it again (the provider keeps what they allowed before)
-      if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
-        const again = connectButton(p, "Reconnect to add", said);
-        again.dataset.action = "reconnect";
-        actions.append(again);
-        details.push(notAllowed(p.missing), said);
-      }
-      if (!several && p.kind === "connection" && p.state !== "not_connected") {
-        actions.append(disconnectButton(p, said));
-        if (!details.includes(said)) details.push(said);
-      }
-      if (p.kind === "own" && p.signIn) {
-        // connected through the provider's own page (never a key pasted here):
-        // it makes a key of the person's, which their computer keeps sealed
-        if (p.state !== "set") {
-          const go = connectButton(p, "Connect", said);
-          go.dataset.action = "sign-in";
-          actions.append(go);
-          details.push(said);
-          if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
-        } else {
-          const off = el("button", "quiet", "Disconnect");
-          off.type = "button";
-          off.dataset.action = "disconnect";
-          off.onclick = removeKey(off);
-          const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
-          manage.href = p.signIn.manage;
-          manage.target = "_blank";
-          manage.rel = "noopener";
-          actions.append(off, manage);
-        }
-      } else if (p.kind === "own") {
-        const form = el("form", "provider-key");
-        const input = el("input");
-        input.type = "password";
-        input.autocomplete = "off";
-        input.placeholder = p.state === "set" ? "Replace your key" : `Your ${providerName(p.provider)} key`;
-        const save = el("button", "quiet", "Save");
-        save.type = "submit";
-        form.append(input, save);
-        form.onsubmit = async (e) => {
-          e.preventDefault();
-          save.disabled = true;
-          try {
-            await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
-            await reopenSettings();
-          } catch (err) {
-            save.textContent = err.message;
-            save.disabled = false;
-          }
-        };
-        actions.append(form);
-        if (p.state === "set") {
-          const remove = el("button", "quiet", "Remove");
-          remove.type = "button";
-          remove.dataset.action = "remove-key";
-          remove.onclick = removeKey(remove);
-          actions.append(remove);
-        }
-      }
-      if (p.state === "set" && unremoved.get(p.provider) === visitOf()) {
-        said.textContent = "That didn't go through. Try again.";
-        details.push(said);
-      } else unremoved.delete(p.provider);
-      if (p.kind === "operator" && p.price) {
-        details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
-      }
-      if (actions.childElementCount) head.append(actions);
-      row.append(...details);
-      if (several && p.accounts.length) row.append(accountsList(p));
-      // which agents may use it: all by default; one narrowed to a list uses
-      // those; of two or more accounts, or a pick saved, which each uses
-      if (agents.length) {
-        const who = el("div", "provider-agents");
-        who.append(el("span", "settings-key", "Agents"));
-        for (const a of agents) {
-          const allowed = a.connections == null || a.connections.includes(p.provider);
-          const chip = named(el("button", "chip"), a.fragment);
-          chip.type = "button";
-          chip.dataset.agent = a.fragment;
-          chip.setAttribute("aria-pressed", String(allowed));
-          named(chip, a.fragment, (t) => (allowed ? `${t} may use it: press to take it away` : `${t} may not use it: press to let it`), "title");
-          chip.onclick = async () => {
-            const visit = visitOf();
-            chip.disabled = true;
-            const all = offered.map((x) => x.provider);
-            const now = a.connections ?? all;
-            const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
-            const list = all.every((x) => next.includes(x)) ? null : next;
-            let refused = null;
-            try {
-              computerIs(await api("PUT", `/api/computers/${seg(computer().computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
-            } catch (e) {
-              refused = e;
-            }
-            // a failure is said by the reload, in the visit it was pressed in,
-            // while the agent may use it or not as before (a newer press may
-            // have changed it since)
-            const was = getAgents().get(a.identity) ?? a;
-            const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-            await reopenSettings(refused && unchanged && visit === visitOf() ? ["That was not changed", refused.message] : null);
-          };
-          who.append(chip);
-          if (allowed && several && (theirs.length >= 2 || a.accounts?.[p.provider])) who.append(accountPick(p, a, theirs));
-        }
-        row.append(who);
-      }
-      // this month's calls through the swap, by agent, and an operator key's cost
-      const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
-      const used = el("div", "provider-uses");
-      used.append(el("span", "settings-key", uses?.month ? `In ${uses.month}` : "This month"));
-      if (!mine.length) used.append(el("span", "muted", "No calls yet"));
-      for (const u of mine) {
-        const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
-        const item = named(el("span", "use"), u.agent, (t) => `${t}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
-        item.dataset.use = u.agent;
-        item.dataset.calls = String(u.calls);
-        item.dataset.micros = String(u.micros);
-        used.append(item);
-      }
-      row.append(used);
-      s.append(row);
+    const month = monthName(uses?.month);
+    const groups = [
+      ["Your accounts", null, offered.filter((p) => p.kind !== "operator")],
+      ["Included with your seat", "On the platform's keys, metered to your credit.", offered.filter((p) => p.kind === "operator")],
+    ];
+    for (const [title, sub, list] of groups) {
+      if (!list.length) continue;
+      const head = el("header", "provider-group-head");
+      head.append(el("h3", null, title), ...(sub ? [el("p", null, sub)] : []));
+      const grid = el("div", "provider-grid");
+      grid.append(...list.map((p) => providerCard(p, offered, agents, uses, month)));
+      s.append(head, grid);
     }
     return s;
+  }
+  function providerCard(p, offered, agents, uses, month) {
+    const name = providerName(p.provider);
+    const card = el("article", "provider");
+    card.dataset.provider = p.provider;
+    card.dataset.kind = p.kind;
+    card.dataset.state = p.state;
+    const several = Array.isArray(p.accounts);
+    // an own key signed in to is the person's account there
+    const kind = p.kind === "operator" ? "Included with your seat" : p.signIn || p.kind === "connection" ? "Your account" : "Your key";
+    const stateName =
+      p.kind === "operator" ? "On for your agents" : p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
+    const price = p.kind === "operator" ? perCall(p.charged) : null;
+    // this month's calls through the swap, by agent, and an operator key's charge
+    const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
+    const calls = mine.reduce((n, u) => n + u.calls, 0);
+    const micros = mine.reduce((n, u) => n + u.micros, 0);
+    const charge = p.kind === "operator" && calls ? ` · ${money(micros)}` : "";
+    const tile = (big) => el("span", `provider-tile${big ? " big" : ""}`, name.slice(0, 1));
+    const light = () => {
+      const st = el("span", "provider-state");
+      st.append(el("span", `provider-light ${lightOf(p)}`));
+      return st;
+    };
+    // the card: its name, the deployment's note on it and a key's price, its
+    // light, and this month's calls; the whole card opens its sheet
+    const body = el("span", "provider-body");
+    const sub = el("span", "provider-sub");
+    if (p.note) sub.append(el("span", "provider-note", p.note));
+    if (price) sub.append(el("span", "provider-price", `${price} a call`));
+    body.append(el("span", "provider-name", name), sub);
+    const foot = el("span", "provider-foot", calls ? `${callsSaid(calls)} in ${month}${charge}` : `No calls in ${month}`);
+    const open = el("button", "provider-open");
+    open.type = "button";
+    open.dataset.action = "open";
+    open.setAttribute("aria-haspopup", "dialog");
+    open.setAttribute("aria-label", `${name}: ${stateName}`);
+    // the sheet
+    const sheet = el("dialog", "provider-sheet");
+    sheet.setAttribute("aria-label", name);
+    // focused itself as it opens (`show`), not its X, whose ring and tooltip
+    // would show: Chrome's dialog focusing skips a dialog's own autofocus
+    sheet.tabIndex = -1;
+    const show = () => {
+      sheet.showModal();
+      sheet.focus();
+    };
+    const top = el("div", "provider-sheet-head");
+    const titled = el("div");
+    titled.append(el("h3", null, name), el("p", "provider-kind", kind));
+    const close = el("button", "icon-button provider-close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    close.append(icon("x"));
+    close.onclick = () => sheet.close();
+    top.append(tile(true), titled, close);
+    const inner = el("div", "provider-sheet-body");
+    if (p.note) inner.append(el("p", "provider-about", p.note));
+    // what a connection's account allows, in words
+    const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
+    // (never its sign-in's: openid, email, profile)
+    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g));
+    if (scopes.length) {
+      const chips = el("div", "provider-chips");
+      chips.append(...scopes.map((g) => el("span", null, g)));
+      inner.append(chips);
+    }
+    // its state, with what changes it
+    const status = el("div", "provider-status");
+    const words = el("span", "provider-status-text");
+    words.append(el("span", "provider-state-name", stateName));
+    if (p.account && !several) {
+      const account = el("span", "provider-account", p.account);
+      account.dataset.account = p.account;
+      words.append(account);
+    }
+    const actions = el("div", "settings-actions");
+    status.append(light(), words, actions);
+    const details = [];
+    // what a Connect press says: a blocked window, or a start refused; and
+    // a Disconnect or Remove that did not go through
+    const said = el("span", "muted provider-detail provider-said");
+    // Disconnect or Remove: settings then reload, and the row they show says
+    // whether the key is still there; one that failed says so in it
+    const removeKey = (button) => async () => {
+      const visit = visitOf();
+      button.disabled = true;
+      unremoved.delete(p.provider);
+      openSheet = null;
+      try {
+        await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
+      } catch {
+        // kept only while its visit is the one shown: an older visit's
+        // answer never replaces a newer one's
+        if (visit === visitOf() && isOpen()) {
+          unremoved.set(p.provider, visit);
+          openSheet = { provider: p.provider, visit };
+        }
+      }
+      await reopenSettings();
+    };
+    if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
+      actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
+      details.push(said);
+    }
+    // of several, another while the platform takes more; each account is
+    // reconnected and disconnected in its own row
+    // theirs to use: none they disconnected (which Pipes may hold still)
+    const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
+    if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
+      const add = connectButton(p, `Add another ${name} account`, said, { add: true });
+      add.dataset.action = "add-account";
+      actions.append(add);
+      details.push(said);
+    }
+    // what the person left unticked when they connected it: a reconnect
+    // asks for it again (the provider keeps what they allowed before)
+    if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
+      const again = connectButton(p, "Reconnect to add", said);
+      again.dataset.action = "reconnect";
+      actions.append(again);
+      details.push(notAllowed(p.missing), said);
+    }
+    if (!several && p.kind === "connection" && p.state !== "not_connected") {
+      const off = disconnectButton(p, said);
+      const press = off.onclick;
+      off.onclick = () => {
+        openSheet = null;
+        return press();
+      };
+      actions.append(off);
+      if (!details.includes(said)) details.push(said);
+    }
+    if (p.kind === "own" && p.signIn) {
+      // connected through the provider's own page (never a key pasted here):
+      // it makes a key of the person's, which their computer keeps sealed
+      if (p.state !== "set") {
+        const go = connectButton(p, "Connect", said);
+        go.dataset.action = "sign-in";
+        actions.append(go);
+        details.push(said);
+        if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${name} account pays for its models; then pick one for an agent under Agents.`));
+      } else {
+        const off = el("button", "quiet", "Disconnect");
+        off.type = "button";
+        off.dataset.action = "disconnect";
+        off.onclick = removeKey(off);
+        const manage = el("a", "provider-manage", `Revoke the key at ${name}`);
+        manage.href = p.signIn.manage;
+        manage.target = "_blank";
+        manage.rel = "noopener";
+        actions.append(off);
+        details.push(manage);
+      }
+    } else if (p.kind === "own") {
+      const form = el("form", "provider-key");
+      const input = el("input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.placeholder = p.state === "set" ? "Replace your key" : `Your ${name} key`;
+      input.setAttribute("aria-label", `Your ${name} key`);
+      const save = el("button", "quiet", "Save");
+      save.type = "submit";
+      form.append(input, save);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        save.disabled = true;
+        try {
+          await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
+          await reopenSettings();
+        } catch (err) {
+          save.textContent = err.message;
+          save.disabled = false;
+        }
+      };
+      details.unshift(form);
+      if (p.state === "set") {
+        const remove = el("button", "quiet", "Remove");
+        remove.type = "button";
+        remove.dataset.action = "remove-key";
+        remove.onclick = removeKey(remove);
+        actions.append(remove);
+      }
+    }
+    if (p.state === "set" && unremoved.get(p.provider) === visitOf()) {
+      said.textContent = "That didn't go through. Try again.";
+      details.push(said);
+    } else unremoved.delete(p.provider);
+    inner.append(status);
+    const more = el("div", "provider-details");
+    more.append(...new Set(details));
+    if (more.childElementCount) inner.append(more);
+    if (several && p.accounts.length) inner.append(accountsList(p));
+    // which agents may use it: all by default; one narrowed to a list uses
+    // those; of two or more accounts, or a pick saved, which each uses
+    if (agents.length) {
+      const who = el("div", "provider-block provider-agents");
+      if (!lightOf(p)) who.classList.add("dim");
+      who.append(el("h4", null, "Which agents may use it"));
+      for (const a of agents) {
+        const allowed = a.connections == null || a.connections.includes(p.provider);
+        const line = el("div", "provider-agent");
+        const face = el("span", "settings-agent-name");
+        face.dataset.agentFace = a.fragment;
+        const used = mine.find((u) => u.agent === a.fragment);
+        const use = el("span", "use", used ? (p.kind === "operator" ? `${callsSaid(used.calls)}, ${money(used.micros)}` : callsSaid(used.calls)) : "No calls");
+        if (used) {
+          use.dataset.use = used.agent;
+          use.dataset.calls = String(used.calls);
+          use.dataset.micros = String(used.micros);
+        }
+        const flip = el("button", "provider-switch");
+        flip.type = "button";
+        flip.dataset.agent = a.fragment;
+        flip.setAttribute("aria-pressed", String(allowed));
+        named(flip, a.fragment, (t) => `${t} may use ${name}`, "aria-label");
+        flip.onclick = async () => {
+          const visit = visitOf();
+          flip.disabled = true;
+          openSheet = { provider: p.provider, visit };
+          const all = offered.map((x) => x.provider);
+          const now = a.connections ?? all;
+          const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
+          const list = all.every((x) => next.includes(x)) ? null : next;
+          let refused = null;
+          try {
+            computerIs(await api("PUT", `/api/computers/${seg(computer().computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
+          } catch (e) {
+            refused = e;
+          }
+          // a failure is said by the reload, in the visit it was pressed in,
+          // while the agent may use it or not as before (a newer press may
+          // have changed it since)
+          const was = getAgents().get(a.identity) ?? a;
+          const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
+          await reopenSettings(refused && unchanged && visit === visitOf() ? ["That was not changed", refused.message] : null);
+        };
+        line.append(face, use, flip);
+        who.append(line);
+        if (allowed && several && (theirs.length >= 2 || a.accounts?.[p.provider])) who.append(accountPick(p, a, theirs));
+      }
+      inner.append(who);
+    }
+    // its details: this month's use, what a call is charged, where it
+    // reaches, the variable an agent names it by, and an own key's models
+    const facts = el("dl", "provider-facts");
+    const fact = (term, ...value) => {
+      const dd = el("dd");
+      dd.append(...value);
+      facts.append(el("dt", null, term), dd);
+    };
+    const codes = (list) => list.flatMap((x, i) => [...(i ? [", "] : []), el("code", null, x)]);
+    fact(`In ${month}`, calls ? `${callsSaid(calls)}${p.kind === "operator" ? `, ${money(micros)} charged to your credit` : ""}` : "No calls yet");
+    if (price) fact("Price", `${price} a call, metered to your credit`);
+    if (p.models?.length) fact("Models", ...p.models.map((m) => el("span", "provider-model", m.name)));
+    if (p.hosts?.length) fact("Reaches", ...codes(p.hosts));
+    if (p.env?.length) fact("Variable", ...codes(p.env.map((v) => `$${v}`)));
+    const block = el("div", "provider-block");
+    block.append(el("h4", null, "Details"), facts);
+    inner.append(block);
+    sheet.append(top, inner);
+    // closed by its X, Escape or a press outside it (its backdrop)
+    sheet.onclick = (e) => {
+      if (e.target === sheet) sheet.close();
+    };
+    sheet.addEventListener("close", () => {
+      // (not one a reload took away: its replacement is shown)
+      if (openSheet?.provider === p.provider && sheet.isConnected) openSheet = null;
+    });
+    open.onclick = () => {
+      openSheet = { provider: p.provider, visit: visitOf() };
+      show();
+    };
+    // the sheet open before this reload, shown again once the page has it
+    if (openSheet?.provider === p.provider && openSheet.visit === visitOf()) {
+      queueMicrotask(() => {
+        if (sheet.isConnected && !sheet.open) show();
+      });
+    }
+    card.append(tile(false), body, light(), foot, open, sheet);
+    return card;
   }
   return { connectionsSection };
 }

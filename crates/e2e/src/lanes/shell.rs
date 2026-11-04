@@ -3863,10 +3863,10 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
     // each note: its row, its text, and whether it is the line under the
     // row's name (right after its head)
-    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, n.previousElementSibling?.classList.contains('provider-head') ?? false, n.classList.contains('muted')])";
+    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, n.closest('.provider-body')?.firstElementChild?.classList.contains('provider-name') ?? false, !n.closest('dialog')])";
     let notes = b.eval(page, NOTES)?;
     s.ok(
-        "a row whose catalog row has a note shows it under the provider's name, muted (Google's, connected); a row without one shows none",
+        "a row whose catalog row has a note shows it on its card, under the provider's name (Google's, connected); a row without one shows none",
         notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]),
         &notes,
     );
@@ -3898,6 +3898,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // Disconnect: this row names no revocation endpoint, so settings says
     // where the person removes the access at the provider
     let google = row(crate::SWAP_CONNECTION);
+    sheet_of(b, page, &google)?;
     b.click(page, &format!("{google} [data-action=disconnect]"))?;
     let off = b.until(
         page,
@@ -3907,7 +3908,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let said = b.eval(page, "document.getElementById('notice').innerText")?;
     s.ok("Disconnect takes a connection away at Pipes; settings shows it not connected, and, unrevoked, says where its access is removed at the provider", off && !s.workos.holds(email, crate::SWAP_CONNECTION), &said);
     let notes = b.eval(page, NOTES)?;
-    s.ok("not connected, Google's row still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
+    s.ok("not connected, Google's card still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
     // connected again for the checks after, the computer told by a read: its
     // disconnect's fence lifted as a connect known to import lifts it (the
     // row has no `connection_oauth` here: the registry's lever)
@@ -3916,7 +3917,22 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     anyhow::ensure!(hook.status == 200, "lift the fence: {hook}");
     shell(api, session, "GET", "/api/connections", None, &[])?;
     partial_grant_ui(s, api, b, page, session, email)?;
-    several_accounts_ui(s, api, b, page, session, email, &lead, &id)
+    several_accounts_ui(s, api, b, page, session, email, &lead, &id)?;
+    close_sheets(b, page)
+}
+
+/// A provider's sheet (its card's Connections design: the card opens it,
+/// modally), open over settings for the mouse to press in, any other closed.
+fn sheet_of(b: &mut Browser, page: &Page, row: &str) -> Result<()> {
+    b.eval(page, &format!("(() => {{ for (const d of document.querySelectorAll('dialog.provider-sheet[open]')) if (!d.closest({row:?})) d.close(); const d = document.querySelector('{row} dialog'); if (d && !d.open) document.querySelector('{row} [data-action=open]').click(); return true; }})()"))?;
+    anyhow::ensure!(b.until(page, &format!("!!document.querySelector('{row} dialog')?.open"), std::time::Duration::from_secs(10)), "{row}'s sheet opened");
+    Ok(())
+}
+
+/// Settings with no provider's sheet open, for what presses the page after.
+fn close_sheets(b: &mut Browser, page: &Page) -> Result<()> {
+    b.eval(page, "(document.querySelectorAll('dialog.provider-sheet[open]').forEach((d) => d.close()), true)")?;
+    Ok(())
 }
 
 /// A connection the person allowed only part of (Google's granular
@@ -3939,6 +3955,7 @@ fn partial_grant_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
         &said,
     );
     let windows = b.pages()?.len();
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-action=reconnect]"))?;
     let callback = format!("/api/connections/{PARTIAL}/callback");
     let mut popup = None;
@@ -4064,6 +4081,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     b.reload(page)?;
     let off = format!("{row} [data-account-id={:?}] [data-action=disconnect]", ids[1]);
     anyhow::ensure!(b.until(page, &format!("document.querySelector('{row} [data-account-id={:?}]')?.dataset.state === 'connected' && !!document.querySelector('{off}')", ids[1]), wait), "{several}'s second account connected again in settings");
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-account-id={:?}] [data-action=disconnect]", ids[1]))?;
     let left = b.until(page, &format!("document.querySelectorAll('{row} .provider-account-row').length === 1 && !document.querySelector('{pick}') && document.querySelector('{row}')?.dataset.state === 'connected'"), wait);
     let held = s.workos.accounts(email, several);
@@ -4868,6 +4886,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // still connected, saying so, with Disconnect to try again
     let said = format!("document.querySelector('{row} .provider-said')");
     b.eval(page, &refuse_once("DELETE", &format!("/api/connections/{}/key$", crate::SWAP_ROUTER)))?;
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
     let told = b.until(
         page,
@@ -4880,6 +4899,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
     );
     // disconnected: the key goes, and no agent offers its models
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
     let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && [...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))"), wait);
     let left = runs_on(&view());
@@ -4896,6 +4916,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.reload(page)?;
     let set = b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'set'"), wait);
     b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Answer))?;
+    sheet_of(b, page, &own)?;
     b.click(page, &format!("{own} [data-action=remove-key]"))?;
     let held = b.until(page, "!!window.__held.release", wait);
     open_row(b, page, chat, wait)?;
@@ -4941,6 +4962,7 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
 
     // the Remove: held, a chat, settings again, then refused
     b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    sheet_of(b, page, &own)?;
     b.click(page, &format!("{own} [data-action=remove-key]"))?;
     let held = b.until(page, "!!window.__held.release", wait);
     open_row(b, page, chat, wait)?;
@@ -4960,6 +4982,7 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     // and settings open again; then let go
     b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
     b.eval(page, &refuse_once("DELETE", &format!("{key}$")))?;
+    sheet_of(b, page, &own)?;
     b.click(page, &format!("{own} [data-action=remove-key]"))?;
     let held = b.until(page, "!!window.__held.release", wait);
     open_row(b, page, chat, wait)?;
@@ -5042,6 +5065,7 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     shell(api, session, "DELETE", &key, None, &[])?;
     b.reload(page)?;
     anyhow::ensure!(b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'not_set' && {pressed}"), wait), "settings, the key gone");
+    close_sheets(b, page)?;
     Ok(())
 }
 
