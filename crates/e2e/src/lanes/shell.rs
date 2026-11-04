@@ -927,7 +927,9 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
     // here, the deploy's second hosted), which Settings shows beside it
     let deployed = page.text.split_once(r#"<meta name="fragment-release-deployed" content=""#).and_then(|(_, rest)| rest.split_once('"')).map(|(v, _)| v.to_string());
     let at = deployed.as_deref().and_then(fragment_core::release::deployed);
-    let filled = fragment_templates::shell_page(std::str::from_utf8(index.bytes)?, &release, at);
+    // and its fragments' origin, `{name}` where a name goes: each one's own
+    let origin = page.text.split_once(r#"<meta name="fragment-origin" content=""#).and_then(|(_, rest)| rest.split_once('"')).map(|(v, _)| v.to_string()).unwrap_or_default();
+    let filled = fragment_templates::shell_page(std::str::from_utf8(index.bytes)?, &release, at, &origin);
     s.ok(
         "the shell's page is the release's, its metas naming the release that answered and when it was deployed, under the platform's policy",
         page.status == 200
@@ -936,8 +938,9 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
             && at.is_some_and(|t| t > 0 && t as i64 <= crate::api::now_s() + 60)
             && page.header("content-security-policy").contains("frame-ancestors 'none'")
             && page.header("x-frame-options") == "DENY"
-            && page.header("cache-control") == "no-store",
-        format!("{} {} bytes (the release's filled: {}), release {release}, deployed {deployed:?}; {}", page.status, page.bytes.len(), page.text == filled, page.header("content-security-policy")),
+            && page.header("cache-control") == "no-store"
+            && origin.replace(fragment_templates::ORIGIN_NAME, "todo--k3x9") == api.site_origin("todo--k3x9"),
+        format!("{} {} bytes (the release's filled: {}), release {release}, deployed {deployed:?}, origin {origin}; {}", page.status, page.bytes.len(), page.text == filled, page.header("content-security-policy")),
     );
     let me = shell(api, session, "GET", "/api/identities/me", None, &[])?;
     let refused = shell(api, session, "GET", "/api/identities/me", None, &[("x-fragment-shell", String::new())])?;
@@ -5872,16 +5875,17 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     Ok(())
 }
 
-/// An app's window asked to load again before the shell knows its origin
+/// An app's window asked to load again before its status has answered
 /// (Alex's review of PR 582). A fragment's frame names its origin in its
 /// policy (`allow="… microphone <origin>"`) before it navigates (a policy
-/// is read as a navigation starts), and the origin is its status's: a
-/// Reload pressed while that was still asked navigated at once under the
-/// bare policy, which names only the mint's origin, and the page stayed
-/// refused the microphone. Valid: in a shell of its own (no origin known),
-/// the app's status held, its window opened and its Reload pressed, the
-/// frame waits (no `src` yet); its status let through, it loads once,
-/// under the policy that names its origin, and its page may use the
+/// is read as a navigation starts): a Reload pressed while the shell
+/// still asked the status for that origin navigated under the bare
+/// policy, which names only the mint's origin, and the page stayed
+/// refused the microphone. The shell knows each fragment's origin from
+/// its own page now (its `fragment-origin` meta), with no request. Valid:
+/// in a shell of its own, the app's status held, never answered, its
+/// window opened and its Reload pressed, the frame is sent at once, under
+/// the policy that names the app's own origin, and its page may use the
 /// microphone (Chrome's fake, allowed).
 fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -5889,9 +5893,9 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     // the app's window elsewhere closed: its page here is the only one
     b.eval(page, &format!("({pane}?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
     b.until(page, &format!("!{pane}"), wait);
-    // its status held until let through, from the page's start
+    // its status held, never answered, from the page's start
     let hold = format!(
-        "(() => {{ const real = window.fetch; let go; window.__let = new Promise((r) => {{ go = r; }}); window.__letGo = () => go(); window.__holding = false; window.fetch = async (url, o) => {{ if (window.__holding && String(url).includes({})) await window.__let; return real(url, o); }}; }})();",
+        "(() => {{ const real = window.fetch; window.__holding = false; window.fetch = async (url, o) => {{ if (window.__holding && String(url).includes({})) await new Promise(() => {{}}); return real(url, o); }}; }})();",
         js(&format!("/api/f/{app}/status"))
     );
     let shell = b.open_with_script(&format!("{}/", api.base), &hold)?;
@@ -5900,11 +5904,9 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     let up = b.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
     b.eval(&shell, &format!("(window.__holding = true, {icon}.click(), true)"))?;
     let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
-    b.eval(&shell, &format!("({pane}.querySelector('button[aria-label=Reload]').click(), true)"))?;
-    let waited = b.eval(&shell, &format!("!{pane}.querySelector('iframe').hasAttribute('src')"))?;
-    b.eval(&shell, "(window.__letGo(), true)")?;
-    let named = b.until(&shell, &format!("/microphone https?:/.test({pane}?.querySelector('iframe')?.allow ?? '') && {pane}.querySelector('iframe').hasAttribute('src')"), wait);
-    let allow = b.eval(&shell, &format!("{pane}?.querySelector('iframe')?.allow ?? null"))?;
+    // in the same task as the press: nothing it could have waited for came
+    let sent = b.eval(&shell, &format!("(() => {{ {pane}.querySelector('button[aria-label=Reload]').click(); const f = {pane}.querySelector('iframe'); return {{ src: f.hasAttribute('src'), allow: f.allow }}; }})()"))?;
+    let named = sent["src"] == true && sent["allow"] == format!("clipboard-write; microphone {}", api.site_origin(app));
     let told = s.eventually(wait, || {
         let Ok(frame) = b.frame(app) else { return false };
         let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");
@@ -5912,9 +5914,9 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
         state.ok() == Some(json!("granted"))
     });
     s.ok(
-        "an app's window opened and reloaded while the shell still asks for its origin waits for it, then loads under the policy that names it: its page may use the microphone",
-        up && opened && waited == true && named && told,
-        json!({ "up": up, "opened": opened, "waited": waited, "allow": allow, "told": told }),
+        "an app's window opened and reloaded before its status answers loads at once, under the policy that names its own origin: its page may use the microphone",
+        up && opened && named && told,
+        json!({ "up": up, "opened": opened, "sent": sent, "told": told }),
     );
     b.close(shell)?;
     Ok(())

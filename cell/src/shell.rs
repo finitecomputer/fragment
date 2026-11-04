@@ -101,7 +101,9 @@ pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     // its bytes are checked against their hash as they are read: UTF-8, as the release's index.html is
     let bytes = crate::assets::read(env, page_file("index.html")).await?;
     let text = std::str::from_utf8(&bytes).map_err(|_| CellError::host("the release's shell page is not UTF-8"))?;
-    let filled = fragment_templates::shell_page(text, &crate::levers::answered_release(cfg, req), cfg.deployed_at);
+    // its fragments' origin, `{name}` in it (fragment_templates::ORIGIN_BLANK)
+    let origin = cfg.origin(url, fragment_templates::ORIGIN_NAME);
+    let filled = fragment_templates::shell_page(text, &crate::levers::answered_release(cfg, req), cfg.deployed_at, &origin);
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
