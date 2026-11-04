@@ -154,6 +154,12 @@ const DEV_ORG: &str = "fragment-dev";
 /// connected, seen connected and turned off locally. Its consent answers at
 /// once and nothing real is connected; its client secret is the fake's.
 const DEV_CONNECTION: &str = "sample";
+/// Dev's stand-in operator keys (each its name, list price in micro-dollars
+/// a call, and a made-up key no host takes) and own key, beside
+/// `DEV_CONNECTION`, so settings' Connections shows each kind locally.
+/// Their hosts are `.test` names: a call to one goes nowhere.
+const DEV_OPERATOR_KEYS: [(&str, i64, &str); 2] = [("web-search", 5_000, "dev-web-search-key"), ("page-reader", 10_000, "dev-page-reader-key")];
+const DEV_OWN_KEY: &str = "sample-key";
 
 /// A command as errors show it: the program and its arguments only
 /// (`{cmd:?}` would print the environment set on it, where a deploy may
@@ -324,8 +330,8 @@ fn dev(args: &[String]) -> Result<()> {
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
         // WorkOS environment has no such provider, so then none
-        providers: workos_fake.as_ref().map(|f| dev_providers(f.connection_oauth())),
-        operator_key_values: vec![],
+        providers: Some(dev_providers(workos_fake.as_ref().map(|f| f.connection_oauth()))),
+        operator_key_values: DEV_OPERATOR_KEYS.iter().map(|(name, _, key)| (name.to_string(), key.to_string())).collect(),
         connection_secret_values: workos_fake.as_ref().map(|_| vec![(DEV_CONNECTION.into(), "mock-connection-secret".into())]).unwrap_or_default(),
         swap_upstream: None,
     };
@@ -356,6 +362,7 @@ fn dev(args: &[String]) -> Result<()> {
     if workos_fake.is_some() {
         println!("  connections:  {DEV_CONNECTION} (the WorkOS fake's stand-in: connects at once, nothing real)");
     }
+    println!("  keys:         {}, and your own {DEV_OWN_KEY} (stand-ins: their hosts are .test names)", DEV_OPERATOR_KEYS.map(|(name, _, _)| name).join(", "));
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     println!("  wipe someone: fragment --host http://127.0.0.1:{DEV_PORT} operator wipe <email> --yes --key-file {}", operator_file.display());
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
@@ -368,15 +375,27 @@ fn dev(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Dev's provider catalog: its one connection (`DEV_CONNECTION`), whose
-/// authorization is at `oauth` (the WorkOS fake's `connection_oauth`).
-fn dev_providers(oauth: serde_json::Value) -> String {
-    serde_json::json!([{
-        "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"],
-        "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["SAMPLE_TOKEN"],
-        "connection_oauth": oauth, "note": "A stand-in on the dev stack: nothing real is connected.",
-    }])
-    .to_string()
+/// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
+/// authorization is, at `oauth` (the WorkOS fake's `connection_oauth`), its
+/// operator keys (`DEV_OPERATOR_KEYS`) and its own key (`DEV_OWN_KEY`).
+fn dev_providers(oauth: Option<serde_json::Value>) -> String {
+    let bearer = serde_json::json!([{ "header": "authorization", "format": "Bearer {}" }]);
+    let env = |name: &str| format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
+    let notes = ["Web search with cited answers, as a stand-in on the dev stack.", "Turns web pages into clean text, as a stand-in on the dev stack."];
+    let mut rows: Vec<serde_json::Value> = oauth
+        .map(|oauth| {
+            serde_json::json!({
+                "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"], "placements": bearer, "env": ["SAMPLE_TOKEN"],
+                "connection_oauth": oauth, "note": "A stand-in on the dev stack: nothing real is connected.",
+            })
+        })
+        .into_iter()
+        .collect();
+    for ((name, micros, _), note) in DEV_OPERATOR_KEYS.iter().zip(notes) {
+        rows.push(serde_json::json!({ "name": name, "kind": "operator", "hosts": [format!("{name}.test")], "placements": bearer, "env": [env(name)], "price": { "micros": micros, "per": 1 }, "note": note }));
+    }
+    rows.push(serde_json::json!({ "name": DEV_OWN_KEY, "kind": "own", "hosts": ["sample-key.test"], "placements": bearer, "env": [env(DEV_OWN_KEY)], "note": "Your own key for a stand-in on the dev stack: nothing real is called." }));
+    serde_json::Value::Array(rows).to_string()
 }
 
 /// The templates `try` scaffolds.
@@ -660,9 +679,17 @@ mod tests {
     #[test]
     fn dev_providers_is_a_valid_catalog() {
         let oauth = serde_json::json!({ "authorize": "http://127.0.0.1:8794/test-oauth/authorize", "exchange": "http://127.0.0.1:8794/test-oauth/token", "client_id": "mock-connection-client", "scopes": ["openid", "email"], "revoke": "http://127.0.0.1:8794/test-oauth/revoke" });
-        let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(oauth)).expect("rows");
+        let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(Some(oauth))).expect("rows");
         let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog");
         assert!(catalog.get(super::DEV_CONNECTION).is_some_and(|p| p.connection_oauth.is_some()));
+        for (name, micros, _) in super::DEV_OPERATOR_KEYS {
+            assert!(catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator && p.price.is_some_and(|pr| pr.micros == micros)), "{name}");
+        }
+        assert!(catalog.get(super::DEV_OWN_KEY).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Own));
+        // with a real WorkOS environment: its keys, and no connection
+        let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(None)).expect("rows");
+        let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog, no WorkOS fake");
+        assert!(catalog.get(super::DEV_CONNECTION).is_none() && catalog.providers().len() == super::DEV_OPERATOR_KEYS.len() + 1);
     }
 
     /// Git's markers, the diff3 base's included, are caught at a line's
