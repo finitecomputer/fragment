@@ -33,7 +33,9 @@ function show(button) {
   active = button;
   timer = setTimeout(() => {
     if (!button.isConnected) return hide();
-    if (!tooltip.isConnected) document.body.append(tooltip);
+    // a modal's in its top layer, over its backdrop; any other in the page
+    const host = button.closest("dialog[open]") ?? document.body;
+    if (tooltip.parentNode !== host) host.append(tooltip);
     tooltip.textContent = label.replace(/…$/, "");
     tooltip.classList.toggle("is-description", !!button.dataset.tooltip);
     tooltip.hidden = false;
