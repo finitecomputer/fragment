@@ -423,6 +423,13 @@ enum Cmd {
         #[command(subcommand)]
         sub: session::SessionCmd,
     },
+    /// Print one file at main through the platform (no folder, no git), as
+    /// its viewers may: what an agent reads of a fragment shared with it
+    Read {
+        name: String,
+        /// The repo path, relative (`garden/wiki/launch.md`)
+        path: String,
+    },
     /// Write one text file to main through the platform (no folder, no git):
     /// what an agent on a computer uses. `fragment deploy` puts it live.
     Write {
@@ -1833,6 +1840,24 @@ fn run(cli: Cli) -> Result<()> {
                 report.print();
             }
             std::process::exit(report.exit_code());
+        }
+        Cmd::Read { name, path } => {
+            let r = c.get(&format!("/api/f/{name}/file?path={}", api::encode_q(&path)))?;
+            if !r.ok() {
+                return Err(anyhow::Error::new(r.refusal()));
+            }
+            // --json carries text as it is, and other bytes as base64
+            match String::from_utf8(r.body) {
+                Ok(text) => {
+                    json_exit(j, &json!({ "path": path, "text": text }));
+                    print!("{text}");
+                }
+                Err(e) => {
+                    let bytes = e.into_bytes();
+                    json_exit(j, &json!({ "path": path, "base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes) }));
+                    std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+                }
+            }
         }
         Cmd::Write { name, path, from, text, message } => {
             let text = match (from, text) {

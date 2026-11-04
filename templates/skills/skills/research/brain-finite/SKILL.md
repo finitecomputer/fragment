@@ -97,7 +97,8 @@ fragment call <brain> search --input '{"q": "…"}'     # check that what you ad
 ## Answering from a brain
 
 - Search first; treat results as entry points, then open each page whole
-  (in your synced folder) before you answer from it.
+  (in your synced folder, or `fragment read <brain> <path>`) before you
+  answer from it.
 - Follow the links that bear on the question, and cite the pages and the
   sources you used.
 - When the brain has no answer, say so, and say what to ingest. Never
@@ -109,9 +110,11 @@ A meta-brain is the same brain template, curated from child fragments.
 Use the guide's **A parent brain** workflow: a source list, incorporated
 revision file and synthesis pages citing child pages and revisions. Read
 children as a viewer, write the parent as editor, and refresh explicitly.
-Check each child's main pin before and after reading; retry if it moved.
-Publish outputs and their revision record together, updating stable paths;
-after restart, reconcile from the parent's files before writing again.
+Check each child's main pin (`fragment status <child>`) before and after
+reading its pages (`fragment read <child> <path>`); retry if it moved.
+Publish outputs and their revision record together, in one sync of the
+parent, updating stable paths; after restart, reconcile from the parent's
+files before writing again.
 
 Synthesis publishes to the parent's audience. Create with
 `--visibility members`; keep that audience inside every child's, including

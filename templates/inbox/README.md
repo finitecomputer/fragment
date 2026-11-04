@@ -17,9 +17,9 @@ result live.
 
 Post to it: `FRAGMENT_INBOX_TOKEN=<inbox token> fragment inbox <name>
 --payload '{"text":"hello"}'` (the token is in `fragment status <name>`), or any
-webhook sender: `POST /api/f/<name>/inbox` with the token in
-`x-fragment-inbox-token` and a JSON body (`{"source", "payload"}`, or
-any JSON as the payload).
+webhook sender: a POST to its inbox URL (`fragment open <name>` prints
+it) with the token in `x-fragment-inbox-token` and a JSON body
+(`{"source", "payload"}`, or any JSON as the payload).
 
 A job reaches the network only through `job.fetch`; to call an API with
 a key, store it with the host it may go to (`fragment secret set <name>

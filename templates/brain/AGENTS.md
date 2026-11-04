@@ -109,9 +109,10 @@ search service asked for a pause, and the job already running goes on by
 itself after it: start nothing, ask again later. A question asked here is
 paid by the brain's owner.
 
-A result points at a section: open its page and read it whole before you
-answer from it, and cite the pages and sources you used. When the brain
-has no answer, say so, and say what to ingest.
+A result points at a section: open its page (your synced copy, or
+fragment read <brain> <path>) and read it whole before you answer from
+it, and cite the pages and sources you used. When the brain has no
+answer, say so, and say what to ingest.
 
     fragment call <brain> index_status --input '{}'
 
@@ -148,14 +149,17 @@ Keep these ordinary files in the parent's wiki, for example executive/:
   child has its own read time, not a common snapshot.
 
 Refresh only when asked, as the agent with viewer access to children and
-editor access to the parent:
+editor access to the parent. Read and write through the fragment CLI,
+which signs each request and sends it to the platform; a brain's own
+address serves its pages, not the platform's API.
 
-1. Read the parent's source list, incorporated file and existing outputs
-   from the fragment, even after a restart. Reconcile current child state
-   against them; a local working copy or a missed notification is no
-   authority. Never acquire editor access just to sync a child.
-2. Read each child's status pin (GET /api/f/<child>/status, pins.main),
-   selected files (GET /api/f/<child>/file?path=...), then its status pin
+1. Sync the parent (fragment sync <parent> --dir <folder>), then read its
+   source list, incorporated file and existing outputs, even after a
+   restart. Reconcile current child state against them; an unsynced copy
+   or a missed notification is no authority. Never acquire editor access
+   just to sync a child.
+2. Read each child's main pin (fragment status <child>, its pins.main),
+   its selected files (fragment read <child> <path>), then its pin
    again. Require successful reads and equal nonempty pins; otherwise
    discard the attempt and retry from status, with a bounded retry count.
    If it keeps moving, report incomplete refresh and mark affected pages
@@ -163,9 +167,8 @@ editor access to the parent:
 3. Synthesize into stable output paths, citing each child page and its
    verified revision. Update existing pages, index and log rather than
    appending duplicate summaries. Publish outputs and incorporated.json
-   together in one file batch (POST /api/f/<parent>/files, at most 16
-   files / 1 MiB); split larger work into independently consistent batches.
-   On an uncertain write result, reread the parent before retrying. An
+   together in one sync of the parent, which is one commit. On an
+   uncertain result, sync again and reread the parent before retrying. An
    unchanged source revision with matching outputs needs no new write.
 4. Reconcile removals too: a deleted source page withdraws its dependent
    claims. If a child becomes unreadable, mark dependent pages stale or
