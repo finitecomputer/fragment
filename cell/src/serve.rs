@@ -197,6 +197,8 @@ impl FragmentCell {
         let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
         // who a socket connected as is asked again later (live.rs)
         let credential = if path == "__live" { caller.unresolved.clone() } else { None };
+        // what a socket's accept waited on, for its client (`Server-Timing`)
+        let mut laps = js::Laps::start();
         let resolved;
         let caller = if answers_someone(&path) {
             resolved = self.identified(caller, name).await?;
@@ -204,6 +206,7 @@ impl FragmentCell {
         } else {
             caller
         };
+        laps.lap("identity");
         let resp = if let Some(op) = path.strip_prefix("__op/") {
             if req.method() != Method::Post {
                 return Err(CellError::invalid("call an operation with POST"));
@@ -351,7 +354,8 @@ impl FragmentCell {
                     // a page following this fragment may soon post to a computer's
                     // channel (an agent's own socket wakes no computer it runs on)
                     self.prewake(&principal);
-                    resp
+                    laps.lap("accept");
+                    laps.stamp(resp)?
                 }
                 Err(e) if page && crate::auth::is_refusal(e.code) => crate::live::refused_page(&e.message)?,
                 Err(e) => return Err(e),
