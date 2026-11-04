@@ -19,6 +19,7 @@ step Registry 5 invites_answered 189ad3c09884ab61
 step Registry 6 connection_accounts 05c1285d594517cb
 step Registry 7 public_addresses ab8499c84e7997be
 step Registry 8 org_content 67159e5ef6e0243b
+step Registry 9 key_sessions af8f359aaef5c386
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -145,7 +146,8 @@ Registry table quantity_syncs: CREATE TABLE quantity_syncs ( org TEXT PRIMARY KE
 Registry table redemptions: CREATE TABLE redemptions ( hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL, expires_at INTEGER NOT NULL, embedder TEXT)
 Registry index redemptions_expires: CREATE INDEX redemptions_expires ON redemptions (expires_at)
 Registry index redemptions_session: CREATE INDEX redemptions_session ON redemptions (session, expires_at)
-Registry table sessions: CREATE TABLE sessions ( hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT)
+Registry table sessions: CREATE TABLE sessions ( hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT, device_key TEXT)
+Registry index sessions_device_key: CREATE UNIQUE INDEX sessions_device_key ON sessions (device_key) WHERE device_key IS NOT NULL
 Registry index sessions_expires: CREATE INDEX sessions_expires ON sessions (expires_at)
 Registry index sessions_parent_fragment: CREATE INDEX sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL
 Registry table stripe_cancels: CREATE TABLE stripe_cancels ( subscription TEXT PRIMARY KEY, org TEXT NOT NULL, why TEXT NOT NULL, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL)

@@ -50,7 +50,7 @@ use sha2::{Digest, Sha256};
 
 use super::calls::{
     ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, ExchangeIn, Exchanged, KeyAdded,
-    LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
+    LiveSession, LoggedOut, Logout, MintKey, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
@@ -165,6 +165,9 @@ struct SessionRow {
     embedder: Option<String>,
     /// The parent's hash when the parent is live too.
     parent_live: Option<String>,
+    device_key: Option<String>,
+    key_live: Option<String>,
+    parent_key: Option<String>,
     kind: Option<IdentityKind>,
     owner: Option<String>,
     held: Option<fragment_proto::Role>,
@@ -388,9 +391,10 @@ impl RegistryCell {
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (a person's sign-ins: `subjects_of`)
         const Q: &str = concat!(
-            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, ",
+            "SELECT s.identity, s.fragment, s.parent, s.embedder, s.device_key, p.hash AS parent_live, p.device_key AS parent_key, k.key AS key_live, i.kind, i.owner, i.held, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY signed_in_at DESC LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
+            "LEFT JOIN keys k ON k.key = p.device_key AND k.identity = s.identity AND k.revoked_at IS NULL ",
             "LEFT JOIN identities i ON i.id = s.identity ",
             "WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?"
         );
@@ -400,11 +404,11 @@ impl RegistryCell {
         let hash = sha(token);
         let now = SqlStorageValue::Integer(js::now_ms());
         let row = self.row::<SessionRow>(Q, vec![now.clone(), hash.as_str().into(), now])?.ok_or_else(not_signed_in)?;
-        if row.fragment.as_deref() != fragment || row.embedder.is_some() != frame {
+        if row.device_key.is_some() || row.fragment.as_deref() != fragment || row.embedder.is_some() != frame {
             return Err(not_signed_in());
         }
         // a site session lives only while the platform session it came from does
-        if row.parent.is_some() && row.parent_live.is_none() {
+        if (row.parent.is_some() && row.parent_live.is_none()) || (row.parent_key.is_some() && row.key_live.is_none()) {
             return Err(not_signed_in());
         }
         let identity = joined_identity(row.identity, row.kind, row.owner, row.held, "a session")?;
@@ -691,19 +695,46 @@ impl RegistryCell {
             return Err(CellError::invalid("a frame redemption's embedder is an origin (scheme://host[:port])"));
         }
         let Live { hash, session, .. } = self.live_session(&b.token, None, false)?;
+        self.mint_from(hash, session, &b.fragment, &b.return_to, b.consent, b.embedder.as_deref()).await
+    }
+
+    pub(super) async fn mint_key(&self, b: MintKey) -> CellResult<Minted> {
+        let identity = self.by(&calls::By::Key(b.key.clone()))?;
+        if identity.kind != IdentityKind::Person { return Err(CellError::new(ErrorCode::Forbidden, "only a person's key opens a browser session")); }
+        let now = js::now_ms();
+        self.sweep_by(now + SESSION_TTL_MS).await?;
+        #[derive(Deserialize)]
+        struct KeyParent { hash: String }
+        // One parent per approved key. Old children become invalid when it is
+        // replaced; neither its bearer token nor its hash ever leaves the registry.
+        self.exec("DELETE FROM sessions WHERE device_key = ? AND (expires_at <= ? OR revoked_at IS NOT NULL)", vec![b.key.as_str().into(), SqlStorageValue::Integer(now)])?;
+        let hash = match self.row::<KeyParent>("SELECT hash FROM sessions WHERE device_key = ? AND identity = ?", vec![b.key.as_str().into(), identity.id.as_str().into()])? {
+            Some(parent) => parent.hash,
+            None => {
+                let token = self.new_session(&identity.id, None, None, None, None, now + SESSION_TTL_MS)?;
+                let hash = sha(&token);
+                self.exec("UPDATE sessions SET device_key = ? WHERE hash = ?", vec![b.key.as_str().into(), hash.as_str().into()])?;
+                hash
+            }
+        };
+        let email = self.email_of(&identity.id)?;
+        self.mint_from(hash, LiveSession { identity, email, embedder: None }, &b.fragment, &b.return_to, b.consent, None).await
+    }
+
+    async fn mint_from(&self, hash: String, session: LiveSession, fragment: &str, return_to: &str, consent: Consent, embedder: Option<&str>) -> CellResult<Minted> {
         let (identity, email) = (session.identity, session.email);
         let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
-        match b.consent {
+        match consent {
             Consent::Member => {}
             Consent::Remembered => {
-                if self.count("SELECT COUNT(*) AS n FROM consents WHERE identity = ? AND fragment = ?", vec![who.into(), b.fragment.as_str().into()])? == 0 {
+                if self.count("SELECT COUNT(*) AS n FROM consents WHERE identity = ? AND fragment = ?", vec![who.into(), fragment.into()])? == 0 {
                     return Ok(Minted { redeem: None, identity, email });
                 }
             }
             Consent::Given => {
                 self.exec(
                     "INSERT INTO consents (identity, fragment, at) VALUES (?, ?, ?) ON CONFLICT (identity, fragment) DO UPDATE SET at = excluded.at",
-                    vec![who.into(), b.fragment.as_str().into(), at],
+                    vec![who.into(), fragment.into(), at],
                 )?;
                 // bounded: the person's newest yeses are kept, the oldest forgotten
                 self.exec(
@@ -712,7 +743,7 @@ impl RegistryCell {
                 )?;
             }
         }
-        let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref()).await?;
+        let redeem = self.new_redemption(&hash, fragment, return_to, embedder).await?;
         Ok(Minted { redeem: Some(redeem), identity, email })
     }
 
@@ -764,7 +795,7 @@ impl RegistryCell {
         let parent = row.session.as_str();
         let p = self
             .row::<ParentRow>(
-                "SELECT identity, expires_at FROM sessions WHERE hash = ? AND fragment IS NULL AND revoked_at IS NULL AND expires_at > ?",
+                "SELECT s.identity, s.expires_at FROM sessions s LEFT JOIN keys k ON k.key = s.device_key AND k.identity = s.identity AND k.revoked_at IS NULL WHERE s.hash = ? AND s.fragment IS NULL AND s.revoked_at IS NULL AND s.expires_at > ? AND (s.device_key IS NULL OR k.key IS NOT NULL)",
                 vec![parent.into(), SqlStorageValue::Integer(js::now_ms())],
             )?
             .ok_or_else(refused)?;

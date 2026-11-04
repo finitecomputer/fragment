@@ -933,6 +933,22 @@ impl Call for Mint {
     }
 }
 
+/// An approved person's key mints a top-level fragment session. The registry
+/// resolves the key in the same turn and binds the parent to its revocation.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MintKey {
+    pub key: String,
+    pub fragment: String,
+    pub return_to: String,
+    pub consent: Consent,
+}
+impl Call for MintKey {
+    const PATH: &'static str = "/redeem/key";
+    type Answer = Minted;
+    fn checked(answer: Minted) -> CellResult<Minted> { Mint::checked(answer) }
+}
+
 /// `POST /redeem`: a redemption spent on its fragment, shown to a frame
 /// (`framed`) or to a top-level page: a frame redemption only to a frame,
 /// any other only to a top-level page (else refused, and spent).

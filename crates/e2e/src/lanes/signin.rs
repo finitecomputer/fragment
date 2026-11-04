@@ -421,6 +421,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
 
+    super::native::key_sessions(s, api)?;
+
     // the round trip
     let r = api.unsigned("GET", "/auth/login?screen_hint=sign-up&return=/x", None)?;
     let to = r.header("location");

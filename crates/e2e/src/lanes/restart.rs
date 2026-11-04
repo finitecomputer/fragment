@@ -66,6 +66,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     // a site session on the fragment, and the fragment's VAPID key (sealed like a secret)
     let member_site = site_cookie(&api, &member_session, &name)?;
+    let native_site = super::native::key_site_cookie(&api, &member, &name)?;
     let push_key = |api: &Api| api.page(&name, "__push-key", Some(&format!("fragment_site={member_site}")));
     let r = push_key(&api)?;
     anyhow::ensure!(r.status == 200 && r.body["key"].is_string(), "push key setup: {r}");
@@ -209,6 +210,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
 
     s.stop()?;
     let api = s.start_with_a_key_more()?;
+    let native = api.page(&name, "__files", Some(&native_site))?;
+    s.ok("a key-bound native web session survives a restart", native.status == 200, native.status);
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a restart whose configuration adds an operator key's row, its version as it was, a ledger made before charges with that book: the key at its row's price",
@@ -412,6 +415,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(fragment_core::site::valid_version(&kept), "a version before the crash: {files}");
     s.crash()?;
     let api = s.start(false)?;
+    let native = api.page(&name, "__files", Some(&native_site))?;
+    s.ok("a key-bound native web session survives a crash", native.status == 200, native.status);
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",
