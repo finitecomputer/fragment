@@ -476,7 +476,11 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     };
     // its host is one DNS label, its mark included: refused, never cut
     fragment_core::names::host_fits(&names[0], cfg.host_label_suffix()).map_err(CellError::invalid)?;
+    // what it waited on, for its client (`Server-Timing`): the router's
+    // here, the object's (fragment.rs `create`) after them
+    let mut laps = js::Laps::start();
     may_create(env, &maker.id).await?;
+    laps.lap("ledger");
     let drawn = names.len() > 1;
     let mut made = None;
     // bounded: at most NAME_DRAWS names
@@ -487,6 +491,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         let bare = Request::new(url.as_str(), Method::Post)?;
         let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker.clone()), credential: None };
         let answer = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
+        laps.lap("object");
         // a drawn name someone holds already: draw again
         if drawn && answer.status_code() == ErrorCode::AlreadyExists.status() {
             continue;
@@ -505,8 +510,9 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         if added.status_code() != 200 {
             return Err(CellError::host(format!("{} was made, but its agent was not made a member: {}", create.name, added.text().await.unwrap_or_default())));
         }
+        laps.lap("agent");
     }
-    Ok(made)
+    Ok(laps.stamp(made)?)
 }
 
 /// `GET /api/fragments/watch`: a socket on which the caller's list says

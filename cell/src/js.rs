@@ -758,6 +758,19 @@ impl Laps {
         (!steps.is_empty()).then(|| steps.join(", "))
     }
 
+    /// `resp` with these waits' `Server-Timing` first, before any it holds
+    /// already (a forwarded object's own), so one answer carries both.
+    pub fn stamp(&self, resp: worker::Response) -> worker::Result<worker::Response> {
+        let Some(mine) = self.server_timing() else { return Ok(resp) };
+        let h = resp.headers().clone();
+        let value = match h.get("server-timing")? {
+            Some(theirs) if !theirs.is_empty() => format!("{mine}, {theirs}"),
+            _ => mine,
+        };
+        h.set("server-timing", &value)?;
+        Ok(resp.with_headers(h))
+    }
+
     /// One line (lesson 14): `fields`, then `event`, `at` (when the work
     /// began, ms), its steps' `waits`, and `ms`, its whole.
     pub fn log(self, event: &str, mut fields: serde_json::Value) {
