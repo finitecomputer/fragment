@@ -422,10 +422,12 @@ pub struct StripeVars {
 
 /// The account's Workers Observability as the cell reads it: its read-only
 /// key (bound as a deploy binds `observability_read`'s), the account
-/// (`FRAGMENT_ACCOUNT_ID`), and where its API is (`CLOUDFLARE_API_URL`).
+/// (`FRAGMENT_ACCOUNT_ID`), this deployment's Worker (`FRAGMENT_WORKER_NAME`),
+/// and where its API is (`CLOUDFLARE_API_URL`).
 pub struct ObservabilityVars {
     pub key: String,
     pub account_id: String,
+    pub script: String,
     pub api_url: String,
 }
 
@@ -565,6 +567,7 @@ impl Fleet {
         }
         if let Some(o) = &self.observability {
             vars.push(("FRAGMENT_ACCOUNT_ID", o.account_id.as_str()));
+            vars.push(("FRAGMENT_WORKER_NAME", o.script.as_str()));
             vars.push(("CLOUDFLARE_API_URL", o.api_url.as_str()));
         }
         let signins = self.signins_pending_max.map(|n| n.to_string());

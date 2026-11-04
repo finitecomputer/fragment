@@ -14,6 +14,11 @@
 //!   failed (won't wake), that a save failed, or that its disk had less
 //!   than `computer::DISK_TOLD_FREE_MAX` free.
 //!
+//! Every query counts this deployment's Worker's lines alone
+//! (`$workers.scriptName`): an account holds other deployments (a
+//! preview's account, its branches'), whose computers' ids are hashes of
+//! the same people.
+//!
 //! Nothing is cached: the page asks again every minute.
 
 use serde_json::Value;
@@ -37,6 +42,19 @@ pub const GROUPS_MAX: u32 = 1_000;
 pub const TROUBLE_MAX: usize = 100;
 /// What the queries are named in Cloudflare's own records.
 pub const QUERY_ID: &str = "fragment-admin-glance";
+/// A Worker's name, at most (Cloudflare's own limit).
+pub const SCRIPT_MAX_BYTES: usize = 63;
+
+/// Whether `name` is a Worker's name a query may name: 1 to
+/// `SCRIPT_MAX_BYTES` of a-z, 0-9 and dashes inside (`fragment`,
+/// `fragment-preview`), so it goes into a query as it is.
+pub fn valid_script(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= SCRIPT_MAX_BYTES
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
 
 const _: () = assert!(NOW_MS >= 2 * METER_EVERY_MS, "an awake computer writes a line at least twice in a now");
 
@@ -70,11 +88,13 @@ impl Question {
         Question::DiskFilling,
     ];
 
-    /// The query API's body for it, at `now_ms`, the day starting at
+    /// The query API's body for it, over `script`'s lines (this
+    /// deployment's Worker), at `now_ms`, the day starting at
     /// `day_start_ms`: one template for all (a body of `json!` for each
     /// cost the cell's Wasm some 4 KB more).
-    pub fn body(self, now_ms: i64, day_start_ms: i64) -> Value {
-        assert!(day_start_ms <= now_ms && now_ms - day_start_ms <= DAY_START_MAX_MS, "the day's start is checked");
+    pub fn body(self, script: &str, now_ms: i64, day_start_ms: i64) -> Value {
+        assert!(valid_script(script), "a Worker's name is checked as the config is read");
+        assert!(day_start(Some(day_start_ms), now_ms).is_ok(), "the day's start is checked");
         // its one filter (key, operation, type, value as JSON), what it
         // counts (a distinct key, or none: lines by computer), and from when
         const AWAKE: (&str, &str, &str, &str) = ("phase.phase", "eq", "string", "\"awake\"");
@@ -96,7 +116,7 @@ impl Question {
             None => r#""calculations":[{"operator":"count","alias":"n"}],"groupBys":[{"type":"string","value":"computer"}]"#.to_string(),
         };
         let body = format!(
-            r#"{{"queryId":"{QUERY_ID}","timeframe":{{"from":{from},"to":{now_ms}}},"view":"calculations","limit":{GROUPS_MAX},"parameters":{{"datasets":["cloudflare-workers"],"filters":[{{"key":"{key}","operation":"{op}","type":"{kind}","value":{value}}}],{counted}}}}}"#
+            r#"{{"queryId":"{QUERY_ID}","timeframe":{{"from":{from},"to":{now_ms}}},"view":"calculations","limit":{GROUPS_MAX},"parameters":{{"datasets":["cloudflare-workers"],"filters":[{{"key":"$workers.scriptName","operation":"eq","type":"string","value":"{script}"}},{{"key":"{key}","operation":"{op}","type":"{kind}","value":{value}}}],{counted}}}}}"#
         );
         serde_json::from_str(&body).expect("a glance's query is JSON")
     }
@@ -152,7 +172,8 @@ pub fn troubles<K: Copy + Ord>(kinds: Vec<(K, Vec<(String, u64)>)>) -> Vec<(Stri
 pub fn day_start(named: Option<i64>, now_ms: i64) -> Result<i64, String> {
     match named {
         None => Ok(now_ms - now_ms.rem_euclid(DAY_MS)),
-        Some(at) if at <= now_ms && now_ms - at <= DAY_START_MAX_MS => Ok(at),
+        // checked: an `at` far below zero would overflow `now_ms - at`
+        Some(at) if now_ms.checked_sub(at).is_some_and(|ago| (0..=DAY_START_MAX_MS).contains(&ago)) => Ok(at),
         Some(at) => Err(format!("dayStart is the start of today, at most a day and an hour ago, not {at}")),
     }
 }
@@ -170,28 +191,46 @@ mod tests {
         json!({ "success": true, "result": { "run": {}, "statistics": {}, "calculations": [{ "calculation": "uniq", "alias": "n", "aggregates": aggregates }] } })
     }
 
-    /// Goal: each question asks what its number means, over its window.
-    /// Method: the bodies, as the probe of 2026-11-04 asked them.
+    const SCRIPT: &str = "fragment";
+
+    /// Goal: each question asks what its number means, over its window,
+    /// of this deployment's Worker's lines alone. Method: the bodies, as
+    /// the probe of 2026-11-04 asked them.
     #[test]
     fn each_question_asks_its_lines_over_its_window() {
         let day = NOW - 5 * 3_600_000;
-        let awake = Question::AwakeNow.body(NOW, day);
+        let awake = Question::AwakeNow.body(SCRIPT, NOW, day);
         assert_eq!(awake["timeframe"], json!({ "from": NOW - NOW_MS, "to": NOW }));
-        assert_eq!(awake["parameters"]["filters"], json!([{ "key": "phase.phase", "operation": "eq", "type": "string", "value": "awake" }]));
+        let ours = json!({ "key": "$workers.scriptName", "operation": "eq", "type": "string", "value": SCRIPT });
+        assert_eq!(awake["parameters"]["filters"], json!([ours, { "key": "phase.phase", "operation": "eq", "type": "string", "value": "awake" }]));
         assert_eq!(awake["parameters"]["calculations"], json!([{ "operator": "uniq", "key": "computer", "alias": "n" }]));
         assert!(awake["parameters"].get("groupBys").is_none());
-        assert_eq!(Question::AwakeToday.body(NOW, day)["timeframe"]["from"], day);
-        let week = Question::AwakeWeek.body(NOW, day);
+        assert_eq!(Question::AwakeToday.body(SCRIPT, NOW, day)["timeframe"]["from"], day);
+        let week = Question::AwakeWeek.body(SCRIPT, NOW, day);
         assert_eq!((week["timeframe"]["from"].as_i64(), &week["parameters"]["groupBys"]), (Some(NOW - WEEK_MS), &json!([{ "type": "string", "value": "computer" }])));
         assert_eq!(week["limit"], GROUPS_MAX);
-        let fragments = Question::FragmentsNow.body(NOW, day);
-        assert_eq!(fragments["parameters"]["filters"][0]["value"], "Fragment");
+        let fragments = Question::FragmentsNow.body(SCRIPT, NOW, day);
+        assert_eq!(fragments["parameters"]["filters"][1]["value"], "Fragment");
         assert_eq!(fragments["parameters"]["calculations"][0]["key"], "$workers.durableObjectId");
-        assert_eq!(Question::WontWake.body(NOW, day)["parameters"]["filters"][0]["value"], "failed");
-        assert_eq!(Question::SavesFailing.body(NOW, day)["parameters"]["filters"][0], json!({ "key": "event.event", "operation": "eq", "type": "string", "value": "save_failed" }));
-        assert_eq!(Question::DiskFilling.body(NOW, day)["parameters"]["filters"][0], json!({ "key": "disk.free", "operation": "lt", "type": "number", "value": DISK_TOLD_FREE_MAX }));
+        assert_eq!(Question::WontWake.body(SCRIPT, NOW, day)["parameters"]["filters"][1]["value"], "failed");
+        assert_eq!(Question::SavesFailing.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "event.event", "operation": "eq", "type": "string", "value": "save_failed" }));
+        assert_eq!(Question::DiskFilling.body(SCRIPT, NOW, day)["parameters"]["filters"][1], json!({ "key": "disk.free", "operation": "lt", "type": "number", "value": DISK_TOLD_FREE_MAX }));
         for q in Question::ALL {
-            assert_eq!(q.body(NOW, day)["queryId"], QUERY_ID);
+            let b = q.body("fragment-preview", NOW, day);
+            assert_eq!((&b["queryId"], &b["parameters"]["filters"][0]["value"]), (&json!(QUERY_ID), &json!("fragment-preview")), "every query is its own deployment's");
+        }
+    }
+
+    /// Goal: a Worker's name goes into a query only as one: valid,
+    /// invalid (empty, too long, a quote, a capital, a dash at an end).
+    #[test]
+    fn a_workers_name_is_one_before_a_query_names_it() {
+        for ok in ["fragment", "fragment-preview", "fragment-rh2", "a"] {
+            assert!(valid_script(ok), "{ok}");
+        }
+        let long = "a".repeat(SCRIPT_MAX_BYTES + 1);
+        for bad in ["", "-fragment", "fragment-", "Fragment", "frag\"ment", "frag ment", long.as_str()] {
+            assert!(!valid_script(bad), "{bad:?}");
         }
     }
 
@@ -234,5 +273,9 @@ mod tests {
         assert!(day_start(Some(NOW - DAY_START_MAX_MS - 1), NOW).is_err());
         assert!(day_start(Some(NOW + 1), NOW).is_err());
         assert_eq!(day_start(None, NOW), Ok(NOW - NOW % DAY_MS));
+        // the integers' ends: refused, never an overflow past the bound
+        assert!(day_start(Some(i64::MIN), NOW).is_err(), "now minus the least i64 overflows: refused");
+        assert!(day_start(Some(i64::MAX), NOW).is_err());
+        assert!(day_start(Some(i64::MIN), 0).is_err());
     }
 }

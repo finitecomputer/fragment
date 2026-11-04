@@ -77,7 +77,7 @@ pub(crate) async fn glance(env: &Env, cfg: &Config, url: &Url) -> CellResult<Adm
 /// question's failure.
 async fn read(env: &Env, o: &crate::config::ObservabilityConfig, now: i64, day_start: i64) -> CellResult<Read> {
     let asked = Question::ALL.map(|q| async move {
-        let answer = crate::keys::observability_query(env, o, &q.body(now, day_start)).await?;
+        let answer = crate::keys::observability_query(env, o, &q.body(&o.script, now, day_start)).await?;
         Ok::<_, CellError>((q, answer))
     });
     let mut read = Read { awake_now: 0, awake_today: 0, awake_week: vec![], fragments_now: 0, fragments_today: 0, trouble: vec![] };

@@ -300,15 +300,27 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     }
     let theirs = fragment_core::computer::default_computer_of(ivy_id);
     let stranger = "computer:00000000000000000000beef".to_string();
-    s.observability.log(now - 60_000, json!({ "computer": theirs, "event": { "event": "alarm" }, "phase": { "phase": "awake" } }));
-    s.observability.log(now - 2 * 3_600_000, json!({ "computer": stranger, "phase": { "phase": "awake" } }));
+    // the node's Worker's lines, and another deployment's in the same
+    // account (a branch's), which name the same person's computer (a hash
+    // of them) and are never counted
+    let of = |script: &str, mut line: Value| {
+        line["$workers.scriptName"] = json!(script);
+        line
+    };
+    let (ours, foreign) = (crate::OBSERVABILITY_SCRIPT, "fragment-elsewhere");
+    s.observability.log(now - 60_000, of(ours, json!({ "computer": theirs, "event": { "event": "alarm" }, "phase": { "phase": "awake" } })));
+    s.observability.log(now - 2 * 3_600_000, of(ours, json!({ "computer": stranger, "phase": { "phase": "awake" } })));
     for (id, ago) in [("frag-a", 1_000), ("frag-a", 2_000), ("frag-b", 3_000)] {
-        s.observability.log(now - ago, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": id }));
+        s.observability.log(now - ago, of(ours, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": id })));
     }
     for ago in [10_000, 20_000] {
-        s.observability.log(now - ago, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } }));
+        s.observability.log(now - ago, of(ours, json!({ "computer": theirs, "phase": { "phase": "failed", "why": "its container kept stopping" } })));
     }
-    s.observability.log(now - 30_000, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 }));
+    s.observability.log(now - 30_000, of(ours, json!({ "computer": stranger, "disk": { "total": 20_000_000_000_u64, "free": 1_000_000_000_u64 }, "generation": 3 })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": "computer:0000000000000000000f0e1d", "phase": { "phase": "awake" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "phase": { "phase": "failed" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "computer": theirs, "event": { "event": "save_failed" } })));
+    s.observability.log(now - 5_000, of(foreign, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "frag-elsewhere" })));
     let r = ask(operator, day)?;
     let b = &r.body;
     let listed = b["newPeople"].as_array().into_iter().flatten().find(|p| p["npub"] == ivy_id).cloned().unwrap_or(Value::Null);
@@ -327,29 +339,33 @@ fn glance(s: &mut Suite, api: &Api, operator: &Keys, ivy: &Keys, ivy_id: &str, i
     let read = &b["logs"];
     let trouble = read["trouble"].as_array().cloned().unwrap_or_default();
     s.ok(
-        "its logs' numbers: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's",
+        "its logs' numbers, of this deployment's Worker's lines alone: computers awake now (a line in ten minutes), today and this week, fragments that ran, and computers in trouble, each named with its person when it is one's (another deployment's lines about the same person's computer count for nothing)",
         read["state"] == "read"
             && read["computersAwakeNow"] == 1
             && read["computersAwakeToday"] == 1
             && read["computersAwakeWeek"] == 2
             && read["fragmentsAwakeNow"] == 2
             && trouble.first() == Some(&json!({ "computer": theirs, "kind": "wont_wake", "lines": 2, "npub": ivy_id, "email": ivy_email }))
-            && trouble.get(1) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null })),
+            && trouble.get(1) == Some(&json!({ "computer": stranger, "kind": "disk_filling", "lines": 1, "npub": null, "email": null }))
+            && trouble.len() == 2,
         read,
     );
     let asked = s.observability.asked();
     s.ok(
-        "each read asks afresh: one query a question, with the account's read-only key",
-        asked.len() == fragment_core::glance::Question::ALL.len() && asked.iter().all(|q| q["queryId"] == fragment_core::glance::QUERY_ID),
+        "each read asks afresh: one query a question, with the account's read-only key, each of this deployment's Worker",
+        asked.len() == fragment_core::glance::Question::ALL.len() && asked.iter().all(|q| q["queryId"] == fragment_core::glance::QUERY_ID && q["parameters"]["filters"][0]["value"] == crate::OBSERVABILITY_SCRIPT),
         json!(asked.len()),
     );
     let person = ask(ivy, day)?;
     let tomorrow = ask(operator, now + 3_600_000)?;
     let stale = ask(operator, now - 2 * 24 * 3_600_000)?;
+    // the integers' ends: refused, never an overflow past the bound
+    let least = ask(operator, i64::MIN)?;
+    let most = ask(operator, i64::MAX)?;
     s.ok(
-        "anyone else's glance is refused (403), and a day that is not today is invalid (400)",
-        person.status == 403 && tomorrow.status == 400 && stale.status == 400,
-        json!([person.status, tomorrow.status, stale.status]),
+        "anyone else's glance is refused (403), and a day that is not today is invalid (400), the integers' ends too",
+        person.status == 403 && [&tomorrow, &stale, &least, &most].iter().all(|r| r.status == 400),
+        json!([person.status, tomorrow.status, stale.status, least.status, most.status]),
     );
     s.observability.fail_next(403, "Authentication error");
     let failed = ask(operator, day)?;

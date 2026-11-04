@@ -1345,9 +1345,11 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
-    // the account whose logs the glance reads, with the key bound beside it
+    // the account whose logs the glance reads, with the key bound beside
+    // it, and this deployment's Worker, whose lines alone it counts
     if d.observability_read.is_some() {
         v.insert("FRAGMENT_ACCOUNT_ID".into(), json!(d.account_id));
+        v.insert("FRAGMENT_WORKER_NAME".into(), json!(n.cell));
     }
     if let Some(c) = &d.connectors {
         v.insert("FRAGMENT_CONNECTORS".into(), json!(serde_json::to_string(c)?));
