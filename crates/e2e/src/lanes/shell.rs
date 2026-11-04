@@ -4861,7 +4861,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // computer gives it the provider's models; narrowed from the provider,
     // its tier's, by its id (Paul, 2026-10-20: it said "cheap model"), and
     // back again, each with no reload (its owner's view tells the shell)
-    b.eval(page, &format!("(document.querySelector('.agent-setting[data-agent={lead:?}] button.row')?.click(), true)"))?;
+    // (its Open, beside its Skills)
+    b.eval(page, &format!("([...document.querySelectorAll('.agent-setting[data-agent={lead:?}] button.row')].find((b) => b.textContent === 'Open')?.click(), true)"))?;
     let its_page = api.site_origin(&lead);
     let shows = |b: &mut Browser, want: &str| s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('tier')?.textContent ?? null").ok() == Some(json!(want)));
     let own_shown = shows(b, "anthropic/claude-sonnet-5.5 (openrouter)");
