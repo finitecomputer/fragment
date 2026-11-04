@@ -51,6 +51,7 @@ mod sessions;
 mod share;
 mod shell;
 mod signin;
+mod native;
 mod site;
 mod sync;
 mod templates;

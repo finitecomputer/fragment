@@ -633,6 +633,40 @@ async fn to_signin(env: &Env, cfg: &Config, url: &Url, name: &str, redeem: &str)
     redirect(&format!("{base}__signin?token={redeem}"), &[])
 }
 
+/// Native clients use their approved CLI key, never a browser's platform cookie.
+/// Only a one-use, one-fragment redemption enters the webview.
+pub(crate) async fn key_fragment(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
+    if !fragment_proto::valid_fragment_name(name) { return Err(CellError::invalid("name a fragment")); }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Asked { #[serde(default)] consent: bool, return_to: Option<String> }
+    fn answer(value: serde_json::Value) -> CellResult<Response> {
+        let mut response = Response::from_json(&value)?;
+        response.headers_mut().set("cache-control", "no-store")?;
+        Ok(response)
+    }
+    let bytes = crate::read_body(&mut req, 4096).await?;
+    let key = crate::authenticate(&req, url, fragment_nip98::Payload::Read(&bytes))?;
+    let asked: Asked = serde_json::from_slice(&bytes).map_err(|_| CellError::invalid("expected consent and a local returnTo path"))?;
+    let back = site::return_path(asked.return_to.as_deref());
+    if asked.return_to.as_ref().is_some_and(|raw| raw != &back) { return Err(CellError::invalid("returnTo must stay on the fragment's origin")); }
+    let make = |consent| calls::MintKey { key: key.clone(), fragment: name.to_string(), return_to: back.clone(), consent };
+    let mut minted = ask_registry(env, &make(if asked.consent { Consent::Given } else { Consent::Remembered })).await?;
+    if minted.redeem.is_none() {
+        let who = Signed { identity: minted.identity.clone(), key: Some(key.clone()), acting_for: None };
+        match share::ask(env, url, name, &who, Method::Get, "/api/status", None).await {
+            Ok(_) => minted = ask_registry(env, &make(Consent::Member)).await?,
+            Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => {
+                return answer(serde_json::json!({"consentRequired":true,"canonical":cfg.canonical(url, name),"email":minted.email}));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let redeem = minted.redeem.ok_or_else(|| CellError::host("an authorized mint answered no redemption"))?;
+    let address = format!("{}__signin?token={redeem}", cfg.canonical(url, name));
+    answer(serde_json::json!({"consentRequired":false,"url":address}))
+}
+
 /// What a platform session may sign a browser in to a fragment with.
 enum Minting {
     /// A single-use redemption for its `__signin`.

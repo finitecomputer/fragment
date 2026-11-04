@@ -66,7 +66,8 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 /// Where runtime code is: what ships or runs for people.
-pub const RUNTIME: [(&str, &str); 8] = [
+pub const RUNTIME: [(&str, &str); 9] = [
+    ("ios/", "the native iOS client; tests and the development fixture are excluded below"),
     ("cell/", "the Worker: its Rust, entry.mjs and the platform's JavaScript, and the shell"),
     ("templates/", "the templates' apps, sites and skills, which fragments and computers run"),
     ("images/", "the computer images: the bridge, Hermes' boot, plugins and hooks, the screen pages"),
@@ -78,7 +79,8 @@ pub const RUNTIME: [(&str, &str); 8] = [
 ];
 
 /// The repo's other directories, each with why its code is not runtime code.
-pub const NOT_RUNTIME: [(&str, &str); 9] = [
+pub const NOT_RUNTIME: [(&str, &str); 10] = [
+    ("ios/dev-server/", "the memory-only local native preview fixture, never shipped"),
     ("bench/", "benchmarks, run by hand on a machine of one's own"),
     ("crates/e2e/", "the e2e, which drives Chrome by Runtime.evaluate (crates/e2e/src/browser.rs)"),
     ("crates/fakes/", "the vendors' fakes, for dev and the e2e"),
@@ -92,7 +94,9 @@ pub const NOT_RUNTIME: [(&str, &str); 9] = [
 
 /// What runs a string as script, each with what it does: the name a failure
 /// reports, and an `ALLOWED` entry names.
-pub const REFUSED: [(&str, &str); 17] = [
+pub const REFUSED: [(&str, &str); 19] = [
+    ("evaluateJavaScript", "WKWebView: runs a JavaScript string in a page"),
+    ("callAsyncJavaScript", "WKWebView: runs a JavaScript function body from a string"),
     ("Runtime.evaluate", "DevTools: runs a string as script in a page"),
     ("callFunctionOn", "DevTools' Runtime.callFunctionOn: runs a function's source in a page"),
     ("compileScript", "DevTools' Runtime.compileScript: compiles a string as script, for Runtime.runScript"),
@@ -131,6 +135,8 @@ const CARDS: &str = "cell/src/card.rs";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Rust,
+    /// Swift comments and quoted literals share the C-style lexer; native eval calls are checked directly.
+    Swift,
     JavaScript,
     /// a page: its inline scripts, as JavaScript
     Html,
@@ -143,6 +149,7 @@ pub fn lang(path: &str) -> Option<Lang> {
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rsplit_once('.').map(|(_, ext)| ext) {
         Some("rs") => Some(Lang::Rust),
+        Some("swift") => Some(Lang::Swift),
         Some("js" | "mjs" | "cjs") => Some(Lang::JavaScript),
         Some("html") => Some(Lang::Html),
         Some("py" | "sh") => Some(Lang::Hash),
@@ -200,8 +207,8 @@ pub fn placed(tracked: &BTreeSet<String>) -> Result<()> {
 pub fn select(paths: impl Iterator<Item = String>) -> Result<Vec<(String, Lang)>> {
     let mut found = vec![];
     for path in paths {
-        let runtime = RUNTIME.iter().any(|(dir, _)| path.starts_with(dir));
-        let test = path.split('/').any(|c| c == "tests");
+        let runtime = RUNTIME.iter().any(|(dir, _)| path.starts_with(dir)) && !NOT_RUNTIME.iter().any(|(dir, _)| path.starts_with(dir));
+        let test = path.split('/').any(|c| matches!(c, "tests" | "Tests" | "UITests"));
         let Some(lang) = lang(&path).filter(|_| runtime && !test && !crate::js_syntax::vendored(&path)) else { continue };
         found.push((path, lang));
         ensure!(found.len() <= FILES_MAX, "more than {FILES_MAX} runtime files to read: is node_modules or target no longer ignored?");
@@ -236,6 +243,14 @@ pub fn hits(file: &File) -> Vec<Hit> {
             let parts = lex_hash(b);
             devtools(b, &parts, &mut at);
             drivers(b, &parts, &mut at);
+        }
+        Lang::Swift => {
+            let parts = lex_rust(b);
+            devtools(b, &parts, &mut at);
+            drivers(b, &parts, &mut at);
+            for word in ["evaluateJavaScript", "callAsyncJavaScript"] {
+                at.extend(words(b, &parts, word, code).filter(|&i| call_args(b, &parts, i + word.len()).is_some()).map(|i| (i, word)));
+            }
         }
         Lang::Rust => {
             let parts = lex_rust(b);
@@ -793,13 +808,20 @@ mod tests {
         hits(&file(path, text)).into_iter().map(|h| (h.line, h.name)).collect()
     }
 
+    #[test]
+    fn swift_comments_and_data_do_not_evaluate_a_page() {
+        assert!(found("ios/Sources/Web.swift", "// web.evaluateJavaScript(source)\nlet label = \"evaluateJavaScript\"\nweb.load(request)\n").is_empty());
+    }
+
     /// Goal: a planted use in each category fails the check, named by its
     /// file, line and name, in each language it can be written in. Method:
     /// each beside clean code, alone and in a check of both.
     #[test]
     fn a_planted_eval_fails_the_check_naming_its_line() {
         let clean = file("cell/clean.mjs", "export const ok = 1;\n");
-        let planted: [(&str, &str, usize, &str); 38] = [
+        let planted: [(&str, &str, usize, &str); 40] = [
+            ("ios/Sources/Web.swift", "// Native page scripts are not evaluated.\nweb.evaluateJavaScript(source)\n", 2, "evaluateJavaScript"),
+            ("ios/Sources/Async.swift", "try await web.callAsyncJavaScript(source, arguments: [:], in: nil, contentWorld: .page)\n", 1, "callAsyncJavaScript"),
             // DevTools, as a method on the wire and as a client's call
             ("cell/src/card.rs", "async fn f() {\n    cdp.call(\"Runtime.evaluate\", json!({ \"expression\": js }), deadline).await?;\n}\n", 2, "Runtime.evaluate"),
             ("crates/core/src/a.rs", "const M: &str = \"Runtime.callFunctionOn\";\n", 1, "callFunctionOn"),
@@ -920,6 +942,10 @@ mod tests {
             "templates/todo/site/index.html",
             "images/hermes/Dockerfile",
             "images/hermes/preload.py",
+            "ios/Sources/FragmentWebSheet.swift",
+            "ios/Tests/DeviceIdentityTests.swift",
+            "ios/UITests/FragmentUITests.swift",
+            "ios/dev-server/src/main.rs",
             "images/bridge/tests/docker.rs",
             "cli/tests/mcp.rs",
             "crates/core/src/lib.rs",
@@ -938,6 +964,7 @@ mod tests {
                 ("templates/todo/site/index.html", Lang::Html),
                 ("images/hermes/Dockerfile", Lang::Hash),
                 ("images/hermes/preload.py", Lang::Hash),
+                ("ios/Sources/FragmentWebSheet.swift", Lang::Swift),
                 ("crates/core/src/lib.rs", Lang::Rust),
             ]
         );

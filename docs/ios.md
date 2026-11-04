@@ -1,0 +1,153 @@
+# Native iOS client and pairing
+
+Status: **native CLI-key pairing and scoped web sessions implemented; hosted rollout and TestFlight remain**.
+The client is in `ios/`, SwiftUI on iOS 26+, with URLSession HTTP/WebSockets.
+The app shares wire shapes with Fragment, not its implementation. The local
+fixture is a separate Rust development server, not a mobile runtime.
+
+## Problem and acceptance
+
+Make Finite.Computer feel at home on iPhone: open your agent, resume a chat, send a
+message, see its reply stream, and open an ordinary app without leaving the
+conversation. Follow the later, simpler Finite iOS design and the existing
+Fragment mobile colours. The signed-in home is a native fullscreen version
+of Fragment's Command-K launcher (Paul, 2026-10-14): one input searches chats,
+apps and message text; the first action and Return start a new chat with the
+complete input. Search hints alone are capped at eight words and 256 bytes;
+older search responses never replace newer results. Empty input stays quiet.
+Paul, 2026-11-04: use web organization with native iOS presentation. Open on
+its search launcher over the web desktop wallpaper. A left sidebar groups chats
+by agent (multiple agents supported), with History, Your Apps and Settings. Chat has
+sidebar left, title, search/new chat and Your Apps right; chat actions live in the
+agent hero menus in the sidebar and chat-row context menus, with no chat ellipsis; Your Apps uses a native list over the shared photo background
+and Add an app opens the built-in prompt sheet, without a separate suggestion empty state.
+Your Apps has Manage Apps at top right, with all apps (including hidden and archived)
+searchable in a native sheet. Per-app settings mirror web sharing and permissions,
+personal show/hide/archive, naming, icons and preview generation. Fixture
+generation and invitations are stand-ins; no paid service or email is contacted.
+Use system typography and system glass controls, a single glass composer with
+aligned 44-point controls and no recipient caption, and actual fragment icons
+in Your Apps. The installed hand icon is a layered Icon Composer asset; product copy is Finite.Computer,
+Finite for short, and messages name their actual agent. App viewers are native large sheets with a visible drag handle and swipe-down
+dismissal, without a Done button; chat state is retained. Native history, settings categories, attachments, voice
+memos, reply/copy/share and group addressing follow the existing wire contracts.
+No Rust FFI, embedded chat webpage, model key or parallel chat protocol.
+
+The fixture runs locally and spends nothing. Connected accounts use their real platform APIs. Acceptance: real HTTP
+and WebSockets, a working composer above the keyboard, whole-text drafts
+replaced once by committed replies, Stop, retry with the original id,
+reconnect/catch-up without duplicates or regressing either channel's cursor,
+earlier history independent of live catch-up, selectable native Markdown,
+light/dark, and ordinary fragments in dismissible WKWebView sheets. Build
+with Swift 6 strict concurrency and warnings as errors. See `ios/README.md`
+for commands and evaluation. The fixture deliberately loses a committed
+post's acknowledgement and interrupts a stream to test recovery.
+
+## Existing contract; what is missing
+
+The live service uses these routes already (`docs/api.md` is authoritative):
+
+| Need | Existing API |
+| --- | --- |
+| Person, owned agent | `GET /api/identities/me`, `GET /api/fragments`, agent's `GET /api/f/{name}/status` for its npub |
+| New chat | `POST /api/fragments {label, template:"chat", title}` then `PUT /api/f/{chat}/members/{agent npub} {role:"editor"}`; keep a successful create across a failed join |
+| Messages, Stop, prompt answer | `POST /api/f/{chat}/channels/chat {id, body}`, as `docs/chat-records.md` defines |
+| Stream/catch-up | `GET /f/{chat}/__live`, subscribe to `chat` and `work` with `last` initially, `after` on reconnect; follow `subscribed.more` until caught up |
+| Earlier messages | `GET /api/f/{chat}/channels/chat?before=&limit=50`; never advance live cursors from this page |
+| List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed` |
+| Launcher search | `GET /api/search?q=` → fragments by title/label and messages by text, archived included; a message result opens its conversation |
+| Read marker | `PUT /api/fragments/{chat}/seen`, after the visible chat catches up |
+| App URL | `GET /api/f/{name}/status` → `urls.canonical` |
+| App management | Personal `PUT /api/fragments/{name}/dock` and `/archived`; app `/status`, `/visibility`, `/members`, `/invites`, `/rotate`, `/icon`, `/icon/make`, and `/card` use the existing web contracts |
+
+## Connect an account
+
+The native client reuses `fragment login`; no second WorkOS integration or device
+token protocol. The phone generates a fresh secp256k1 key, saves it to Keychain,
+and signs `POST /cli/begin`. The person types the returned code on the platform’s
+`/cli` page, signs in through the existing WorkOS flow if needed, checks the request,
+and approves. The phone polls signed `GET /api/identities/me` every two seconds
+while foregrounded, up to the code’s ten-minute expiry. That existing person and
+email become the connected account. An npub is an identifier; possession of the
+approved private key authenticates requests. The CLI’s private key is never copied.
+
+`DeviceIdentity.swift` uses P256K 0.21.1 (Bitcoin Core’s libsecp256k1) for BIP-340.
+NIP-98 binds the actual HTTP URL, method, body hash, and clock. A WebSocket’s tag
+names the HTTP upgrade URL, not `wss:`. Every HTTP path (history, attachments,
+icons and previews included) and live socket signs through `FragmentAPI`.
+Credentials go only to the selected platform origin. Signed sessions are ephemeral,
+hold no browser cookies, and refuse redirects. Release accepts HTTPS origins;
+Debug also permits loopback and local development hostnames over HTTP.
+
+Keychain stores the origin, private key and approved account together, using
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, without synchronization. No key in
+UserDefaults, logs, URLs, a fragment page, or its JavaScript. A 401 is checked
+against the identity endpoint and returns the app to connection when authorization
+has ended. Disconnect revokes this phone’s key through the existing key API and
+removes its local account data; it leaves other devices and browser sessions alone.
+A failed/offline revocation is shown as an error, not reported as a successful logout.
+
+## Apps and brains in web sheets
+
+A signed `POST /api/f/{name}/session` reuses the registry’s existing single-use
+redemption and top-level fragment session. It returns a one-fragment `__signin`
+URL, good for 60 seconds, that the sheet’s nonpersistent WKWebView opens. Only
+that fragment’s cookie enters the webview. Native authorization headers and private
+keys never do. A stranger’s app asks for consent before learning the person’s
+identity; owned/shared apps use their existing membership. General access and
+membership permissions still belong to each fragment.
+
+Each approved native key holds one internal parent session, expiring after 30 days,
+which cannot authenticate as a browser’s platform session. The registry checks the
+bound key when redeeming and on every derived session lookup; revoking the key
+invalidates existing web cookies and pending redemptions. Existing per-parent
+redemption and per-fragment session bounds apply. Expired parents are replaced on
+the next authenticated mint. The key itself follows normal CLI-key revocation,
+not a separate mobile expiration rule. Schema step: `0009_key_sessions.sql`.
+
+The viewer follows same-origin navigation and sends unrelated clicked web links
+to the system browser. It validates the redemption against the fragment’s canonical
+origin, reports main-frame HTTP errors, and supports swipe dismissal. Add is a
+native prompt sheet, matching the web shell’s built-in Add hand; there is no real
+server fragment named `add-app`.
+
+## Local data and reliability
+
+Real-account drafts and pending sends are protected, atomic files in Application
+Support, scoped by platform and person and excluded from backup. Bounds: 32 saved
+chats, one MiB per file, 16 pending sends per chat, eight attachments per message.
+The complete post and its original id are saved before HTTP. After termination,
+ambiguous sends appear for explicit retry with that same id/body; they are never
+silently resent with a new id. Draft edits are debounced and flushed on leaving a
+chat or backgrounding. Empty drafts are removed. Fixture sessions remain memory-only.
+
+JSON text subscriptions match the Worker’s live protocol; the fixture also ignores
+binary subscriptions. Connected accounts follow the signed list watcher, discard
+stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
+interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
+full Markdown tables are not implemented. Notification permission alone does not
+deliver background replies.
+
+## Validation and rollout
+
+`cargo xtask check` checks guards, schema lock, host tests and host/wasm Clippy.
+`cargo xtask e2e --only signin,identities,restart` covers native-key web redemption,
+unknown/revoked/agent keys, unsafe returns, one-use and wrong-fragment refusal,
+consent, revocation isolation, and session survival across graceful restart/crash.
+The existing sign-in lanes also exercise actual WorkOS/CLI browser approval.
+Native tests cover NIP-98 URL/method/body/time binding and Schnorr verification,
+credential origin boundaries, Keychain persistence/deletion, account-scoped drafts,
+original-id outbox recovery, and the existing transport and UI flows.
+
+For local preview commands and the sample brain, see `ios/README.md`. Default app
+launch offers Connect; Debug’s Try local preview and explicit `--server` retain the
+fixture path. Debug `--pair-server <origin>` pre-fills Connect for local integration.
+The fixture has no authentication and is never accepted as production proof.
+
+Hosted use needs the server changes deployed for private app/brain web sheets;
+existing signed native API calls reuse the already deployed CLI authentication.
+Deploy to preview, approve a phone key there, and verify an existing chat, stream,
+Stop, private app/brain, membership removal and key revocation before production.
+Run the same flows on a physical iPhone before TestFlight. Signing/team identifiers,
+privacy disclosures and App Store submission remain release work. No deployment,
+production account enrollment, or paid model call is authorized by this document.
