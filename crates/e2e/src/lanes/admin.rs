@@ -233,10 +233,55 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let session = api.sign_in("operator@e2e.test")?;
     let _ = api.approve(&session, &s.operator);
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    // the glance first, its default tab: a person whose computer the logs
+    // say is awake and won't wake (lines planted in the fake, a local run's)
+    let glancer = api.person()?;
+    let glancer_id = api.identity(&glancer)?;
+    let glancer_email = Api::email_of(&glancer);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    if !s.hosted() {
+        let computer = fragment_core::computer::default_computer_of(&glancer_id);
+        let script = crate::OBSERVABILITY_SCRIPT;
+        s.observability.log(now - 30_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "awake" } }));
+        s.observability.log(now - 20_000, json!({ "$workers.scriptName": script, "computer": computer, "phase": { "phase": "failed" } }));
+    }
     let page = b.open(&format!("{}/admin", api.base))?;
-    let listed = b.until(&page, "document.querySelectorAll('#people-rows tr').length > 0 && /people/.test(document.getElementById('status').textContent)", wait);
+    let tiles = b.until(&page, "document.querySelectorAll('#tiles .tile').length === 5 && /Updated/.test(document.getElementById('glance-at').textContent)", wait);
+    let shown = b.eval(&page, "[...document.querySelectorAll('#tiles .tile')].map(t => t.querySelector('.label').textContent + ': ' + t.querySelector('.big').textContent)")?;
     let me = b.eval(&page, "document.getElementById('me').textContent")?;
-    s.ok("an operator's session opens the admin's page: it lists people, and says who they are", listed && me == "operator@e2e.test", &me);
+    s.ok("an operator's session opens the admin's page on its glance: five tiles, and says who they are", tiles && me == "operator@e2e.test", &shown);
+    // the glance as an operator sees it, for review
+    let _ = b.screenshot(&page, &s.dir("admin-page").join("glance.png"));
+    if !s.hosted() {
+        let day = b.eval(&page, "(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })()")?;
+        let read = api.signed(&s.operator, "GET", &format!("/api/admin/glance?dayStart={day}"), None)?;
+        let awake = read.body["logs"]["computersAwakeNow"].as_u64().unwrap_or(0);
+        let rows = b.until(
+            &page,
+            &format!(
+                "[...document.querySelectorAll('#trouble-rows tr')].some(r => r.textContent.includes({glancer_email:?}) && r.textContent.includes(\"won't wake\")) && [...document.querySelectorAll('#new-rows tr')].some(r => r.textContent.includes({glancer_email:?}) && r.textContent.endsWith('yes'))"
+            ),
+            wait,
+        );
+        let tile = |b: &mut crate::browser::Browser| b.eval(&page, "[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now').querySelector('.big').textContent");
+        let before = tile(&mut b)?;
+        s.ok(
+            "its tiles are the glance's numbers, its trouble names the person whose computer won't wake, and its new people say whose computer came up",
+            rows && before == json!(awake.to_string()),
+            json!({ "page": shown, "glance": read.body["logs"] }),
+        );
+        // no cache: a computer awake since, and the glance read again
+        s.observability.log(now, json!({ "$workers.scriptName": crate::OBSERVABILITY_SCRIPT, "computer": "computer:000000000000000000000a11", "phase": { "phase": "awake" } }));
+        b.click(&page, "#tabs button[data-tab=glance]")?;
+        let again = b.until(&page, &format!("[...document.querySelectorAll('#tiles .tile')].find(t => t.querySelector('.label').textContent === 'Computers awake now')?.querySelector('.big').textContent === '{}'", awake + 1), wait);
+        s.ok("read again, the glance asks afresh: a computer awake since counts", again, tile(&mut b)?);
+        b.eval(&page, &format!("[...document.querySelectorAll('#trouble-rows tr')].find(r => r.textContent.includes({glancer_email:?})).click()"))?;
+        let opened = b.until(&page, &format!("!document.getElementById('people').hidden && !document.getElementById('person').hidden && document.getElementById('person').textContent.includes({glancer_email:?})"), wait);
+        s.ok("a person in trouble opens their page", opened, b.eval(&page, "document.getElementById('person').textContent")?);
+    }
+    b.click(&page, "#tabs button[data-tab=people]")?;
+    let listed = b.until(&page, "document.querySelectorAll('#people-rows tr').length > 0 && /people/.test(document.getElementById('status').textContent)", wait);
+    s.ok("its People tab lists people", listed, b.eval(&page, "document.getElementById('status').textContent")?);
 
     let email = format!("admin-page-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
     b.eval(&page, &format!("(() => {{ const f = document.getElementById('comp'); f.email.value = {email:?}; f.kind.value = 'seat_always_on'; f.requestSubmit(); }})()"))?;
