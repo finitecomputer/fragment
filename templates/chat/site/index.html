@@ -8,6 +8,10 @@
        stylesheet comes (the fonts' is another site's): never white while
        a woken chat loads (chat.css's --bg-chat) -->
   <style>html{background:#181818;color-scheme:dark}@media (prefers-color-scheme:light){html{background:#ebe9e5;color-scheme:light}}</style>
+  <!-- its live socket, asked before anything else comes: its handshake
+       overlaps the page's modules, and the platform's client
+       (`__fragment.js`) adopts it, with what it heard meanwhile -->
+  <script>(()=>{try{const u=new URL("__live",document.baseURI);u.protocol=u.protocol==="https:"?"wss:":"ws:";const ws=new WebSocket(u),heard=[],keep=(e)=>heard.push(e);ws.addEventListener("message",keep);window.__fragmentLive={ws,heard,keep};}catch{}})();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">

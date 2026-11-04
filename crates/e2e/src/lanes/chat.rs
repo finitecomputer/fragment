@@ -114,6 +114,44 @@ fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, cha
     Ok(())
 }
 
+/// Counts a page's `__live` sockets from before its first script, each
+/// with what it heard (`type`, or `type:channel`), in `__lives`.
+const LIVES_WATCH: &str = "(() => { if (window !== window.top) return; window.__lives = []; \
+    window.WebSocket = new Proxy(window.WebSocket, { construct(target, args) { const ws = new target(...args); \
+      if (String(args[0]).includes('/__live')) { const l = { heard: [] }; window.__lives.push(l); \
+        ws.addEventListener('message', (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } l.heard.push(m.channel ? `${m.type}:${m.channel}` : m.type); }); } \
+      return ws; } }); })();";
+
+/// A chat's page asks for its live socket from its document's head
+/// (templates/chat/site/index.html), so the handshake overlaps its modules'
+/// waves, and the platform's client (`__fragment.js`) adopts it with what
+/// it heard meanwhile. Method: the page's `__fragment.js` held, unsent,
+/// until it is asked for and that socket has said hello, then let
+/// through. Valid: its socket heard its hello while the client was still
+/// held; the page then is ready on that same socket, its chat in, one
+/// socket dialled in all.
+fn early_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let page = chrome.open_with_script("about:blank", LIVES_WATCH)?;
+    chrome.hold(&page, &["*/__fragment.js"])?;
+    chrome.eval(&page, &format!("location.assign({}), true", serde_json::to_string(&api.site_url(chat, "__signin?return=/"))?))?;
+    // the hello may come before chat.js does, so before it asks for the client
+    let asked = s.eventually(wait, || chrome.held(&page).is_ok_and(|h| h.iter().any(|u| u.ends_with("/__fragment.js"))));
+    let heard = chrome.until(&page, "window.__lives?.length === 1 && window.__lives[0].heard.includes('hello')", wait);
+    let held = chrome.held(&page)?;
+    let before = chrome.eval(&page, "({ lives: window.__lives, ready: document.getElementById('say')?.dataset.ready ?? null })")?;
+    chrome.release(&page, false)?;
+    let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1' && window.__lives[0].heard.includes('subscribed:chat')", wait);
+    let after = chrome.eval(&page, "({ lives: window.__lives.length, heard: window.__lives[0].heard.slice(0, 6), ready: document.getElementById('say')?.dataset.ready ?? null })")?;
+    s.ok(
+        "a chat's page dials its live socket before its modules come, and its client adopts it, with the hello it heard meanwhile: ready on that one socket",
+        asked && heard && held.iter().any(|u| u.ends_with("/__fragment.js")) && before["ready"].is_null() && ready && after["lives"] == 1,
+        json!({ "asked": asked, "heard": heard, "held": held, "before": before, "ready": ready, "after": after }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
 /// Watches a page from before its script runs: each composer placeholder
 /// it sets and each working line it draws (`__said`), and `__drawn` once
 /// its chat and work backlogs are in (each channel's last `subscribed`)
@@ -1078,6 +1116,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
+    early_socket(s, api, &mut chrome, &chat_name)?;
     loads_idle(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_in_frame(s, api, &mut chrome, &chat_name)?;
