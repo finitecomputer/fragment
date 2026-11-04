@@ -31,7 +31,7 @@ fn every_module_a_page_imports_is_its_own() {
     let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
     let mut checked = 0;
     for t in fragment_templates::ALL {
-        for f in t.files.iter().filter(|f| f.path.starts_with("site/") && [".js", ".mjs", ".html"].iter().any(|x| f.path.ends_with(x))) {
+        for f in t.files.iter().filter(|f| f.path.starts_with("site/") && !fragment_templates::built(t.name, f.path) && [".js", ".mjs", ".html"].iter().any(|x| f.path.ends_with(x))) {
             let source = std::fs::read_to_string(templates.join(t.name).join(f.path)).unwrap_or_else(|e| panic!("{}/{}: {e}", t.name, f.path));
             for spec in imports(&source) {
                 let mut path: Vec<&str> = f.path.split('/').collect();
@@ -53,37 +53,4 @@ fn every_module_a_page_imports_is_its_own() {
         }
     }
     assert!(checked > 20, "the pages' imports were read ({checked})");
-}
-
-/// The `href`s of a page's `<link rel="modulepreload">`s.
-fn preloads(page: &str) -> Vec<&str> {
-    let open = "<link rel=\"modulepreload\" href=\"";
-    page.match_indices(open).map(|(at, _)| &page[at + open.len()..]).map(|rest| &rest[..rest.find('"').unwrap_or(0)]).collect()
-}
-
-/// Goal: the chat's modules all come at once, not a wave of imports after
-/// each module that names them (three waves, each a round trip: the
-/// chat-open bench, 2026-11-04). Method: the chat's page preloads
-/// (`modulepreload`) each module it runs; the modules its page imports,
-/// and theirs, read from the template's files (the platform's own, `__*`,
-/// import nothing). Valid: the two are the same, none twice.
-#[test]
-fn the_chat_preloads_its_whole_module_graph() {
-    let site = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/chat/site");
-    let page = std::fs::read_to_string(site.join("index.html")).expect("the chat's page");
-    let preloaded = preloads(&page);
-    let mut graph = std::collections::BTreeSet::new();
-    let mut next: Vec<String> = imports(&page).into_iter().map(str::to_string).collect();
-    while let Some(spec) = next.pop() {
-        assert!(spec.starts_with("./") && !spec[2..].contains('/'), "the chat's modules sit beside its page: {spec}");
-        if !graph.insert(spec.clone()) || spec.starts_with("./__") {
-            continue;
-        }
-        let source = std::fs::read_to_string(site.join(&spec[2..])).unwrap_or_else(|e| panic!("{spec}: {e}"));
-        next.extend(imports(&source).into_iter().map(str::to_string));
-    }
-    let listed: std::collections::BTreeSet<String> = preloaded.iter().map(|s| s.to_string()).collect();
-    assert_eq!(listed.len(), preloaded.len(), "each module preloaded once: {preloaded:?}");
-    assert!(graph.contains("./__markdown.js") && graph.len() > 8, "the chat's graph was read: {graph:?}");
-    assert_eq!(listed, graph, "the chat's page preloads exactly the modules it runs");
 }
