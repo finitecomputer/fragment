@@ -207,14 +207,16 @@ function wanted() {
 }
 
 // A socket a page asked for before this client came (`__fragmentLive`, the
-// chat's inline script: its handshake overlaps the page's modules), taken
-// once, with what it heard meanwhile, if it is this client's own URL and
-// still opening or open; else closed, and this client dials as before.
+// chat's inline script: its handshake overlaps the page's modules), claimed
+// once, with what it heard meanwhile: its claim ends the bounds it kept
+// while unclaimed (a deadline, a cap on what it holds), so they never close
+// this client's socket. Taken if it is this client's own URL and still
+// opening or open; else closed. One that gave up first (its deadline, its
+// cap, its close) is no longer there, and this client dials as before, from
+// its own cursor, never from a cut-short replay.
 function adopted(url) {
-  const early = globalThis.__fragmentLive;
+  const early = globalThis.__fragmentLive?.claim?.();
   if (!early) return null;
-  delete globalThis.__fragmentLive;
-  early.ws.removeEventListener("message", early.keep);
   if (early.ws.url === url.href && early.ws.readyState <= WebSocket.OPEN) return early;
   early.ws.close();
   return null;
