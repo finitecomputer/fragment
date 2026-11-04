@@ -702,8 +702,8 @@ label.settings-line { cursor: pointer; }
 .provider-body { min-width: 0; }
 .provider-name { display: block; font: var(--type-body-strong); }
 .provider-sub { display: block; margin-top: 2px; font: var(--type-body-sm); color: var(--text-secondary); }
-/* its note at most two lines; a key's price always its own */
-.provider-sub .provider-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* its note whole, wrapped (one line of the deployment's, at most 280
+   characters: a clamp cut its words in half); a key's price its own line */
 .provider-price { display: block; }
 .provider-foot { grid-column: 2 / 4; margin-top: 6px; font: var(--type-caption); color: var(--text-tertiary); }
 /* its light: on, green; waiting on the person, amber; off, an empty ring */
