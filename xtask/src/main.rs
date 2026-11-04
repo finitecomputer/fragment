@@ -149,6 +149,11 @@ const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
 const DEV_ORG: &str = "fragment-dev";
+/// Dev's one connection: the WorkOS fake's stand-in OAuth provider (the
+/// e2e `connections` lane's `e2e-oauth`), so settings' Connections can be
+/// connected, seen connected and turned off locally. Its consent answers at
+/// once and nothing real is connected; its client secret is the fake's.
+const DEV_CONNECTION: &str = "sample";
 
 /// A command as errors show it: the program and its arguments only
 /// (`{cmd:?}` would print the environment set on it, where a deploy may
@@ -239,7 +244,7 @@ fn dev(args: &[String]) -> Result<()> {
             None => Ok(None),
         }
     };
-    let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
+    let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
             let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
@@ -317,9 +322,11 @@ fn dev(args: &[String]) -> Result<()> {
         computer_snapshots: false,
         computer_internet: true,
         computer_unsaved_max_ms: None,
-        providers: None,
+        // with the WorkOS fake (dev's default), its stand-in provider; a real
+        // WorkOS environment has no such provider, so then none
+        providers: workos_fake.as_ref().map(|f| dev_providers(f.connection_oauth())),
         operator_key_values: vec![],
-        connection_secret_values: vec![],
+        connection_secret_values: workos_fake.as_ref().map(|_| vec![(DEV_CONNECTION.into(), "mock-connection-secret".into())]).unwrap_or_default(),
         swap_upstream: None,
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
@@ -346,6 +353,9 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
+    if workos_fake.is_some() {
+        println!("  connections:  {DEV_CONNECTION} (the WorkOS fake's stand-in: connects at once, nothing real)");
+    }
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     println!("  wipe someone: fragment --host http://127.0.0.1:{DEV_PORT} operator wipe <email> --yes --key-file {}", operator_file.display());
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
@@ -356,6 +366,17 @@ fn dev(args: &[String]) -> Result<()> {
     let removed = devstack::containers::remove(&devstack::cell_dir())?;
     println!("removed {} containers the dev node left", removed.containers);
     Ok(())
+}
+
+/// Dev's provider catalog: its one connection (`DEV_CONNECTION`), whose
+/// authorization is at `oauth` (the WorkOS fake's `connection_oauth`).
+fn dev_providers(oauth: serde_json::Value) -> String {
+    serde_json::json!([{
+        "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"],
+        "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["SAMPLE_TOKEN"],
+        "connection_oauth": oauth, "note": "A stand-in on the dev stack: nothing real is connected.",
+    }])
+    .to_string()
 }
 
 /// The templates `try` scaffolds.
@@ -633,6 +654,15 @@ mod tests {
         for bad in [&["--hermes"][..], &["--real-agent", "--models"], &["--models", "preview.jsonc"]] {
             assert!(args(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// Dev's connection is one a deployment's catalog takes as it is.
+    #[test]
+    fn dev_providers_is_a_valid_catalog() {
+        let oauth = serde_json::json!({ "authorize": "http://127.0.0.1:8794/test-oauth/authorize", "exchange": "http://127.0.0.1:8794/test-oauth/token", "client_id": "mock-connection-client", "scopes": ["openid", "email"], "revoke": "http://127.0.0.1:8794/test-oauth/revoke" });
+        let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(oauth)).expect("rows");
+        let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog");
+        assert!(catalog.get(super::DEV_CONNECTION).is_some_and(|p| p.connection_oauth.is_some()));
     }
 
     /// Git's markers, the diff3 base's included, are caught at a line's
