@@ -25,7 +25,7 @@ struct AppAppearanceView: View {
                 if canEdit {
                     TextField("Describe an icon (optional)", text: $hint, axis: .vertical).lineLimit(1...3).accessibilityIdentifier("iconHint")
                     Button("Generate icons", systemImage: "sparkles") { Task { await makeIcons() } }.accessibilityIdentifier("makeAppIcons")
-                        .disabled(inFlight || hint.count > 200)
+                        .disabled(inFlight)
                     Button("Upload icon…", systemImage: "square.and.arrow.up") { importer = true }.disabled(inFlight)
                     if app.picture != nil {
                         Button("Remove icon", systemImage: "trash", role: .destructive) { Task { await change { let _: JSONValue = try await api.request("api/f/\(app.name)/icon", method: "DELETE") } } }

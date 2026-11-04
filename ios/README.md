@@ -126,7 +126,9 @@ post leaves the outbox and its words return to the composer), a rate limit
 Stop, earlier pages that never move the live cursor, an ended authorization,
 and the requests behind lists, joins, renames, archiving, attachments, search,
 sharing and icons. `TimelineTests` cover ordering, cursors, drafts and turns;
-`DeviceIdentityTests` NIP-98 binding, origins, Keychain and the local outbox;
+`DeviceIdentityTests` NIP-98 binding, origins and Keychain; `DraftTests` the
+saved draft and outbox across restarts (a paste past a message, a refused send
+beside a draft, a saved file past its bounds or unreadable);
 `MarkdownTests` a code fence arriving in parts. The stubs' answers are written
 by hand from docs/api.md.
 

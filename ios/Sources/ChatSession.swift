@@ -24,15 +24,19 @@ final class ChatSession {
     init(fragment: FragmentSummary, api: FragmentAPI) {
         self.fragment = fragment
         self.api = api
+        do { persistence = try ChatDraftStore(api: api, fragment: fragment.name) }
+        catch { self.error = "The local draft could not be opened: " + error.localizedDescription; return }
+        // What was saved, within its bounds; a file that is none is cleared.
+        // Either way the chat opens and sends.
         do {
-            persistence = try ChatDraftStore(api: api, fragment: fragment.name)
-            if let saved = try persistence?.load() {
+            if let (saved, cut) = try persistence?.load() {
                 composer = saved.composer; attachments = saved.attachments; replyTo = saved.replyTo; recipients = saved.recipients
                 // A terminated send may already be committed. Retry remains an
                 // explicit action, with exactly the saved id and body.
                 pending = saved.pending.map { var post = $0; post.failed = true; return post }
+                if cut { self.error = "Part of this chat’s saved draft was longer than a message can be, and was cut." }
             }
-        } catch { self.error = "The local draft could not be opened: " + error.localizedDescription; persistence = nil }
+        } catch { self.error = error.localizedDescription }
     }
     private var saved: SavedChat { SavedChat(composer: composer, attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending) }
     private func scheduleDraftSave() {
@@ -47,6 +51,25 @@ final class ChatSession {
         draftWrite?.cancel(); draftWrite = nil
         do { try persistence?.save(saved) }
         catch { self.error = "The local draft could not be saved: " + error.localizedDescription }
+    }
+
+    /// The composer as typed or pasted, kept to what a message (and its
+    /// saved draft) can hold: past it, cut at a character, and said so.
+    func edit(_ text: String) {
+        let (kept, cut) = SavedChat.fitted(text)
+        composer = kept
+        if cut { error = "A message is at most 32 KB: the rest was cut." }
+    }
+
+    /// A refused send's words back in the composer, to change and send
+    /// anew, once the composer is empty (`deliver`).
+    func reopen(_ post: PendingPost) {
+        guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
+        guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
+        let refused = pending.remove(at: index)
+        composer = refused.text; attachments = refused.attachments
+        replyTo = timeline.records.first { $0.channel == "chat" && $0.seq == refused.replyTo }
+        error = nil
     }
 
     // Owned by the view's .task: backgrounding or leaving the chat closes the
@@ -138,7 +161,8 @@ final class ChatSession {
             return
         }
         let text = composer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!text.isEmpty || !attachments.isEmpty), text.utf8.count <= 32_768, pending.count < 16 else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
         let post = PendingPost(id: UUID().uuidString, text: text, attachments: attachments, replyTo: replyTo?.seq, recipients: recipients)
         do {
             // Persist the exact send before any request leaves the phone.
@@ -151,7 +175,7 @@ final class ChatSession {
     }
 
     func retry(_ post: PendingPost) async {
-        guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].failed else { return }
+        guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].failed, pending[index].refused == nil else { return }
         pending[index].failed = false
         await deliver(post)
     }
@@ -167,13 +191,14 @@ final class ChatSession {
             pending.removeAll { $0.id == post.id }
             error = nil
         } catch APIError.refused(let message) {
-            // Refused, not lost: sending it again gets the same answer. It
-            // leaves the outbox, and its words go back to the composer.
+            // Refused, not lost: sending it again gets the same answer, so
+            // it is never retried. Its words go back to an empty composer;
+            // beside a draft, it waits to be edited (`reopen`), as a draft
+            // and it joined might be more than a message holds.
             guard let index = pending.firstIndex(where: { $0.id == post.id }) else { return }
-            let refused = pending.remove(at: index)
-            composer = [refused.text, composer].filter { !$0.isEmpty }.joined(separator: "\n\n")
-            attachments = refused.attachments + attachments.filter { kept in !refused.attachments.contains(kept) }
-            replyTo = replyTo ?? timeline.records.first { $0.seq == refused.replyTo }
+            pending[index].failed = true
+            pending[index].refused = message
+            reopen(pending[index])
             self.error = message
         } catch {
             // A matching live record also acknowledges delivery. The HTTP

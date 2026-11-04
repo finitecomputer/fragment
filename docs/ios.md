@@ -134,8 +134,13 @@ The complete post and its original id are saved before HTTP. After termination,
 ambiguous sends appear for explicit retry with that same id/body; they are never
 silently resent with a new id. The channel takes the same id and body again as
 the same post (`docs/chat-records.md`). A refusal (4xx, but 408 and 429) is final:
-the post leaves the outbox at once and its words return to the composer, with the
-server's message. Draft edits are debounced and flushed on leaving a chat or
+it is never retried; its words return to an empty composer at once, or, beside a
+draft, wait in the chat to be edited once the composer is empty, with the server's
+message (a draft and a post joined might be more than a message holds). Editing,
+saving and loading keep one set of bounds (`SavedChat`): a paste past 32 KiB is
+cut at a character, and said so. A saved file past its bounds loads what fits and
+says what was cut; one that is no saved chat is cleared and says so. A chat
+always opens and sends. Draft edits are debounced and flushed on leaving a chat or
 backgrounding. Empty drafts are removed.
 
 The app keeps no copy of a limit the server enforces: it shows the server's

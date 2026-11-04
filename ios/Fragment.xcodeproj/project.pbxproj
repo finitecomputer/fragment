@@ -40,6 +40,7 @@
 		CC7761F962CB619DD2A5BB51 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 934BF3B3E3B9A45CF6843505 /* Assets.xcassets */; };
 		E4358E209B49F024F52BDCAE /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 811C73B367475E8B5D4DB77F /* AppIcon.icon */; };
 		ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */; };
+		F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8B11860501F69BE73ECB3D0 /* DraftTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -91,6 +92,7 @@
 		D261EC9048255D1B31FED623 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		D48A78B0A3D4F8A90EEBD8DB /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		D8A9F828339CA70751D48F66 /* ChatMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMedia.swift; sourceTree = "<group>"; };
+		D8B11860501F69BE73ECB3D0 /* DraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftTests.swift; sourceTree = "<group>"; };
 		DC2E702AC579841626A1A67C /* Stub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Stub.swift; sourceTree = "<group>"; };
 		DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportTests.swift; sourceTree = "<group>"; };
 		EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentApp.swift; sourceTree = "<group>"; };
@@ -172,6 +174,7 @@
 			children = (
 				0A44398C694D0FA2138E5A64 /* AppSettingsTests.swift */,
 				92F50038387E161FFC74D67A /* DeviceIdentityTests.swift */,
+				D8B11860501F69BE73ECB3D0 /* DraftTests.swift */,
 				AB0814CDF8824F8A8657129D /* MarkdownTests.swift */,
 				3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */,
 				8C581195A0FDAC2EA88D081F /* ShellTests.swift */,
@@ -300,6 +303,7 @@
 			files = (
 				5938CA76ED5569461BA445AB /* AppSettingsTests.swift in Sources */,
 				A8A038F320ECBCC025021D8B /* DeviceIdentityTests.swift in Sources */,
+				F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */,
 				A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */,
 				7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */,
 				4FEE2A2E44CD058FD4666F85 /* ShellTests.swift in Sources */,

@@ -45,7 +45,11 @@ struct ChatView: View {
                     ForEach(session.pending) { pending in
                         VStack(alignment: .trailing, spacing: 6) {
                             MessageView(text: pending.text, isYou: true)
-                            if pending.failed {
+                            if let refused = pending.refused {
+                                Button("Not sent: \(refused) Tap to edit", systemImage: "pencil") {
+                                    session.reopen(pending)
+                                }.font(.caption).accessibilityIdentifier("editRefused")
+                            } else if pending.failed {
                                 Button("Not sent. Tap to retry", systemImage: "arrow.clockwise") {
                                     Task { await session.retry(pending) }
                                 }.font(.caption).accessibilityIdentifier("retry")
@@ -104,7 +108,7 @@ struct ChatView: View {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
                 composerAccessories
-                ComposerView(text: $session.composer, working: !session.timeline.activeTurns.isEmpty,
+                ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.timeline.activeTurns.isEmpty,
                     enabled: session.connected && session.caughtUp, busy: uploading, recording: voice.recording,
                     attach: { importer = true }, record: { Task { await recordVoice() } },
                     send: { await session.send() }, stop: { await session.stop() }, hasAttachments: !session.attachments.isEmpty)

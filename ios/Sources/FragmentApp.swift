@@ -244,7 +244,7 @@ struct FragmentRoot: View {
             await library.load(api)
             let resolved = library.fragments.first { $0.name == chat.name } ?? chat
             let session = try library.session(for: resolved, api: api)
-            session.composer = homeDraft
+            session.edit(homeDraft)
             homeDraft = ""
             page = .chat(chat.name)
             await session.send()

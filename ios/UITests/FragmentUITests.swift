@@ -19,7 +19,10 @@ final class FragmentUITests: XCTestCase {
         guard server.waitForExistence(timeout: 10) else {
             throw XCTSkip("This simulator holds a connected account; reset its keychain (`xcrun simctl keychain booted reset`) and run again.")
         }
-        XCTAssertEqual(server.value as? String, "http://127.0.0.1:9")
+        // never ask any other server than the closed port
+        guard server.value as? String == "http://127.0.0.1:9" else {
+            return XCTFail("Connect shows \(server.value ?? "nothing"), not the --pair-server address")
+        }
         XCTAssertFalse(app.buttons["tryPreview"].exists, "there is no unsigned preview")
         screenshot(app, "Connect")
         app.buttons["pairAccount"].tap()

@@ -112,7 +112,14 @@ final class AccountConnection {
 struct AccountConnectionView: View {
     let connection: AccountConnection
     var close: () -> Void = {}
-    @State private var server = "https://finite.chat"
+    /// The address to pair with, as the screen first shows it: Debug's
+    /// `--pair-server`, else the saved account's, else Finite's own.
+    @State private var server: String
+    init(connection: AccountConnection, close: @escaping () -> Void = {}) {
+        self.connection = connection
+        self.close = close
+        _server = State(initialValue: Self.pairServer ?? connection.account?.origin.absoluteString ?? "https://finite.chat")
+    }
     @State private var replaceKey = false
     @State private var forgetConnection = false
     @Environment(\.openURL) private var openURL
@@ -164,7 +171,6 @@ struct AccountConnectionView: View {
             }
             .navigationTitle("Connect Finite").navigationBarTitleDisplayMode(.inline)
             .disabled(connection.busy)
-            .task { server = connection.account?.origin.absoluteString ?? initialServer }
             .task(id: "\(connection.code?.code ?? "")|\(scenePhase)") { if connection.code != nil && scenePhase == .active { await connection.poll() } }
             .onChange(of: connection.account?.approved) { _, approved in if approved == true { close() } }
             .confirmationDialog("Remove this connection from this iPhone?", isPresented: $forgetConnection, titleVisibility: .visible) {
@@ -175,11 +181,11 @@ struct AccountConnectionView: View {
             } message: { Text("Use this if the previous key was revoked. Other devices keep their own keys.") }
         }
     }
-    private var initialServer: String {
+    private static var pairServer: String? {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "--pair-server"), args.indices.contains(i + 1) { return args[i + 1] }
         #endif
-        return "https://finite.chat"
+        return nil
     }
 }

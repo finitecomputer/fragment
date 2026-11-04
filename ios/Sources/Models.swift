@@ -178,6 +178,8 @@ struct PendingPost: Codable, Identifiable, Sendable {
     let id: String
     let text: String
     var failed = false
+    /// Why the server refused it: final, so it is edited, never retried.
+    var refused: String?
     var attachments: [ChatAttachment] = []
     var replyTo: Int64?
     var recipients: [String] = []
