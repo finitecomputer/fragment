@@ -4039,6 +4039,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
         shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0]]),
         &one,
     );
+    sheet_of(b, page, &row)?;
     let (came_back, connected) = connected_in_window(s, b, page, &format!("{row} [data-action=add-account]"), several)?;
     b.reload(page)?;
     let two = b.until(page, &format!("document.querySelectorAll('{row} .provider-account-row').length === 2 && !!document.querySelector('{pick}')"), wait);
@@ -4050,6 +4051,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
         came_back && connected && two && held.len() == 2 && choice[0].as_str().is_some_and(|l| l.ends_with("'s E2e Several account")) && choice[1] == "" && choice[2] == json!(["", ids[0], ids[1]]),
         json!({ "choice": choice, "held": ids }),
     );
+    anyhow::ensure!(ids.len() == 2, "{several} holds two accounts for the checks after: {ids:?}");
     b.eval(page, &format!("((p) => (p.value = {:?}, p.dispatchEvent(new Event('change')), true))(document.querySelector('{pick}'))", ids[1]))?;
     let agent_uses = || -> Value {
         shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[])
