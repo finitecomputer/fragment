@@ -207,7 +207,8 @@ impl CodeStorage {
     /// semantics belong to the callers' bounded retry loops.
     fn req(&self, method: &str, path: &str, body: Option<Vec<u8>>, content_type: Option<&str>) -> Result<(u16, Vec<u8>), CsError> {
         let url = format!("{}/api/repos/{}{}", self.server, self.repo_seg(), path);
-        let body = body.unwrap_or_default();
+        // kept once for its retries, each attempt sending it shared
+        let body = bytes::Bytes::from(body.unwrap_or_default());
         let timeout = timeout_for(body.len() as u64);
         let verb: reqwest::Method = method.parse().map_err(|_| CsError::Malformed(format!("bad method {method}")))?;
         let build = || {
@@ -215,7 +216,7 @@ impl CodeStorage {
             if let Some(ct) = content_type {
                 r = r.header("content-type", ct);
             }
-            if body.is_empty() { r } else { r.body(body.clone()) }
+            if body.is_empty() { r } else { r.body(crate::api::attempt_body(&body)) }
         };
         send_retrying(build, Replay::of(method), None).map_err(|failed| match failed {
             Failed::Unbuilt(e) => CsError::Malformed(format!("building {method} {path}: {e}")),

@@ -3230,8 +3230,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-update.png"));
     s.ok(
-        "an update is shown at once, with no reload: an update is ready, Restart (about a minute, chats and work kept; or by itself at its next sleep), and Later",
-        r.status == 200 && told && !running.is_empty() && latest != running && said.as_str().is_some_and(|t| t.contains("about a minute; your chats and work are kept") && t.contains("the next time your computer sleeps")),
+        "an update is shown at once, with no reload: an update is ready, Restart (chats and work kept, no time promised; or by itself at its next sleep), and Later",
+        r.status == 200 && told && !running.is_empty() && latest != running && said.as_str().is_some_and(|t| t.contains("Restart to get it; your chats and work are kept") && !t.contains("minute") && t.contains("the next time your computer sleeps")),
         json!({ "said": said, "view": r.body }),
     );
     // a read of it failing meanwhile (#437): what the last one said stays
@@ -7662,7 +7662,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
     b.click(page, "#settings-page .agent-add-open")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
-    // what it runs on: Hermes unless Claude Code is chosen (FIN-250)
+    // what it runs on: Hermes alone, no choice, while Claude Code is left out
+    // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)
     let runs = b.eval(page, "[...document.querySelectorAll('#new-agent .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
     b.eval(page, &fill("#new-agent .agent-add-name", "Wren"))?;
     b.eval(page, &fill("#new-agent .agent-add-role", "editor"))?;
@@ -7688,8 +7689,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         json!({ "chat": chat, "hello": seen, "job": job }),
     );
     s.ok(
-        "Add offers what it runs on, Hermes chosen unless Claude Code is: Wren, added as it was, runs on Hermes (its agent.json names no runtime)",
-        runs == json!([["hermes", true], ["claude", false]]) && runtime == Some(Value::Null),
+        "Add offers no runtime to choose, Claude Code left out of new agents: Wren, added, runs on Hermes (its agent.json names no runtime)",
+        runs == json!([]) && runtime == Some(Value::Null),
         json!({ "offered": runs, "runtime": runtime }),
     );
     // its role, edited in Settings, then taken away
@@ -7958,10 +7959,18 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     click_chat(b, page, &chat)?;
     let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
-    let placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
+    // The list is read as `@` is typed, from the chat's members as they
+    // are; the placeholder is drawn from them on the frame after they come
+    // (`readMembers` schedules a render, whose `renderChrome` sets it), so
+    // it is waited for as the list is (it read "Message" a frame early).
+    let mut placeholder = Value::Null;
+    let named = s.eventually(wait, || {
+        placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
+        placeholder.as_str().is_some_and(|p| p.ends_with(", or @ someone else"))
+    });
     s.ok(
         "in a chat of their own, @ lists its agent, then their other agent, marked as one the message adds",
-        listed == want && placeholder.as_str().is_some_and(|p| p.ends_with(", or @ someone else")),
+        listed == want && named,
         json!({ "listed": listed, "placeholder": placeholder }),
     );
     let _ = b.screenshot(page, &shots.join("desktop-roster.png"));

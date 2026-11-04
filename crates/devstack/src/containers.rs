@@ -234,6 +234,44 @@ pub fn remove(project: &Path) -> Result<Removed> {
     bail!("{} container(s) of {} still there after {PASSES_MAX} passes: {}{why}", left.len(), project.display(), left.join(", "))
 }
 
+/// The rule a computer's networking sidecar drops public DNS by, in the
+/// network namespace it shares with its container (its NET_ADMIN lets it):
+/// proxy-everything (image 3cb1195) marks each query it forwards to public
+/// DNS 100 (its `dnsBypassMark`), and its answers to the container go to
+/// the container's own port, never 53, so they pass.
+const PUBLIC_DNS_DROP: [&str; 11] = ["OUTPUT", "-p", "udp", "--dport", "53", "-m", "mark", "--mark", "100", "-j", "DROP"];
+
+/// Has the sidecar of each of the project's computers that are up drop
+/// every query it would send public DNS: a test's, of a run that must not
+/// need it (#1017). Answers those sidecars (`public_dns_asked`).
+pub fn drop_public_dns(project: &Path) -> Result<Vec<String>> {
+    let label = project_label(project)?;
+    let up = docker(&["ps", "--no-trunc", "--filter", &format!("label={PROJECT_LABEL}={label}"), "--format", "{{.Names}}"])?;
+    let sidecars: Vec<String> = up.lines().map(|name| format!("{name}-proxy")).collect();
+    for sidecar in &sidecars {
+        let mut args = vec!["exec", sidecar.as_str(), "iptables", "-I"];
+        args.extend(PUBLIC_DNS_DROP);
+        docker(&args)?;
+    }
+    Ok(sidecars)
+}
+
+/// The queries to public DNS `sidecars` (`drop_public_dns`'s) dropped
+/// since: the packets each one's rule counted.
+pub fn public_dns_asked(sidecars: &[String]) -> Result<u64> {
+    let mut asked = 0;
+    for sidecar in sidecars {
+        asked += dropped_packets(&docker(&["exec", sidecar, "iptables", "-L", "OUTPUT", "-v", "-x", "-n"])?).with_context(|| format!("{sidecar} lists no rule of `drop_public_dns`"))?;
+    }
+    Ok(asked)
+}
+
+/// The packets `PUBLIC_DNS_DROP`'s rule counted, from `iptables -L OUTPUT
+/// -v -x -n`: its line's first field. None when no line is the rule's.
+fn dropped_packets(listing: &str) -> Option<u64> {
+    listing.lines().find(|l| l.contains(" DROP ") && l.contains("dpt:53") && l.contains("mark match 0x64")).and_then(|l| l.split_whitespace().next()?.parse().ok())
+}
+
 /// Where a project's own Dockerfiles are (`scope_images`).
 fn images_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/images")
@@ -245,6 +283,16 @@ mod tests {
 
     const ID_A: &str = "d9414676ec33b9ed42256fb85b1fb55740ed83efa7779aea713d7c2541a0e5c0";
     const ID_B: &str = "f86d64ac5f75693b8b0cd8b06698baccabcba78faab43b8e06678409255a22ef";
+
+    /// The rule's packets, as the sidecar image's iptables (1.8.11,
+    /// nf_tables) lists them; none from a listing without it.
+    #[test]
+    fn the_public_dns_rule_counts_what_it_dropped() {
+        let listing = "Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n    pkts      bytes target     prot opt in     out     source               destination         \n      12      744 DROP       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 mark match 0x64\n";
+        assert_eq!(dropped_packets(listing), Some(12));
+        assert_eq!(dropped_packets(&listing.replace("12      744", "0        0")), Some(0));
+        assert_eq!(dropped_packets("Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n    pkts      bytes target     prot opt in     out     source               destination\n"), None);
+    }
 
     fn name(id: &str) -> String {
         format!("workerd-fragment-Computer-{id}")

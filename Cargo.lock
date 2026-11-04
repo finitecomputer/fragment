@@ -557,6 +557,7 @@ version = "0.15.0"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "clap",
  "dirs",
  "fragment-core",

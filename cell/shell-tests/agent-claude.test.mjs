@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeSet, claudeSettings, createAgentSettings, CLAUDE_MODELS, CLAUDE_EFFORTS, DEFAULT_AGENT_TIER } from "../shell/agent-settings.js";
+import { claudeSet, claudeSettings, createAgentSettings, CLAUDE_MODELS, CLAUDE_EFFORTS, DEFAULT_AGENT_TIER, NEW_AGENT_RUNTIMES } from "../shell/agent-settings.js";
 
 test("a model set keeps its thinking; Claude's default takes the field away, and `claude` with its last", () => {
   const j = { runtime: "claude", claude: { effort: "high" } };
@@ -66,4 +66,11 @@ test("a Claude agent's write adds no tier; a Hermes agent's keeps its own, or th
   assert.deepEqual(files.get("clio"), { runtime: "claude", claude: { effort: "low" } });
   await settings.writeAgentJson("juniper", (next) => ((next.home = "garden"), "its home"));
   assert.deepEqual(files.get("juniper"), { tier: DEFAULT_AGENT_TIER, home: "garden" });
+});
+
+test("a new agent is made on Hermes alone for now: Claude Code is left out of Add (Paul, 2026-11-03), an existing Claude agent's settings kept", () => {
+  assert.deepEqual(NEW_AGENT_RUNTIMES.map(([v]) => v), ["hermes"]);
+  const j = { runtime: "claude", claude: { model: "haiku" } };
+  assert.equal(claudeSet(j, "effort", "low"), true, "its Model and Thinking still set");
+  assert.deepEqual(j.claude, { model: "haiku", effort: "low" });
 });

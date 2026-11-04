@@ -1482,7 +1482,11 @@ async fn held_nothing_under_data_changes() {
     }
     eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
-    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper--k3x9/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    // the databases it copied, and the caches a save leaves out: folders,
+    // never a file of a person's (held.rs, `caches`)
+    let (databases, caches): (Vec<&String>, Vec<&String>) = left_out.iter().partition(|l| l.contains(".db"));
+    assert!(databases.iter().any(|l| *l == "/hermes/profiles/juniper--k3x9/state.db") && databases.iter().all(|l| l.starts_with("/hermes/")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(caches.iter().any(|l| *l == "/hermes/.cache/pip/") && caches.iter().all(|l| l.ends_with('/')), "the rest it names are cache folders: {caches:?}");
     assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
     let before = files(&c, &left_out);
     let held = Instant::now();
@@ -5027,9 +5031,11 @@ async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
     // fetches nothing, and a browser `sudo` installs goes where the agent's
     // own launch looks (sudo keeps PLAYWRIGHT_BROWSERS_PATH): its dry run's
     // place is the one the agent's Playwright resolves
-    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && sudo playwright install chromium && echo \"sudo-chromium=$?\" && at=$(sudo playwright install --dry-run firefox | sed -n 's|^ *Install location: *\\(.*/firefox-[0-9]*\\)$|\\1|p') && mine=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.firefox.executable_path); p.stop()') && case \"$mine\" in \"$at\"/*) echo \"firefox-where-$((6 * 7))\" ;; *) echo \"sudo $at, the agent $mine\" ;; esac").await;
+    let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && sudo playwright install chromium && echo \"sudo-chromium=$?\" && at=$(sudo playwright install --dry-run firefox | sed -n 's|^ *Install location: *\\(.*/firefox-[0-9]*\\)$|\\1|p') && [ -n \"$at\" ] && mine=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.firefox.executable_path); p.stop()') && case \"$mine\" in \"$at\"/*) echo \"firefox-where-$((6 * 7))\" ;; *) echo \"sudo $at, the agent $mine\" ;; esac").await;
     assert!(said.contains("sudo-chromium=0") && !said.contains("MiB") && !said.contains("downloaded to"), "sudo installs no Chromium, nor its FFmpeg: {said}");
     assert!(!said.contains("Removing unused browser"), "nor collects Hermes' tools: {said}");
+    // an install location was read (empty, `"$at"/*` is `/*`, which any
+    // absolute path matches: Codex on #991)
     assert!(said.contains("firefox-where-42"), "a browser sudo installs is where the agent looks: {said}");
     // `uninstall`, which collects regardless, is refused in Hermes' store
     let said = tool_said(&fake, &chat, &c, "run: cd /tmp/pw && { sudo playwright uninstall --all; echo \"uninstall=$?\"; } && { timeout 60 playwright uninstall; echo \"mine=$?\"; }").await;

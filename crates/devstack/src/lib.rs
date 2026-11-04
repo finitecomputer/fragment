@@ -106,6 +106,11 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
 }
 
+/// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
+/// it imports from beside it (a deploy runs it from the source tree, so
+/// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
+pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
+
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
 /// `build/`, so a node run from it keeps its state and variables apart from
@@ -131,7 +136,9 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
+    for shim in SHIM_FILES {
+        fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
+    }
     let _ = fs::remove_dir_all(dir.join("build"));
     // no build writes among the files as they are copied
     let reading = built::reading(&from.join("build"))?;
@@ -261,6 +268,21 @@ impl Tools {
     }
 }
 
+/// Whether a boot's log says wrangler's build of the Worker failed:
+/// wrangler 4.145.0 (`logBuildFailure`) says "Build failed with N
+/// error(s):" and each of esbuild's errors after it, in one write. A dev
+/// server whose build failed stays up waiting for a file to change: it
+/// neither gets ready nor exits, so without this a start waited out
+/// READY_TIMEOUT (runs 41655792118 and 41655789661: an import of a file the
+/// node's copy of cell/ did not have, 900 s on each shard).
+fn build_failed(text: &str) -> bool {
+    text.match_indices("Build failed with ").any(|(at, said)| {
+        let count = &text[at + said.len()..];
+        let digits = count.len() - count.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        digits > 0 && count[digits..].starts_with(" error")
+    })
+}
+
 /// The port a boot's log says wrangler is ready on (`Ready on
 /// http://127.0.0.1:<port>`): its own pick, a boot's log saying it once.
 fn ready_port(text: &str) -> Option<u16> {
@@ -355,6 +377,17 @@ pub struct Fleet {
     /// `cargo xtask dev --real-agent`.
     pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
+    /// Whether computers reach the internet (`FRAGMENT_COMPUTER_INTERNET`,
+    /// `off` when not). Locally, workerd's networking sidecar answers a
+    /// container's DNS: with internet on, it asks public DNS first for
+    /// every name, the platform's intercepted hosts included
+    /// (`backups.sandbox.internal`, `api.fragment.internal`), and answers
+    /// them itself only once public DNS says there is no such name. Off,
+    /// it answers them at once, asking no one. The e2e's are off: its
+    /// computers reach only hosts the platform intercepts, and a run must not
+    /// depend on public DNS (#1017: every save of a boot failed when it did
+    /// not answer). `cargo xtask dev`'s are on, as a deployment's are.
+    pub computer_internet: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
@@ -526,6 +559,9 @@ impl Fleet {
         }
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
+        }
+        if !self.computer_internet {
+            vars.push(("FRAGMENT_COMPUTER_INTERNET", "off"));
         }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {
@@ -794,6 +830,11 @@ impl Node {
                 let status = node.reap()?;
                 bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
+            // neither ready nor gone: it waits for a file to change, and
+            // no file of a started node's changes under it (`build_failed`)
+            if build_failed(&text) {
+                bail!("wrangler dev's build failed, so it never gets ready:\n{text}");
+            }
             if t0.elapsed() > READY_TIMEOUT {
                 bail!("wrangler dev on :{port} was not ready after {READY_TIMEOUT:?}:\n{text}");
             }
@@ -922,6 +963,26 @@ impl Drop for Node {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a staged cell (dev's, the e2e's) holds every module its shim
+    /// imports from beside it, as the source tree a deploy runs from does
+    /// (a module left out failed the e2e's build: "Could not resolve
+    /// ./backup-reads.mjs"), and nothing it does not. Method: entry.mjs's
+    /// relative imports, read, against `SHIM_FILES`.
+    #[test]
+    fn the_staged_shim_holds_what_it_imports() {
+        let entry = std::fs::read_to_string(super::cell_dir().join("entry.mjs")).expect("entry.mjs reads");
+        let mut beside: Vec<String> = entry
+            .lines()
+            .filter(|l| l.trim_start().starts_with("import ") || l.trim_start().starts_with("export ") && l.contains(" from "))
+            .filter_map(|l| l.split(" from \"./").nth(1))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|path| !path.starts_with("build/"))
+            .map(str::to_string)
+            .collect();
+        beside.insert(0, "entry.mjs".into());
+        assert_eq!(beside, super::SHIM_FILES, "SHIM_FILES is entry.mjs and what it imports from beside it");
+    }
+
 
     /// A node's subjects, as its Registry keeps them: one issuer's alone,
     /// its other SQLite (metadata) passed over; a node with no state has none.
@@ -1060,6 +1121,19 @@ mod tests {
         assert_eq!(ready_port("x\n[wrangler:info] Ready on http://127.0.0.1:35523\n[wrangler:info] GET / 200"), Some(35523));
         for unready in ["", "Starting local server...", "Ready on http://127.0.0.1:355", "Ready on http://127.0.0.1:0\n", "Ready on http://localhost:35523\n"] {
             assert_eq!(ready_port(unready), None, "{unready:?}");
+        }
+    }
+
+    /// A build that failed, as wrangler says it (run 41655792118's words,
+    /// its colors kept), for one error or several; not a start's lines, nor
+    /// the words without a count.
+    #[test]
+    fn a_failed_build_is_heard_from_wranglers_own_words() {
+        let ci = "\x1b[31m\u{2718} \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mBuild failed with 1 error:\x1b[0m\n\n  \x1b[31m\u{2718} \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mCould not resolve \"./backup-reads.mjs\"\x1b[0m\n";
+        assert!(build_failed(ci));
+        assert!(build_failed("x\nBuild failed with 2 errors:\n"));
+        for fine in ["", "[wrangler:info] Ready on http://127.0.0.1:35523\n", "Build failed with", "Build failed with errors", "Build failed with 1"] {
+            assert!(!build_failed(fine), "{fine:?}");
         }
     }
 

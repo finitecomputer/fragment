@@ -315,6 +315,7 @@ fn dev(args: &[String]) -> Result<()> {
             None => vec![],
         },
         computer_snapshots: false,
+        computer_internet: true,
         computer_unsaved_max_ms: None,
         providers: None,
         operator_key_values: vec![],

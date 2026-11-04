@@ -1,6 +1,14 @@
 import { icon } from "./icons.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 
+const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
+
+// What the person is told of a disk filling (the `disk_filling` notice),
+// here too, in one line (Paul's words): the room left, and what to do.
+export function diskSaid(n) {
+  return `Your computer is almost full (${size(n.free)} left). Delete files you don't need, or ask an agent to tidy up.`;
+}
+
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, markOffer, reads, load }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
@@ -39,9 +47,10 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
   };
   // why a computer won't start, in plain words (the platform's own words
-  // stay beside them, for whoever helps)
+  // stay beside them, for whoever helps); no time it may not keep: a big
+  // restore takes a start up to 15 minutes (#1001)
   function wontStart(why) {
-    if (/not ready within/.test(why)) return "It didn't finish starting within a few minutes.";
+    if (/not ready within/.test(why)) return "It didn't finish starting in time.";
     if (/kept stopping/.test(why)) return "It kept stopping as soon as it started.";
     if (/check/.test(why)) return "Its saved files didn't pass their check.";
     if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
@@ -103,15 +112,20 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       actions.append(ok);
     } else if (n.kind === "update") {
       // told only between turns, never restarted behind their back; an
-      // always-on computer never sleeps, so never updates by itself
+      // always-on computer never sleeps, so never updates by itself. No
+      // time promised: a restart restores its work, a big one up to 15
+      // minutes (#1001)
       const itself = computer()?.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps.";
-      say("An update is ready for your computer", `Restart to get it — about a minute; your chats and work are kept.${itself}`);
+      say("An update is ready for your computer", `Restart to get it; your chats and work are kept.${itself}`);
       restart("Restart");
       const later = el("button", null, "Later");
       later.type = "button";
       later.dataset.action = "later";
       later.onclick = () => updateLater(n.version, later);
       actions.append(later);
+    } else if (n.kind === "disk_filling") {
+      row.classList.add("warn");
+      copy.append(el("strong", null, diskSaid(n)));
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {

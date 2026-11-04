@@ -5,6 +5,17 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A computer's disk is 20 GB, priced as 12
+
+- **Shortcut:** every computer starts with Containers' most disk, 20 GB
+  (`price::DISK_MB`), since a computer whose `/data` filled the 12 GB its
+  price assumed could never be restored again (2026-11-03). The price book
+  still counts 12 GB (`price::DEFAULT_INSTANCES`): the 8 GB more,
+  $0.002016 an awake hour, is the platform's.
+- **Risk:** about 3% of a computer's awake price goes uncharged.
+- **Delete when:** Paul reprices the default instance with its 20 GB (a
+  new `DEFAULT_INSTANCES` row and `DEFAULT_BOOK_VERSION`).
+
 ## A fragment with reach is shared with no one else
 
 - **Shortcut:** Paul, 2026-11-01 (FIN-352): "as an extra safety right now
@@ -441,6 +452,21 @@ unfinished design, not debt.
 - **Delete when:** the release's build rebuilds a change to one of its
   files in seconds, and dev builds the release's again.
 
+## The cell's Wasm budget raised to 6.6 MB
+
+- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
+  6.5 MB to 6.6 MB (Paul, 2026-11-03) so the fixes that let every
+  computer restart could land: a folder that will not fit set aside, its
+  owner getting it back or dropping it, it in their export, and the
+  disk read and told as it fills (about 66 KB together, on a cell that
+  had reached 6.454 MB).
+- **Risk:** slower isolate starts and less memory for every object, and
+  an easier next raise.
+- **Delete when:** the cell is back under 6.5 MB and the budget is set
+  back to 6.5 MB. Candidates: the export's archive builder in a Worker of
+  its own (the launch entry's), and the Computer DO's routes, whose big
+  async functions grow with each await point a feature adds.
+
 ## The cell's Wasm budget was raised for launch
 
 - **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
@@ -476,6 +502,24 @@ unfinished design, not debt.
   the node runs Miniflare itself with no proxy between: then front.rs,
   the debug level and `Node::start`'s readers go. The devstack's
   `front_door` and `debug_terminal` tests check a wrangler move.
+
+## The e2e's computers have no internet
+
+- **Shortcut:** with the internet on, local workerd's networking sidecar
+  (`cloudflare/proxy-everything`) resolves even the hosts the platform
+  intercepts through public DNS first, so a run's saves failed while
+  public DNS did not answer (#1017). The e2e's fleet starts computers
+  with it off (`FRAGMENT_COMPUTER_INTERNET=off`, crates/devstack's
+  `Fleet::computer_internet`), and the sidecar answers them at once.
+  The computers lane checks it by dropping a sidecar's queries to public
+  DNS (`containers::drop_public_dns`, which leans on the sidecar's mark
+  for them).
+- **Risk:** a run's computers do not run as a deployment's do, with the
+  internet on: something a computer needs from the internet fails only
+  on a preview.
+- **Delete when:** the sidecar answers an intercepted name without
+  asking public DNS (a draft upstream issue awaits Paul); then the fleet
+  var, `computer_internet` and the lane's drop go.
 
 ## The dev proxy may answer an early refusal with its own 500
 

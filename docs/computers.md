@@ -61,8 +61,31 @@ an image may rely on this:
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
+- **A failed start** (it failed, never reported ready, or its container
+  stopped before it was ready) is tried again after a growing pause. It
+  is one strike however its failure is heard: a start that fails
+  destroys its container, and that container's end is not a crash too.
+- **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
+  share `RESTORE_MS`), never one that follows a restore's progress: a
+  restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
+  2026-11-02), so its nine minutes and 25 seconds hold about 22 GB, more
+  than a computer's 20 GB disk. Any restore that fits the disk fits the
+  deadline; one that does not fit is set aside, not waited for.
+- **A start owed after its container goes** (a sleep's end with a wake
+  or a restart asked, a crash while wanted, a start that fell back past a
+  bad save) is due at once: the request that saw it go makes it, and each
+  one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
+  an alarm, the alarm it asks for, never the rest of the alarm that ran
+  the sleep (see Bounds). Its owner's sleep before it is made lets it go,
+  unless the computer is always on.
 - **Won't wake**: after `STARTS_FAILED_MAX` failed starts in a row it
   starts no container until its owner asks.
+- **Trying again**: "won't wake" is never for good, since what failed may
+  pass (a storage error, a disk a release made room on). A wake that is
+  not its owner's (a record, a page's presence, a join, a port tab)
+  `WONT_WAKE_RETRY_MS` (30 minutes) after it gave up tries one start, and
+  a failure gives up again at once: at most one paid start that often,
+  and only while something wants it.
 
 ## Durability
 
@@ -160,6 +183,13 @@ with no clock, so every reader is told the same, and when they change the
 DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
 
 - `wont_wake`: its starts kept failing.
+- `disk_filling`: its disk, read (`df`) once each start is ready and
+  after each awake save (never before a start is ready: a read holds up
+  no deadline), is used past `DISK_TOLD_USED_PCT` (80%) with at most
+  `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
+  clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
+  `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
+  and clears it in turn. Each read logs a `disk` line of its own.
 - `unsaved`: this life's saves are failing (a sleep's at once, awake ones
   from the second in a row): since when its work is in no save, and when
   the bound stops it.
@@ -316,7 +346,9 @@ from a snapshot.
 - **What the save leaves out.** `held` may name, one per line, what the
   save of `/data` leaves out: gitignore patterns relative to `/data`, the
   files the guest copied under the hold to names the save keeps, so a hot
-  copy of one is never what a wake restores. Bounds and the patterns'
+  copy of one is never what a wake restores, and caches a tool fetches
+  again. Those under `/work/` its work's own save leaves out, relative to
+  it (`fragment_core::computer::work_left_out`). Bounds and the patterns'
   alphabet are `fragment_core::computer::left_out`'s. An empty answer
   leaves nothing out; one the DO refuses saves the guest whole.
 - **A hold not answered.** Until it answers, a guest may say why in
@@ -334,7 +366,8 @@ from a snapshot.
   scratch), and the rest of `/data` is the guest's own state (ours:
   Hermes' home and the bridge's state). Each is a `DirectoryBackup`
   record of its own, restored together, `/data` first; the work's record
-  leaves nothing out. The DO makes `/data/work` with its hold, so it
+  leaves out only the caches the guest named in it. The DO makes
+  `/data/work` with its hold, so it
   always exists to save.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
@@ -348,13 +381,18 @@ from a snapshot.
 
 ### Saves and what a wake restores
 
-- A computer keeps its newest three saves (`SAVES_KEPT`), each taken
+- A computer keeps its newest three saves (`SAVES_KEPT`), and the one its
+  running life came up from until a start comes up from a newer one (a
+  save a start proved, the last a start falls back to), each taken
   under the hold; its view lists them (`saves`), newest first, each
   saying whether its guest answered (`held`).
 - **A wake restores the current save**, the newest not found unusable. A
   start whose save will never restore (its archive gone or altered)
   marks it unusable and starts again at once from the one before, with no
-  strike against the computer.
+  strike against the computer. A read of its archive that storage failed
+  (R2 answered an error) is asked again a few times within the restore
+  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
+  start on one.
 - **The snapshot is only a cache** of one save on one image (`{id, image,
   save}`): a wake uses it only when `save` is the current save and
   `image` the pinned image's reference, and one that fails or comes up
@@ -371,8 +409,18 @@ from a snapshot.
 Every step the DO takes in a container ends within a bound, and one past
 it fails (the Sandbox SDK times out nothing): the consts beside
 `SLEEP_STEPS_MS` in cell/src/computer.rs, each within the lifecycle's
-deadline for its phase, checked as the cell compiles. So an owner's sleep
-answers within 11 minutes.
+deadline for its phase, checked as the cell compiles. A save's steps run
+in the Durable Object alarm whose events asked for them, which Cloudflare
+ends at 15 minutes: a sleep's hold, save and stop fit one alarm, and its
+backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
+That is the most any save can have, so it is fixed, not one that follows
+a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
+(2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
+the slowest 6% of tries, each tried again. A start takes an alarm of its
+own: the one start an alarm makes (a retry's, or one owed after a sleep),
+with the disk's read once it is ready and the alarm's other events, fits
+15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
+sleep answers within 14 minutes.
 
 ### The fragment API
 
@@ -653,7 +701,11 @@ What our Hermes image guarantees beyond the contract:
   of its own, copies every SQLite database outside the work with SQLite's
   online backup, and names exactly those as left out; a database it
   cannot copy (made after the copy, or held locked) is saved hot. Its
-  `computer-check` puts the copies back and checks each.
+  `computer-check` puts the copies back and checks each. It also names
+  the caches a save leaves out (`held::caches`: package managers'
+  downloads under Hermes' home and each agent's, a browser profile's
+  caches, never a person's own folder) and Claude Code's versions but the
+  one it runs, as many as fit beside its copies.
 - **What changes under the hold.** Hermes' gateway still writes on its
   own timers while held, each file replaced whole or appended, so a save
   holds a whole version of it; nothing else under `/data` changes (the

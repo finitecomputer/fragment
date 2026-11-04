@@ -7,10 +7,20 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { connect } from "cloudflare:sockets";
-import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
+import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
+import { readAgain } from "./backup-reads.mjs";
 import * as rs from "./build/index.js";
 
-export { DirectoryBackupGateway } from "@cloudflare/sandbox";
+// The Sandbox SDK's gateway between a computer's container and its saves in
+// R2, whose ranged reads (a restore's) that storage failed are asked again
+// (backup-reads.mjs); every other request is the SDK's own, once.
+export class DirectoryBackupGateway extends SandboxGateway {
+  fetch(request) {
+    if (request.method !== "GET") return super.fetch(request);
+    const again = (tried, status) => console.log(JSON.stringify({ backup: "read again", status, tried, key: this.ctx.props?.key }));
+    return readAgain(() => super.fetch(request), again);
+  }
+}
 
 export default rs.default;
 
@@ -294,7 +304,10 @@ class ContainerHost {
   // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
     this.#generation = generation;
-    const opts = { env, enableInternet: true };
+    // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
+    // depend on public DNS, which local workerd's sidecar asks first for
+    // the intercepted hosts while the internet is on (devstack::Fleet)
+    const opts = { env, enableInternet: this.#env.FRAGMENT_COMPUTER_INTERNET !== "off" };
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];

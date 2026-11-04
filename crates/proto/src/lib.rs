@@ -1708,6 +1708,31 @@ pub struct SetVisibility {
     pub visibility: Visibility,
 }
 
+/// The refs a fragment's git has that the platform follows (its pins).
+pub const PINNED_REFS: [&str; 2] = ["main", "live"];
+
+/// `POST /api/f/<name>/refresh`'s body: the ref its writer moved, which is
+/// all the platform reads again (a sync moved main, a rollback live).
+/// Without one (an older CLI's `{}`, or no body), both.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Refresh {
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<String>,
+}
+
+impl Refresh {
+    /// The refs a refresh with this body reads again. A body that names
+    /// no ref, or is not one (the route once read none), reads both; a ref
+    /// the platform does not pin is refused.
+    pub fn refs_of(body: &[u8]) -> Result<Vec<&'static str>, String> {
+        let asked: Refresh = serde_json::from_slice(body).unwrap_or_default();
+        match asked.moved.as_deref() {
+            None => Ok(PINNED_REFS.to_vec()),
+            Some(r) => PINNED_REFS.iter().find(|p| **p == r).map(|p| vec![*p]).ok_or_else(|| format!("ref is main or live, not {r:?}")),
+        }
+    }
+}
+
 /// `GET /api/f/<name>/storage-token` (editor and up): a code.storage JWT
 /// scoped to this fragment's repo, `git:read` + `git:write`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2255,6 +2280,21 @@ pub mod wipe;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a refresh reads again the ref its writer names, and an older
+    /// writer's body (`{}`, none, or not JSON: the route read no body
+    /// before) both. Method: each body, and a ref the platform does not pin.
+    #[test]
+    fn a_refresh_reads_the_ref_it_names_or_both() {
+        assert_eq!(Refresh::refs_of(br#"{"ref":"main"}"#), Ok(vec!["main"]));
+        assert_eq!(Refresh::refs_of(br#"{"ref":"live"}"#), Ok(vec!["live"]));
+        for older in [&b"{}"[..], b"", b"not json", br#"{"other":1}"#] {
+            assert_eq!(Refresh::refs_of(older), Ok(vec!["main", "live"]), "{}", String::from_utf8_lossy(older));
+        }
+        assert!(Refresh::refs_of(br#"{"ref":"dev"}"#).is_err());
+        let sent = serde_json::to_value(Refresh { moved: Some("main".into()) }).unwrap();
+        assert_eq!(sent, serde_json::json!({ "ref": "main" }), "as a CLI sends it");
+    }
 
     /// Goal: the typed identity and sign-in reads the same JSON the
     /// registry and `GET /api/identities/me` carried before (T4: the wire

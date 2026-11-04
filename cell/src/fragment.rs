@@ -339,6 +339,10 @@ pub(crate) enum MetaKey {
     /// The live manifest's `files` (`FilesDecl`), as JSON text: its page as
     /// the files view, and that view's layer (FIN-372).
     FilesLive,
+    /// Per woke trigger's operation, the main commit its last triggered run
+    /// started at (JSON, op → commit or null): what a wake compares main's
+    /// head against before it starts anything (jobs.rs `woke_due`).
+    WokeCovered,
     /// The blessed template live runs and its release (`<name>@<release>`,
     /// blessed.rs in crates/templates), when it names one.
     Blessed,
@@ -390,6 +394,12 @@ pub(crate) enum MetaKey {
     /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
     TestFacetCalls,
     TestAdvanceHeld,
+    /// Test fleets: while set, a wake with something due waits before it
+    /// reads the ledger (jobs.rs `held_woke`), at most `TEST_HOLD_MAX_MS`.
+    TestHoldWoke,
+    /// Test fleets: set while a wake waits there, until it has decided
+    /// (`woke-held`).
+    TestWokeHeld,
     /// The computer this agent fragment runs on (runs_on.rs).
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
@@ -479,6 +489,7 @@ impl MetaKey {
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
             MetaKey::FilesLive => "files_live",
+            MetaKey::WokeCovered => "woke_covered",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
@@ -499,6 +510,8 @@ impl MetaKey {
             MetaKey::TestHoldRows => "test_hold_rows",
             MetaKey::TestFacetCalls => "test_facet_calls",
             MetaKey::TestAdvanceHeld => "test_advance_held",
+            MetaKey::TestHoldWoke => "test_hold_woke",
+            MetaKey::TestWokeHeld => "test_woke_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Door => "door",
@@ -1088,7 +1101,11 @@ impl FragmentCell {
             }
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
-            (Method::Post, ["api", "refresh"]) => self.refresh(&caller).await,
+            (Method::Post, ["api", "refresh"]) => {
+                // the ref its writer moved, or both (fragment_proto::Refresh)
+                let refs = fragment_proto::Refresh::refs_of(&req.bytes().await?).map_err(CellError::invalid)?;
+                self.refresh(&caller, &refs).await
+            }
             (Method::Get, ["api", "files"]) => self.files(&caller).await,
             (Method::Post, ["api", "files"]) => {
                 let body = body_json(&mut req).await?;

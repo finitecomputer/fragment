@@ -3,6 +3,7 @@
 // the platform's `ErrorBody` and a success into its fragment_proto type.
 use crate::auth::Identity;
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use fragment_proto::{ErrorBody, ErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -403,7 +404,7 @@ impl Client {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
-        let body = body.unwrap_or_default();
+        let body = Bytes::from(body.unwrap_or_default());
         let timeout = timeout_for(body.len() as u64);
         self.send(method, path, body, Replay::of(method), Signed::Body, timeout, None)
     }
@@ -412,7 +413,7 @@ impl Client {
     /// allows (`send_retrying`); `content_type` names the body's type, when
     /// it has one.
     #[allow(clippy::too_many_arguments)]
-    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
+    fn send(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
         let path = &self.resolved(path)?;
         let url = self.url(method, path);
         let verb: reqwest::Method = method.parse()?;
@@ -423,7 +424,7 @@ impl Client {
             if let Some(t) = content_type {
                 req = req.header("content-type", t);
             }
-            if body.is_empty() { req } else { req.body(body.clone()) }
+            if body.is_empty() { req } else { req.body(attempt_body(&body)) }
         };
         let (host, coded) = (&self.host, |code, msg| Err(anyhow::Error::new(CodedError { code, msg })));
         match send_retrying(build, replay, self.verbose.then_some(what.as_str())) {
@@ -450,14 +451,14 @@ impl Client {
     /// A bounded slow operation, such as icon generation. It retains the
     /// normal non-idempotent POST retry policy.
     pub fn post_json_with_timeout(&self, path: &str, v: &impl serde::Serialize, timeout: Duration) -> Result<Resp> {
-        self.send("POST", path, serde_json::to_vec(v)?, Replay::ConnectOnly, Signed::Body, timeout, None)
+        self.send("POST", path, Bytes::from(serde_json::to_vec(v)?), Replay::ConnectOnly, Signed::Body, timeout, None)
     }
     /// A POST whose body carries its idempotency id (an operation call):
     /// retried like a read (`Replay::ById`).
     pub fn post_json_by_id(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         let body = serde_json::to_vec(v)?;
         let timeout = timeout_for(body.len() as u64);
-        self.send("POST", path, body, Replay::ById, Signed::Body, timeout, None)
+        self.send("POST", path, Bytes::from(body), Replay::ById, Signed::Body, timeout, None)
     }
     pub fn put_json(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         self.request("PUT", path, Some(serde_json::to_vec(v)?))
@@ -470,12 +471,12 @@ impl Client {
     /// `content_type` is what a page reading it gets (`__blob`).
     pub fn put_blob(&self, path: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<Resp> {
         let timeout = timeout_for(bytes.len() as u64);
-        self.send("PUT", path, bytes, Replay::Safe, Signed::Url, timeout, content_type)
+        self.send("PUT", path, Bytes::from(bytes), Replay::Safe, Signed::Url, timeout, content_type)
     }
     /// A GET whose answer is known to be about `bytes` long (a blob), given
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
-        self.send("GET", path, Vec::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
+        self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
     }
     /// A signed GET whose answer goes to `to` as it arrives (an export's
     /// archive, which may be gigabytes), never held whole: its bytes. A
@@ -489,7 +490,7 @@ impl Client {
         let mut resp = self.http.get(&url).header(header, value).timeout(Duration::from_secs(6 * 3600)).send().with_context(|| format!("GET {path}"))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
+            let body = resp.bytes().map(owned).unwrap_or_default();
             return Err(anyhow::Error::new(Resp { status, body }.refusal()));
         }
         let mut file = std::fs::File::create(to).with_context(|| format!("writing {}", to.display()))?;
@@ -550,6 +551,21 @@ pub fn resolve_label(label: &str, listed: &[fragment_proto::ListedFragment]) -> 
     }
 }
 
+/// The body one attempt of a request sends: the buffer kept for its
+/// retries itself, shared (a reference, not a copy). A blob's PUT (up to
+/// `BLOB_MAX_BYTES`) once held two whole copies, the kept one and the
+/// attempt's.
+pub fn attempt_body(kept: &Bytes) -> Bytes {
+    kept.clone()
+}
+
+/// An answer's bytes as the `Vec` a `Resp` holds: the buffer reqwest read
+/// them into, taken in place when the answer holds it alone (a body read
+/// whole does), not copied out beside it as a blob's GET once was.
+pub fn owned(answer: Bytes) -> Vec<u8> {
+    Vec::from(answer)
+}
+
 pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, replay: Replay, log: Option<&str>) -> std::result::Result<(u16, Vec<u8>), Failed> {
     let (mut last, mut reached) = (None, false);
     for attempt in 0..REQUEST_ATTEMPTS {
@@ -562,7 +578,7 @@ pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, repl
         let answer = build().send().and_then(|resp| {
             crate::notice::heard(resp.url().host_str(), resp.headers().get("x-fragment-cli").and_then(|v| v.to_str().ok()));
             let status = resp.status().as_u16();
-            resp.bytes().map(|b| (status, b.to_vec()))
+            resp.bytes().map(|b| (status, owned(b)))
         });
         let ms = t0.elapsed().as_millis();
         match answer {
@@ -601,6 +617,38 @@ pub fn encode_q(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a transfer's bytes are one buffer, not two (Codex on
+    /// 69037874: four 256 MiB blobs moving at once held 2 GiB). Method:
+    /// the buffers themselves, by address. An attempt sends the body kept
+    /// for its retries, shared; an answer read whole by this reqwest (a
+    /// 4 MiB one from a local socket, in many chunks) becomes the `Vec` a
+    /// `Resp` holds in place. Each fails with a copy (`clone` of a `Vec`,
+    /// `to_vec`: checked).
+    #[test]
+    fn a_transfer_holds_its_bytes_once() {
+        let kept = Bytes::from(vec![7u8; 1 << 20]);
+        assert_eq!(attempt_body(&kept).as_ptr(), kept.as_ptr(), "an attempt's body is the kept buffer");
+
+        use std::io::{Read, Write};
+        const LEN: usize = 4 << 20;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut asked = [0u8; 1024];
+            let _ = conn.read(&mut asked).unwrap();
+            write!(conn, "HTTP/1.1 200 OK\r\ncontent-length: {LEN}\r\nconnection: close\r\n\r\n").unwrap();
+            for _ in 0..LEN / (64 << 10) {
+                conn.write_all(&[9u8; 64 << 10]).unwrap();
+            }
+        });
+        let answer = reqwest::blocking::get(&url).unwrap().bytes().unwrap();
+        let at = answer.as_ptr();
+        let body = owned(answer);
+        assert_eq!((body.as_ptr(), body.len()), (at, LEN), "an answer's Vec is the buffer reqwest read it into");
+        served.join().unwrap();
+    }
 
     use fragment_fakes::http::{Response as FakeResponse, Server};
     use std::sync::atomic::{AtomicU32, Ordering};

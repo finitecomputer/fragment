@@ -1890,7 +1890,7 @@ fn run(cli: Cli) -> Result<()> {
             let author = Author::writer(&writer_id(&c));
             let new_tip = storage.restore_live(&target, &live_tip, &format!("rollback {name} to {target}"), &author)
                 .map_err(cs_anyhow)?;
-            sync::refresh_pins(&c, &name);
+            sync::refresh_pins(&c, &name, LIVE);
             json_exit(j, &json!({ "rolledBackTo": target, "liveTip": new_tip }));
             println!("rolled back to {}: live is now {}", &target[..8.min(target.len())], &new_tip[..8.min(new_tip.len())]);
         }
@@ -2201,7 +2201,7 @@ fn run(cli: Cli) -> Result<()> {
                 req = req.header(api::AGENT_HEADER, &mode.agent);
             }
             let resp = req.send()?;
-            let resp = api::Resp { status: resp.status().as_u16(), body: resp.bytes()?.to_vec() };
+            let resp = api::Resp { status: resp.status().as_u16(), body: api::owned(resp.bytes()?) };
             let v = c.call(resp)?;
             json_exit(j, &v);
             println!("{}", serde_json::to_string(&v)?);

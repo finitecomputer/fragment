@@ -18,6 +18,8 @@ use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -272,7 +274,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!("fragment-partial-{}", std::process::id()));
+    let tmp = partial_path(path);
     {
         let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -280,6 +282,99 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Where `atomic_write` puts `path`'s bytes before the rename: beside it,
+/// named after its whole file name and a count of this process's writes,
+/// so files written at once never share one (`a.md` and `a.txt` did, by
+/// extension, when a pull wrote one file at a time). `syncable` leaves
+/// it out by its `.fragment-partial` mark.
+fn partial_path(path: &Path) -> PathBuf {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!("{name}.fragment-partial-{}-{n}", std::process::id()))
+}
+
+/// Files a pass reads from code.storage at once: the pull's, and the
+/// bootstrap's content checks (`adopt_identical`). A read is a round trip
+/// of about 40 ms from a laptop (preview and prod alike, 2026-11-02), so
+/// one at a time a 400-file pull took 17 s; 16 at once is about a second,
+/// and still a handful of connections for one person's sync. A blob's
+/// bytes, up to `BLOB_MAX_BYTES` each, keep a bound of their own
+/// (`BLOB_TRANSFERS_AT_ONCE`).
+const READS_AT_ONCE: usize = 16;
+
+/// Blobs (files of 1 MiB or more, up to `BLOB_MAX_BYTES` each) a pass moves
+/// at once, up or down. A blob's PUT took about 450 ms before its bytes and
+/// 150 ms a MB after, its HEAD about 120 ms (preview, 2026-11-02): four at
+/// a time overlap those waits, and hold at most four in memory (1 GiB at
+/// the largest). A push reads its files this many at a time too, each a
+/// blob's upload when it is one.
+const BLOB_TRANSFERS_AT_ONCE: usize = 4;
+
+/// At most `max` holders at once: a counting gate (std has none). A
+/// holder's `Pass` lets it go when dropped.
+struct Gate {
+    max: usize,
+    held: Mutex<usize>,
+    freed: Condvar,
+}
+
+struct Pass<'a>(&'a Gate);
+
+impl Gate {
+    fn new(max: usize) -> Gate {
+        assert!(max >= 1, "a gate lets one through at least");
+        Gate { max, held: Mutex::new(0), freed: Condvar::new() }
+    }
+
+    /// Waits for a place, and holds it until the pass is dropped.
+    fn enter(&self) -> Pass<'_> {
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = self.freed.wait_while(held, |n| *n >= self.max).unwrap_or_else(|e| e.into_inner());
+        *held += 1;
+        Pass(self)
+    }
+
+    /// How many hold a place now.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        *self.held.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        *self.0.held.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// `f` over `items`, at most `at_once` at a time on scoped threads: each
+/// item's answer in order, or `None` for one never started because one
+/// before it failed (the pass is failing, so nothing more is read).
+fn at_once<T: Sync, R: Send, E: Send>(items: &[T], at_once: usize, f: impl Fn(&T) -> Result<R, E> + Sync) -> Vec<Option<Result<R, E>>> {
+    assert!(at_once >= 1, "at least one at a time");
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let slots: Vec<Mutex<Option<Result<R, E>>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..at_once.min(items.len()) {
+            scope.spawn(|| {
+                while !failed.load(Ordering::Relaxed) {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(i) else { break };
+                    let answer = f(item);
+                    if answer.is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                    *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(answer);
+                }
+            });
+        }
+    });
+    slots.into_iter().map(|slot| slot.into_inner().unwrap_or_else(|e| e.into_inner())).collect()
 }
 
 /// Writes the journal, unless it is byte for byte what was read (`before`):
@@ -535,7 +630,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     let storage = CodeStorage::connect(client, name)?;
     let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name)?)?;
     if report.landed {
-        refresh_pins(client, name);
+        refresh_pins(client, name, MAIN);
     }
     Ok(report)
 }
@@ -624,10 +719,25 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                 break; // nothing to commit (clean, or a replay absorbed)
             }
             let mut changes: Vec<Change> = Vec::with_capacity(plan.upserts.len() + plan.deletes.len());
-            for p in &plan.upserts {
+            // read BLOB_TRANSFERS_AT_ONCE at a time: a file is its bytes, a
+            // blob its pointer once uploaded (a HEAD, and the PUT the store
+            // lacks). Nothing is committed if one fails.
+            let stored = at_once(&plan.upserts, BLOB_TRANSFERS_AT_ONCE, |p| {
                 let bytes = fs::read(p.under(dir)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
-                let bytes = blobs.store(bytes).map_err(|e| SyncError::blob(p.as_str(), e))?;
-                changes.push(Change::Upsert { path: p.clone(), bytes });
+                blobs.store(bytes).map_err(|e| SyncError::blob(p.as_str(), e))
+            });
+            let mut failure = None;
+            for (p, got) in plan.upserts.iter().zip(stored) {
+                match got {
+                    Some(Ok(bytes)) => changes.push(Change::Upsert { path: p.clone(), bytes }),
+                    Some(Err(e)) => {
+                        failure.get_or_insert(e);
+                    }
+                    None => {}
+                }
+            }
+            if let Some(e) = failure {
+                return Err(e);
             }
             for p in &plan.deletes {
                 changes.push(Change::Delete { path: p.clone() });
@@ -681,6 +791,7 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
     // ---- pull: make the folder match main (fetch new/changed; propagate
     // remote deletions per mode) ----
     if opts.mode != Mode::Push {
+        let mut fetches: Vec<&TreeEntry> = vec![];
         for rf in listing.files.values() {
             let l = local.get(&rf.path);
             let s = state.files.get(&rf.path);
@@ -707,8 +818,32 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                 }
             };
             if fetch {
-                pull_file(storage, &blobs, dir, listing.rev(), rf, &mut state, &mut report)?;
+                fetches.push(rf);
             }
+        }
+        // read READS_AT_ONCE at a time; the journal takes them only if
+        // every one landed (it is not saved on a failure, so a partial
+        // pull never reads as a complete one: the next pass adopts what
+        // was written by content and fetches the rest)
+        fetches.sort_by(|a, b| a.path.cmp(&b.path));
+        let blob_gate = Gate::new(BLOB_TRANSFERS_AT_ONCE);
+        let fetched = at_once(&fetches, READS_AT_ONCE, |rf| pull_file(storage, &blobs, &blob_gate, dir, listing.rev(), rf));
+        let mut failure = None;
+        for (rf, got) in fetches.iter().zip(fetched) {
+            match got {
+                Some(Ok(Some(row))) => {
+                    state.files.insert(rf.path.clone(), row);
+                    report.pulled.push(rf.path.to_string());
+                }
+                Some(Ok(None)) => report.refused.push(through_link(&rf.path)),
+                Some(Err(e)) => {
+                    failure.get_or_insert(e);
+                }
+                None => {}
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
         }
         // remote deletions: known before, gone now, local copy untouched
         let mut paths: Vec<RepoPath> = state.files.keys().cloned().collect();
@@ -743,12 +878,14 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
     Ok(report)
 }
 
-/// Tells the cell its fragment's git moved. Our commits and ref moves are
+/// Tells the cell its fragment's `moved` ref moved. Our commits and ref moves are
 /// EXTERNAL pushes from the cell's perspective: without this nudge its
 /// pins wait out the 5-minute poll backstop before app reads and serving
 /// see them. Best-effort: the poll covers a missed nudge.
-pub fn refresh_pins(client: &Client, name: &str) {
-    if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &serde_json::json!({})) {
+pub fn refresh_pins(client: &Client, name: &str, moved: &str) {
+    // the cell reads again only the ref we moved (a cell before that reads both)
+    let asked = fragment_proto::Refresh { moved: Some(moved.to_string()) };
+    if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &asked) {
         eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
     }
 }
@@ -824,20 +961,28 @@ fn adopt_identical(
     listing: &Listing,
     state: &mut SyncState,
 ) -> Result<(), SyncError> {
-    for (p, rf) in listing.files.iter() {
-        if state.files.contains_key(p) {
-            continue;
-        }
-        let Some(lf) = local.get(p) else { continue };
-        if lf.size != rf.size && !crate::blobs::could_point(rf.size, lf.size) {
-            continue;
-        }
-        let bytes = storage.read_file(p.as_str(), listing.rev())?;
-        if crate::blobs::content_sha(&bytes) == lf.sha256 {
-            state.files.insert(
-                p.clone(),
-                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
-            );
+    let unknown: Vec<(&RepoPath, &TreeEntry, &LocalFile)> = listing
+        .files
+        .iter()
+        .filter(|(p, _)| !state.files.contains_key(*p))
+        .filter_map(|(p, rf)| local.get(p).map(|lf| (p, rf, lf)))
+        .filter(|(_, rf, lf)| lf.size == rf.size || crate::blobs::could_point(rf.size, lf.size))
+        .collect();
+    // read as the pull reads, READS_AT_ONCE at a time: a folder a pull
+    // left part-way is all of these on its next pass. Each is compared
+    // where it is read, so a body is let go before the next read: what
+    // these hold at once is READS_AT_ONCE files, not the folder's
+    let same = at_once(&unknown, READS_AT_ONCE, |(p, _, lf)| storage.read_file(p.as_str(), listing.rev()).map(|bytes| crate::blobs::content_sha(&bytes) == lf.sha256));
+    for ((p, rf, lf), got) in unknown.iter().zip(same) {
+        match got {
+            Some(Ok(true)) => {
+                state.files.insert(
+                    (*p).clone(),
+                    FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
+                );
+            }
+            Some(Ok(false)) | None => {}
+            Some(Err(e)) => return Err(e.into()),
         }
     }
     state.files.retain(|p, _| local.contains_key(p) || listing.files.contains_key(p));
@@ -956,26 +1101,46 @@ fn through_link(path: &RepoPath) -> String {
     format!("{path}: a folder on its way in this folder is a symlink, and sync writes and deletes nothing through one")
 }
 
-/// Fetches one file at `rev` (the listing's commit) into the folder.
-fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path, rev: &str, entry: &TreeEntry, state: &mut SyncState, report: &mut Report) -> Result<(), SyncError> {
+/// Fetches one file at `rev` (the listing's commit) into the folder: its
+/// journal row, or `None` when a folder on its way is a symlink. Files are
+/// fetched READS_AT_ONCE at a time; a blob's bytes (up to `BLOB_MAX_BYTES`)
+/// BLOB_TRANSFERS_AT_ONCE at a time, through `blob_gate`.
+fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, blob_gate: &Gate, dir: &Path, rev: &str, entry: &TreeEntry) -> Result<Option<FileState>, SyncError> {
     let (path, commit) = (&entry.path, entry.last_commit_sha.as_str());
     // the one join of a listing's path onto the folder, checked before
     // anything is fetched for it
-    let Some(target) = place(dir, path)? else {
-        report.refused.push(through_link(path));
-        return Ok(());
-    };
-    let bytes = blobs.resolve(storage.read_file(path.as_str(), rev)?).map_err(|e| SyncError::blob(path.as_str(), e))?;
-    let sha = sha256_hex(&bytes);
-    atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
-    let md = fs::metadata(&target).map_err(|e| SyncError::Io(e.to_string()))?;
+    let Some(target) = place(dir, path)? else { return Ok(None) };
+    let git = storage.read_file(path.as_str(), rev)?;
+    let (sha, md) = land(
+        blob_gate,
+        git,
+        |git| blobs.resolve(git).map_err(|e| SyncError::blob(path.as_str(), e)),
+        |bytes| {
+            atomic_write(&target, bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+            fs::metadata(&target).map_err(|e| SyncError::Io(e.to_string()))
+        },
+    )?;
     let mtime_ns = md.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0)).unwrap_or(0);
-    state.files.insert(
-        path.clone(),
-        FileState { sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() },
-    );
-    report.pulled.push(path.to_string());
-    Ok(())
+    Ok(Some(FileState { sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() }))
+}
+
+/// A file's bytes from what git holds (`resolve`), their hash, and what
+/// `write` made of them. A pointer's bytes (a blob, up to
+/// `BLOB_MAX_BYTES`) are fetched and written with a place at `gate`, held
+/// until they are written and dropped: however many files a pull fetches at
+/// once, the gate's few blobs are in memory. A plain file takes no place.
+fn land<T>(
+    gate: &Gate,
+    git: Vec<u8>,
+    resolve: impl FnOnce(Vec<u8>) -> Result<Vec<u8>, SyncError>,
+    write: impl FnOnce(&[u8]) -> Result<T, SyncError>,
+) -> Result<(String, T), SyncError> {
+    let _place = fragment_core::blob::parse(&git).is_some().then(|| gate.enter());
+    let bytes = resolve(git)?;
+    let sha = sha256_hex(&bytes);
+    let wrote = write(&bytes)?;
+    drop(bytes);
+    Ok((sha, wrote))
 }
 
 /// Full-content audit: local truth vs the repo listing + fetched bytes
@@ -1414,6 +1579,170 @@ mod tests {
         assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
         assert_eq!(mock.commit_pack_count(), 1, "and nothing is left to send");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: `at_once` runs that many together, never more, and answers
+    /// in order. Method: the first `max` tasks each wait until `max` are in
+    /// flight, which a pool running fewer at once never reaches (the wait
+    /// is bounded so such a pool fails rather than hangs).
+    #[test]
+    fn at_once_runs_that_many_together_and_answers_in_order() {
+        use std::sync::Condvar;
+        let (n, max) = (40, READS_AT_ONCE);
+        // (in flight now, the most at once, whether `max` were)
+        let flight = Mutex::new((0usize, 0usize, false));
+        let all_in = Condvar::new();
+        let items: Vec<usize> = (0..n).collect();
+        let answers = at_once(&items, max, |&i| -> Result<usize, ()> {
+            let mut f = flight.lock().unwrap();
+            f.0 += 1;
+            f.1 = f.1.max(f.0);
+            if f.0 == max {
+                f.2 = true;
+                all_in.notify_all();
+            }
+            let (mut f, waited) = all_in.wait_timeout_while(f, std::time::Duration::from_secs(10), |f| !f.2).unwrap();
+            assert!(!waited.timed_out(), "{max} were never in flight at once");
+            f.0 -= 1;
+            Ok(i * 2)
+        });
+        assert_eq!(flight.lock().unwrap().1, max, "{max} at once, never more");
+        assert_eq!(answers, (0..n).map(|i| Some(Ok(i * 2))).collect::<Vec<_>>());
+    }
+
+    /// Goal: once a task fails, nothing more starts. Method: one at a time,
+    /// so which tasks started is certain.
+    #[test]
+    fn at_once_starts_nothing_after_a_failure() {
+        let answers = at_once(&[1, 2, 3, 4, 5], 1, |&i| if i == 3 { Err(i) } else { Ok(i) });
+        assert_eq!(answers, vec![Some(Ok(1)), Some(Ok(2)), Some(Err(3)), None, None]);
+        assert!(at_once(&[] as &[u8], 4, |_| Ok::<_, ()>(())).is_empty());
+    }
+
+    /// Goal: a blob's bytes keep their place at the gate until they are
+    /// written and dropped, however many files a pull fetches at once.
+    /// Method: land a pointer's bytes and a plain file's, reading the
+    /// gate from inside the write. (With the place let go once the bytes
+    /// arrived, as a317d948 did, the write sees none: checked.)
+    #[test]
+    fn a_blobs_gate_is_held_until_its_bytes_are_written() {
+        let gate = Gate::new(BLOB_TRANSFERS_AT_ONCE);
+        let pointer = fragment_core::blob::pointer(&"a".repeat(64), 2 * 1024 * 1024).into_bytes();
+        let (sha, (len, held)) = land(&gate, pointer, |_| Ok(vec![7u8; 16]), |bytes| Ok((bytes.len(), gate.held()))).unwrap();
+        assert_eq!((len, held), (16, 1), "a place is held through a blob's write");
+        assert_eq!(sha, sha256_hex(&[7u8; 16]), "the hash is the blob's bytes'");
+        assert_eq!(gate.held(), 0, "and let go after");
+        let (_, held) = land(&gate, b"plain".to_vec(), Ok, |_| Ok(gate.held())).unwrap();
+        assert_eq!(held, 0, "a plain file takes no place");
+    }
+
+    /// Goal: the gate lets `max` through together and never more. Method:
+    /// each of twice that many waits (bounded) until `max` hold a place,
+    /// which a gate letting fewer through never reaches.
+    #[test]
+    fn a_gate_lets_that_many_through_together() {
+        let gate = Gate::new(BLOB_TRANSFERS_AT_ONCE);
+        let peak = Mutex::new(0usize);
+        std::thread::scope(|scope| {
+            for _ in 0..BLOB_TRANSFERS_AT_ONCE * 2 {
+                scope.spawn(|| {
+                    let _place = gate.enter();
+                    let now = gate.held();
+                    let mut p = peak.lock().unwrap();
+                    *p = (*p).max(now);
+                    drop(p);
+                    let t0 = std::time::Instant::now();
+                    while *peak.lock().unwrap() < BLOB_TRANSFERS_AT_ONCE {
+                        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{BLOB_TRANSFERS_AT_ONCE} never held places at once");
+                        std::thread::yield_now();
+                    }
+                });
+            }
+        });
+        assert_eq!(*peak.lock().unwrap(), BLOB_TRANSFERS_AT_ONCE);
+        assert_eq!(gate.held(), 0);
+    }
+
+    /// Goal: a push whose blob is not stored commits nothing, and says
+    /// which file. Method: a folder of notes and one file of 1 MiB, whose
+    /// upload fails (the fake host answers no blob threshold), the notes
+    /// read at once beside it.
+    #[test]
+    fn a_push_whose_blob_is_not_stored_commits_nothing() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("seed.md", b"s")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("push-blob-fails");
+        for i in 0..12 {
+            fs::write(dir.join(format!("n-{i:02}.md")), format!("note {i}")).unwrap();
+        }
+        fs::write(dir.join("big.bin"), vec![7u8; fragment_core::blob::BLOB_MIN_BYTES + 17]).unwrap();
+        let before = mock.commit_pack_count();
+        let failed = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap_err();
+        assert!(failed.to_string().contains("big.bin"), "{failed}");
+        assert_eq!(mock.commit_pack_count(), before, "nothing committed");
+        assert!(!state_path(&dir).exists(), "and no journal");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: files written at once never share a partial file. Before,
+    /// `a.md` and `a.txt` both wrote `a.fragment-partial-<pid>`.
+    #[test]
+    fn partial_files_are_named_for_their_whole_file() {
+        let dir = Path::new("/folder/notes");
+        let (md, txt) = (partial_path(&dir.join("a.md")), partial_path(&dir.join("a.txt")));
+        assert_ne!(md, txt);
+        assert_ne!(partial_path(&dir.join("a.md")), md, "and each write its own");
+        assert_eq!(md.parent(), Some(dir), "beside its file, for the rename");
+        let name = md.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("a.md.") && !syncable(&format!("notes/{name}")), "{name}");
+    }
+
+    /// Goal: a pull reads its files READS_AT_ONCE at a time, and a failed
+    /// read leaves no journal that reads as complete. Method: a 40-file
+    /// main pulled into an empty folder (valid), again (replay); into
+    /// another with one file's read failing (a typed error, no journal),
+    /// then again once it answers (restart): each file is read once in
+    /// all, what the failed pass wrote adopted by its content.
+    #[test]
+    fn a_pull_reads_at_once_and_a_failed_read_saves_no_journal() {
+        let mock = crate::mockcs::start();
+        let files: Vec<(String, Vec<u8>)> = (0..40).map(|i| (format!("d{}/f-{i:02}.md", i % 3), format!("file {i}\n").into_bytes())).collect();
+        let seeded: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+        mock.seed_repo("t--k3x9", &seeded);
+        let c = client_for(&mock);
+        let all_there = |dir: &Path| {
+            for (p, b) in &files {
+                assert_eq!(fs::read(dir.join(p)).ok().as_deref(), Some(b.as_slice()), "{p}");
+            }
+            assert_eq!(load_state(dir, "t--k3x9").unwrap().files.len(), files.len(), "a journal row for each");
+        };
+        let reads = |mock: &MockServer| mock.take_requests("").get("GET file").copied().unwrap_or(0);
+
+        let dir = tmpdir("pull-at-once");
+        mock.take_requests("");
+        let pulled = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        assert_eq!(pulled.pulled.len(), files.len());
+        all_there(&dir);
+        assert_eq!(reads(&mock), 40, "each file read once");
+        let again = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        assert!(again.pulled.is_empty(), "{again:?}");
+        assert_eq!(reads(&mock), 0, "a replay reads nothing");
+
+        let cut = tmpdir("pull-cut");
+        mock.fail_file_read(Some("d1/f-19.md"));
+        let failed = sync_once(&c, "t--k3x9", &cut, &opts(Mode::Pull)).unwrap_err();
+        assert!(matches!(failed, SyncError::Cs(_)), "{failed}");
+        assert!(!state_path(&cut).exists(), "a failed pull saves no journal");
+        assert!(!cut.join("d1/f-19.md").exists());
+        mock.fail_file_read(None);
+        mock.take_requests("");
+        let resumed = sync_once(&c, "t--k3x9", &cut, &opts(Mode::Pull)).unwrap();
+        all_there(&cut);
+        assert!(resumed.pulled.contains(&"d1/f-19.md".to_string()), "{resumed:?}");
+        assert_eq!(reads(&mock), 40, "each file read once more: what landed adopted by its content, the rest fetched");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&cut).ok();
     }
 
     #[test]

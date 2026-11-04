@@ -3,6 +3,13 @@ import { icon } from "./icons.js";
 import { providerName } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
+// The runtimes a new agent may be made on (Settings' New agent), each as its
+// Runs on names it; one alone, Add asks nothing. Claude Code is left out for now
+// (Paul, 2026-11-03): its install and self-update grew a computer's /data
+// past its disk, and Skyler's computer could not start. An agent already on
+// Claude Code runs, shows and chats as before. To offer it again, add back
+// ["claude", "Claude Code"].
+export const NEW_AGENT_RUNTIMES = [["hermes", "Hermes"]];
 // A Claude agent's model and thinking (agent.json `claude`), as the bridge
 // reads them (images/bridge, Claude's `--model` and `--effort`): Claude
 // Code's own aliases and levels; none is Claude Code's default.
@@ -370,7 +377,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     return label;
   }
   // ---- another agent (Paul, 2026-10-30): its name and role, and what it
-  // runs on (FIN-250: Hermes, or Claude Code, chosen here only), asked in a
+  // runs on (FIN-250, chosen here only; `NEW_AGENT_RUNTIMES`), asked in a
   // dialog New agent opens; then it is made as the first was, in its own
   // chat (onboarding.js `addAgent`), which opens at once for the making's
   // steps. Asked, the dialog says it is on its way and closes as that chat
@@ -395,11 +402,12 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     role.type = "text";
     role.maxLength = ROLE_MAX_CHARS;
     role.placeholder = "e.g. dev";
-    // its runtime, as the bridge reads it (agent.json `runtime`; none, Hermes)
-    const runs = el("select", "agent-model agent-add-runtime");
-    for (const [value, text] of [["hermes", "Hermes"], ["claude", "Claude Code"]]) runs.append(modelOption(value, text));
+    // its runtime, as the bridge reads it (agent.json `runtime`; none,
+    // Hermes): a choice only when there is one (`NEW_AGENT_RUNTIMES`)
+    const runs = NEW_AGENT_RUNTIMES.length > 1 ? el("select", "agent-model agent-add-runtime") : null;
+    for (const [value, text] of runs ? NEW_AGENT_RUNTIMES : []) runs.append(modelOption(value, text));
     const fields = el("div", "agent-fields");
-    fields.append(settingLabel("Name", name), settingLabel("Role", role), settingLabel("Runs on", runs));
+    fields.append(settingLabel("Name", name), settingLabel("Role", role), ...(runs ? [settingLabel("Runs on", runs)] : []));
     const error = el("p", "form-error");
     error.setAttribute("role", "alert");
     error.hidden = true;
@@ -433,7 +441,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       event.preventDefault();
       const called = name.value.trim();
       if (!called) return name.focus();
-      const asked = { name: called, role: role.value.trim(), runtime: runs.value };
+      const asked = { name: called, role: role.value.trim(), runtime: runs?.value ?? NEW_AGENT_RUNTIMES[0][0] };
       error.hidden = true;
       form.hidden = true;
       done.hidden = false;
@@ -454,7 +462,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         asking();
         name.value = asked.name;
         role.value = asked.role;
-        runs.value = asked.runtime;
+        if (runs) runs.value = asked.runtime;
         error.textContent = e.message;
         error.hidden = false;
       }

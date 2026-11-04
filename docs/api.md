@@ -676,7 +676,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
 | `POST /api/f/{name}/door` | its owner, in person (never an agent) | `{act: "link", agent}` → `{door, agent, relayed}`, or `{act: "unlink"}` → `{ok}` (An agent's doors). No connector, one the deployment does not allow, or an agent not the owner's, 403; another `act` 400 |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S` |
-| `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: …}}` once a moved live is installed. A writer to the repo asks this after its push; the platform follows its own moves, and a busy fragment's poll is the backstop (`FRAGMENT_POLL_INTERVAL_S`) |
+| `POST /api/f/{name}/refresh` | editor | `{ref?: "main" \| "live"}`, the ref the writer moved (none, or no body: both; another ref 400) → `{ok, refs: {main: {pin, moved} \| {absent}, live: …}}`, the refs it read, once a moved live is installed. A writer to the repo asks this after its push; the platform follows its own moves, and a busy fragment's poll is the backstop (`FRAGMENT_POLL_INTERVAL_S`) |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main (at most `FILE_WRITES_MAX` files, 400; `API_FILES_WRITE_MAX_BYTES` decoded in a body of `BODY_MAX_BYTES`, 413; relative paths, no `.` or `..`). The same `key` from the same person answers the first commit again; a write of what main holds commits nothing. Main moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `sha256` is its blob. A blessed template's data from the release is listed beneath (`release: true`) |
@@ -948,8 +948,10 @@ agent, or carrying code, keeps the last good code and says to fork it.
   input `{ref: "live", commit, code}`); `{"woke": true, "run": op}` (at
   most once per activation of the fragment's object, at the first request
   of it a person or an agent makes: signed, or a page's session; never an
-  alarm, the platform's own calls, or an anonymous visitor; its input
-  `{}`, its run's `via` `woke`).
+  alarm, the platform's own calls, or an anonymous visitor; and only when
+  there is something to catch up: `main` moved since the operation's last
+  triggered run started, or that run did not succeed, with none queued or
+  running; its input `{}`, its run's `via` `woke`).
 - `files` (optional, FIN-372): `{"page": true, "home": <path>, "status":
   <query>}`, each optional. `page`: the fragment's page (`/`) is the files
   view (`__files`), with its Open Graph tags. `home`: the content file it
@@ -1886,7 +1888,7 @@ docs/computers.md's; these routes are its owner's. A view is
 | `GET /api/computers` | a person | → `{computers: [ComputerView], support}`, `support` `FRAGMENT_SUPPORT_URL` or `null` |
 | `GET /api/computers/{id}` | its owner (anyone else 404) | → `ComputerView`. Their pages are told when it changes (`watch`'s `changed`) |
 | `POST /api/computers/{id}/wake` | its owner | → the view once awake; 503 `wont_wake` when it would not start |
-| `POST /api/computers/{id}/sleep` | its owner | → the view once asleep, or awake with its `why` when its save failed; within the sum of its steps' bounds (`SLEEP_STEPS_MS`), at most 11 minutes |
+| `POST /api/computers/{id}/sleep` | its owner | → the view once asleep, or awake with its `why` when its save failed; within the sum of its steps' bounds (`SLEEP_STEPS_MS`), at most 14 minutes |
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` → the view once started again, fresh from the image and its newest good save. `generation` names the start the owner saw: one already restarted is not restarted again. At zero credit 402, a guest 403 |
 | `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view, that `went_back` notice told no more; a `life` past the newest, or 0, 400 |
 | `POST /api/computers/{id}/notices/later` | its owner | `{version}` → the view, that update put off; not its next start's, or not 12 hex, 400 |

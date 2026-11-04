@@ -50,8 +50,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
-    SLEEP_DEADLINE_MS, START_DEADLINE_MS,
+    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
@@ -144,6 +144,8 @@ const HELD_READ: &str = "cat /run/computer/held";
 const UNHELD_READ: &str = "cat /run/computer/unheld 2>/dev/null || true";
 /// The read of it answers within this, or the hold's line says so.
 const UNHELD_EXEC_MS: i64 = 5_000;
+/// A read of its disk (`DISK_READ`) answers within this, or it is not read.
+const DISK_READ_MS: i64 = 5_000;
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -157,7 +159,8 @@ const CHECK_UNUSABLE: i64 = 3;
 /// its own and restored together, the first first (a restore replaces its
 /// directory whole, so `/data`'s record goes in before the work's).
 /// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
-/// guest names; the work's record leaves nothing out.
+/// guest names; the work's record leaves out only what it named under
+/// `/work/` (`work_left_out`: its agents' caches).
 const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
@@ -177,17 +180,39 @@ const SIGSTOP: f64 = 19.0;
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
+/// A Durable Object's alarm runs at most this long (Cloudflare's limits:
+/// "Alarm handler invocations have a maximum wall time of 15 minutes"),
+/// and a save's steps run inside the alarm whose events asked for them
+/// (`drive_events`): an idle sleep's hold, save and stop, an awake save's
+/// hold, save and unhold, all in one.
+const ALARM_WALL_MS: i64 = 15 * 60_000;
+/// What an alarm's other events take beside those steps (its adopt, a
+/// meter's flush, its owner told), each a call of about a second. Kept
+/// free, not enforced: those calls take no bound of their own (the
+/// ledger's `ask`, `principal::tell_changed`), and one that hung would be
+/// ended by the alarm's wall, its step then tried again.
+const ALARM_OTHER_MS: i64 = 60_000;
 /// A save's backups, its records one after the other, answer within this
 /// together, or the save fails (entry.mjs's `Overdue`), as one that says so
-/// does: spike S3 moved 52 MB in 3.3 s, so a few GiB fit, and the rest of
-/// the save still reports before the lifecycle's `SAVE_DEADLINE_MS`. The
-/// Sandbox SDK "never times out anything" (r4, r6: a sick container's
-/// backup never returned, so its sleep never ended).
-const BACKUPS_MS: i64 = 8 * 60_000;
+/// does: the Sandbox SDK "never times out anything" (r4, r6: a sick
+/// container's backup never returned, so its sleep never ended). It is
+/// what an alarm leaves after a sleep's other steps, the most any save can
+/// have. A 20 GB disk holds about 17 GB of a person's (a fresh computer
+/// uses 2.4 GB), 10.8 GB saved at the 1.6 to 1 the largest save showed;
+/// 577 saves over 1 GB on production moved 9 to 156 MB a second
+/// (2026-10-27 to 11-03), so eight minutes would cut 18% of such a save's
+/// tries and this cuts 6%, each tried again a minute later. A save bigger
+/// or slower than an alarm allows needs saves that are not whole copies.
+const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EXEC_MS - FORGET_PASS_MS - STOP_STEPS_MS;
 /// A start's restores, its save's records together, answer within this, or
-/// the start failed (tried again, on the same save): past the start's own
-/// deadline the lifecycle has failed it already.
-const RESTORE_MS: i64 = START_DEADLINE_MS;
+/// the start failed (tried again, on the same save): what the start's own
+/// deadline leaves after the waits around them (the container taking an
+/// exec, the image's check, the gate's mark), the disk's read once it is
+/// ready and an alarm's other events, so a slow restore fails as itself,
+/// saying so, before the lifecycle fails the start unexplained, and a
+/// start fits an alarm of its own (a retry's, or one owed after a sleep:
+/// `Lifecycle::start_due`).
+const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - DISK_READ_MS - ALARM_OTHER_MS;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -227,8 +252,13 @@ const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
 const _: () = assert!(HOLD_STEPS_MS < HOLD_DEADLINE_MS, "a hold reports before its deadline");
 const _: () = assert!(SAVE_STEPS_MS < SAVE_DEADLINE_MS, "a save reports before its deadline, which then only catches a report its isolate lost");
 const _: () = assert!(STOP_STEPS_MS < SLEEP_DEADLINE_MS, "a stop reports before its deadline");
-const _: () = assert!(RESTORE_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
-const _: () = assert!(SLEEP_STEPS_MS <= 11 * 60_000, "docs/api.md: a sleep answers within 11 minutes");
+const _: () = assert!(EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS <= START_DEADLINE_MS && ALIVE_MS < START_DEADLINE_MS, "a start's waits fit its deadline");
+const _: () = assert!(RESTORE_MS >= 9 * 60_000, "a restore of a full disk's save (17 GB at 31 MB/s; 5.7 GB took 147 s) is given nine minutes at least");
+const _: () = assert!(START_DEADLINE_MS <= ALARM_WALL_MS && EXEC_READY_MS + RESTORE_MS + CHECK_EXEC_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a start, the disk's read once it is ready, and an alarm's other events fit an alarm of its own");
+const _: () = assert!(SLEEP_STEPS_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "a sleep's steps, and an alarm's other events, fit the one alarm they run in");
+const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_MS + ALARM_OTHER_MS <= ALARM_WALL_MS, "an awake save, its unhold and the disk's read after it fit the one alarm they run in");
+const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
+const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -368,9 +398,10 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
-    /// The start this isolate judged dead and destroys: its exit is that
-    /// start's own failure, which it reports (`exit_of`).
-    dead: std::cell::Cell<Option<u64>>,
+    /// The start this isolate found failed, and destroys: its container's
+    /// end is that start's own failure, which the start reports itself
+    /// (`exit_of`), never a crash as well.
+    failing: std::cell::Cell<Option<u64>>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -397,7 +428,7 @@ impl DurableObject for ComputerCell {
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
-            dead: std::cell::Cell::new(None),
+            failing: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
         }
@@ -421,7 +452,7 @@ impl DurableObject for ComputerCell {
             return Response::ok("");
         }
         if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
-            if let Err(e) = self.drive(Event::Alarm).await {
+            if let Err(e) = self.drive_with(Some(Event::Alarm), false).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
             }
         }
@@ -799,10 +830,36 @@ impl ComputerCell {
     /// runtime no longer holds open (`keepalives_lost`); with no `first`,
     /// those alone (a keepalive's close).
     async fn drive_after(&self, first: Option<Event>) -> CellResult<Option<String>> {
+        self.drive_with(first, true).await
+    }
+
+    /// `drive_after`, in a request (`asked`) or the DO's alarm. Each start its
+    /// events leave due (a sleep's end, a crash, a fallback past a bad save:
+    /// `Lifecycle::start_due`) a request makes at once, one after another
+    /// as each fails over to the next, since nothing ends a request that
+    /// waits (`STARTS_OWED_MAX` of them at most); an alarm leaves it to the
+    /// alarm its events asked for, an invocation of its own, since an alarm
+    /// ends at `ALARM_WALL_MS` and its sleep's steps took most of this one.
+    async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
-        let refused = self.drive_events(first).await;
+        let mut refused = self.drive_events(first).await;
+        if asked {
+            // bounded: the lifecycle owes at most STARTS_OWED_MAX in a row
+            for _ in 0..STARTS_OWED_MAX {
+                let Ok(said) = &refused else { break };
+                if !self.lifecycle()?.start_due(js::now_ms()) {
+                    break;
+                }
+                let said = said.clone();
+                refused = self.drive_events(Some(Event::Alarm)).await.map(|again| said.or(again));
+            }
+            if refused.is_ok() && self.lifecycle()?.start_due(js::now_ms()) {
+                // past the lifecycle's own bound: its alarm makes the next
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "starts": "owed past the bound", "max": STARTS_OWED_MAX }));
+            }
+        }
         // what its owner is told changed: their open pages read it again
         // (whatever the events did, a step that failed half way included)
         if self.notices().is_ok_and(|now| now != told) {
@@ -879,6 +936,7 @@ impl ComputerCell {
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
             let logged = json!(event);
+            let applied = event.clone();
             let step = life.apply_with(event, js::now_ms(), &rules);
             // one line per event (lesson 14): what happened, and what it led to
             let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
@@ -904,6 +962,11 @@ impl ComputerCell {
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
                 queue.push(next);
+            }
+            // its disk, once its start is ready or an awake save worked:
+            // after the event, so no read holds up a start's readiness
+            if let Some(generation) = reads_disk_after(&applied, &life) {
+                self.read_disk(generation).await;
             }
         }
         Ok(refused)
@@ -1112,7 +1175,14 @@ impl ComputerCell {
         };
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
-        match self.try_start(generation, &planned).await {
+        let started = self.try_start(generation, &planned).await;
+        if started.is_err() {
+            // what it destroys below ends as this start's failure, reported
+            // by the event this answers, so the end is not a crash too: it
+            // would count a second strike, and start again with no pause
+            self.failing.set(Some(generation));
+        }
+        match started {
             Ok(()) => {
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
                 match self.update_saves(came_up) {
@@ -1135,9 +1205,8 @@ impl ComputerCell {
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
-                // forgotten before the destroy: the exit that reports is the
-                // start's own failure (`exit_of`), and any start after it
-                // restores the save
+                // forgotten before the destroy: any start after it restores
+                // the save
                 let forgot = self.update_saves(|s| s.snapshot_failed());
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "failed", "generation": generation, "why": e.message, "forgot": forgot.ok().flatten() }));
                 let _ = self.destroy(generation, "the snapshot did not start").await;
@@ -1149,7 +1218,6 @@ impl ComputerCell {
                 // report's to make (`exit_of`), and the same wake starts the
                 // image and the save, no strike. Its own line, so the logs
                 // count how often a snapshot's restore comes up dead (#362).
-                self.dead.set(Some(generation));
                 let forgot = self.update_saves(|s| s.snapshot_failed());
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "dead", "generation": generation, "from": from, "why": why, "forgot": forgot.ok().flatten() }));
                 let _ = self.destroy(generation, "it came up dead").await;
@@ -1274,6 +1342,30 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// Reads the disk of start `generation`'s container (`DISK_READ`) and
+    /// keeps it (`Saves::measured`), which its owner's notices tell: once
+    /// its start is ready, and after each awake save (`reads_disk_after`),
+    /// a line of its own. Best effort: a read that fails is logged and
+    /// changes nothing.
+    async fn read_disk(&self, generation: u64) -> Option<fragment_core::computer::ComputerDisk> {
+        let at = js::now_ms();
+        let argv = js::to_js(&json!(["sh", "-c", DISK_READ]));
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let out = match read {
+            Ok(o) if o["exitCode"] == 0 => o["output"].as_str().unwrap_or_default().to_string(),
+            Ok(o) => format!("exit {}", o["exitCode"]),
+            Err(e) => e.message,
+        };
+        let disk = disk_of_df(&out, at);
+        let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
+        match (disk, kept) {
+            // one line per read (lesson 14): its size and what is free
+            (Some(d), Some(Ok(_))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free }, "generation": generation })),
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "answer": out.chars().take(200).collect::<String>() })),
+        }
+        disk
+    }
+
     /// Waits, at most `bound_ms`, for the guest of the start made at
     /// `started_ms` to read its own view (`fragment_core::computer::alive`):
     /// a container Cloudflare restores from a snapshot can come up dead,
@@ -1313,14 +1405,14 @@ impl ComputerCell {
     }
 
     /// An exit of start `generation`'s container, as the lifecycle should
-    /// hear it: one from the snapshot that stopped before it came up is the
-    /// start's own failure (the snapshot is forgotten), never a strike; one
-    /// its start judged dead and destroys is that start's to report (as a
-    /// snapshot that would not start), so its wake goes on in one place:
-    /// nothing here.
+    /// hear it: one its start found failed and destroys is that start's to
+    /// report (`StartFailed`, `RestoreFailed`, `SnapshotFailed`), so its wake
+    /// goes on in one place: nothing here. One from the snapshot that
+    /// stopped on its own before it came up is the start's own failure (the
+    /// snapshot is forgotten), never a strike.
     fn exit_of(&self, generation: u64) -> CellResult<Option<Event>> {
         let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
-        if starting && self.dead.get() == Some(generation) {
+        if starting && self.failing.get() == Some(generation) {
             return Ok(None);
         }
         if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {
@@ -1415,10 +1507,12 @@ impl ComputerCell {
         let until = js::now_ms() + budget;
         for dir in SAVED_DIRS {
             // the guest's own state leaves its work out (a record of its
-            // own) and what it copied; its work is saved as it is
+            // own) and what it copied or named; its work leaves out only the
+            // caches it named in it
             let exclude = match dir {
                 "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
-                _ => vec![],
+                // what it named in its work (its agents' caches), relative to it
+                _ => fragment_core::computer::work_left_out(&left_out),
             };
             let exclude = js::to_js(&json!(exclude));
             let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);

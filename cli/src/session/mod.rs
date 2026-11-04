@@ -486,7 +486,7 @@ fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
     let indexes = Indexes { c, name, storage: &storage, author: &author };
     let (entries, indexed) = indexes.write(head, merge.entries, merge.indexes, &written)?;
     if total > 0 || indexed {
-        crate::sync::refresh_pins(c, name);
+        crate::sync::refresh_pins(c, name, crate::codestorage::MAIN);
     }
     Ok(Written { added, updated, unchanged, entries })
 }
