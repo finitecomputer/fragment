@@ -1260,6 +1260,8 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::Name, &body.name)?;
         self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
+        // what it waited on, for its client (`Server-Timing`, after the router's)
+        let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
             // the one place a repo's name is derived: its owner's, so a
@@ -1267,7 +1269,9 @@ impl FragmentCell {
             let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
                 .ok_or_else(|| CellError::invalid("a fragment's name is <label>--<suffix>, and its owner an identity"))?;
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
+            laps.lap("repo");
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
+            laps.lap("key");
             Ok::<_, CellError>((repo, pubkey, sealed))
         };
         let (repo, fragment_pub, sealed) = match made.await {
@@ -1327,16 +1331,20 @@ impl FragmentCell {
                 let title = body.title.as_deref().map(str::trim).or(m.title());
                 self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, m.role(), None))?;
             }
+            laps.lap("manifest");
         }
         self.index_change(&owner, Some(Role::Owner))?;
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
+        laps.lap("list");
         // a template that did not land is retried by the alarm
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
+        laps.lap("seed");
         self.schedule().await?;
-        json_response(&Created {
+        laps.lap("alarm");
+        let created = json_response(&Created {
             name: body.name.clone(),
             npub: fragment_npub,
             owner: owner.clone(),
@@ -1345,7 +1353,8 @@ impl FragmentCell {
             inbox_token,
             repo,
             canonical: self.cfg.canonical(&caller.url, &body.name),
-        })
+        })?;
+        Ok(laps.stamp(created)?)
     }
 
     /// Ends the fragment's life at once and answers once one round of its

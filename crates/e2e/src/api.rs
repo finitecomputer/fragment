@@ -852,6 +852,11 @@ pub fn watch(api: &Api, name: &str, query: &str, keys: Option<&Keys>) -> Result<
 /// A socket to a fragment's `__watch` or `__live`, read as JSON frames.
 pub struct Socket(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>);
 
+/// The parts a `Server-Timing` value names (`<part>;dur=<ms>, …`), in order.
+pub fn timing_parts(value: &str) -> Vec<String> {
+    value.split(',').filter_map(|p| p.split(';').next()).map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+}
+
 impl Socket {
     /// Opens `/f/<name>/<path>` (reachable in place on every fleet);
     /// `keys` signs the upgrade, `cookie` rides along like a browser's.
@@ -877,6 +882,20 @@ impl Socket {
     /// A socket to `http`, whichever host it names, opened as a page on
     /// `origin` opens one.
     pub fn connect(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, Vec<String>)> {
+        let (socket, answer) = Socket::handshake(api, http, keys, cookie, origin)?;
+        let cookies = answer.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
+        Ok((socket, cookies))
+    }
+
+    /// What `/f/<name>/<path>`'s accept said it waited on (its upgrade's
+    /// `Server-Timing`), the socket closed after.
+    pub fn accepted_timing(api: &Api, name: &str, path: &str, keys: Option<&Keys>) -> Result<String> {
+        let (socket, answer) = Socket::handshake(api, &format!("{}/f/{name}/{path}", api.base), keys, None, None)?;
+        socket.close();
+        Ok(answer.headers().get("server-timing").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+    }
+
+    fn handshake(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, tungstenite::handshake::client::Response)> {
         use tungstenite::client::IntoClientRequest;
         let url = reqwest::Url::parse(http)?;
         let mut to = url.clone();
@@ -910,8 +929,7 @@ impl Socket {
         if let Some(s) = tcp(socket.get_ref()) {
             s.set_read_timeout(Some(Duration::from_secs(5)))?;
         }
-        let cookies = answer.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
-        Ok((Socket(socket), cookies))
+        Ok((Socket(socket), answer))
     }
 
     pub fn send(&mut self, v: &Value) -> Result<()> {

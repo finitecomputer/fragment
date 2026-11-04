@@ -329,6 +329,9 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a page hears its own change", own == json!({ "type": "presence", "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }), &own);
     n.close();
     s.ok("a visitor's socket without a cookie gets one, as a call does", set.iter().any(|c| c.starts_with("fragment_anon=") && c.contains("HttpOnly")), format!("{set:?}"));
+    let timing = Socket::accepted_timing(api, &name, "__live", None)?;
+    let parts = crate::api::timing_parts(&timing);
+    s.ok("a socket's accept says what it waited on (Server-Timing): who it is, and the accept", ["identity", "accept"].iter().all(|p| parts.iter().any(|w| w == p)), &timing);
     // b heard the new page's presence arrive and leave: past those two
     for _ in 0..2 {
         b.until("presence", 5)?;
