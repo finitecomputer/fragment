@@ -381,12 +381,12 @@ fn dev(args: &[String]) -> Result<()> {
 fn dev_providers(oauth: Option<serde_json::Value>) -> String {
     let bearer = serde_json::json!([{ "header": "authorization", "format": "Bearer {}" }]);
     let env = |name: &str| format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-    let notes = ["Web search with cited answers, as a stand-in on the dev stack.", "Turns web pages into clean text, as a stand-in on the dev stack."];
+    let notes = ["A stand-in web search.", "A stand-in page reader."];
     let mut rows: Vec<serde_json::Value> = oauth
         .map(|oauth| {
             serde_json::json!({
                 "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"], "placements": bearer, "env": ["SAMPLE_TOKEN"],
-                "connection_oauth": oauth, "note": "A stand-in on the dev stack: nothing real is connected.",
+                "connection_oauth": oauth, "note": "A stand-in: nothing real is connected.",
             })
         })
         .into_iter()
@@ -394,7 +394,7 @@ fn dev_providers(oauth: Option<serde_json::Value>) -> String {
     for ((name, micros, _), note) in DEV_OPERATOR_KEYS.iter().zip(notes) {
         rows.push(serde_json::json!({ "name": name, "kind": "operator", "hosts": [format!("{name}.test")], "placements": bearer, "env": [env(name)], "price": { "micros": micros, "per": 1 }, "note": note }));
     }
-    rows.push(serde_json::json!({ "name": DEV_OWN_KEY, "kind": "own", "hosts": [format!("{DEV_OWN_KEY}.test")], "placements": bearer, "env": [env(DEV_OWN_KEY)], "note": "Your own key for a stand-in mail service on the dev stack: nothing real is called." }));
+    rows.push(serde_json::json!({ "name": DEV_OWN_KEY, "kind": "own", "hosts": [format!("{DEV_OWN_KEY}.test")], "placements": bearer, "env": [env(DEV_OWN_KEY)], "note": "Your own key for a stand-in mail service." }));
     serde_json::Value::Array(rows).to_string()
 }
 
