@@ -1013,10 +1013,6 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
     }
-    // a frame's sign-in lands here (auth.rs): the browser kept its cookie, or the page says it did not
-    if let Some(note) = auth::landed_without_cookie(&req, url, cfg, name, rest, fetched)? {
-        return Ok(note);
-    }
     own_page_socket(&req, cfg, url, name)?;
     // a page's blob upload streams through, as the API's does: the router
     // never holds its bytes (the fragment checks who uploads, and the hash)

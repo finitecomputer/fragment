@@ -150,38 +150,48 @@ fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Re
     let redeemed = as_browser(api, "GET", to.clone(), "iframe", "cross-site", "")?;
     let line = cookie_line(&redeemed, "fragment_frame");
     s.ok(
-        "another fragment refuses it (401) and leaves it unspent; its own fragment's frame redeems it into a partitioned frame cookie, and goes straight on to its page, marked for the check that the browser kept it",
+        "another fragment refuses it (401) and leaves it unspent; its own fragment's frame redeems it into a partitioned frame cookie, and goes straight on to its page, as it was asked (no mark in its URL)",
         elsewhere.status == 401
             && redeemed.status == 302
-            && redeemed.header("location") == api.site_url(n.own, "?__signin=frame")
+            // the page it was asked for (`return=/x`), as it was asked
+            && redeemed.header("location") == api.site_url(n.own, "x")
             && ["HttpOnly", "Secure", "SameSite=None", "Partitioned"].iter().all(|a| line.contains(a))
             && cookie_line(&redeemed, "fragment_site").is_empty()
             // what the redemption waited on (Server-Timing): the registry's
             && crate::api::timing_parts(&redeemed.header("server-timing")).iter().any(|p| p == "redeem"),
-        format!("{elsewhere} / {redeemed} {line:?}"),
+        format!("{elsewhere} / {redeemed} → {} {line:?}", redeemed.header("location")),
     );
     let again = as_browser(api, "GET", to, "iframe", "cross-site", "")?;
     s.ok("and it works once (401 again)", again.status == 401 && again.cookies().is_empty(), &again);
 
     // ---- the frame's cookie
     let value = line.split(';').next().unwrap_or("").to_string();
-    // its page, where the sign-in lands, checks the browser kept it: kept,
-    // the page; none (a browser that keeps no cookie in a frame), the note
-    // that says so (as `check=frame`, its hop before, still answers)
-    let landing = api.site_url(n.own, "?__signin=frame");
+    // where it lands: with its cookie, the page; without one (a browser
+    // that keeps no cookie in a frame), refused as signed out, and that
+    // page tells the platform's page around it (`why: "refused"`, its
+    // origin alone), whose frame came through the mint (shell.js); the old
+    // check's hop still answers
+    let landing = api.site_url(n.own, "");
     let landed = as_browser(api, "GET", landing.clone(), "iframe", "cross-site", &value)?;
-    let dropped = as_browser(api, "GET", landing, "iframe", "cross-site", "")?;
+    // a page's navigation, as a browser asks for one (`Accept: text/html`)
+    let navigated = |dest: &str| {
+        let extra = vec![("sec-fetch-dest", dest.to_string()), ("sec-fetch-site", "cross-site".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("accept", "text/html".to_string())];
+        api.call(Call { method: "GET", url: landing.clone(), cookie: Some(String::new()), extra, ..Call::default() })
+    };
+    let (dropped, top_dropped) = (navigated("iframe")?, navigated("document")?);
     let checked = as_browser(api, "GET", api.site_url(n.own, "__signin?check=frame&return=/"), "iframe", "cross-site", &value)?;
+    let told = |r: &Reply| r.text.contains(&format!("fragment: \"signin-blocked\", name: {:?}, why: \"refused\"", n.own)) && r.text.contains(&format!("{:?})", api.base));
     s.ok(
-        "where it lands, the page shows with its cookie, and without one says the browser kept none (why: cookies), a tab to open; the old check's hop still goes on",
+        "where it lands, the page shows with its cookie; without one it is refused as signed out (401), and says so to the platform's page alone (why: refused); a top-level page says nothing; the old check's hop still goes on",
         landed.status == 200
             && landed.text.contains("inside own")
-            && dropped.status == 200
-            && dropped.text.contains("why: \"cookies\"")
+            && dropped.status == 401
+            && told(&dropped)
             && !dropped.text.contains("inside own")
+            && !top_dropped.text.contains("signin-blocked")
             && checked.status == 302
             && checked.header("location") == api.site_url(n.own, ""),
-        format!("{landed} / {dropped} / {checked}"),
+        format!("{landed} / {dropped} / {top_dropped} / {checked}"),
     );
     let framed = as_browser(api, "GET", api.site_url(n.own, ""), "iframe", "cross-site", &value)?;
     let top = as_browser(api, "GET", api.site_url(n.own, ""), "document", "cross-site", &value)?;
@@ -356,6 +366,38 @@ fn updating_platform_frames(s: &mut Suite, api: &Api, chrome: &mut Browser, shel
     Ok(())
 }
 
+/// A browser that keeps no cookie from a frame's sign-in (Safari from
+/// 18.5 to 26.1 keeps none from a cross-site frame, partitioned or not):
+/// the shell's own window of the owner's app, its redemption's answer
+/// given to the frame without its `Set-Cookie`. Valid: the page it lands
+/// on refuses it as signed out and says so to the shell, which says this
+/// browser keeps a window's own sign-in from it, in the frame's place, and
+/// signs it in no more (no loop: no redemption after the one).
+fn dropped_cookie(s: &mut Suite, api: &Api, chrome: &mut Browser, own: &str) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let shell = chrome.open(&format!("{}/", api.base))?;
+    // its own redemption's alone (the shell signs its chat's frame in beside it)
+    chrome.hold_responses(&shell, &[&format!("{}*", api.site_url(own, "__signin"))])?;
+    let icon = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{own}\"]"))?);
+    let up = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
+    chrome.eval(&shell, &format!("({icon}?.click(), true)"))?;
+    let redeemed = s.eventually(wait, || chrome.held(&shell).is_ok_and(|h| h.iter().any(|u| u.contains("__signin?token="))));
+    let released = chrome.release_without_cookies(&shell)?;
+    let note = "[...document.querySelectorAll('.frame-note')].some((n) => n.innerText.includes(\"can't sign in here\"))";
+    let told = chrome.until(&shell, note, wait);
+    let blocked = chrome.eval(&shell, &format!("document.querySelector({})?.dataset.blocked ?? null", serde_json::to_string(&format!("iframe[data-fragment=\"{own}\"]"))?))?;
+    let more = chrome.held(&shell)?;
+    let _ = chrome.screenshot(&shell, &s.scratch.join("frames-dropped-cookie.png"));
+    s.ok(
+        "a browser that keeps no cookie from the frame's sign-in: its page refuses it as signed out, and the shell says this browser keeps a window's own sign-in from it, in its place, signing it in no more",
+        up && redeemed && released == 1 && told && blocked == "cookies" && more.is_empty(),
+        json!({ "up": up, "redeemed": redeemed, "released": released, "told": told, "blocked": blocked, "more": more }),
+    );
+    chrome.release(&shell, false)?;
+    chrome.close(shell)?;
+    Ok(())
+}
+
 fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session): (&str, &str), (guest_id, guest_session): (&str, &str)) -> Result<()> {
     let wait = Duration::from_secs(20);
     let platform = api.base.clone();
@@ -407,6 +449,8 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
         shown,
         chrome.eval_in_frame(&shell, &host(n.own), &inner("nested")).unwrap_or_default(),
     );
+
+    dropped_cookie(s, api, &mut chrome, n.own)?;
 
     // ---- a stranger's members-only fragment: a tab must ask first
     frame(&mut chrome, &shell, &mint(n.theirs))?;

@@ -58,6 +58,9 @@ pub struct Browser {
     /// Each holding page's held requests (`hold`), by its session: their
     /// ids and URLs.
     held: HashMap<String, Vec<(String, String)>>,
+    /// Each holding page's held responses (`hold_responses`), by its
+    /// session: their `Fetch.requestPaused` params, headers and all.
+    held_responses: HashMap<String, Vec<Value>>,
 }
 
 /// What a watched page's target said as it loaded and ran (its `Runtime`,
@@ -276,7 +279,7 @@ impl Browser {
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile, watched: HashMap::new(), held: HashMap::new() }))
+        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile, watched: HashMap::new(), held: HashMap::new(), held_responses: HashMap::new() }))
     }
 
     /// One Chrome, up: its process, its DevTools socket's URL, and its
@@ -407,6 +410,11 @@ impl Browser {
             if let Some(held) = event["sessionId"].as_str().and_then(|s| self.held.get_mut(s)) {
                 let paused = &event["params"];
                 held.push((paused["requestId"].as_str().unwrap_or("").to_string(), paused["request"]["url"].as_str().unwrap_or("").to_string()));
+                // a response held (`hold_responses`): what came, for its release
+                if paused["responseStatusCode"].is_number() {
+                    let session = event["sessionId"].as_str().unwrap_or("").to_string();
+                    self.held_responses.entry(session).or_default().push(paused.clone());
+                }
             }
         }
         if let Some(w) = event["sessionId"].as_str().and_then(|s| self.watched.get_mut(s)) {
@@ -913,6 +921,36 @@ impl Browser {
         // what Chrome said before this answer is read
         self.send("Runtime.evaluate", json!({ "expression": "0" }), Some(&page.session))?;
         Ok(self.held.get(&page.session).into_iter().flatten().map(|(_, url)| url.clone()).collect())
+    }
+
+    /// The page's (and its in-process frames') responses from URLs matching
+    /// `patterns` (`*` any run of characters) held from now on, before the
+    /// browser reads them, until `release_without_cookies`.
+    pub fn hold_responses(&mut self, page: &Page, patterns: &[&str]) -> Result<()> {
+        let patterns: Vec<Value> = patterns.iter().map(|p| json!({ "urlPattern": p, "requestStage": "Response" })).collect();
+        self.held.insert(page.session.clone(), Vec::new());
+        self.held_responses.insert(page.session.clone(), Vec::new());
+        self.send("Fetch.enable", json!({ "patterns": patterns }), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// Every response held now (`hold_responses`) given to the page as it
+    /// came, but with no `Set-Cookie`: as a browser that keeps no cookie
+    /// from it reads it. Those that come after are held, until `release`.
+    /// How many went on.
+    pub fn release_without_cookies(&mut self, page: &Page) -> Result<usize> {
+        self.held(page)?;
+        let paused = self.held_responses.get_mut(&page.session).map(std::mem::take).unwrap_or_default();
+        let ids: Vec<&str> = paused.iter().filter_map(|p| p["requestId"].as_str()).collect();
+        if let Some(held) = self.held.get_mut(&page.session) {
+            held.retain(|(id, _)| !ids.contains(&id.as_str()));
+        }
+        for p in &paused {
+            let headers: Vec<&Value> = p["responseHeaders"].as_array().into_iter().flatten().filter(|h| !h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("set-cookie"))).collect();
+            let params = json!({ "requestId": p["requestId"], "responseCode": p["responseStatusCode"], "responseHeaders": headers, "body": "" });
+            self.send("Fetch.fulfillRequest", params, Some(&page.session))?;
+        }
+        Ok(paused.len())
     }
 
     /// Every held request sent on, or (`fail`) failed as a dropped
