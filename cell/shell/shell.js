@@ -924,7 +924,7 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption } = createAgentSettings({
-  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), load, nameScreen, renderNames,
+  api, el, seg, byName, agentFace, titleOf, agents: () => state.agents, named, rename: (name) => rename(name), retitle: (name, title) => retitle(name, title, "rename"), load, nameScreen, renderNames,
   computer: () => state.computer, homePicker: (a, said) => homePicker(a, said), addAgent: (spec) => onboarding.addAgent(spec),
   primaryAgent: () => primaryAgent(), chats, own, me: () => state.me,
 });
@@ -1133,8 +1133,18 @@ function openApp(name, path = "/") {
   navigated();
 }
 
-// A fragment's files (its `__files` view) as a pane's frame.
-const filesFrame = (name) => named(frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name), name, (t) => `${t} files`, "aria-label");
+// A fragment's files (its `__files` view) as a pane's frame, at `folder`
+// (`skills/`: the view opens a folder its hash names) or its own first page.
+const filesAt = (folder) => (folder ? `/__files#/${folder.split("/").map(encodeURIComponent).join("/")}` : "/__files");
+const filesFrame = (name, folder = "") => named(frameOf(framed(name, filesAt(folder)), `${titleOf(name)} files`, name), name, (t) => `${t} files`, "aria-label");
+// A fragment's files in a window, at `folder` (an agent's `skills/`, from
+// Settings): one open already goes there.
+function openFiles(name, folder = "") {
+  const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`tree:${name}`)}"] iframe`);
+  if (shown) go(shown, framed(name, filesAt(folder)));
+  show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: filesFrame(name, folder), actions: windowActions(name, null, filesAt(folder)) });
+  navigated();
+}
 
 // A fragment window's actions, its app's or its files' (FIN-372: the files
 // view has the window's too): Share (its owner), its files (`files`, but on
@@ -1694,7 +1704,7 @@ const settings = createSettings({
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
-  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, markOffer,
+  allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, markOffer,
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }

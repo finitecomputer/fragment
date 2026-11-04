@@ -1,3 +1,4 @@
+import { icon } from "./icons.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 
 const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
@@ -164,14 +165,16 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (!c) return;
     const buttons = [...document.querySelectorAll("[data-action=restart]")];
     for (const b of buttons) b.disabled = true;
-    const label = button.textContent;
-    button.textContent = "Restarting…";
+    // its words alone, where they are a span beside an icon (Settings' Restart)
+    const words = button.querySelector(":scope > span") ?? button;
+    const label = words.textContent;
+    words.textContent = "Restarting…";
     try {
       restarted = c.generation || 0;
       computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
       await reopenSettings();
     } catch (e) {
-      button.textContent = label;
+      words.textContent = label;
       const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
       said.textContent = `It did not restart: ${e.message}`;
       button.parentElement.append(said);
@@ -220,18 +223,36 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
         : // never read: a failed read is not "none" (shown again once one answers: `load`)
           [el("p", "muted", computerFailed() ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
     );
+    // a row of Computer: its label, a short line under it, and its buttons
+    // on the right
+    const row = (key, sub, ...buttons) => {
+      const line = el("div", "settings-line settings-line-with-action");
+      const info = el("div", "settings-info");
+      info.append(el("span", "settings-key", key), el("span", "settings-value settings-sub", sub));
+      const control = el("div", "settings-control");
+      control.append(...buttons);
+      line.append(info, control);
+      return line;
+    };
+    // a button with its icon before its words; `words`, the span its words
+    // are in (a named one: renderNames rewrites only its text)
+    const iconed = (name, words, cls = "quiet") => {
+      const b = el("button", `${cls} with-icon`);
+      b.type = "button";
+      b.append(icon(name), typeof words === "string" ? el("span", null, words) : words);
+      return b;
+    };
     // each agent's own desktop, where its runtime offers one (`markOffer`:
     // agent-runtimes.js), and the line gone with the last
     const screens = [];
     for (const a of c ? agents().values() : []) {
-      const screen = named(el("button", "quiet"), a.fragment, (t) => `Open ${t}'s screen`);
-      screen.type = "button";
+      const screen = iconed("screen", named(el("span"), a.fragment, (t) => `Open ${t}'s screen`));
       screen.dataset.screenFor = a.fragment;
       screen.onclick = () => openScreen(a.fragment);
       screens.push(markOffer(screen, a.fragment, "screen"));
     }
     if (screens.length) {
-      const shown = actionLine("Screens", ...screens);
+      const shown = row("Screens", "Watch your agent work on its own desktop, and take over.", ...screens);
       shown.dataset.offers = "";
       shown.hidden = screens.every((s) => s.hidden);
       computer.append(shown);
@@ -239,23 +260,20 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // the way back to working when something is wrong with it: asked once
     // more before it cuts what its agents are doing
     if (c) {
-      computer.append(el("p", "muted", "Restarting saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops."));
-      const row = el("span", "settings-actions");
-      const go = el("button", "quiet", "Restart computer");
-      go.type = "button";
+      const asks = el("span", "settings-actions");
+      const go = iconed("reload", "Restart computer");
       go.dataset.action = "restart-ask";
       go.onclick = () => {
-        const sure = el("button", "quiet", "Restart now");
-        sure.type = "button";
+        const sure = iconed("reload", "Restart now");
         sure.dataset.action = "restart";
         sure.onclick = () => restartComputer(sure);
         const cancel = el("button", "quiet", "Cancel");
         cancel.type = "button";
-        cancel.onclick = () => row.replaceChildren(go);
-        row.replaceChildren(sure, cancel);
+        cancel.onclick = () => asks.replaceChildren(go);
+        asks.replaceChildren(cancel, sure);
       };
-      row.append(go);
-      computer.append(actionLine("Restart", row));
+      asks.append(go);
+      computer.append(row("Restart", "Saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops.", asks));
     }
     return computer;
   }

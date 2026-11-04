@@ -1,5 +1,6 @@
 import { billingSections, returnSaid, returning } from "./billing.js";
 import { dataSection } from "./exports.js";
+import { icon } from "./icons.js";
 
 export function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -42,7 +43,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, markOffer }) {
+export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -241,8 +242,10 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     if (mySeat) setGuest(mySeat.guest);
     setSeat(mySeat?.seat ?? null);
     const emails = (person().subjects ?? []).map((x) => x.email).filter(Boolean);
-    // who is signed in (their latest sign-in's email), signing out, and
-    // another account: a seat may wait under another email
+    // who is signed in: their picture, changed from the picture itself (a
+    // pencil over it on hover or focus, as an agent's: agent-settings.js),
+    // their latest sign-in's email beside it, and signing out, and another
+    // account: a seat may wait under another email
     const signout = el("form");
     signout.method = "post";
     signout.action = "/auth/logout";
@@ -251,36 +254,61 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     signout.append(out);
     const ways = el("span", "settings-actions");
     ways.append(signout, switchForm(SETTINGS));
-    const who = line("Signed in as", "", ways);
-    who.classList.add("settings-who", "settings-stack");
-    who.querySelector(".settings-value").append(person().email ? el("strong", null, person().email) : "—");
-    const id = line("Identity", person().id);
-    id.lastChild.classList.add("mono");
-    const account = section("Account", who, id);
-    // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
-    const picture = el("label", "quiet picture");
-    const shown = el("img");
-    shown.alt = "";
-    shown.hidden = !person().picture;
-    if (person().picture) shown.src = person().picture;
+    // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT
+    // /api/identities/me/picture); none, their email's first letter. The
+    // file input stays in reach of the keyboard, unseen, its words the
+    // label's name and its tooltip's.
+    const words = person().picture ? "Change your picture" : "Add a picture";
+    const picture = el("label", "picture profile-picture");
+    picture.dataset.tooltip = words;
+    const face = el("span", "profile-avatar", (person().email ?? "").trim().charAt(0).toUpperCase() || "?");
+    if (person().picture) {
+      const img = el("img");
+      img.alt = "";
+      img.src = person().picture;
+      img.onerror = () => img.remove();
+      face.append(img);
+    }
     const file = el("input");
     file.type = "file";
     file.accept = "image/png,image/jpeg,image/webp,image/gif";
-    file.hidden = true;
-    picture.append(shown, el("span", null, person().picture ? "Change your picture" : "Add a picture"), file);
+    const over = el("span", "profile-picture-over");
+    over.append(icon("rename"));
+    picture.append(face, over, el("span", "profile-picture-words", words), file);
+    // what became of a picture chosen: saving it, or why it was not taken
+    const said = el("p", "profile-said");
+    said.setAttribute("role", "status");
+    said.hidden = true;
+    const email = el("span", "settings-value");
+    email.append(person().email ? el("strong", null, person().email) : "—");
+    const text = el("div", "profile-text");
+    text.append(el("span", "settings-key", "Signed in as"), email, said);
+    const info = el("div", "settings-info profile-info");
+    info.append(picture, text);
+    const control = el("div", "settings-control");
+    control.append(ways);
+    const who = el("div", "settings-line settings-line-with-action settings-who settings-stack profile");
+    who.append(info, control);
     file.onchange = async () => {
       const f = file.files?.[0];
       if (!f) return;
+      file.disabled = true;
+      said.classList.remove("form-error");
+      said.textContent = "Saving your picture…";
+      said.hidden = false;
       try {
         await api("PUT", "/api/identities/me/picture", f, f.type);
       } catch (e) {
-        picture.querySelector("span").textContent = e.message || "That picture was not taken";
+        said.classList.add("form-error");
+        said.textContent = e.message || "That picture was not taken";
+        file.disabled = false;
+        file.value = "";
         return;
       }
       setPerson(await api("GET", "/api/identities/me"));
       reopenSettings();
     };
-    account.append(actionLine("Picture", picture));
+    const account = section("Account", who);
     // their sign-ins, when they linked several before linking went (off
     // until WorkOS offers an account picker: docs/api.md, Sign-in)
     if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
@@ -315,13 +343,27 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       const row = markOffer(el("button", "row", "Open"), a.fragment, "profile");
       row.type = "button";
       row.onclick = () => openApp(a.fragment);
+      // its own skills: its fragment's skills/, in its files, where its
+      // runtime reads them (Paul, 2026-11-04: no copy, no move, and none
+      // of this in the Edit dialog)
+      const skills = markOffer(el("button", "row", "Skills"), a.fragment, "skills");
+      skills.type = "button";
+      skills.dataset.skillsFor = a.fragment;
+      skills.onclick = () => openFiles(a.fragment, "skills/");
       const name = el("span", "settings-agent-name");
       name.dataset.agentFace = a.fragment;
-      const [actions, said] = faceControls(a);
-      return [agentSettings(a, actionLine(name, actions, row), modeled), said];
+      const [actions, said, renameIt, pictures, picture] = faceControls(a);
+      // its picture's pencil over its picture, and its pencil and Remove
+      // picture beside its name, all outside the name: renderAgentFaces
+      // redraws it (its picture and its title)
+      const face = el("span", "agent-face-edit");
+      face.append(name, picture);
+      const title = el("span", "settings-agent-title");
+      title.append(face, renameIt, pictures);
+      return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
     }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
     const connections = connectionsSection(linked, uses);
-    const skills = await skillsSection();
+    const skills = skillsSection();
     if (lost()) return;
     returnSaid(back);
     renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
@@ -340,18 +382,29 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
 
   // Building with a coding agent: one prompt that names this platform's
   // /llms.txt (its handoff: the install, `fragment login --host` here, the
-  // manual), copied into Claude Code or Codex with what to build. The
-  // install line stays, folded, for whoever runs it themselves.
+  // manual), copied into Claude Code or Codex with what to build: one line,
+  // quiet, its Copy a copy icon at its end (a check once copied; its words,
+  // Copy and Copied, its label and its tooltip's). The install line stays,
+  // folded, for whoever runs it themselves.
   function buildSection() {
-    const prompt = el("textarea", "build-prompt");
+    const prompt = el("input", "build-prompt");
     prompt.id = "build-prompt";
-    prompt.rows = 3;
+    prompt.type = "text";
     prompt.spellcheck = false;
     prompt.setAttribute("aria-label", "A prompt for your coding agent");
     prompt.value = `Read ${location.origin}/llms.txt and help me build: `;
-    const copy = el("button", "quiet", "Copy");
+    const copy = el("button", "icon-button build-copy");
     copy.type = "button";
     copy.dataset.action = "copy-prompt";
+    const word = el("span", "build-copy-word");
+    const shows = (copied) => {
+      word.textContent = copied ? "Copied" : "Copy";
+      copy.setAttribute("aria-label", copied ? "Copied" : "Copy the prompt");
+      copy.replaceChildren(icon(copied ? "check" : "copy"), word);
+    };
+    shows(false);
+    const field = el("div", "build-prompt-field");
+    field.append(prompt, copy);
     // a clipboard that refuses (no permission, a webview's, none at all) is
     // said under the prompt, which is selected to copy by hand; Copy stays
     // Copy, to try again (#438)
@@ -369,7 +422,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
         await navigator.clipboard.writeText(prompt.value);
       } catch {
         if (mine !== presses) return;
-        copy.textContent = "Copy";
+        shows(false);
         said.textContent = "Couldn't copy it. The prompt is selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
         said.hidden = false;
         prompt.focus();
@@ -377,46 +430,61 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
         return;
       }
       if (mine !== presses) return;
-      copy.textContent = "Copied";
+      shows(true);
       setTimeout(() => {
-        if (mine === presses) copy.textContent = "Copy";
+        if (mine === presses) shows(false);
       }, 1500);
     };
-    const actions = el("div", "settings-actions");
-    actions.append(copy);
+    // a command to run, its Copy a copy icon in its corner (a check once
+    // copied); a clipboard that refuses selects it, to copy by hand
+    const command = (text) => {
+      const pre = el("pre", "command", text);
+      const button = el("button", "icon-button command-copy");
+      button.type = "button";
+      const showing = (copied) => {
+        button.setAttribute("aria-label", copied ? "Copied" : "Copy the command");
+        button.replaceChildren(icon(copied ? "check" : "copy"));
+      };
+      showing(false);
+      let pressed = 0;
+      button.onclick = async () => {
+        const mine = ++pressed;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          const range = document.createRange();
+          range.selectNodeContents(pre);
+          getSelection()?.removeAllRanges();
+          getSelection()?.addRange(range);
+          return;
+        }
+        showing(true);
+        setTimeout(() => mine === pressed && showing(false), 1500);
+      };
+      const block = el("div", "command-block");
+      block.append(pre, button);
+      return block;
+    };
+    // its fold: a chevron that turns as it opens
+    const fold = el("summary");
+    fold.append(icon("caret"), "Install it yourself");
     const yourself = el("details", "settings-install");
     yourself.append(
-      el("summary", null, "Install it yourself"),
+      fold,
       say("On macOS or Linux (on Windows, in WSL), then pair it with you:"),
-      el("pre", "command", `${INSTALL}\nfragment login --host ${location.origin}`),
+      command(`${INSTALL}\nfragment login --host ${location.origin}`),
       say("To give Claude Code its skill:"),
-      el("pre", "command", SKILL),
+      command(SKILL),
     );
-    return section(
-      "Build with Claude Code or Codex",
-      say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
-      prompt,
-      actions,
-      said,
-      yourself,
-    );
+    const about = say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once.");
+    about.classList.add("muted");
+    return section("Build with Claude Code or Codex", about, field, said, yourself);
   }
 
   // ---- skills (decision 17): the managed set, the person's skills fragment's
   // (the platform's release, which their computers install for every agent),
-  // by category, and each agent's own (its fragment's skills/, which win on a
-  // name). Both read as the agents' computers read them: the fragments' files.
-  // A skill is skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md.
-  function skillsIn(paths) {
-    const out = [];
-    for (const path of paths) {
-      const parts = path.split("/");
-      if (parts[0] !== "skills" || parts[parts.length - 1] !== "SKILL.md") continue;
-      if (parts.length === 4) out.push({ category: parts[1], name: parts[2] });
-      else if (parts.length === 3) out.push({ category: "", name: parts[1] });
-    }
-    return out.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
-  }
+  // opened from one row (Paul, 2026-11-04). Each agent's own are its
+  // fragment's skills/, opened from its item in Agents. ----
   const skillsFragmentOf = () => allFragments().find((f) => f.kind === "skills" && own(f));
   // The person's skills fragment, made from the blessed template when they
   // have none: at setup, as their default agent is, or from settings' Skills
@@ -428,55 +496,38 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     await load();
     return made.name;
   }
-  function skillNames(list) {
-    const value = el("span", "settings-value");
-    list.forEach((s, i) => {
-      if (i) value.append(", ");
-      const name = el("span", "skill", s.name);
-      name.dataset.skill = s.name;
-      value.append(name);
-    });
-    return value;
-  }
-  async function skillsSection() {
+  // Skills: one row as Computer's are (its label, a short line under it,
+  // Open with an icon). Open is the person's skills fragment, made first
+  // from the blessed template when they have none. The line says nothing
+  // of which agents get them: only our Hermes image installs the set
+  // (docs/computers.md, "Skills and the CLI")
+  function skillsSection() {
     const s = section("Skills");
     s.id = "settings-skills";
-    const filesOf = (name) => api("GET", `/api/f/${name}/files`).then((v) => (v.files ?? []).map((f) => f.path)).catch(() => null);
     const mine = skillsFragmentOf();
-    if (!mine) {
-      const add = el("button", "quiet", "Add the managed skills");
-      add.type = "button";
-      add.onclick = () => skillsFragment().then(() => reopenSettings()).catch((e) => { add.textContent = e.message; });
-      s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
-    } else {
-      const paths = await filesOf(mine.name);
-      if (!paths) s.append(el("p", "muted", "Your skills could not be read."));
-      else {
-        const groups = new Map();
-        for (const k of skillsIn(paths)) groups.set(k.category, [...(groups.get(k.category) ?? []), k]);
-        s.dataset.fragment = mine.name;
-        s.append(...[...groups].map(([category, list]) => {
-          const row = el("p", "settings-line");
-          row.dataset.category = category || "general";
-          row.append(el("span", "settings-key", (category || "general").replace(/-/g, " ")), skillNames(list));
-          return row;
-        }));
-        const open = el("button", "quiet", "Open your skills");
-        open.type = "button";
-        open.onclick = () => openApp(mine.name);
-        s.append(actionLine("Managed skills", open));
+    if (mine) s.dataset.fragment = mine.name;
+    const words = el("span", null, "Open");
+    const open = el("button", "quiet with-icon");
+    open.type = "button";
+    open.dataset.action = "open-skills";
+    open.append(icon("folder"), words);
+    open.onclick = async () => {
+      open.disabled = true;
+      try {
+        openApp(await skillsFragment());
+      } catch (e) {
+        words.textContent = e.message;
+      } finally {
+        open.disabled = false;
       }
-    }
-    // each agent's own skills, from its fragment
-    const agents = allFragments().filter((f) => f.kind === "agent" && own(f));
-    const owns = await Promise.all(agents.map((a) => filesOf(a.name)));
-    agents.forEach((a, i) => {
-      const row = el("p", "settings-line");
-      row.dataset.agent = a.name;
-      const list = skillsIn(owns[i] ?? []);
-      row.append(named(el("span", "settings-key"), a.name, (t) => `${t}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
-      s.append(row);
-    });
+    };
+    const row = el("div", "settings-line settings-line-with-action");
+    const info = el("div", "settings-info");
+    info.append(el("span", "settings-key", "Skills"), el("span", "settings-value settings-sub", "What your agents know how to do, kept in one place."));
+    const control = el("div", "settings-control");
+    control.append(open);
+    row.append(info, control);
+    s.append(row);
     return s;
   }
   return { openSettings, reopenSettings, skillsFragment, visit: () => visits };

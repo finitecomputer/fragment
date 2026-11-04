@@ -375,8 +375,12 @@ export async function billingSections(helpers, ledger, mine, back) {
       if (offer) billing.append(seat.admin ? actionLine("Renewal", button("Pay again", () => goCheckout({}), (e) => plainly(e, CHECKOUT, CHECKOUT_FAILED))) : el("p", "muted", "Ask your org's admin to pay for it again."));
     }
     if (seat.good && seat.kind === "seat_always_on") {
-      const sleeps = el("input");
+      // a switch: a checkbox drawn as one (shell.css `.settings-switch`), so
+      // it is still a checkbox to forms, tests and assistive tech, which
+      // reads it as a switch
+      const sleeps = el("input", "settings-switch");
       sleeps.type = "checkbox";
+      sleeps.setAttribute("role", "switch");
       sleeps.checked = seat.sleeps;
       sleeps.onchange = async () => {
         try {
@@ -388,8 +392,14 @@ export async function billingSections(helpers, ledger, mine, back) {
           note(billing, plainly(e, { no_seat: "You don't hold a seat any more. Open Settings again to see where it went." }, "That wasn't changed. Try again in a moment."));
         }
       };
-      const label = el("label", "settings-line");
-      label.append(sleeps, " Let my computer sleep when nothing is open");
+      // the row its label above its sentence, the switch on the right; the
+      // whole row is the label, so a press anywhere on it flips the switch
+      const label = el("label", "settings-line settings-line-with-action");
+      const info = el("div", "settings-info");
+      info.append(el("span", "settings-key", "Sleep"), el("span", "settings-value", "Let my computer sleep when nothing is open"));
+      const control = el("div", "settings-control");
+      control.append(sleeps);
+      label.append(info, control);
       billing.append(label);
     }
   } else if (mine.guest) {
@@ -430,7 +440,36 @@ export async function billingSections(helpers, ledger, mine, back) {
         : null;
     // the balance: below zero, what is owed (a paid call is charged after it, so one can go past zero)
     const balance = ledger.balanceMicros;
-    billing.append(line("Credit this month", balance < 0 ? `${usd(-balance)} owed` : `${usd(balance)} left`, topUp));
+    const credit = line("Credit this month", balance < 0 ? `${usd(-balance)} owed` : `${usd(balance)} left`, topUp);
+    credit.dataset.credit = "";
+    // a bar of this month's included credit, filling as it is used: a
+    // charge draws included credit before bought credit (crates/core/src/
+    // ledger.rs), so the bar is full once only bought credit, or a debt, is
+    // left. None where no credit is included (a plan that grants none).
+    const granted = ledger.includedGrantedMicros ?? 0;
+    if (granted > 0) {
+      const owed = balance < 0;
+      const used = owed ? granted : Math.min(granted, Math.max(0, granted - (ledger.includedMicros ?? 0)));
+      const bought = ledger.purchasedMicros ?? 0;
+      // the ledger's month is UTC (`YYYY-MM`): its included credit renews
+      // on the first of the next one
+      const [y, m] = String(ledger.month ?? "").split("-").map(Number);
+      const renews = y && m ? new Date(Date.UTC(y, m, 1)).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }) : null;
+      const said = `${usd(used)} of ${usd(granted)} used (${Math.round((used / granted) * 100)}%)` + (renews ? ` · renews ${renews}` : "") + (bought > 0 ? ` · ${usd(bought)} of bought credit left` : "");
+      // spans: the row is a <p> when it has no button
+      const bar = el("span", owed ? "credit-bar owed" : "credit-bar");
+      bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-label", "Included credit used this month");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", String(granted));
+      bar.setAttribute("aria-valuenow", String(used));
+      bar.setAttribute("aria-valuetext", said);
+      const fill = el("span", "credit-bar-fill");
+      fill.style.width = `${(used / granted) * 100}%`;
+      bar.append(fill);
+      (credit.querySelector(".settings-info") ?? credit).append(bar, el("span", "credit-said muted", said));
+    }
+    billing.append(credit);
   }
   if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
   // an admin alone buys seats for others, where something is sold

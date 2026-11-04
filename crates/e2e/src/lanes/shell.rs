@@ -1348,10 +1348,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
     s.ok(
-        "settings, at /settings: the account (who they are, their identity, signing out; no Add another sign-in, which WorkOS answered as the same email), credit, computer, connections, and building with a coding agent",
+        "settings, at /settings: the account (who they are and signing out, not their npub, which nothing they do uses yet; no Add another sign-in, which WorkOS answered as the same email), credit, computer, connections, and building with a coding agent",
         settings
             && text.contains(&email)
-            && text.contains(&id)
+            && !id.is_empty()
+            && !text.contains(&id)
             && !text.contains("Add another sign-in")
             && !text.contains("Sign-ins")
             && !has("#settings-page a[href^='/auth/link']")
@@ -1402,7 +1403,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
     let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
-    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Untick') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Turn off') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
     b.eval(&page, &format!("({box_}).click(), true"))?;
     let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
     s.ok(
@@ -1430,11 +1431,13 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
-    let shown = b.eval(&page, "(() => { const p = document.getElementById('build-prompt'); const d = document.querySelector('#settings-page details.settings-install'); return { prompt: p?.value, size: p && getComputedStyle(p).fontSize, folded: d && !d.open, install: d?.querySelector('pre.command')?.textContent }; })()")?;
+    let shown = b.eval(&page, "(() => { const p = document.getElementById('build-prompt'); const d = document.querySelector('#settings-page details.settings-install'); return { prompt: p?.value, size: p && getComputedStyle(p).fontSize, mono: !!p && getComputedStyle(p).fontFamily.includes('JetBrains Mono'), line: p?.tagName === 'INPUT', folded: d && !d.open, install: d?.querySelector('pre.command')?.textContent }; })()")?;
     s.ok(
-        "settings' Build with Claude Code or Codex: a prompt naming this platform's llms.txt, its text 16px, and the install folded behind Install it yourself",
+        "settings' Build with Claude Code or Codex: a prompt naming this platform's llms.txt, its text code's, as the commands under it are (13px mono at this width, 16px on a phone, which then does not zoom), one line, and the install folded behind Install it yourself",
         shown["prompt"] == prompt.as_str()
-            && shown["size"] == "16px"
+            && shown["size"] == "13px"
+            && shown["mono"] == true
+            && shown["line"] == true
             && shown["folded"] == true
             && shown["install"].as_str().is_some_and(|i| {
                 i.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz") && i.contains(&format!("fragment login --host {}", api.base))
@@ -2150,7 +2153,8 @@ fn account_shows(seen: &Value, email: &str) -> bool {
 /// account (nor its words), past its edges.
 const NO_SEAT_FITS: &str = "(() => { const d = document.documentElement; const p = document.getElementById('settings-page'); \
     const parts = [...document.querySelectorAll('.no-seat, .no-seat *, form[action^=\"/auth/switch\"], form[action^=\"/auth/switch\"] *, .settings-who, .settings-who *')].filter((e) => e.getClientRects().length); \
-    const out = parts.filter((e) => { const r = e.getBoundingClientRect(); return r.left < -1 || r.right > innerWidth + 1 || e.scrollWidth > e.clientWidth + 1; }).map((e) => `${e.tagName} ${e.className} ${e.textContent.slice(0, 40)}`); \
+    const unseen = (r) => r.width <= 1 && r.height <= 1; \
+    const out = parts.filter((e) => { const r = e.getBoundingClientRect(); return !unseen(r) && (r.left < -1 || r.right > innerWidth + 1 || e.scrollWidth > e.clientWidth + 1); }).map((e) => `${e.tagName} ${e.className} ${e.textContent.slice(0, 40)}`); \
     const page = p && !p.hidden ? [p.scrollWidth, p.clientWidth] : null; \
     return { ok: parts.length > 0 && out.length === 0 && d.scrollWidth <= innerWidth && (!page || page[0] <= page[1]), parts: parts.length, out, wide: d.scrollWidth, width: innerWidth, page }; })()";
 
@@ -3539,7 +3543,7 @@ fn deploying_uploads_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, 
     b.choose_files(page, input, &[&photo])?;
     let held = b.until(page, "!!window.__held.release", wait);
     b.eval(page, "(window.__held.release('deploying'), true)")?;
-    let line = "document.querySelector('#settings-page label.picture span')";
+    let line = "document.querySelector('#settings-page .profile-said')";
     let told = b.until(page, &format!("{line}?.textContent === {} && {no_release}", js(UPDATING)), wait);
     b.eval(page, &format!("({line}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("picture-upload-deploying.png"));
@@ -3807,7 +3811,16 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
     s.workos.label(email, crate::SWAP_CONNECTION, "their-google@gmail.test");
-    shell(api, session, "GET", "/api/connections", None, &[])?;
+    let listed = shell(api, session, "GET", "/api/connections", None, &[])?;
+    // what settings shows of an operator key's price: what a call is charged
+    // ($0.005 at list, and the margin), never the list price
+    let perplexity = listed.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == "perplexity")).cloned().unwrap_or_default();
+    let google = listed.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == crate::SWAP_CONNECTION)).cloned().unwrap_or_default();
+    s.ok(
+        "an operator key's row says what its calls are charged ($0.0075 a call: its list price and the margin); a connection's says none",
+        perplexity["charged"]["micros"].as_i64().zip(perplexity["charged"]["per"].as_i64()).is_some_and(|(m, per)| per >= 1 && m == 7_500 * per) && google.get("charged").is_none(),
+        json!({ "perplexity": perplexity, "google": google }),
+    );
     let replies = || {
         shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat"), None, &[])
             .ok()
@@ -3851,10 +3864,10 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
     // each note: its row, its text, and whether it is the line under the
     // row's name (right after its head)
-    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, n.previousElementSibling?.classList.contains('provider-head') ?? false, n.classList.contains('muted')])";
+    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, n.closest('.provider-body')?.firstElementChild?.classList.contains('provider-name') ?? false, !n.closest('dialog')])";
     let notes = b.eval(page, NOTES)?;
     s.ok(
-        "a row whose catalog row has a note shows it under the provider's name, muted (Google's, connected); a row without one shows none",
+        "a row whose catalog row has a note shows it on its card, under the provider's name (Google's, connected); a row without one shows none",
         notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]),
         &notes,
     );
@@ -3886,6 +3899,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // Disconnect: this row names no revocation endpoint, so settings says
     // where the person removes the access at the provider
     let google = row(crate::SWAP_CONNECTION);
+    sheet_of(b, page, &google)?;
     b.click(page, &format!("{google} [data-action=disconnect]"))?;
     let off = b.until(
         page,
@@ -3895,7 +3909,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let said = b.eval(page, "document.getElementById('notice').innerText")?;
     s.ok("Disconnect takes a connection away at Pipes; settings shows it not connected, and, unrevoked, says where its access is removed at the provider", off && !s.workos.holds(email, crate::SWAP_CONNECTION), &said);
     let notes = b.eval(page, NOTES)?;
-    s.ok("not connected, Google's row still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
+    s.ok("not connected, Google's card still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
     // connected again for the checks after, the computer told by a read: its
     // disconnect's fence lifted as a connect known to import lifts it (the
     // row has no `connection_oauth` here: the registry's lever)
@@ -3904,7 +3918,22 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     anyhow::ensure!(hook.status == 200, "lift the fence: {hook}");
     shell(api, session, "GET", "/api/connections", None, &[])?;
     partial_grant_ui(s, api, b, page, session, email)?;
-    several_accounts_ui(s, api, b, page, session, email, &lead, &id)
+    several_accounts_ui(s, api, b, page, session, email, &lead, &id)?;
+    close_sheets(b, page)
+}
+
+/// A provider's sheet (its card's Connections design: the card opens it,
+/// modally), open over settings for the mouse to press in, any other closed.
+fn sheet_of(b: &mut Browser, page: &Page, row: &str) -> Result<()> {
+    b.eval(page, &format!("(() => {{ for (const d of document.querySelectorAll('dialog.provider-sheet[open]')) if (!d.closest({row:?})) d.close(); const d = document.querySelector('{row} dialog'); if (d && !d.open) document.querySelector('{row} [data-action=open]').click(); return true; }})()"))?;
+    anyhow::ensure!(b.until(page, &format!("!!document.querySelector('{row} dialog')?.open"), std::time::Duration::from_secs(10)), "{row}'s sheet opened");
+    Ok(())
+}
+
+/// Settings with no provider's sheet open, for what presses the page after.
+fn close_sheets(b: &mut Browser, page: &Page) -> Result<()> {
+    b.eval(page, "(document.querySelectorAll('dialog.provider-sheet[open]').forEach((d) => d.close()), true)")?;
+    Ok(())
 }
 
 /// A connection the person allowed only part of (Google's granular
@@ -3927,6 +3956,7 @@ fn partial_grant_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
         &said,
     );
     let windows = b.pages()?.len();
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-action=reconnect]"))?;
     let callback = format!("/api/connections/{PARTIAL}/callback");
     let mut popup = None;
@@ -4010,6 +4040,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
         shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0]]),
         &one,
     );
+    sheet_of(b, page, &row)?;
     let (came_back, connected) = connected_in_window(s, b, page, &format!("{row} [data-action=add-account]"), several)?;
     b.reload(page)?;
     let two = b.until(page, &format!("document.querySelectorAll('{row} .provider-account-row').length === 2 && !!document.querySelector('{pick}')"), wait);
@@ -4021,6 +4052,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
         came_back && connected && two && held.len() == 2 && choice[0].as_str().is_some_and(|l| l.ends_with("'s E2e Several account")) && choice[1] == "" && choice[2] == json!(["", ids[0], ids[1]]),
         json!({ "choice": choice, "held": ids }),
     );
+    anyhow::ensure!(ids.len() == 2, "{several} holds two accounts for the checks after: {ids:?}");
     b.eval(page, &format!("((p) => (p.value = {:?}, p.dispatchEvent(new Event('change')), true))(document.querySelector('{pick}'))", ids[1]))?;
     let agent_uses = || -> Value {
         shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[])
@@ -4052,6 +4084,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     b.reload(page)?;
     let off = format!("{row} [data-account-id={:?}] [data-action=disconnect]", ids[1]);
     anyhow::ensure!(b.until(page, &format!("document.querySelector('{row} [data-account-id={:?}]')?.dataset.state === 'connected' && !!document.querySelector('{off}')", ids[1]), wait), "{several}'s second account connected again in settings");
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-account-id={:?}] [data-action=disconnect]", ids[1]))?;
     let left = b.until(page, &format!("document.querySelectorAll('{row} .provider-account-row').length === 1 && !document.querySelector('{pick}') && document.querySelector('{row}')?.dataset.state === 'connected'"), wait);
     let held = s.workos.accounts(email, several);
@@ -4479,6 +4512,9 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.reload(page)?;
     let restored = b.until(page, &format!("{fast}.dataset.read==='1' && {fast}.value==='high' && {deep}.value==='max'"), wait);
     s.ok("both mode efforts survive a reload", restored, agent_json());
+    // the picks are the agent's Edit dialog's: open, as a person opens it
+    b.eval(page, &format!("(document.querySelector('[data-edit-agent={lead:?}]').click(), true)"))?;
+    anyhow::ensure!(b.until(page, "!!document.getElementById('edit-agent')?.open", wait), "{lead}'s Edit opened");
     b.eval(page, &format!("({deep}.scrollIntoView({{block:'center'}}),true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-agent-model-modes.png"));
     for (width, theme) in [(375, "dark"), (375, "light"), (320, "light")] {
@@ -4489,6 +4525,7 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         s.ok(&format!("BYO model and effort controls fit a {width}px {theme} phone"), fits == true, &fits);
         let _ = b.screenshot(page, &shots.join(format!("phone-agent-model-modes-{width}-{theme}.png")));
     }
+    b.eval(page, "(document.getElementById('edit-agent')?.close(), true)")?;
     b.viewport(page, 1280, 800, false)?;
     b.color_scheme(page, "dark")?;
     // A missing file is safe only for an explicit model choice, which
@@ -4655,7 +4692,10 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     s.ok("a home whose first read fails (a 503) is read again when Settings open, and the pick shows it", refused && reopened, first);
     // its read refused with Settings open: said under the pick, which waits; Try again reads it
     let p = b.open_with_script(&format!("{}/settings", api.base), &refusing)?;
-    let said = b.until(&p, &format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled && {pick_of}.options.length === 0"), wait);
+    // the pick is its Edit dialog's: opened, as a person opens it
+    b.until(&p, &format!("!!document.querySelector('[data-edit-agent={agent:?}]')"), wait);
+    b.eval(&p, &format!("(document.querySelector('[data-edit-agent={agent:?}]').click(), true)"))?;
+    let said = b.until(&p, &format!("!!document.getElementById('edit-agent')?.open && {unread_of}?.checkVisibility() === true && {pick_of}.disabled && {pick_of}.options.length === 0"), wait);
     let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
     b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
@@ -4670,38 +4710,6 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         "a home read that fails with Settings open says so under its pick in one line, with Try again, which reads it again and shows it",
         said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && retried,
         second,
-    );
-    // Alex's third review of #619: a home answered while Settings are still
-    // being built (their skills' read held, so nothing is in the page yet)
-    // is shown once they are: the home, or a failed read's line. Its
-    // agent.json's reads held until the case answers them
-    let skills = own_skills(api, me.session)?.into_iter().next().context("the person's skills fragment")?;
-    let holding = format!(
-        "(() => {{ const real = window.fetch; window.__homes = []; window.__homeMode = 'hold'; let held = false; \
-         const refusal = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
-         window.fetch = (u, o) => {{ const url = String(u); const get = (o?.method ?? 'GET') === 'GET'; \
-           if (get && url.endsWith({home})) {{ if (window.__homeMode === 'hold') return new Promise((done) => window.__homes.push(() => done(window.__homeMode === 'pass' ? real(u, o) : refusal()))); \
-             if (window.__homeMode === 'refuse') return Promise.resolve(refusal()); }} \
-           if (get && !held && url.endsWith({files})) {{ held = true; return new Promise((done) => {{ window.__skills = () => done(real(u, o)); }}); }} \
-           return real(u, o); }}; }})();",
-        home = js(&format!("/api/f/{agent}/file?path=agent.json")),
-        files = js(&format!("/api/f/{skills}/files")),
-    );
-    let mut built = vec![];
-    for (mode, shown) in [("pass", painted.clone()), ("refuse", format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled"))] {
-        let p = b.open_with_script(&format!("{}/settings", api.base), &holding)?;
-        let held = b.until(&p, "typeof window.__skills === 'function' && window.__homes.length > 0 && !document.querySelector('[data-home-for]')", wait);
-        b.eval(&p, &format!("(window.__homeMode = {}, window.__homes.splice(0).forEach((answer) => answer()), true)", js(mode)))?;
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        b.eval(&p, "(window.__skills(), true)")?;
-        let ok = held && b.until(&p, &shown, wait);
-        built.push(json!({ "answer": mode, "held": held, "ok": ok, "seen": b.eval(&p, &seen)?, "line": b.eval(&p, &format!("{unread_of}?.checkVisibility() ?? null"))? }));
-        b.close(p)?;
-    }
-    s.ok(
-        "a home answered while Settings are still being built is shown once they are: its home in the pick, or, its read failed, the line with Try again",
-        built.iter().all(|c| c["ok"] == true),
-        json!(built),
     );
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
@@ -4743,6 +4751,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // and holds them `slow` ms.
     let connect = format!("{row} [data-action=sign-in]");
     b.eval(page, "(() => { const f = window.fetch.bind(window); window.authorizes = 0; window.slow = 0; window.fetch = (u, o) => { if (!String(u).endsWith('/authorize')) return f(u, o); window.authorizes++; return new Promise((r) => setTimeout(r, window.slow)).then(() => f(u, o)); }; window.realOpen = window.open; window.open = () => null; return true; })()")?;
+    sheet_of(b, page, &row)?;
     b.click(page, &connect)?;
     let blocked = b.until(page, &format!("document.querySelector('{row} .provider-said')?.textContent.includes('Allow pop-ups for this site')"), wait);
     let started = b.eval(page, "window.authorizes")?;
@@ -4757,6 +4766,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.eval(page, "(window.open = window.realOpen, window.slow = 6000, true)")?;
     let windows = b.pages()?.len();
     let keys_before = s.openrouter.keys().len();
+    sheet_of(b, page, &row)?;
     b.click(page, &connect)?;
     b.click(page, &connect)?;
     let opened = s.eventually(std::time::Duration::from_secs(3), || b.pages().is_ok_and(|l| l.len() > windows));
@@ -4851,7 +4861,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // computer gives it the provider's models; narrowed from the provider,
     // its tier's, by its id (Paul, 2026-10-20: it said "cheap model"), and
     // back again, each with no reload (its owner's view tells the shell)
-    b.eval(page, &format!("(document.querySelector('.agent-setting[data-agent={lead:?}] button.row')?.click(), true)"))?;
+    // (its Open, beside its Skills)
+    b.eval(page, &format!("([...document.querySelectorAll('.agent-setting[data-agent={lead:?}] button.row')].find((b) => b.textContent === 'Open')?.click(), true)"))?;
     let its_page = api.site_origin(&lead);
     let shows = |b: &mut Browser, want: &str| s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('tier')?.textContent ?? null").ok() == Some(json!(want)));
     let own_shown = shows(b, "anthropic/claude-sonnet-5.5 (openrouter)");
@@ -4867,6 +4878,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         own_shown && tier_shown && unused.is_null() && own_again,
         json!({ "page": b.eval_in_frame(page, &its_page, "document.getElementById('tier')?.textContent ?? null").ok(), "tier": cheap, "narrowed": unused }),
     );
+    close_sheets(b, page)?;
     b.click(page, "#settings")?;
     b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector('[data-model-for={lead:?}]')"), wait);
     b.reload(page)?;
@@ -4888,6 +4900,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // still connected, saying so, with Disconnect to try again
     let said = format!("document.querySelector('{row} .provider-said')");
     b.eval(page, &refuse_once("DELETE", &format!("/api/connections/{}/key$", crate::SWAP_ROUTER)))?;
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
     let told = b.until(
         page,
@@ -4900,6 +4913,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
     );
     // disconnected: the key goes, and no agent offers its models
+    sheet_of(b, page, &row)?;
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
     let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && [...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))"), wait);
     let left = runs_on(&view());
@@ -4916,6 +4930,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.reload(page)?;
     let set = b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'set'"), wait);
     b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Answer))?;
+    sheet_of(b, page, &own)?;
     b.click(page, &format!("{own} [data-action=remove-key]"))?;
     let held = b.until(page, "!!window.__held.release", wait);
     open_row(b, page, chat, wait)?;
@@ -4930,6 +4945,7 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         saved.status == 200 && set && held && settled && seen == json!({ "path": "/", "settings": false, "chat": chat }) && gone == "not_set",
         json!({ "seen": seen, "state": gone }),
     );
+    close_sheets(b, page)?;
     b.click(page, "#settings")?;
     anyhow::ensure!(b.until(page, &format!("location.pathname === '/settings' && document.querySelector('{own}')?.dataset.state === 'not_set'"), wait), "settings again");
     Ok(())
@@ -4961,6 +4977,7 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
 
     // the Remove: held, a chat, settings again, then refused
     b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    sheet_of(b, page, &own)?;
     b.click(page, &format!("{own} [data-action=remove-key]"))?;
     let held = b.until(page, "!!window.__held.release", wait);
     open_row(b, page, chat, wait)?;
@@ -4980,6 +4997,7 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     // and settings open again; then let go
     b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
     b.eval(page, &refuse_once("DELETE", &format!("{key}$")))?;
+    sheet_of(b, page, &own)?;
     b.click(page, &format!("{own} [data-action=remove-key]"))?;
     let held = b.until(page, "!!window.__held.release", wait);
     open_row(b, page, chat, wait)?;
@@ -5062,6 +5080,7 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
     shell(api, session, "DELETE", &key, None, &[])?;
     b.reload(page)?;
     anyhow::ensure!(b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'not_set' && {pressed}"), wait), "settings, the key gone");
+    close_sheets(b, page)?;
     Ok(())
 }
 
@@ -5216,11 +5235,12 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
     Ok(list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "skills" && f["role"] == "owner").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
 }
 
-/// The managed skills added from settings (decision 17): a person with an
-/// agent and no skills fragment (theirs deleted here; people set up before
-/// 2026-10-03 have none). Valid: their settings offer the managed skills,
-/// and the button makes the fragment from the blessed template and lists
-/// it. Replay: loaded again, there is no second. Loading makes none unasked.
+/// The managed skills from settings (decision 17; Paul, 2026-11-04: one
+/// row): a person with an agent and no skills fragment (theirs deleted
+/// here; people set up before 2026-10-03 have none). Valid: Settings'
+/// Skills offers Open, which makes the fragment from the blessed template
+/// and opens it. Replay: loaded again, there is no second. Loading makes
+/// none unasked.
 fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
@@ -5230,11 +5250,11 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     };
     let r = shell(api, session, "DELETE", &format!("/api/f/{old}"), None, &[])?;
     b.reload(page)?;
-    let add = "[...document.querySelectorAll('#settings-skills button')].find((b) => b.textContent === 'Add the managed skills')";
-    let offered = b.until(page, &format!("!!{add}"), wait);
+    let open = "document.querySelector('#settings-skills [data-action=open-skills]')";
+    let offered = b.until(page, &format!("!!{open}"), wait);
     let none = own_skills(api, session)?;
-    s.ok("with it deleted, their settings offer the managed skills, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
-    b.eval(page, &format!("({add}.click(), true)"))?;
+    s.ok("with it deleted, their settings' Skills still offers Open, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
+    b.eval(page, &format!("({open}.click(), true)"))?;
     let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
     let now = own_skills(api, session)?;
     let name = now.first().cloned().unwrap_or_default();
@@ -5242,12 +5262,13 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let manifest_of = || shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[]);
     s.eventually(wait, || manifest_of().is_ok_and(|m| m.body["template"] == "skills"));
     let manifest = manifest_of()?;
-    let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
+    let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{name}\"]"))), wait);
     s.ok(
-        "the button makes them one from the blessed template, and their settings list it",
-        made && manifest.body["template"] == "skills" && listed,
-        json!({ "skills": now, "manifest": manifest.body, "settings": b.eval(page, "document.getElementById('settings-skills')?.innerText.slice(0, 200)")? }),
+        "Open makes them one from the blessed template, and opens it",
+        made && manifest.body["template"] == "skills" && window,
+        json!({ "skills": now, "manifest": manifest.body, "window": window }),
     );
+    back_to_settings(b, page, wait);
     b.reload(page)?;
     b.until(page, "!!document.getElementById('settings-skills')", wait);
     let again = own_skills(api, session)?;
@@ -5255,10 +5276,10 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     Ok(())
 }
 
-/// The skills in settings (decision 17): the shell made the person's skills
-/// fragment at setup, and its Skills section lists exactly that fragment's
-/// managed set by category, then each agent's own skills (its fragment's
-/// `skills/`), as the agents' computers read them.
+/// The skills in settings (decision 17; Paul, 2026-11-04): the shell made
+/// the person's skills fragment at setup, and Settings' Skills is one row,
+/// Open, with no list of them; an agent's own skills (its fragment's
+/// `skills/`) are its item's Skills in Agents, which opens its files there.
 fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
@@ -5268,48 +5289,38 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         return Ok(());
     };
     s.ok("the shell made the person's skills fragment at setup, beside their agent", true, &skills);
-    // what the fragment's files say: skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md
-    let skills_of = |paths: &[String]| -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = paths
-            .iter()
-            .filter_map(|p| {
-                let parts: Vec<&str> = p.split('/').collect();
-                match parts.as_slice() {
-                    ["skills", c, n, "SKILL.md"] => Some((c.to_string(), n.to_string())),
-                    ["skills", n, "SKILL.md"] => Some(("general".to_string(), n.to_string())),
-                    _ => None,
-                }
-            })
-            .collect();
-        out.sort();
-        out
-    };
-    let paths = |name: &str| -> Result<Vec<String>> {
-        let r = shell(api, session, "GET", &format!("/api/f/{name}/files"), None, &[])?;
-        Ok(r.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str().map(str::to_string)).collect()).unwrap_or_default())
-    };
-    let want = skills_of(&paths(&skills)?);
-    let shown = "JSON.stringify([...document.querySelectorAll('#settings-skills [data-category] [data-skill]')].map((e) => [e.closest('[data-category]').dataset.category, e.dataset.skill]).sort())";
-    let listed = b.until(page, &format!("{shown} !== '[]'"), wait);
-    let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
+    let section = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&skills)), wait);
+    let rows = b.eval(page, "[...document.querySelectorAll('#settings-skills .settings-line, #settings-skills .settings-action-line, #settings-skills [data-skill], #settings-skills [data-category]')].map((e) => e.innerText.trim())")?;
+    let row = b.eval(page, "({ sub: document.querySelector('#settings-skills .settings-sub')?.innerText.trim() ?? '', icon: !!document.querySelector('#settings-skills [data-action=open-skills] svg') })")?;
     s.ok(
-        &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
-        listed && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
-        json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
+        "settings' Skills is one row, Skills with its line and Open (with its icon), listing none of them",
+        section && rows.as_array().is_some_and(|l| l.len() == 1 && l[0].as_str().is_some_and(|t| t.starts_with("Skills") && t.ends_with("Open"))) && row["sub"].as_str().is_some_and(|t| !t.is_empty()) && row["icon"] == true,
+        json!({ "rows": rows, "row": row }),
     );
-    // an agent's own skill, from its fragment, shows beside it
+    // an agent's own skill, in its fragment: its item's Skills opens its files there
     let own = "---\nname: garden-notes\ndescription: What this garden needs.\n---\n";
     let w = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "files": [{ "path": "skills/garden-notes/SKILL.md", "text": own }], "key": "own-skill" })), &[])?;
     b.reload(page)?;
-    let beside = format!("!!document.querySelector('#settings-skills [data-agent={}] [data-skill=\"garden-notes\"]')", js(&agent));
-    let shows = b.until(page, &beside, wait);
-    let own_files = skills_of(&paths(&agent)?);
+    let button = format!("document.querySelector({})", js(&format!("[data-skills-for=\"{agent}\"]")));
+    let offered = b.until(page, &format!("!!{button} && !{button}.hidden"), wait);
+    b.eval(page, &format!("({button}?.click(), true)"))?;
+    let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"tree:{agent}\"] iframe"))), wait);
+    let opened = s.eventually(wait, || b.eval_in_frame(page, &agent, "document.querySelector('#tree .row.active')?.dataset.path ?? null").ok() == Some(json!("skills/garden-notes/SKILL.md")));
     s.ok(
-        "and an agent's own skill shows beside it, as its fragment's files say",
-        w.status == 200 && shows && own_files.contains(&("general".to_string(), "garden-notes".to_string())),
-        json!({ "write": w.status, "own": own_files }),
+        "an agent's item in Agents has Skills, which opens its files at skills/, its own skill open there",
+        w.status == 200 && offered && window && opened,
+        json!({ "write": w.status, "offered": offered, "window": window, "open": b.eval_in_frame(page, &agent, "({ hash: location.hash, active: document.querySelector('#tree .row.active')?.dataset.path ?? null })").unwrap_or(Value::Null) }),
     );
+    back_to_settings(b, page, wait);
     Ok(())
+}
+
+/// Back at settings, loaded, from the window one of its buttons opened (an
+/// app or files window leaves /settings for the desktop), as the person
+/// goes: the sidebar's Settings.
+fn back_to_settings(b: &mut Browser, page: &Page, wait: std::time::Duration) -> bool {
+    let _ = b.eval(page, "(document.getElementById('settings').click(), true)");
+    b.until(page, "location.pathname === '/settings' && !!document.getElementById('settings-skills')", wait)
 }
 
 /// The shell's person in its browser lane: their platform session, and
@@ -7656,18 +7667,20 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
-    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add')", wait);
+    // one button, New agent, opens its dialog
+    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
+    b.click(page, "#settings-page .agent-add-open")?;
+    let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
     // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)
-    let runs = b.eval(page, "[...document.querySelectorAll('#settings-page .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
-    b.eval(page, &fill("#settings-page .agent-add-name", "Wren"))?;
-    b.eval(page, &fill("#settings-page .agent-add-role", "editor"))?;
-    b.eval(page, "(document.querySelector('#settings-page .agent-add').scrollIntoView({ block: 'center' }), true)")?;
+    let runs = b.eval(page, "[...document.querySelectorAll('#new-agent .agent-add-runtime option')].map((o) => [o.value, o.selected])")?;
+    b.eval(page, &fill("#new-agent .agent-add-name", "Wren"))?;
+    b.eval(page, &fill("#new-agent .agent-add-role", "editor"))?;
     let _ = b.screenshot(page, &shots.join("settings-add-agent.png"));
-    b.eval(page, "(document.querySelector('#settings-page .agent-add').requestSubmit(), true)")?;
+    b.eval(page, "(document.querySelector('#new-agent .agent-add').requestSubmit(), true)")?;
     let mut chat = String::new();
     let made = s.eventually(wait, || own_named(api, session, "wren-chat").map(|c| chat = c).is_ok());
-    let opened = made && b.until(page, &format!("location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
+    let opened = made && b.until(page, &format!("!document.getElementById('new-agent')?.open && location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
     // its frame opened for the making's steps (its card, gone once it is ready)
     let card = opened && b.eval(page, &format!("[...document.querySelectorAll('#frames iframe')].find((f) => f.dataset.fragment === {})?.dataset.src.includes('setup%3D1') ?? false", js(&chat)))? == true;
     let listed = b.until(page, &format!("({HEROES}).some((h) => h.name === 'Wren' && h.chats.includes({}))", js(&chat)), agent_wait);
@@ -7681,7 +7694,7 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let _ = b.screenshot(page, &shots.join("desktop-agent-added.png"));
     s.ok(
         "Add agent, in Settings (a name and a role): its chat opens at once, for the making's steps; once made, its own section's hero names it over that chat, its role is its list row's, it says hello first, and its job names no role",
-        offered && card && listed && role() == json!("editor") && hello && !job.is_empty() && !job.contains("editor"),
+        offered && unfolded && card && listed && role() == json!("editor") && hello && !job.is_empty() && !job.contains("editor"),
         json!({ "chat": chat, "hello": seen, "job": job }),
     );
     s.ok(

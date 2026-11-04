@@ -1,14 +1,15 @@
 import { avatar } from "./agent-identity.js";
+import { icon } from "./icons.js";
 import { providerName } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
-// The runtimes a new agent may be made on (Settings' Add agent), each as Add
-// names it; one alone, Add asks nothing. Claude Code is left out for now
+// The runtimes a new agent may be made on (Settings' New agent), each as its
+// Runs on names it; one alone, Add asks nothing. Claude Code is left out for now
 // (Paul, 2026-11-03): its install and self-update grew a computer's /data
 // past its disk, and Skyler's computer could not start. An agent already on
 // Claude Code runs, shows and chats as before. To offer it again, add back
-// ["claude", "Runs on Claude Code"].
-export const NEW_AGENT_RUNTIMES = [["hermes", "Runs on Hermes"]];
+// ["claude", "Claude Code"].
+export const NEW_AGENT_RUNTIMES = [["hermes", "Hermes"]];
 // A Claude agent's model and thinking (agent.json `claude`), as the bridge
 // reads them (images/bridge, Claude's `--model` and `--effort`): Claude
 // Code's own aliases and levels; none is Claude Code's default.
@@ -36,7 +37,7 @@ export function claudeSet(next, field, value) {
 const ROLE_MAX_CHARS = 48;
 const AGENTS_MAX = 16;
 
-export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
+export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
   // put live as any of its files are (POST …/files, then …/deploy). Every
@@ -118,9 +119,12 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     const live = liveOwn();
     return live.has(a.identity) && live.size > 1 && primaryAgent()?.fragment !== a.fragment;
   };
-  // An agent's row's Rename, its picture (Add, Change, Remove), Remove agent
-  // (asked once more, saying what it does), and a line that says what they
-  // did or why not.
+  // An agent's row's Remove agent (asked once more, saying what it does),
+  // a line that says what they did or why not, and what the row puts beside
+  // its name: its Rename, a pencil, as the Apps page puts one beside an
+  // app's (apps-page.js); its picture's Add and Change, a pencil over the
+  // picture itself, shown on hover or focus, its tooltip saying which; and
+  // its Remove, beside the name while it has one.
   function faceControls(a) {
     const said = el("p", "muted agent-face-said");
     said.hidden = true;
@@ -128,19 +132,24 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       said.textContent = text;
       said.hidden = !text;
     };
-    const renameIt = el("button", "quiet", "Rename");
+    const renameIt = el("button", "app-title-edit agent-rename");
     renameIt.type = "button";
+    // (its name as it is now: renamed elsewhere, it follows)
+    named(renameIt, a.fragment, (t) => `Rename ${t}`, "aria-label");
+    renameIt.append(icon("rename"));
     renameIt.dataset.renameAgent = a.fragment;
     renameIt.onclick = () => rename(a.fragment);
-    const picture = el("label", "quiet picture");
-    const label = el("span");
+    // the file input stays in reach of the keyboard, unseen: its focus shows
+    // the pencil and the tooltip; its words (Add a picture, Change picture)
+    // are the label's name, read aloud, and the tooltip's (renderAgentFaces)
+    const picture = el("label", "agent-picture-edit");
+    const label = el("span", "agent-picture-said");
     label.dataset.pictureLabel = a.fragment;
     const file = el("input");
     file.type = "file";
     file.accept = "image/png,image/jpeg,image/webp,image/gif";
     file.dataset.pictureFor = a.fragment;
-    file.hidden = true;
-    picture.append(label, file);
+    picture.append(icon("rename"), label, file);
     const remove = el("button", "quiet", "Remove picture");
     remove.type = "button";
     remove.dataset.pictureRemove = a.fragment;
@@ -160,8 +169,9 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     };
     file.onchange = () => file.files?.[0] && change(file.files[0]);
     remove.onclick = () => change(null);
+    const pictures = el("span", "agent-picture-actions");
+    pictures.append(picture, remove);
     const actions = el("span", "agent-face-actions");
-    actions.append(renameIt, picture, remove);
     if (removable(a)) {
       const ask = el("button", "quiet", "Remove agent");
       ask.type = "button";
@@ -173,7 +183,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
         sure.dataset.removeAgentSure = a.fragment;
         const cancel = el("button", "quiet", "Cancel");
         cancel.type = "button";
-        cancel.onclick = () => actions.replaceChildren(renameIt, picture, remove, ask);
+        cancel.onclick = () => actions.replaceChildren(ask);
         sure.onclick = async () => {
           for (const b of [sure, cancel]) b.disabled = true;
           tell(`Removing ${titleOf(a.fragment)}…`);
@@ -185,14 +195,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
             row?.remove();
           } catch (e) {
             tell(e.message);
-            actions.replaceChildren(renameIt, picture, remove, ask);
+            actions.replaceChildren(ask);
           }
         };
         actions.replaceChildren(what, sure, cancel);
       };
       actions.append(ask);
     }
-    return [actions, said];
+    return [actions, said, renameIt, pictures, picture];
   }
   // Settings' agent rows as the list says now: each one's face and name, and
   // whether it has a picture to change or remove; and its open screens. The
@@ -208,7 +218,10 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       name.dataset.shown = shown;
       name.replaceChildren(avatar(face, "small"), titleOf(fragment));
     }
-    for (const label of document.querySelectorAll("[data-picture-label]")) label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
+    for (const label of document.querySelectorAll("[data-picture-label]")) {
+      label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
+      label.closest(".agent-picture-edit")?.setAttribute("data-tooltip", label.textContent);
+    }
     for (const remove of document.querySelectorAll("[data-picture-remove]")) remove.hidden = !byName(remove.dataset.pictureRemove)?.picture;
     renderNames();
   }
@@ -258,6 +271,85 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     await api("POST", `/api/f/${seg(agent)}/files`, { message: role ? "its role" : "no role", files: [{ path: "fragment.json", text: JSON.stringify(manifest, null, 2) + "\n" }] });
     await api("POST", `/api/f/${seg(agent)}/deploy`, {});
   }
+  // ---- an agent's name and picture in its Edit dialog, written as they
+  // change, as its other fields are: its name its fragment's title (as
+  // Rename writes it: fragment-title.js `retitle`), none or as it was
+  // changing nothing; its picture chosen there, or taken away
+  // (`setPicture`). Neither is said in its summary, which its card's
+  // header shows ----
+  function nameField(a, said) {
+    const field = el("input", "agent-name-field");
+    field.type = "text";
+    field.maxLength = 48;
+    field.dataset.nameFor = a.fragment;
+    field.value = titleOf(a.fragment);
+    named(field, a.fragment, (t) => `${t}'s name`, "aria-label");
+    field.onchange = async () => {
+      const title = field.value.trim();
+      if (!title || title === titleOf(a.fragment)) {
+        field.value = titleOf(a.fragment);
+        return;
+      }
+      field.disabled = true;
+      said.textContent = "Saving…";
+      try {
+        await retitle(a.fragment, title);
+        said.textContent = "Saved.";
+        await load();
+      } catch (e) {
+        said.textContent = e.message;
+        field.value = titleOf(a.fragment);
+      } finally {
+        field.disabled = false;
+      }
+    };
+    const label = settingLabel("Name", field);
+    label.dataset.summary = "skip";
+    return label;
+  }
+  function pictureField(a, said) {
+    const row = el("div", "agent-model-label agent-picture-field");
+    row.dataset.summary = "skip";
+    const shown = el("span", "agent-picture-shown");
+    const choose = el("label", "quiet");
+    const words = el("span");
+    const file = el("input");
+    file.type = "file";
+    file.accept = "image/png,image/jpeg,image/webp,image/gif";
+    file.hidden = true;
+    choose.append(words, file);
+    const remove = el("button", "quiet", "Remove picture");
+    remove.type = "button";
+    const draw = () => {
+      shown.replaceChildren(avatar(agentFace(a.fragment, a.identity)));
+      const has = !!byName(a.fragment)?.picture;
+      words.textContent = has ? "Change picture" : "Add a picture";
+      remove.hidden = !has;
+    };
+    draw();
+    const change = async (chosen) => {
+      file.disabled = remove.disabled = true;
+      said.textContent = chosen ? "Saving its picture…" : "Taking its picture away…";
+      try {
+        await setPicture(a.fragment, chosen);
+        said.textContent = "Saved.";
+        await load();
+        draw();
+      } catch (e) {
+        said.textContent = e.message;
+      } finally {
+        file.disabled = remove.disabled = false;
+        file.value = "";
+      }
+    };
+    file.onchange = () => file.files?.[0] && change(file.files[0]);
+    remove.onclick = () => change(null);
+    const buttons = el("span", "agent-picture-buttons");
+    buttons.append(shown, choose, remove);
+    row.append(el("span", "settings-key", "Picture"), buttons);
+    row.redraw = draw;
+    return row;
+  }
   function roleField(a, said) {
     const field = el("input", "agent-role");
     field.type = "text";
@@ -286,54 +378,147 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     return label;
   }
   // ---- another agent (Paul, 2026-10-30): its name and role, and what it
-  // runs on (FIN-250: Hermes, or Claude Code, chosen here only), then it is
-  // made as the first was, in its own chat (onboarding.js `addAgent`),
-  // which opens. None past what one computer runs. ----
-  function addAgentForm() {
-    if (agents().size >= AGENTS_MAX) return [];
+  // runs on (FIN-250, chosen here only; `NEW_AGENT_RUNTIMES`), asked in a
+  // dialog New agent opens; then it is made as the first was, in its own
+  // chat (onboarding.js `addAgent`), which opens at once for the making's
+  // steps. Asked, the dialog says it is on its way and closes as that chat
+  // opens (Settings hidden), a moment after it said so at the least; a
+  // making that fails before its chat brings the form back, saying why.
+  // None past what one computer runs. ----
+  const CONFIRMED_MS = 1200;
+  let newAgent = null;
+  function newAgentDialog() {
+    if (newAgent?.isConnected) return newAgent;
+    const dialog = el("dialog", "rename-agent agent-dialog");
+    dialog.id = "new-agent";
+    dialog.setAttribute("aria-labelledby", "new-agent-title");
     const form = el("form", "agent-add");
+    const title = el("h2", null, "New agent");
+    title.id = "new-agent-title";
     const name = el("input", "agent-add-name");
     name.type = "text";
     name.maxLength = 48;
-    name.placeholder = "Name";
-    name.setAttribute("aria-label", "New agent's name");
+    name.placeholder = "e.g. Wren";
     const role = el("input", "agent-add-role");
     role.type = "text";
     role.maxLength = ROLE_MAX_CHARS;
-    role.placeholder = "Role, e.g. dev";
-    role.setAttribute("aria-label", "New agent's role");
+    role.placeholder = "e.g. dev";
     // its runtime, as the bridge reads it (agent.json `runtime`; none,
     // Hermes): a choice only when there is one (`NEW_AGENT_RUNTIMES`)
-    const runs = NEW_AGENT_RUNTIMES.length > 1 ? el("select", "agent-add-runtime") : null;
-    runs?.setAttribute("aria-label", "New agent runs on");
-    for (const [value, text] of runs ? NEW_AGENT_RUNTIMES : []) {
-      const o = el("option", null, text);
-      o.value = value;
-      runs.append(o);
-    }
-    const add = el("button", "quiet", "Add agent");
+    const runs = NEW_AGENT_RUNTIMES.length > 1 ? el("select", "agent-model agent-add-runtime") : null;
+    for (const [value, text] of runs ? NEW_AGENT_RUNTIMES : []) runs.append(modelOption(value, text));
+    const fields = el("div", "agent-fields");
+    fields.append(settingLabel("Name", name), settingLabel("Role", role), ...(runs ? [settingLabel("Runs on", runs)] : []));
+    const error = el("p", "form-error");
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    cancel.onclick = () => dialog.close();
+    const add = el("button", "agent-add-submit", "Add agent");
     add.type = "submit";
-    const said = el("p", "muted agent-face-said");
-    said.hidden = true;
+    const buttons = el("div", "rename-actions");
+    buttons.append(cancel, add);
+    form.append(title, fields, error, buttons);
+    // its confirmation, in the form's place
+    const done = el("div", "agent-dialog-done");
+    done.setAttribute("role", "status");
+    done.hidden = true;
+    const mark = el("span", "agent-dialog-check");
+    mark.append(icon("check"));
+    const doneTitle = el("h2");
+    done.append(mark, doneTitle, el("p", null, "Its chat opens next, where it says hello."));
+    dialog.append(form, done);
+    const asking = () => {
+      form.hidden = false;
+      done.hidden = true;
+    };
+    dialog.addEventListener("close", () => {
+      form.reset();
+      error.hidden = true;
+      asking();
+    });
     form.onsubmit = async (event) => {
       event.preventDefault();
-      if (!name.value.trim()) return name.focus();
-      add.disabled = true;
-      // made here, its chat opens when it is (onboarding.js `creatingAgent`)
-      add.textContent = "Adding…";
-      said.hidden = true;
+      const called = name.value.trim();
+      if (!called) return name.focus();
+      const asked = { name: called, role: role.value.trim(), runtime: runs?.value ?? NEW_AGENT_RUNTIMES[0][0] };
+      error.hidden = true;
+      form.hidden = true;
+      done.hidden = false;
+      doneTitle.textContent = `${called} is on its way`;
+      const shown = Date.now();
+      const page = document.getElementById("settings-page");
+      const opened = new Promise((resolve) => {
+        if (page.hidden) return resolve();
+        const watch = new MutationObserver(() => page.hidden && (watch.disconnect(), resolve()));
+        watch.observe(page, { attributes: true, attributeFilter: ["hidden"] });
+      });
+      opened.then(() => setTimeout(() => dialog.open && !done.hidden && dialog.close(), Math.max(0, CONFIRMED_MS - (Date.now() - shown))));
       try {
-        await addAgent({ name: name.value.trim(), role: role.value.trim(), runtime: runs?.value ?? NEW_AGENT_RUNTIMES[0][0] });
+        await addAgent(asked);
       } catch (e) {
-        said.textContent = e.message;
-        said.hidden = false;
-      } finally {
-        add.disabled = false;
-        add.textContent = "Add agent";
+        // still in Settings, no chat opened: asked again, its words kept, saying why
+        if (!dialog.open) dialog.showModal();
+        asking();
+        name.value = asked.name;
+        role.value = asked.role;
+        if (runs) runs.value = asked.runtime;
+        error.textContent = e.message;
+        error.hidden = false;
       }
     };
-    form.append(name, role, ...(runs ? [runs] : []), add);
-    return [form, said];
+    document.body.append(dialog);
+    newAgent = dialog;
+    return dialog;
+  }
+  function addAgentForm() {
+    if (agents().size >= AGENTS_MAX) return [];
+    const open = el("button", "quiet agent-add-open");
+    open.type = "button";
+    open.append(icon("plus"), "New agent");
+    open.onclick = () => {
+      const dialog = newAgentDialog();
+      dialog.showModal();
+      dialog.querySelector(".agent-add-name").focus();
+    };
+    return [open];
+  }
+  // ---- an agent's settings, edited in a dialog its Edit (a pencil) opens: Settings shows
+  // what they are, each its label above it, as text; its fields (each
+  // written as it changes, said under them) are kept in its card, unseen,
+  // and lent to the dialog while it is open ----
+  let editing = null;
+  function editDialog() {
+    if (editing?.dialog.isConnected) return editing;
+    const dialog = el("dialog", "rename-agent agent-dialog");
+    dialog.id = "edit-agent";
+    dialog.setAttribute("aria-labelledby", "edit-agent-title");
+    const form = el("form");
+    form.method = "dialog";
+    const title = el("h2");
+    title.id = "edit-agent-title";
+    const slot = el("div", "agent-dialog-fields");
+    const done = el("button", null, "Done");
+    done.type = "submit";
+    const buttons = el("div", "rename-actions");
+    buttons.append(done);
+    form.append(title, slot, buttons);
+    dialog.append(form);
+    document.body.append(dialog);
+    editing = { dialog, title, slot };
+    return editing;
+  }
+  // what an agent's fields hold, as text: each shown field's label and its
+  // value (a pick's option, both of a mode's picks), none said so
+  function summaryOf(fields) {
+    return [...fields.querySelectorAll(":scope > .agent-model-label")].filter((l) => !l.hidden && l.dataset.summary !== "skip").map((l) => {
+      const shown = [...l.querySelectorAll("input, select")].filter((c) => !c.hidden);
+      const value = shown.map((c) => (c.tagName === "SELECT" ? c.selectedOptions[0]?.textContent ?? "" : c.value.trim())).filter(Boolean).join(" · ");
+      const item = el("div", "agent-summary-item");
+      item.append(el("dt", "settings-key", l.querySelector(".settings-key")?.textContent ?? ""), el("dd", value ? null : "muted", value || "None"));
+      return item;
+    });
   }
   function agentSettings(a, row, modeled) {
     const box = el("div", "agent-setting");
@@ -347,8 +532,44 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     // names (Private, Standard) or a model of a provider the person
     // connected; whether there is one, with a single route, is the agent's
     // own tier's to say (once agent.json is read)
-    const picks = [roleField(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said), ...homePicker(a, said)];
-    box.append(row, ...picks, said);
+    const name = nameField(a, said), picture = pictureField(a, said);
+    const picks = [picture, name, roleField(a, said), ...homePicker(a, said), ...modelPickers(a, modeled, read, write, said), ...claudePickers(a, read, write, said)];
+    const fields = el("div", "agent-fields");
+    fields.append(...picks);
+    const home = el("div", "agent-edit-home");
+    home.hidden = true;
+    home.append(fields, said);
+    const summary = el("dl", "agent-summary");
+    summary.dataset.summaryFor = a.fragment;
+    const summarize = () => summary.replaceChildren(...summaryOf(fields));
+    // drawn again as its fields fill (their reads answer), change, or show
+    new MutationObserver(summarize).observe(fields, { subtree: true, childList: true, attributes: true, attributeFilter: ["hidden"] });
+    fields.addEventListener("change", summarize);
+    read.then(summarize);
+    summarize();
+    // Edit: a pencil at the end of the line of what they are, its tooltip
+    // its name (tooltips.js: an icon button's label)
+    const edit = el("button", "icon-button agent-edit");
+    edit.type = "button";
+    edit.append(icon("rename"));
+    edit.dataset.editAgent = a.fragment;
+    named(edit, a.fragment, (t) => `Edit ${t}`, "aria-label");
+    edit.onclick = () => {
+      const d = editDialog();
+      named(d.title, a.fragment, (t) => `Edit ${t}`);
+      // its name and picture as they are now (renamed, or pictured, elsewhere)
+      name.querySelector("input").value = titleOf(a.fragment);
+      picture.redraw();
+      d.slot.replaceChildren(fields, said);
+      d.dialog.onclose = () => {
+        if (home.isConnected) home.append(fields, said);
+        summarize();
+      };
+      d.dialog.showModal();
+    };
+    const details = el("div", "agent-details");
+    details.append(summary, edit);
+    box.append(row, details, home);
     return box;
   }
   // a pick (`value`) being written (`written`), said under its agent's

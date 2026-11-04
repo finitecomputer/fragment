@@ -565,7 +565,11 @@ impl WorkOs {
                             Some(grant) => q("scope").split(' ').filter(|s| grant.split(' ').any(|g| g == *s)).collect::<Vec<_>>().join(" "),
                             None => q("scope"),
                         };
-                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, q("account")));
+                        // the account signed in as: the test's (`account`), else
+                        // `you`, as a person pressing Connect on the dev stack
+                        // names none (their account `you@oauth.test`)
+                        let account = Some(q("account")).filter(|a| !a.is_empty()).unwrap_or_else(|| "you".into());
+                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, account));
                         back.query_pairs_mut().append_pair("code", &code);
                     }
                     back.query_pairs_mut().append_pair("state", &q("state"));

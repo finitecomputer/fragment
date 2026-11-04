@@ -376,7 +376,9 @@ async function open(path, anchor, keep) {
   drawer(false);
   let view;
   if (!f) {
-    view = say("No such file", `${path} is not in ${fragmentName}.`);
+    // a folder asked that holds no file (`inFolder` found none): git keeps
+    // no empty folder, so it is one with nothing in it yet
+    view = path.endsWith("/") ? say("Nothing here yet", `${path} has no files yet.`) : say("No such file", `${path} is not in ${fragmentName}.`);
   } else if (kind(path) === "image") {
     view = el("div", "media");
     const img = el("img");
@@ -444,6 +446,16 @@ async function first() {
   return lower.get("index.md") || files.find((f) => kind(f.path) === "markdown")?.path || null;
 }
 
+// A folder the hash names (`#/skills/`, or one named without its slash):
+// its first file, its README or index first; its folders open above it
+// (`mark`). None when it names a file, or no folder holding one.
+function inFolder(path) {
+  const dir = path.replace(/\/+$/, "");
+  if (!dir || index.has(dir)) return null;
+  const under = files.map((f) => f.path).filter((p) => p.startsWith(`${dir}/`)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return under.find((p) => /^(readme|index)\.md$/i.test(p.slice(dir.length + 1))) ?? under[0] ?? null;
+}
+
 // The view the hash names. Any view asked for after this one wins: a
 // search still out, a search still waiting for the typing to stop, and a
 // file still being read are all dropped.
@@ -453,7 +465,8 @@ async function go() {
   typing = null;
   searching = inflight = false;
   const [p, anchor] = location.hash.replace(/^#\/?/, "").split("#");
-  const path = decode(p) || (await first());
+  const asked = decode(p);
+  const path = (asked && inFolder(asked)) || asked || (await first());
   if (n !== nav) return;
   if (!path) return landing();
   // the file in the reader already, drawn: only its heading to reach. One

@@ -2,15 +2,16 @@
 //
 // Each runtime offers what it supports, and the shell shows only what an
 // agent's runtime can do (AGENTS.md, "Rules and approvals"): Hermes, the
-// agent's profile (its own page) and its screen (its computer's desktop);
-// Claude Code, neither (Paul, 2026-11-02: "different harness, different
+// agent's profile (its own page), its screen (its computer's desktop) and
+// its own skills (its fragment's skills/, which Hermes installs); Claude
+// Code, none of them (Paul, 2026-11-02: "different harness, different
 // capabilities"). An agent's runtime is its agent.json's `runtime` (none:
 // Hermes), as Settings reads it (agent-settings.js `agentJson`), chosen at
 // its making and never changed: read once a page. Until it is read, or when
 // its read fails, an agent is offered what it was before; a runtime this
 // shell does not know is offered nothing beyond its chats.
 
-export const RUNTIME_OFFERS = { hermes: ["profile", "screen"], claude: [] };
+export const RUNTIME_OFFERS = { hermes: ["profile", "screen", "skills"], claude: [] };
 
 export function createRuntimes({ agentJson, agents, own, byName }) {
   const runtimes = new Map();

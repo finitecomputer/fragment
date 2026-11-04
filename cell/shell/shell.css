@@ -39,6 +39,25 @@
   --primary:var(--text-primary); --primary-foreground:var(--bg-window);
   --font-sans:"Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* the type library: finite-mono's dashboard's (finitecomputer-v2/apps/dashboard/
+     src/styles/typography.css), its styles as font shorthands, tracking 0,
+     and a control's words and a field's as its Button and Input set theirs
+     (body's size at medium; 16px where a phone zooms into smaller, body's
+     size from 48rem). Settings and its dialogs take only these. */
+  --type-display: 600 2rem/1.1 var(--font-sans);
+  --type-title-1: 600 1.75rem/1.15 var(--font-sans);
+  --type-title-2: 600 1.375rem/1.2 var(--font-sans);
+  --type-title-3: 600 1.125rem/1.25 var(--font-sans);
+  --type-body-lg: 400 .9375rem/1.45 var(--font-sans);
+  --type-body: 400 .875rem/1.45 var(--font-sans);
+  --type-body-strong: 600 .875rem/1.45 var(--font-sans);
+  --type-body-sm: 400 .8125rem/1.4 var(--font-sans);
+  --type-caption: 500 .75rem/1.35 var(--font-sans);
+  --type-label: 600 .6875rem/1.2 var(--font-sans);
+  --type-mono: 400 .8125rem/1.45 var(--font-mono);
+  --type-mono-sm: 400 .75rem/1.4 var(--font-mono);
+  --type-control: 500 .875rem/1.45 var(--font-sans);
+  --type-field: 400 1rem/1.45 var(--font-sans);
   --wallpaper-dark-opacity: 1;
   color-scheme: dark;
 }
@@ -57,6 +76,7 @@
   }
 }
 
+@media (min-width: 48rem) { :root { --type-field: 400 .875rem/1.45 var(--font-sans); } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 /* A native app's page (Paul, 2026-10-13: "staying strictly in the
@@ -309,16 +329,17 @@ body.reordering iframe { pointer-events: none; }
 .row .unread { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent-blue); color: var(--bg-window); font: 700 11px/20px var(--font-sans); text-align: center; }
 .topbar { min-height: 76px; gap: 10px; }
 .frames { border-top: 0; }
-.rename-agent { padding: 28px; width: min(400px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-card); color: var(--text-primary); }
+.rename-agent { font: var(--type-body); padding: 28px; width: min(400px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-card); color: var(--text-primary); }
 .rename-agent::backdrop { background: rgba(0,0,0,.5); }
-.rename-agent h2 { margin: 0 0 8px; font-size: 21px; }
-.rename-agent p { color: var(--text-secondary); font-size: 14px; }
-.rename-agent label { display: block; margin: 24px 0 8px; font-size: 13px; }
-.rename-agent input { width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
+.rename-agent h2 { font: var(--type-title-2); margin: 0 0 8px; }
+.rename-agent p { font: var(--type-body); color: var(--text-secondary); }
+.rename-agent label { font: var(--type-body-sm); display: block; margin: 24px 0 8px; }
+.rename-agent input { font: var(--type-field); width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; color: inherit; background: var(--bg-window); }
 .rename-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
-.rename-actions button { padding: 9px 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); }
-.rename-actions button[type=submit] { background: var(--text-primary); color: var(--bg-window); }
-.rename-actions button[type=submit]:disabled { opacity: .45; }
+/* a dialog's buttons: pills that keep their size and colours in every state
+   (disabled while it saves or arms: fragment-title.js holds its width) */
+.rename-actions button { font: var(--type-control); min-height: 40px; padding: 0 18px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-muted); }
+.rename-actions button[type=submit] { border-color: var(--text-primary); background: var(--text-primary); color: var(--bg-window); }
 button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 @media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .topbar .grow { display: none; } }
 
@@ -423,7 +444,7 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .avatar-stack[data-count="3"] > .agent-avatar:nth-child(1) { left: calc((var(--stack) - var(--dot)) / 2); }
 .avatar-stack[data-count="3"] > .agent-avatar:nth-child(2) { left: 0; right: auto; }
 .avatar-stack[data-count="3"] > .agent-avatar:nth-child(3) { right: 0; bottom: 0; z-index: 1; }
-.rename-actions button:disabled { opacity: .5; cursor: default; }
+.rename-actions button:disabled { cursor: default; }
 
 /* ---- what the handoff did not draw, in its look ---- */
 .muted { color: var(--text-tertiary); }
@@ -509,62 +530,124 @@ iframe[data-blocked] { display: none; }
 /* its width, not the window's, lays settings out: a window opened beside them narrows it;
    its scrollbar's room is kept while it loads, short, so nothing moves once it scrolls */
 .page { flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; border-top: 1px solid var(--border); padding: 0; scroll-padding-top: 20px; container: settings / inline-size; }
+/* Settings' words are the type library's, body unless a rule says which */
+#settings-page { font: var(--type-body); }
+/* emphasis (who is signed in) at the library's heaviest weight, not the browser's bold */
+#settings-page strong { font-weight: 600; }
 .settings-layout { display: grid; grid-template-columns: 176px minmax(0, 720px); justify-content: center; gap: clamp(28px, 4vw, 64px); max-width: 1160px; min-height: 100%; margin: 0 auto; padding: 34px clamp(24px, 4vw, 56px) 88px; }
 .settings-nav { position: sticky; top: 24px; align-self: start; display: flex; flex-direction: column; gap: 2px; }
-.settings-nav-title { padding: 10px 12px 14px; color: var(--text-tertiary); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-.settings-nav-link { min-height: 36px; padding: 7px 12px; border: 0; border-radius: 8px; background: none; color: var(--text-secondary); text-align: left; font-size: 14px; line-height: 1.35; transition: background .15s, color .15s; }
+.settings-nav-title { font: var(--type-label); padding: 10px 12px 14px; color: var(--text-tertiary); text-transform: uppercase; }
+.settings-nav-link { font: var(--type-body); min-height: 36px; padding: 7px 12px; border: 0; border-radius: 8px; background: none; color: var(--text-secondary); text-align: left; transition: background .15s, color .15s; }
 .settings-nav-link:hover, .settings-nav-link:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
-.settings-nav-link[aria-current="location"] { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
+.settings-nav-link[aria-current="location"] { background: var(--bg-active); color: var(--text-primary); }
 .settings-content { min-width: 0; }
 /* room for the last section's heading to reach the scroll handler's line */
 .settings-content:has(.settings-section) { padding-bottom: calc(100vh - 250px); }
 .settings-intro { padding: 2px 0 8px; }
-.settings-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; text-wrap: balance; }
-.settings-intro p { margin: 0; color: var(--text-secondary); font-size: 14px; }
+.settings-intro h1 { font: var(--type-title-1); margin: 0 0 6px; text-wrap: balance; }
+@media (min-width: 48rem) { .settings-intro h1 { font-size: 2rem; } }
+.settings-intro p { font: var(--type-body); margin: 0; color: var(--text-secondary); }
 /* settings loading: in the loaded page's layout, where its first section's heading comes */
-.settings-loading { margin: 22px 0 0; font-size: 14px; }
+.settings-loading { font: var(--type-body); margin: 22px 0 0; }
 .settings-section { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 0; min-width: 0; margin-top: 64px; padding: 8px 22px 16px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); scroll-margin-top: 64px; }
-.settings-section h2 { position: absolute; top: -42px; left: 0; margin: 0; font-size: 18px; font-weight: 600; line-height: 1.35; letter-spacing: -.018em; }
+.settings-section h2 { font: var(--type-title-3); position: absolute; top: -42px; left: 0; margin: 0; }
 .settings-section h2:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 4px; border-radius: 2px; }
 .settings-section > p { margin: 0; padding: 12px 2px; }
-.settings-section > p.muted { color: var(--text-secondary); font-size: 14px; line-height: 1.55; }
+/* a section's intro: the design's line-height (1.55, roomier than a row's
+   text), its lines kept even where it wraps */
+.settings-section > p.muted { font: var(--type-body); line-height: 1.55; color: var(--text-secondary); text-wrap: pretty; }
 .settings-section > .connector-tags { display: flex; gap: 6px; padding: 12px 2px 0; }
-.settings-section .settings-line { display: flex; align-items: center; gap: 18px; width: 100%; padding: 15px 2px; margin: 0; border-bottom: 1px solid var(--border-strong); font-size: 14px; }
+.settings-section .settings-line { font: var(--type-body); display: flex; align-items: center; gap: 18px; width: 100%; padding: 15px 2px; margin: 0; border-bottom: 1px solid var(--border-strong); }
 .settings-line:last-child { border-bottom: 0; }
-.settings-key { flex: 0 0 156px; color: var(--text-secondary); }
-.settings-value { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-.settings-info { display: flex; align-items: baseline; flex: 1; min-width: 0; gap: 18px; }
+/* a row: its label above its content, its actions (when it has any) anchored on the right */
+.settings-key { font: var(--type-body-sm); flex: none; color: var(--text-secondary); }
+.settings-value { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.settings-section .settings-line:has(> .settings-key + .settings-value) { flex-direction: column; align-items: flex-start; gap: 3px; }
+.settings-info { display: flex; flex-direction: column; align-items: flex-start; flex: 1; min-width: 0; gap: 3px; }
 .settings-action-line .settings-key { flex: 1; }
 .settings-control { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-width: 0; margin-left: auto; }
 .settings-control .settings-actions { margin: 0; }
-.settings-section .settings-control .picture { margin: 0; }
-.settings-warning { color: var(--danger-text); font-size: 14px; }
-.settings-section .row { align-self: flex-end; width: auto; max-width: 100%; min-height: 36px; padding: 5px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); }
+.settings-warning { font: var(--type-body); color: var(--danger-text); }
+/* a row's short line under its label, where its value would be: what it does */
+.settings-value.settings-sub { font: var(--type-body-sm); color: var(--text-secondary); }
+/* a settings button with its icon before its words (computer.js) */
+.settings-section .quiet.with-icon { display: inline-flex; align-items: center; gap: 7px; padding-left: 13px; }
+.settings-section .quiet.with-icon svg { flex: none; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+/* Credit this month: the included credit used, a bar under what is left (billing.js) */
+.credit-bar { position: relative; display: block; width: 100%; max-width: 420px; height: 8px; margin-top: 8px; border-radius: 999px; background: var(--border-strong); overflow: hidden; }
+.credit-bar-fill { display: block; height: 100%; min-width: 0; border-radius: inherit; background: var(--accent-blue); transition: width .3s ease; }
+.credit-bar.owed .credit-bar-fill { background: var(--danger-text); }
+.credit-said { font: var(--type-caption); display: block; margin-top: 2px; color: var(--text-secondary); }
+@media (prefers-reduced-motion: reduce) { .credit-bar-fill { transition: none; } }
+@media (forced-colors: active) { .credit-bar { border: 1px solid CanvasText; } .credit-bar-fill { background: CanvasText; } }
+.settings-section .row { font: var(--type-control); align-self: flex-end; width: auto; max-width: 100%; min-height: 36px; padding: 5px 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); }
 .settings-section .row:hover { background: var(--bg-hover); }
 .settings-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 4px; }
 .settings-section > .settings-actions { width: 100%; margin: 0; padding: 12px 2px; }
 .settings-actions form { margin: 0; }
-.settings-section .quiet { min-height: 34px; height: auto; padding: 6px 15px; border-radius: 999px; background: var(--bg-active); font-size: 13px; line-height: 1.45; transition: background .15s; }
+.settings-section .quiet { font: var(--type-control); min-height: 34px; height: auto; padding: 6px 15px; border-radius: 999px; background: var(--bg-active); transition: background .15s; }
 .settings-section .quiet:hover { background: var(--bg-hover); }
 .settings-section .quiet:disabled { opacity: .55; cursor: default; }
 .settings-section > .quiet { align-self: flex-end; margin: 12px 2px; }
-.settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select { min-height: 34px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
+/* the shell's form: fields (inputs, selects, text areas) are rounded rectangles, 10px, on the card's white; buttons are pills */
+.settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select, .agent-dialog input:not([type="file"]):not([type="checkbox"]), .agent-dialog select { font: var(--type-field); min-height: 36px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
 .settings-section input[type="checkbox"] { accent-color: var(--accent-blue); }
+/* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
+label.settings-line { cursor: pointer; }
+.settings-section input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
+.settings-section input.settings-switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .15s; }
+.settings-section input.settings-switch:checked { background: var(--accent-blue); }
+.settings-section input.settings-switch:checked::before { transform: translateX(16px); }
+.settings-section input.settings-switch:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.settings-section input.settings-switch:disabled { opacity: .55; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .settings-section input.settings-switch, .settings-section input.settings-switch::before { transition: none; } }
+@media (forced-colors: active) { .settings-section input.settings-switch { border: 1px solid CanvasText; } .settings-section input.settings-switch::before { background: CanvasText; } }
 /* Your data's rows, drawn again as its export changes, are the section's own */
 .settings-export { display: contents; }
 .settings-export > p { margin: 0; padding: 12px 2px; }
-.settings-value.mono, .settings-section code { font: 500 12.5px/1.6 var(--font-mono); }
+.settings-value.mono, .settings-section code { font: var(--type-mono); }
 .settings-section p code { padding: 2px 5px; border-radius: 5px; background: var(--chat-code); }
 .settings-section p a { color: var(--text-primary); text-underline-offset: 3px; }
-.settings-section pre.command { width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); font: 500 12.5px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
-/* settings' Build with Claude Code or Codex: the prompt to copy (16px: no zoom as it takes focus), the install folded */
-.settings-section textarea.build-prompt { width: 100%; min-height: 80px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 16px; line-height: 1.5; resize: vertical; }
-.settings-section textarea.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+.settings-section pre.command { font: var(--type-mono); width: 100%; margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
+/* settings' Build with Claude Code or Codex: the prompt to copy, one line, its Copy an icon at its end, the install folded */
+.build-prompt-field { position: relative; align-self: stretch; margin: 4px 2px 6px; }
+/* the prompt as the commands are: code on code's ground; 16px on a phone, which then does not zoom */
+.settings-section .build-prompt-field input.build-prompt { width: 100%; min-height: 44px; padding: 10px 48px 10px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--chat-code); color: var(--text-primary); font: var(--type-mono); text-overflow: ellipsis; }
+@media (max-width: 47.99rem) { .settings-section .build-prompt-field input.build-prompt { font-size: 1rem; } }
+.build-copy { right: 7px; }
+.settings-section input.build-prompt:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+.build-copy { position: absolute; top: 50%; right: 3px; width: 30px; height: 30px; transform: translateY(-50%); }
+.build-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.build-copy-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-install { width: 100%; padding: 4px 2px 8px; }
-.settings-install summary { width: max-content; padding: 6px 0; color: var(--text-secondary); font-size: 13.5px; cursor: pointer; }
-.settings-install p { margin: 8px 0; font-size: 14px; }
-.settings-section .picture { margin-top: 12px; margin-bottom: 2px; }
-.settings-section .picture img { width: 24px; height: 24px; }
+.settings-install summary { font: var(--type-body-sm); display: inline-flex; align-items: center; gap: 6px; width: max-content; padding: 6px 0; color: var(--text-secondary); cursor: pointer; list-style: none; }
+.settings-install summary::-webkit-details-marker { display: none; }
+.settings-install summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(-90deg); transition: transform .15s; }
+.settings-install[open] summary svg { transform: none; }
+@media (prefers-reduced-motion: reduce) { .settings-install summary svg { transition: none; } }
+/* a command, its copy icon in its corner */
+.command-block { position: relative; width: 100%; }
+.settings-section .command-block pre.command { padding-right: 52px; }
+.command-copy { position: absolute; top: 7px; right: 7px; width: 30px; height: 30px; }
+.command-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.settings-install p { font: var(--type-body); margin: 8px 0; }
+/* Account's first row: the person's picture (their initial where there is
+   none), a pencil over it on hover or focus, then who is signed in */
+.profile .settings-info.profile-info { flex-direction: row; align-items: center; gap: 14px; }
+.profile-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.profile-picture { position: relative; flex: none; width: 52px; height: 52px; border-radius: 50%; cursor: pointer; }
+.profile-picture:has(input:disabled) { cursor: default; }
+.profile-picture:has(input:focus-visible) { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.profile-avatar { font: var(--type-title-2); position: relative; display: grid; place-items: center; width: 100%; height: 100%; border-radius: 50%; overflow: hidden; background: var(--bg-active); box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text-secondary); }
+.profile-picture .profile-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; object-fit: cover; }
+.profile-picture-over { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: rgba(0,0,0,.5); color: #fff; opacity: 0; transition: opacity .15s; }
+.profile-picture:hover .profile-picture-over, .profile-picture:has(input:focus-visible) .profile-picture-over { opacity: 1; }
+.profile-picture-over svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-picture input, .profile-picture-words { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; }
+.profile-said { font: var(--type-body-sm); margin: 2px 0 0; color: var(--text-secondary); }
+.profile-said.form-error { color: var(--danger-text); }
+@media (hover: none) { .profile-picture-over { opacity: 1; background: rgba(0,0,0,.28); } }
+@media (prefers-reduced-motion: reduce) { .profile-picture-over { transition: none; } }
 @container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
   /* as tall before its links come (settings loading) as with them: a link's 36px, padded */
@@ -577,15 +660,20 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
   .settings-nav { min-height: 57px; margin: -16px -20px 22px; padding: 10px 20px; }
-  .settings-section .settings-line:not(.settings-action-line):not(.settings-line-with-action) { flex-direction: column; align-items: flex-start; gap: 2px; }
-  .settings-info { flex-direction: column; gap: 2px; }
-  .settings-info .settings-key { flex: none; }
-  .settings-control { flex: none; max-width: 58%; }
-  .settings-key { flex: none; }
-  /* a line whose buttons go under it (who is signed in, and a guest's seat) */
-  .settings-section .settings-stack { flex-wrap: wrap; row-gap: 10px; }
-  .settings-stack .settings-control { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
-  .settings-stack .settings-actions { justify-content: flex-start; }
+  /* on a phone, a row's buttons (and a field beside them) go under what it
+     says, each the row's width, one under another; a switch stays beside
+     its row, as it is not a button */
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) { flex-direction: column; align-items: stretch; gap: 12px; }
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) .settings-control { flex: none; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; max-width: none; margin-left: 0; }
+  .settings-control :is(.settings-actions, .agent-face-actions, form) { display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: 100%; margin: 0; }
+  .settings-control .agent-face-actions:empty { display: none; }
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) .settings-control :is(button, input, label.quiet) { width: 100%; max-width: none; justify-content: center; }
+  .settings-section :is(.settings-line-with-action:not(:has(.settings-switch)), .settings-action-line) .settings-control .row { align-self: stretch; }
+  .settings-section > :is(.quiet, .agent-add-open) { align-self: stretch; justify-content: center; }
+  .settings-section > .settings-actions { flex-direction: column; align-items: stretch; }
+  .settings-section > .settings-actions > button { width: 100%; justify-content: center; }
+  /* an agent's summary two to a line on a phone */
+  .agent-details .agent-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
 }
@@ -593,60 +681,175 @@ iframe[data-blocked] { display: none; }
   .settings-nav { scrollbar-width: none; }
   .settings-nav::-webkit-scrollbar { display: none; }
 }
-/* settings' connections: one block per provider (shell.js connectionsSection) */
-.provider { width: 100%; display: flex; flex-direction: column; gap: 8px; padding: 16px 2px; border-bottom: 1px solid var(--border-strong); }
-.provider:last-child { border-bottom: 0; }
-.provider-head { display: flex; align-items: flex-start; gap: 12px; }
-.provider-identity { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
-.provider-head .settings-actions { flex: none; max-width: 60%; margin: 0; }
-.provider-detail { font-size: 12.5px; line-height: 1.45; }
+/* settings' connections (Skyler's design, 2026-11-04): a card per provider,
+   in two groups, each opening its sheet (connections.js connectionsSection) */
+/* spaced by what belongs together (Paul, 2026-11-04): a group's heading and
+   its line hug (about 4 px), its header sits 12 px over its cards, its cards
+   12 px apart (the grid's gap), and a group 30 px under the one before, as the
+   first is under the intro (its 12 px padding, and this 14 px) */
+.provider-group-head { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; margin: 14px 0 12px; padding: 0 2px; }
+.provider-grid + .provider-group-head { margin-top: 28px; }
+.provider-group-head h3 { margin: 0; font: var(--type-body-strong); }
+.provider-group-head p { margin: 0; font: var(--type-body-sm); color: var(--text-tertiary); }
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; width: 100%; }
+.provider { position: relative; display: grid; grid-template-columns: 36px 1fr auto; align-items: start; gap: 4px 12px; min-height: 96px; padding: 14px 14px 13px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface-muted); transition: background .15s; }
+.provider:hover { background: var(--bg-active); }
+.provider-open { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: inherit; background: none; cursor: pointer; }
+.provider-open:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 2px; }
+/* its tile: its name's first letter (no provider's logo is ours to show) */
+.provider-tile { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; background: var(--bg-card); box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text-primary); font: var(--type-body-strong); }
+.provider-tile.big { width: 48px; height: 48px; border-radius: 12px; font: 600 1.25rem/1 var(--font-sans); }
+.provider-body { min-width: 0; }
+.provider-name { display: block; font: var(--type-body-strong); }
+.provider-sub { display: block; margin-top: 2px; font: var(--type-body-sm); color: var(--text-secondary); }
+/* its note whole, wrapped (one line of the deployment's, at most 280
+   characters: a clamp cut its words in half); a key's price its own line */
+.provider-price { display: block; }
+.provider-foot { grid-column: 2 / 4; margin-top: 6px; font: var(--type-caption); color: var(--text-tertiary); }
+/* its light: on, green; waiting on the person, amber; off, an empty ring */
+.provider-state { display: grid; place-items: center; width: 22px; height: 22px; }
+.provider-light { display: block; width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--text-tertiary); }
+.provider-light.on { background: var(--success); box-shadow: none; }
+.provider-light.warn { background: #b7791f; box-shadow: none; }
+.provider-sheet { width: min(520px, calc(100vw - 24px)); max-height: min(720px, calc(100dvh - 48px)); padding: 0; border: 1px solid var(--border-strong); border-radius: 20px; background: var(--bg-window); color: var(--text-primary); box-shadow: 0 24px 80px rgba(0,0,0,.35); font: var(--type-body); }
+.provider-sheet:focus { outline: none; }
+.provider-sheet::backdrop { background: rgba(0,0,0,.4); }
+.provider-sheet-head { position: relative; display: grid; grid-template-columns: 48px 1fr; gap: 14px; align-items: center; padding: 22px 56px 16px 22px; }
+.provider-sheet-head h3 { margin: 0; font: 600 1.1875rem/1.3 var(--font-sans); letter-spacing: -.015em; }
+.provider-kind { margin: 2px 0 0; font: var(--type-body-sm); color: var(--text-secondary); }
+.provider-close { position: absolute; top: 12px; right: 12px; }
+.provider-sheet-body { padding: 0 22px 22px; }
+.provider-about { margin: 0 0 14px; color: var(--text-secondary); }
+.provider-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 14px; }
+.provider-chips span { display: inline-flex; align-items: center; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px; font: var(--type-body-sm); }
+.provider-status { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 8px 8px 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--surface-muted); font: var(--type-body); }
+.provider-status .provider-state { width: 12px; height: 12px; flex: none; }
+.provider-status-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.provider-account { font: var(--type-body-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
+.provider-status .settings-actions { flex: none; margin: 0; }
+.provider-status .quiet { font: var(--type-control); min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; background: var(--bg-active); color: var(--text-primary); }
+.provider-status [data-action=disconnect], .provider-status [data-action=remove-key] { color: var(--danger-text); }
+.provider-details { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0 2px; }
+.provider-detail { font: var(--type-body-sm); }
 .provider-said:empty { display: none; }
-.provider-name { font-weight: 600; }
-.provider-kind { font-size: 12px; color: var(--text-tertiary); }
-.provider-state { font-size: 13px; color: var(--text-secondary); }
-.provider-account { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.provider-state.connected, .provider-state.set, .provider-state.offered { color: var(--success); }
-.provider-state.needs_reauthorization, .provider-state.disconnecting { color: var(--danger-text); }
-.provider-agents, .provider-uses { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13px; }
-.provider-agents { justify-content: flex-end; }
-.provider-agents .settings-key { margin-right: auto; }
-.provider .settings-key { flex: 0 0 auto; min-width: 80px; font-size: 13px; }
-.provider .use { color: var(--text-secondary); }
-.provider .use + .use::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
-.provider-accounts { display: flex; flex-direction: column; gap: 8px; padding-left: 12px; border-left: 2px solid var(--border-strong); }
-.provider-account-row { display: flex; flex-direction: column; gap: 4px; }
-.provider-account-pick { height: 26px; max-width: 220px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 12.5px; }
+.provider-manage { font: var(--type-body-sm); color: var(--text-secondary); }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
-.provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
+.provider-key input { font: var(--type-field); height: 32px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
+.provider-accounts { display: flex; flex-direction: column; gap: 8px; margin: 0 0 8px; padding-left: 12px; border-left: 2px solid var(--border-strong); }
+.provider-account-row { display: flex; flex-direction: column; gap: 4px; }
+.provider-account-row .provider-head { display: flex; align-items: flex-start; gap: 12px; }
+.provider-account-row .provider-identity { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.provider-account-row .provider-state { display: inline; width: auto; height: auto; font: var(--type-body-sm); color: var(--text-secondary); }
+.provider-account-row .provider-state.connected { color: var(--success); }
+.provider-account-row .provider-state.needs_reauthorization, .provider-account-row .provider-state.disconnecting { color: var(--danger-text); }
+.provider-account-pick { font: var(--type-field); height: 30px; max-width: 220px; margin: 0 0 6px auto; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
+.provider-block { padding: 14px 0 0; margin-top: 8px; border-top: 1px solid var(--border-strong); }
+.provider-block.dim { opacity: .5; }
+.provider-block h4 { margin: 0 0 10px; font: var(--type-label); letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); }
+.provider-agents { display: flex; flex-direction: column; }
+.provider-agent { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.provider-agent .settings-agent-name { display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0; font: var(--type-control); }
+.provider-agent .use { font: var(--type-body-sm); color: var(--text-tertiary); }
+.provider-switch { position: relative; flex: none; width: 36px; height: 22px; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
+.provider-switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: translate .18s; }
+.provider-switch[aria-pressed="true"] { background: var(--success); }
+.provider-switch[aria-pressed="true"]::after { translate: 14px 0; }
+.provider-switch:disabled { opacity: .6; }
+.provider-facts { display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; margin: 0; font: var(--type-body-sm); }
+.provider-facts dt { color: var(--text-tertiary); }
+.provider-facts dd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.provider-facts code { font: var(--type-mono-sm); padding: 1px 5px; border-radius: 5px; background: var(--chat-code); }
+.provider-model { padding: 1px 8px; border: 1px solid var(--border-strong); border-radius: 999px; }
+@media (max-width: 520px) {
+  .provider-facts { grid-template-columns: 1fr; gap: 2px 0; }
+  .provider-facts dd { margin-bottom: 6px; }
+}
 /* settings' agents: a platform route, or independent BYO Fast/Deep picks */
-.agent-setting { width: 100%; display: flex; flex-direction: column; gap: 4px; padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
+.agent-setting { width: 100%; display: flex; flex-direction: column; gap: 14px; padding: 14px 2px; border-bottom: 1px solid var(--border-strong); }
 .agent-setting:last-child { border-bottom: 0; }
 .agent-setting .settings-line { padding: 0 0 4px; border: 0; }
-.settings-agent-name { display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); font-weight: 600; }
-.agent-model-label { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; font-size: 13px; }
-.agent-model-label .settings-key { flex: 0 0 auto; min-width: 80px; }
-.agent-model-label::after { content: ""; position: absolute; top: 50%; right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
-.settings-section select.agent-model { width: min(320px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
-.settings-section select.agent-model:hover { background: var(--bg-hover); }
-.settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
+.settings-agent-name { font: var(--type-body-strong); display: inline-flex; align-items: center; gap: 8px; color: var(--text-primary); }
+.settings-agent-title { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+/* an agent's picture's buttons, small, by its picture and name */
+.agent-picture-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: 10px; }
+.settings-section .agent-picture-actions .quiet { font: var(--type-control); min-height: 28px; padding: 3px 11px; }
+/* an agent's picture in Settings, larger, and over it the pencil that changes
+   it: shown on hover or as its file input takes focus; always, faintly,
+   where nothing hovers */
+.agent-face-edit { position: relative; display: inline-flex; align-items: center; }
+.settings-agent-name { gap: 10px; }
+.settings-agent-name .agent-avatar.small { width: 36px; height: 36px; }
+.agent-picture-edit { position: absolute; top: 50%; left: 0; display: grid; place-items: center; width: 36px; height: 36px; margin-top: -18px; border-radius: 10px; background: rgba(0,0,0,.5); color: #fff; opacity: 0; cursor: pointer; transition: opacity .15s; }
+.agent-picture-edit:hover, .agent-picture-edit:has(input:focus-visible) { opacity: 1; }
+/* round over a picture, as it is; square, its corners softened, over the cube, which fills its square */
+.agent-face-edit:has(.agent-avatar.picture) .agent-picture-edit { border-radius: 50%; }
+.agent-picture-edit:has(input:focus-visible) { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.agent-picture-edit:has(input:disabled) { cursor: default; }
+.agent-picture-edit svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.agent-picture-edit input, .agent-picture-said { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; }
+@media (hover: none) { .agent-picture-edit { opacity: 1; background: rgba(0,0,0,.28); } }
+@media (prefers-reduced-motion: reduce) { .agent-picture-edit { transition: none; } }
+/* an agent's fields (its role, where it reaches you, its model), and a new agent's: one compact grid, each its label above it */
+.agent-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; width: 100%; }
+.agent-fields input { width: 100%; height: 36px; }
+.agent-model-label:has(> input)::after { content: none; }
+.agent-model-label { font: var(--type-body-sm); position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; }
+/* the chevron sits in the pick under the label: its middle, 18px above the bottom */
+.agent-model-label::after { content: ""; position: absolute; top: calc(100% - 18px); right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+:is(.settings-section, .agent-dialog) select.agent-model { font: var(--type-field); width: 100%; height: 36px; min-width: 0; padding: 0 34px 0 12px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); text-overflow: ellipsis; cursor: pointer; }
+:is(.settings-section, .agent-dialog) select.agent-model:disabled { opacity: .55; cursor: default; }
 /* Settings' Agents: an agent's role, and another agent to add (agent-settings.js) */
 .agent-role-label::after { content: none; }
-.settings-section input.agent-role { width: min(320px, 62%); height: 36px; }
-.agent-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 0 4px; }
-.agent-add input { flex: 1 1 140px; min-width: 0; }
-.agent-mode-picks { display: flex; gap: 8px; width: min(460px, 74%); min-width: 0; }
+:is(.settings-section, .agent-dialog) input.agent-role { width: 100%; height: 36px; }
+/* New agent: one button, which opens its dialog */
+.settings-section > .agent-add-open { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin: 14px 2px 4px; }
+.agent-add-open svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
+/* an agent's settings as text, each its label above it (agent-settings.js
+   `summaryOf`), edited in a dialog; a new agent asked in one, which says it
+   is on its way before its chat opens */
+/* an agent's Remove agent as tall as its Open beside it */
+.agent-setting .settings-control .quiet { min-height: 36px; }
+/* the line of what an agent is, its Edit (a pencil) at its end */
+.agent-details { display: flex; align-items: center; gap: 12px; width: 100%; }
+.agent-details .agent-summary { flex: 1; min-width: 0; }
+.agent-edit svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.agent-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 16px; width: 100%; margin: 0; }
+.agent-summary-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.agent-summary dd { font: var(--type-body); margin: 0; overflow-wrap: anywhere; }
+.agent-summary dd.muted { color: var(--text-tertiary); }
+.agent-dialog { width: min(440px, calc(100vw - 32px)); }
+/* a dialog's fields: one column, each its label above it */
+.agent-dialog .agent-fields { grid-template-columns: 1fr; gap: 16px; margin-top: 20px; }
+.agent-dialog .quiet { font: var(--type-control); min-height: 36px; padding: 0 15px; background: var(--bg-active); }
+.agent-dialog .quiet:hover { background: var(--bg-hover); }
+/* a picture's chooser is a label (its file input inside): a button like the
+   dialog's others, not `.rename-agent label`'s field label, beside its avatar */
+.agent-dialog label.quiet { display: inline-flex; align-items: center; justify-content: center; margin: 0; cursor: pointer; }
+.agent-picture-field::after { content: none; }
+.agent-picture-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agent-picture-shown { display: inline-flex; margin-right: 4px; }
+.agent-picture-shown .agent-avatar { width: 36px; height: 36px; }
+.agent-dialog .agent-model-label { display: flex; margin: 0; }
+.agent-dialog .agent-model-said { font: var(--type-caption); display: block; margin-top: 12px; }
+.agent-dialog .agent-model-said:empty { display: none; }
+.agent-dialog-done { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 0 10px; text-align: center; }
+.agent-dialog-done h2 { margin: 10px 0 0; }
+.agent-dialog-done p { margin: 0; }
+.agent-dialog-check { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%; background: var(--success); color: #fff; }
+.agent-dialog-check svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+@media (prefers-reduced-motion: no-preference) { .agent-dialog-done:not([hidden]) .agent-dialog-check { animation: agent-confirmed .32s cubic-bezier(.2, .9, .3, 1.3) both; } }
+@keyframes agent-confirmed { from { transform: scale(.6); opacity: 0; } to { transform: none; opacity: 1; } }
+.agent-mode-picks { display: flex; gap: 8px; width: 100%; min-width: 0; }
 .agent-mode-picks select.agent-model { width: 100%; flex: 1; }
 .agent-mode-picks select.agent-effort { flex: 0 0 86px; }
-.agent-model-label:not(.has-modes) .agent-mode-picks { width: min(320px, 62%); }
 .agent-model-label.has-modes::after { display: none; }
 .agent-model-label.has-modes .settings-key { min-width: 32px; }
-.agent-model-label.has-modes .agent-mode-picks { width: min(460px, calc(100% - 40px)); }
 .agent-model-label.has-modes select.agent-model { appearance: auto; padding: 0 10px; }
-.agent-model-said { font-size: 12.5px; }
+.agent-model-said { font: var(--type-caption); }
 .chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
 .chip[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }
 .chip:disabled { opacity: .6; }
-.settings-section .chip { min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; font-size: 13px; transition: background .15s; }
+.settings-section .chip { font: var(--type-control); min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; transition: background .15s; }
 .settings-section .chip:hover { background: var(--bg-hover); }
 /* the Apps page (apps-page.js): in the work area as settings are, one row
    an app: its icon, title, what it is and who has access, its card, and
@@ -669,8 +872,8 @@ iframe[data-blocked] { display: none; }
 .app-title-edit:hover, .app-title-edit:focus-visible { opacity: 1; color: var(--text-primary); }
 .app-title-edit svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .app-name-form { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
-.app-name-input { min-width: 80px; flex: 1; width: 80px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-window); color: inherit; font: inherit; }
-.app-name-form button { border: 0; padding: 5px 8px; border-radius: 6px; background: var(--bg-active); font-size: 12px; }
+.app-name-input { min-width: 80px; flex: 1; width: 80px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-window); color: inherit; font: inherit; }
+.app-name-form button { border: 0; padding: 5px 12px; border-radius: 999px; background: var(--bg-active); font-size: 12px; }
 .app-row-url { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 12px; min-width: 0; text-decoration: none; }
 .app-row-url span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-row-url svg { flex: none; width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }
@@ -689,17 +892,17 @@ iframe[data-blocked] { display: none; }
 .icon-editor .icon-current .app-picture, .icon-editor .icon-current .app-icon { width: 56px; height: 56px; }
 .icon-editor .icon-make { flex-wrap: wrap; }
 .icon-editor .icon-make input { width: 100%; }
-.icon-editor .icon-make button, .icon-editor .icon-actions button { padding: 7px 10px; font-size: 12px; border-radius: 6px; }
+.icon-editor .icon-make button, .icon-editor .icon-actions button { padding: 7px 14px; font-size: 12px; border-radius: 999px; }
 .icon-editor .icon-actions { justify-content: flex-start; margin-top: 12px; }
 .icon-editor .icon-actions button:first-child { margin-right: 0; }
 .app-preview-image { display: block; width: 100%; aspect-ratio: 1.6; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; object-fit: cover; object-position: top; }
-.app-preview-editor .quiet { padding: 7px 10px; border-radius: 6px; background: var(--bg-active); font-size: 12px; }
+.app-preview-editor .quiet { padding: 7px 14px; border-radius: 999px; background: var(--bg-active); font-size: 12px; }
 .app-sharing-frame { display: block; border: 0; width: 100%; min-height: 240px; background: transparent; }
 .app-address-form { display: flex; gap: 10px; flex-wrap: wrap; }
 .app-address-field { display: flex; align-items: center; min-width: 0; flex: 1; gap: 0; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg-card); overflow: hidden; }
 .app-address-field input { flex: 1; width: 100px; min-width: 50px; padding: 9px 10px; border: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; }
 .app-address-field span { padding-right: 10px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.app-address-form .quiet { padding: 8px 12px; border-radius: 7px; font-size: 12px; background: var(--bg-active); }
+.app-address-form .quiet { padding: 8px 14px; border-radius: 999px; font-size: 12px; background: var(--bg-active); }
 .app-address-note, .app-address-said { margin: 10px 0 0; font-size: 12px; }
 .app-address-kept { color: var(--text-primary); font-size: 14px; }
 .app-row-progress { padding-left: 54px; }
@@ -811,9 +1014,9 @@ iframe[data-blocked] { display: none; }
 .agent-avatar.picture img { display: block; width: 100%; height: 100%; object-fit: cover; }
 /* Settings' Agents: each agent's name and picture */
 .agent-face-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.agent-face-said { width: 100%; margin: 0; padding: 0 2px 12px; font-size: 12.5px; }
+.agent-face-said { font: var(--type-caption); width: 100%; margin: 0; padding: 0 2px 12px; }
 /* Settings' Billing: an org's seats (billing.js) */
-.billing-seats { border-collapse: collapse; width: 100%; font-size: 14px; }
+.billing-seats { font: var(--type-body); border-collapse: collapse; width: 100%; }
 .billing-seats td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border-strong); vertical-align: middle; }
 .billing-seats td:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 /* an org's offer to the person, to accept or decline (billing.js `offers`) */
@@ -967,10 +1170,10 @@ iframe[data-blocked] { display: none; }
 @media (max-width: 760px) { .desktop-dock { margin-bottom: max(8px, env(safe-area-inset-bottom)); } }
 /* Finite's privacy policy and terms, at the end of Settings' Account (the
    first run's footer is platform-pages.css's .page-footer) */
-.legal-links, .settings-section > p.legal-links { font-size: 12.5px; }
+.legal-links, .settings-section > p.legal-links { font: var(--type-caption); }
 .legal-links a { color: inherit; }
 /* the release and the computer's version, under Settings' last section (shell.js releaseLine) */
-.settings-release { margin: 28px 2px 0; font-size: 12.5px; }
+.settings-release { font: var(--type-caption); margin: 28px 2px 0; }
 .settings-release a { color: inherit; }
 
 /* an app's own icon (app-icon.js): an object on nothing, never on a tile */
@@ -985,8 +1188,8 @@ iframe[data-blocked] { display: none; }
 .icon-current { display: grid; place-items: center; height: 88px; margin-bottom: 14px; border-radius: 12px; background: var(--bg-window); }
 .icon-current .app-picture, .icon-current .app-icon { width: 64px; height: 64px; border-radius: 14px; }
 .icon-make { display: flex; gap: 8px; }
-.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
-.icon-make button, .icon-actions button { padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-window); color: inherit; font: inherit; }
+.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px; font: inherit; color: inherit; background: var(--bg-window); }
+.icon-make button, .icon-actions button { padding: 10px 16px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: inherit; font: inherit; }
 .icon-make button[type=submit] { background: var(--text-primary); color: var(--bg-window); border-color: transparent; }
 .icon-make button:disabled, .icon-pick:disabled, .icon-actions button:disabled { opacity: .55; }
 .icon-said { margin: 12px 0 0; color: var(--text-secondary); font-size: 14px; }

@@ -28,21 +28,21 @@ function world() {
   });
   return { runtimes, asked };
 }
-const offered = (r, agent) => ["profile", "screen"].filter((what) => r.offers(agent, what));
+const offered = (r, agent) => ["profile", "screen", "skills"].filter((what) => r.offers(agent, what));
 
 test("a Claude agent offers neither its profile nor its screen; a Hermes one both; none named is Hermes", async () => {
   const { runtimes } = world();
   await runtimes.loadRuntimes();
   assert.deepEqual(offered(runtimes, "clio--a1b2"), []);
-  assert.deepEqual(offered(runtimes, "juniper--c3d4"), ["profile", "screen"]);
-  assert.deepEqual(offered(runtimes, "rook--j9k2"), ["profile", "screen"], "no agent.json (404): Hermes");
+  assert.deepEqual(offered(runtimes, "juniper--c3d4"), ["profile", "screen", "skills"]);
+  assert.deepEqual(offered(runtimes, "rook--j9k2"), ["profile", "screen", "skills"], "no agent.json (404): Hermes");
 });
 
 test("unread, or its read failed, an agent is offered what it was before; a runtime not known here, nothing", async () => {
   const { runtimes } = world();
-  assert.deepEqual(offered(runtimes, "clio--a1b2"), ["profile", "screen"], "not read yet");
+  assert.deepEqual(offered(runtimes, "clio--a1b2"), ["profile", "screen", "skills"], "not read yet");
   await runtimes.loadRuntimes();
-  assert.deepEqual(offered(runtimes, "wren--e5f6"), ["profile", "screen"], "its read failed");
+  assert.deepEqual(offered(runtimes, "wren--e5f6"), ["profile", "screen", "skills"], "its read failed");
   assert.deepEqual(offered(runtimes, "quill--g7h8"), [], "a runtime this shell does not know");
 });
 
@@ -73,6 +73,6 @@ test("a control drawn before its agent's runtime is read is hidden once it is, a
   assert.deepEqual([clioOpen.hidden, clioScreen.hidden, juniperScreen.hidden, screens.hidden], [true, true, false, true]);
 });
 
-test("Claude Code offers nothing beyond its chats; Hermes its profile and its screen", () => {
-  assert.deepEqual(RUNTIME_OFFERS, { hermes: ["profile", "screen"], claude: [] });
+test("Claude Code offers nothing beyond its chats; Hermes its profile, its screen and its own skills", () => {
+  assert.deepEqual(RUNTIME_OFFERS, { hermes: ["profile", "screen", "skills"], claude: [] });
 });
