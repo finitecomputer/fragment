@@ -1,0 +1,140 @@
+import Foundation
+import Synchronization
+import Testing
+@testable import Fragment
+
+/// The shell's reads and writes against a stub of the platform's answers
+/// (docs/api.md): what the app asks, and what it makes of the answers.
+@MainActor
+struct ShellTests {
+    /// A person's list: two agents, a chat with both, an app, and their
+    /// session archive.
+    nonisolated private static let list = #"""
+    {"fragments":[
+      {"name":"moss--a1","kind":"agent","title":"Moss","role":"owner"},
+      {"name":"juniper--a2","kind":"agent","title":"Juniper","role":"owner"},
+      {"name":"talk--c1","kind":"chat","title":"A calmer morning","agents":["npub1moss","npub1juniper"],"previewAt":5,"role":"owner"},
+      {"name":"reading--p1","kind":"app","title":"Reading","picture":"/api/f/reading--p1/icon?v=7","role":"owner","dock":true},
+      {"name":"archive--s1","kind":"sessions","role":"owner"}
+    ]}
+    """#
+    nonisolated private static func platform(_ seen: Seen, _ before: [Seen]) -> (Int, String) {
+        switch seen.route {
+        case "GET /api/fragments": (200, list)
+        case "GET /api/f/moss--a1/status": (200, #"{"npub":"npub1moss","urls":{"canonical":"https://moss--a1.finite.test/"}}"#)
+        case "GET /api/f/juniper--a2/status": (200, #"{"npub":"npub1juniper","urls":{"canonical":"https://juniper--a2.finite.test/"}}"#)
+        case "GET /api/f/archive--s1/file": (200, #"{"sessions":[{"key":"imported-chat","title":"Before Finite","ended_at":"2026-10-01T10:00:00Z"}]}"#)
+        default: (404, #"{"error":"not_found","message":"no route \#(seen.route)"}"#)
+        }
+    }
+
+    @Test func theListResolvesAgentsChatsAppsAndTheArchive() async throws {
+        let stub = Stub(Self.platform)
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        #expect(library.error == nil)
+        #expect(library.agents.map(\.name) == ["moss--a1", "juniper--a2"])
+        let chat = try #require(library.chats.first)
+        #expect(library.agents(in: chat).map(\.name) == ["moss--a1", "juniper--a2"])
+        #expect(library.agent(for: "npub1juniper")?.displayTitle == "Juniper")
+        // a listed picture is the platform's, signed like every other read
+        #expect(library.apps.first?.picture == "https://\(stub.host)/api/f/reading--p1/icon?v=7")
+        #expect(library.imported.map(\.key) == ["imported-chat"] && library.imported[0].at > 0)
+        #expect(stub.seen.first { $0.path == "/api/f/archive--s1/file" }?.query == ["path": "index/chat.json"])
+    }
+
+    @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
+        let stub = Stub { seen, before in
+            seen.route == "PUT /api/f/talk--c9/members/npub1moss" ? (200, #"{"principal":"npub1moss","role":"editor"}"#) : Self.platform(seen, before)
+        }
+        let api = try stub.api()
+        try await api.join(FragmentSummary(name: "moss--a1", kind: "agent"), to: FragmentSummary(name: "talk--c9", kind: "chat"))
+        #expect(stub.seen.map(\.route) == ["GET /api/f/moss--a1/status", "PUT /api/f/talk--c9/members/npub1moss"])
+        #expect(stub.seen[1].json == .object(["role": .string("editor")]))
+    }
+
+    @Test func aNewChatIsMadeFromTheChatTemplate() async throws {
+        let stub = Stub { seen, _ in seen.route == "POST /api/fragments" ? (200, #"{"name":"mobile-chat--x1","npub":"npub1c"}"#) : (404, "{}") }
+        let chat = try await stub.api().createChat()
+        #expect(chat.name == "mobile-chat--x1" && chat.kind == "chat")
+        #expect(stub.seen[0].json == .object(["label": .string("mobile-chat"), "template": .string("chat"), "title": .string("New chat")]))
+    }
+
+    @Test func cachedDraftsAreNeverEvictedAtCapacity() throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        for index in 0..<32 {
+            try library.session(for: FragmentSummary(name: "draft-\(index)", kind: "chat"), api: api).composer = "A draft to preserve"
+        }
+        #expect(throws: APIError.self) { try library.session(for: FragmentSummary(name: "one-more", kind: "chat"), api: api) }
+        #expect(library.sessions.count == 32)
+        #expect(library.sessions.values.allSatisfy { $0.composer == "A draft to preserve" })
+        let again = try library.session(for: FragmentSummary(name: "draft-3", kind: "chat"), api: api)
+        #expect(again === library.sessions["draft-3"])
+    }
+
+    @Test func renameKeepsTheManifestAndDeploysIt() async throws {
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/f/talk--c1/manifest": (200, #"{"name":"talk--c1","meta":{"title":"Old","template":"chat"},"channels":{"chat":{}}}"#)
+            case "POST /api/f/talk--c1/files": (200, #"{"commit":"abc"}"#)
+            case "POST /api/f/talk--c1/deploy": (200, #"{"live":"abc","canonical":"https://talk--c1.finite.test/"}"#)
+            default: (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        let chat = FragmentSummary(name: "talk--c1", kind: "chat")
+        await #expect(throws: APIError.self) { try await api.rename(chat, title: "   ") }
+        #expect(stub.seen.isEmpty)
+        try await api.rename(chat, title: "  A name to keep ")
+        #expect(stub.seen.map(\.route) == ["GET /api/f/talk--c1/manifest", "POST /api/f/talk--c1/files", "POST /api/f/talk--c1/deploy"])
+        let file = stub.seen[1].json["files"].array.first
+        #expect(file?["path"].string == "fragment.json")
+        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data(try #require(file?["text"].string).utf8))
+        #expect(manifest["meta"] == .object(["title": .string("A name to keep"), "template": .string("chat")]))
+        #expect(manifest["channels"] == .object(["chat": .object([:])]))
+    }
+
+    @Test func archivingIsThePersonsOwnView() async throws {
+        let stub = Stub { seen, before in
+            seen.route == "PUT /api/fragments/talk--c1/archived" ? (200, #"{"ok":true}"#) : Self.platform(seen, before)
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.archive(FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        #expect(stub.seen.first?.json == .object(["archived": .bool(true)]))
+        await library.archive(FragmentSummary(name: "talk--c1", kind: "chat", archived: true), api: api)
+        #expect(stub.seen.last { $0.method == "PUT" }?.json == .object(["archived": .bool(false)]))
+    }
+
+    @Test func anAttachmentIsPutByItsHashAndARefusalSaysWhy() async throws {
+        let stub = Stub { seen, _ in
+            seen.body.count > 4 ? (413, #"{"error":"too_large","message":"a blob is at most 4 bytes here"}"#) : (200, #"{"ok":true,"stored":true}"#)
+        }
+        let api = try stub.api()
+        let file = try await api.upload(Data("abc".utf8), name: "a.txt", type: "text/plain", to: "talk--c1")
+        #expect(file.sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" && file.size == 3)
+        #expect(stub.seen[0].route == "PUT /api/f/talk--c1/blobs/\(file.sha256)" && stub.seen[0].body == Data("abc".utf8))
+        do {
+            _ = try await api.upload(Data("too big".utf8), name: "b.txt", type: "text/plain", to: "talk--c1")
+            Issue.record("a refused upload is an error")
+        } catch APIError.refused(let message) { #expect(message == "a blob is at most 4 bytes here") }
+    }
+
+    @Test func anEndedAuthorizationAsksForTheConnectionAgain() async throws {
+        let stub = Stub { _, _ in (401, #"{"error":"unauthenticated","message":"the key was revoked"}"#) }
+        let api = try stub.api()
+        let heard = Heard()
+        let observer = NotificationCenter.default.addObserver(forName: .finiteAuthorizationFailed, object: nil, queue: nil) { note in
+            if let key = note.userInfo?["key"] as? String { heard.keys.withLock { $0.append(key) } }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        await #expect(throws: APIError.self) { let _: JSONValue = try await api.request("api/identities/me") }
+        #expect(heard.keys.withLock { $0.contains(api.identity.publicKey) })
+    }
+}
+
+private final class Heard: Sendable { let keys = Mutex<[String]>([]) }
