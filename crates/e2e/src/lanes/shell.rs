@@ -5218,11 +5218,12 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
     Ok(list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "skills" && f["role"] == "owner").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
 }
 
-/// The managed skills added from settings (decision 17): a person with an
-/// agent and no skills fragment (theirs deleted here; people set up before
-/// 2026-10-03 have none). Valid: their settings offer the managed skills,
-/// and the button makes the fragment from the blessed template and lists
-/// it. Replay: loaded again, there is no second. Loading makes none unasked.
+/// The managed skills from settings (decision 17; Paul, 2026-11-04: one
+/// row): a person with an agent and no skills fragment (theirs deleted
+/// here; people set up before 2026-10-03 have none). Valid: Settings'
+/// Skills offers Open, which makes the fragment from the blessed template
+/// and opens it. Replay: loaded again, there is no second. Loading makes
+/// none unasked.
 fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
@@ -5232,11 +5233,11 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     };
     let r = shell(api, session, "DELETE", &format!("/api/f/{old}"), None, &[])?;
     b.reload(page)?;
-    let add = "[...document.querySelectorAll('#settings-skills button')].find((b) => b.textContent === 'Add the managed skills')";
-    let offered = b.until(page, &format!("!!{add}"), wait);
+    let open = "document.querySelector('#settings-skills [data-action=open-skills]')";
+    let offered = b.until(page, &format!("!!{open}"), wait);
     let none = own_skills(api, session)?;
-    s.ok("with it deleted, their settings offer the managed skills, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
-    b.eval(page, &format!("({add}.click(), true)"))?;
+    s.ok("with it deleted, their settings' Skills still offers Open, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
+    b.eval(page, &format!("({open}.click(), true)"))?;
     let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
     let now = own_skills(api, session)?;
     let name = now.first().cloned().unwrap_or_default();
@@ -5244,11 +5245,11 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let manifest_of = || shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[]);
     s.eventually(wait, || manifest_of().is_ok_and(|m| m.body["template"] == "skills"));
     let manifest = manifest_of()?;
-    let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
+    let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{name}\"]"))), wait);
     s.ok(
-        "the button makes them one from the blessed template, and their settings list it",
-        made && manifest.body["template"] == "skills" && listed,
-        json!({ "skills": now, "manifest": manifest.body, "settings": b.eval(page, "document.getElementById('settings-skills')?.innerText.slice(0, 200)")? }),
+        "Open makes them one from the blessed template, and opens it",
+        made && manifest.body["template"] == "skills" && window,
+        json!({ "skills": now, "manifest": manifest.body, "window": window }),
     );
     b.reload(page)?;
     b.until(page, "!!document.getElementById('settings-skills')", wait);
@@ -5257,10 +5258,10 @@ fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     Ok(())
 }
 
-/// The skills in settings (decision 17): the shell made the person's skills
-/// fragment at setup, and its Skills section lists exactly that fragment's
-/// managed set by category, then each agent's own skills (its fragment's
-/// `skills/`), as the agents' computers read them.
+/// The skills in settings (decision 17; Paul, 2026-11-04): the shell made
+/// the person's skills fragment at setup, and Settings' Skills is one row,
+/// Open, with no list of them; an agent's own skills (its fragment's
+/// `skills/`) are its item's Skills in Agents, which opens its files there.
 fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
@@ -5270,46 +5271,26 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         return Ok(());
     };
     s.ok("the shell made the person's skills fragment at setup, beside their agent", true, &skills);
-    // what the fragment's files say: skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md
-    let skills_of = |paths: &[String]| -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = paths
-            .iter()
-            .filter_map(|p| {
-                let parts: Vec<&str> = p.split('/').collect();
-                match parts.as_slice() {
-                    ["skills", c, n, "SKILL.md"] => Some((c.to_string(), n.to_string())),
-                    ["skills", n, "SKILL.md"] => Some(("general".to_string(), n.to_string())),
-                    _ => None,
-                }
-            })
-            .collect();
-        out.sort();
-        out
-    };
-    let paths = |name: &str| -> Result<Vec<String>> {
-        let r = shell(api, session, "GET", &format!("/api/f/{name}/files"), None, &[])?;
-        Ok(r.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str().map(str::to_string)).collect()).unwrap_or_default())
-    };
-    let want = skills_of(&paths(&skills)?);
-    let shown = "JSON.stringify([...document.querySelectorAll('#settings-skills [data-category] [data-skill]')].map((e) => [e.closest('[data-category]').dataset.category, e.dataset.skill]).sort())";
-    let listed = b.until(page, &format!("{shown} !== '[]'"), wait);
-    let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
+    let section = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&skills)), wait);
+    let rows = b.eval(page, "[...document.querySelectorAll('#settings-skills .settings-line, #settings-skills .settings-action-line, #settings-skills [data-skill], #settings-skills [data-category]')].map((e) => e.innerText.trim())")?;
     s.ok(
-        &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
-        listed && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
-        json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
+        "settings' Skills is one row, Skills with Open, listing none of them",
+        section && rows.as_array().is_some_and(|l| l.len() == 1 && l[0].as_str().is_some_and(|t| t.starts_with("Skills") && t.ends_with("Open"))),
+        json!({ "rows": rows }),
     );
-    // an agent's own skill, from its fragment, shows beside it
+    // an agent's own skill, in its fragment: its item's Skills opens its files there
     let own = "---\nname: garden-notes\ndescription: What this garden needs.\n---\n";
     let w = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "files": [{ "path": "skills/garden-notes/SKILL.md", "text": own }], "key": "own-skill" })), &[])?;
     b.reload(page)?;
-    let beside = format!("!!document.querySelector('#settings-skills [data-agent={}] [data-skill=\"garden-notes\"]')", js(&agent));
-    let shows = b.until(page, &beside, wait);
-    let own_files = skills_of(&paths(&agent)?);
+    let button = format!("document.querySelector({})", js(&format!("[data-skills-for=\"{agent}\"]")));
+    let offered = b.until(page, &format!("!!{button} && !{button}.hidden"), wait);
+    b.eval(page, &format!("({button}.click(), true)"))?;
+    let window = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"tree:{agent}\"] iframe"))), wait);
+    let opened = s.eventually(wait, || b.eval_in_frame(page, &agent, "document.querySelector('#tree .row.active')?.dataset.path ?? null").ok() == Some(json!("skills/garden-notes/SKILL.md")));
     s.ok(
-        "and an agent's own skill shows beside it, as its fragment's files say",
-        w.status == 200 && shows && own_files.contains(&("general".to_string(), "garden-notes".to_string())),
-        json!({ "write": w.status, "own": own_files }),
+        "an agent's item in Agents has Skills, which opens its files at skills/, its own skill open there",
+        w.status == 200 && offered && window && opened,
+        json!({ "write": w.status, "offered": offered, "window": window, "open": b.eval_in_frame(page, &agent, "({ hash: location.hash, active: document.querySelector('#tree .row.active')?.dataset.path ?? null })").unwrap_or(Value::Null) }),
     );
     Ok(())
 }

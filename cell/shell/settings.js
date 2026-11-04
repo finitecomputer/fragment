@@ -43,7 +43,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, markOffer }) {
+export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -345,6 +345,13 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       const row = markOffer(el("button", "row", "Open"), a.fragment, "profile");
       row.type = "button";
       row.onclick = () => openApp(a.fragment);
+      // its own skills: its fragment's skills/, in its files, where its
+      // runtime reads them (Paul, 2026-11-04: no copy, no move, and none
+      // of this in the Edit dialog)
+      const skills = markOffer(el("button", "row", "Skills"), a.fragment, "skills");
+      skills.type = "button";
+      skills.dataset.skillsFor = a.fragment;
+      skills.onclick = () => openFiles(a.fragment, "skills/");
       const name = el("span", "settings-agent-name");
       name.dataset.agentFace = a.fragment;
       const [actions, said, renameIt, pictures, picture] = faceControls(a);
@@ -355,7 +362,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       face.append(name, picture);
       const title = el("span", "settings-agent-title");
       title.append(face, renameIt, pictures);
-      return [agentSettings(a, actionLine(title, actions, row), modeled), said];
+      return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
     }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
     const connections = connectionsSection(linked, uses);
     const skills = await skillsSection();
@@ -478,19 +485,8 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
 
   // ---- skills (decision 17): the managed set, the person's skills fragment's
   // (the platform's release, which their computers install for every agent),
-  // by category, and each agent's own (its fragment's skills/, which win on a
-  // name). Both read as the agents' computers read them: the fragments' files.
-  // A skill is skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md.
-  function skillsIn(paths) {
-    const out = [];
-    for (const path of paths) {
-      const parts = path.split("/");
-      if (parts[0] !== "skills" || parts[parts.length - 1] !== "SKILL.md") continue;
-      if (parts.length === 4) out.push({ category: parts[1], name: parts[2] });
-      else if (parts.length === 3) out.push({ category: "", name: parts[1] });
-    }
-    return out.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
-  }
+  // opened from one row (Paul, 2026-11-04). Each agent's own are its
+  // fragment's skills/, opened from its item in Agents. ----
   const skillsFragmentOf = () => allFragments().find((f) => f.kind === "skills" && own(f));
   // The person's skills fragment, made from the blessed template when they
   // have none: at setup, as their default agent is, or from settings' Skills
@@ -502,55 +498,27 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     await load();
     return made.name;
   }
-  function skillNames(list) {
-    const value = el("span", "settings-value");
-    list.forEach((s, i) => {
-      if (i) value.append(", ");
-      const name = el("span", "skill", s.name);
-      name.dataset.skill = s.name;
-      value.append(name);
-    });
-    return value;
-  }
+  // Skills: one row, its Open the person's skills fragment, made first
+  // from the blessed template when they have none
   async function skillsSection() {
     const s = section("Skills");
     s.id = "settings-skills";
-    const filesOf = (name) => api("GET", `/api/f/${name}/files`).then((v) => (v.files ?? []).map((f) => f.path)).catch(() => null);
     const mine = skillsFragmentOf();
-    if (!mine) {
-      const add = el("button", "quiet", "Add the managed skills");
-      add.type = "button";
-      add.onclick = () => skillsFragment().then(() => reopenSettings()).catch((e) => { add.textContent = e.message; });
-      s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
-    } else {
-      const paths = await filesOf(mine.name);
-      if (!paths) s.append(el("p", "muted", "Your skills could not be read."));
-      else {
-        const groups = new Map();
-        for (const k of skillsIn(paths)) groups.set(k.category, [...(groups.get(k.category) ?? []), k]);
-        s.dataset.fragment = mine.name;
-        s.append(...[...groups].map(([category, list]) => {
-          const row = el("p", "settings-line");
-          row.dataset.category = category || "general";
-          row.append(el("span", "settings-key", (category || "general").replace(/-/g, " ")), skillNames(list));
-          return row;
-        }));
-        const open = el("button", "quiet", "Open your skills");
-        open.type = "button";
-        open.onclick = () => openApp(mine.name);
-        s.append(actionLine("Managed skills", open));
+    if (mine) s.dataset.fragment = mine.name;
+    const open = el("button", "quiet", "Open");
+    open.type = "button";
+    open.dataset.action = "open-skills";
+    open.onclick = async () => {
+      open.disabled = true;
+      try {
+        openApp(await skillsFragment());
+      } catch (e) {
+        open.textContent = e.message;
+      } finally {
+        open.disabled = false;
       }
-    }
-    // each agent's own skills, from its fragment
-    const agents = allFragments().filter((f) => f.kind === "agent" && own(f));
-    const owns = await Promise.all(agents.map((a) => filesOf(a.name)));
-    agents.forEach((a, i) => {
-      const row = el("p", "settings-line");
-      row.dataset.agent = a.name;
-      const list = skillsIn(owns[i] ?? []);
-      row.append(named(el("span", "settings-key"), a.name, (t) => `${t}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
-      s.append(row);
-    });
+    };
+    s.append(actionLine("Skills", open));
     return s;
   }
   return { openSettings, reopenSettings, skillsFragment, visit: () => visits };
