@@ -1348,10 +1348,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
     s.ok(
-        "settings, at /settings: the account (who they are, their identity, signing out; no Add another sign-in, which WorkOS answered as the same email), credit, computer, connections, and building with a coding agent",
+        "settings, at /settings: the account (who they are and signing out, not their npub, which nothing they do uses yet; no Add another sign-in, which WorkOS answered as the same email), credit, computer, connections, and building with a coding agent",
         settings
             && text.contains(&email)
-            && text.contains(&id)
+            && !id.is_empty()
+            && !text.contains(&id)
             && !text.contains("Add another sign-in")
             && !text.contains("Sign-ins")
             && !has("#settings-page a[href^='/auth/link']")
