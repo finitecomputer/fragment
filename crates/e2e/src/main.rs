@@ -220,6 +220,9 @@ pub const STRIPE_PORTAL: &str = "bpc_fragment_e2e";
 /// the operators' glance reads its logs with.
 pub const OBSERVABILITY_ACCOUNT: &str = "e2e0000000000000000000000000beef";
 pub const OBSERVABILITY_KEY: &str = "e2e-observability-read";
+/// The node's Worker as its lines name it (`$workers.scriptName`); another
+/// deployment's lines in the same account name another.
+pub const OBSERVABILITY_SCRIPT: &str = "fragment-e2e";
 /// Where the platform's mail says it comes from on the e2e's node.
 pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
@@ -767,7 +770,12 @@ impl Suite {
                 portal: Some(STRIPE_PORTAL.into()),
                 tax: true,
             }),
-            observability: Some(devstack::ObservabilityVars { key: OBSERVABILITY_KEY.into(), account_id: OBSERVABILITY_ACCOUNT.into(), api_url: self.observability.node().url.clone() }),
+            observability: Some(devstack::ObservabilityVars {
+                key: OBSERVABILITY_KEY.into(),
+                account_id: OBSERVABILITY_ACCOUNT.into(),
+                script: OBSERVABILITY_SCRIPT.into(),
+                api_url: self.observability.node().url.clone(),
+            }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
                 Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),

@@ -143,32 +143,47 @@ mod tests {
 
     const T: i64 = 1_793_800_000_000;
 
+    /// A Worker's line: its own keys, and the runtime's `$workers.scriptName`.
+    fn of(script: &str, mut line: Value) -> Value {
+        line["$workers.scriptName"] = json!(script);
+        line
+    }
+
     fn lines() -> Vec<(i64, Value)> {
+        let ours = |line: Value| of("fragment", line);
+        // another deployment's in the same account (a branch's): never counted
+        let theirs = |line: Value| of("fragment-rh", line);
         vec![
-            (T - 60_000, json!({ "computer": "computer:a", "phase": { "phase": "awake" } })),
-            (T - 30_000, json!({ "computer": "computer:a", "phase": { "phase": "awake" } })),
-            (T - 3_600_000, json!({ "computer": "computer:b", "phase": { "phase": "awake" } })),
-            (T - 1_000, json!({ "computer": "computer:c", "phase": { "phase": "failed" } })),
-            (T - 1_000, json!({ "computer": "computer:d", "disk": { "total": 20, "free": 1_000_000_000_u64 } })),
-            (T - 1_000, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f1" })),
-            (T - 2_000, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f1" })),
-            (T - 3_000, json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f2" })),
+            (T - 60_000, ours(json!({ "computer": "computer:a", "phase": { "phase": "awake" } }))),
+            (T - 30_000, ours(json!({ "computer": "computer:a", "phase": { "phase": "awake" } }))),
+            (T - 3_600_000, ours(json!({ "computer": "computer:b", "phase": { "phase": "awake" } }))),
+            (T - 1_000, ours(json!({ "computer": "computer:c", "phase": { "phase": "failed" } }))),
+            (T - 1_000, ours(json!({ "computer": "computer:d", "disk": { "total": 20, "free": 1_000_000_000_u64 } }))),
+            (T - 1_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f1" }))),
+            (T - 2_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f1" }))),
+            (T - 3_000, ours(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f2" }))),
+            (T - 1_000, theirs(json!({ "computer": "computer:e", "phase": { "phase": "awake" } }))),
+            (T - 1_000, theirs(json!({ "computer": "computer:a", "phase": { "phase": "failed" } }))),
+            (T - 1_000, theirs(json!({ "computer": "computer:a", "event": { "event": "save_failed" } }))),
+            (T - 1_000, theirs(json!({ "$workers.entrypoint": "Fragment", "$workers.durableObjectId": "f9" }))),
         ]
     }
 
     /// Goal: the glance's own queries answer as the real one would: each
-    /// question's body (fragment_core::glance) over planted lines.
+    /// question's body (fragment_core::glance) over planted lines, another
+    /// deployment's in the same account never counted (its computers are
+    /// hashes of the same people's).
     #[test]
     fn the_glances_queries_answer_over_their_lines() {
         use fragment_core::glance::{by_computer_of, uniq_of, Question};
         let day = T - 5 * 3_600_000;
-        let ask = |q: Question| answer(&lines(), &q.body(T, day)).unwrap();
+        let ask = |q: Question| answer(&lines(), &q.body("fragment", T, day)).unwrap();
         assert_eq!(uniq_of(&ask(Question::AwakeNow)), Ok(1), "a, twice; b an hour ago");
         assert_eq!(uniq_of(&ask(Question::AwakeToday)), Ok(2));
         assert_eq!(by_computer_of(&ask(Question::AwakeWeek)), Ok(vec![("computer:a".into(), 2), ("computer:b".into(), 1)]));
         assert_eq!(uniq_of(&ask(Question::FragmentsNow)), Ok(2));
         assert_eq!(by_computer_of(&ask(Question::WontWake)), Ok(vec![("computer:c".into(), 1)]));
         assert_eq!(by_computer_of(&ask(Question::DiskFilling)), Ok(vec![("computer:d".into(), 1)]));
-        assert_eq!(by_computer_of(&ask(Question::SavesFailing)), Ok(vec![]));
+        assert_eq!(by_computer_of(&ask(Question::SavesFailing)), Ok(vec![]), "the other deployment's failed save is none of ours");
     }
 }
