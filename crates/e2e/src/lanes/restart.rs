@@ -66,6 +66,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     // a site session on the fragment, and the fragment's VAPID key (sealed like a secret)
     let member_site = site_cookie(&api, &member_session, &name)?;
+    // and the member's key's own, as a native app opens the fragment (native.rs)
+    let member_key_site = super::native::key_site_cookie(&api, &member, &name)?;
     let push_key = |api: &Api| api.page(&name, "__push-key", Some(&format!("fragment_site={member_site}")));
     let r = push_key(&api)?;
     anyhow::ensure!(r.status == 200 && r.body["key"].is_string(), "push key setup: {r}");
@@ -370,6 +372,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("after a restart a browser's platform session still signs it in", r.to_string().contains(MEMBER_EMAIL), &r);
     let r = push_key(&api)?;
     s.ok("and its site session on a fragment still works", r.status == 200, &r);
+    let r = api.page(&name, "__push-key", Some(&member_key_site))?;
+    s.ok("and so does a site session a key opened (native.rs)", r.status == 200, &r);
     s.ok("the fragment's VAPID key is the one it had (sealed, and opened again)", r.body["key"].is_string() && r.body["key"] == vapid, format!("{} vs {vapid}", r.body["key"]));
     s.ok("after a restart a person's search finds what it found", found(&api, "kale") == 1, "");
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
