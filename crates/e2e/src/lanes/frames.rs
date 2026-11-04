@@ -155,7 +155,9 @@ fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Re
             && redeemed.status == 302
             && redeemed.header("location").starts_with(&api.site_url(n.own, "__signin?check=frame&return="))
             && ["HttpOnly", "Secure", "SameSite=None", "Partitioned"].iter().all(|a| line.contains(a))
-            && cookie_line(&redeemed, "fragment_site").is_empty(),
+            && cookie_line(&redeemed, "fragment_site").is_empty()
+            // what the redemption waited on (Server-Timing): the registry's
+            && crate::api::timing_parts(&redeemed.header("server-timing")).iter().any(|p| p == "redeem"),
         format!("{elsewhere} / {redeemed} {line:?}"),
     );
     let again = as_browser(api, "GET", to, "iframe", "cross-site", "")?;

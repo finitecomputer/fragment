@@ -164,6 +164,48 @@ const LOAD_WATCH: &str = "(() => { if (window !== window.top) return; window.__s
       if (m.type !== 'subscribed' || m.more || done.has(m.channel)) return; done.add(m.channel); \
       if (done.has('chat') && done.has('work')) requestAnimationFrame(() => requestAnimationFrame(() => { window.__drawn = true; })); }); return ws; } }); })();";
 
+/// The chat page's whole module graph, as its page preloads it
+/// (crates/templates/tests/page_imports.rs keeps the two the same).
+const CHAT_MODULES: [&str; 11] = [
+    "/chat.js", "/__fragment.js", "/agent-color.js", "/control.js", "/icons.js", "/markdown.js", "/__markdown.js", "/media.js", "/response-actions.js", "/tooltips.js", "/frame-messages.js",
+];
+
+/// A chat's page asks for every module it runs at once, from its head
+/// (`modulepreload`), not a wave of imports after each module that names
+/// them. Method: the page's `chat.js` held, unsent, then let through.
+/// Valid: while it is held, every other module has come (only a preload
+/// could ask for them: `chat.js` names them); once the page is ready,
+/// each module was asked for once (its import took the preload's).
+fn preloaded_modules(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let page = chrome.open_watched("about:blank")?;
+    chrome.hold(&page, &["*/chat.js"])?;
+    chrome.eval(&page, &format!("location.assign({}), true", serde_json::to_string(&api.site_url(chat, "__signin?return=/"))?))?;
+    let others = serde_json::to_string(&CHAT_MODULES[1..])?;
+    let came = chrome.until(&page, &format!("((came) => {others}.every((m) => came.includes(m)))(performance.getEntriesByType('resource').map((e) => new URL(e.name).pathname))"), wait);
+    let held = chrome.held(&page)?;
+    chrome.release(&page, false)?;
+    let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", wait);
+    let asked: Vec<String> = chrome
+        .watched(&page)?
+        .events
+        .iter()
+        .filter(|e| e["method"] == "Network.requestWillBeSent")
+        .filter_map(|e| e["params"]["request"]["url"].as_str())
+        .filter_map(|u| reqwest::Url::parse(u).ok())
+        .map(|u| u.path().to_string())
+        .filter(|p| CHAT_MODULES.contains(&p.as_str()))
+        .collect();
+    let once = CHAT_MODULES.iter().all(|m| asked.iter().filter(|p| p == m).count() == 1);
+    s.ok(
+        "a chat's page asks for all its modules at once (preloaded), each once, and is ready",
+        came && held.iter().any(|u| u.ends_with("/chat.js")) && ready && once,
+        json!({ "came": came, "held": held, "ready": ready, "asked": asked }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
 /// An idle chat's page says nothing of a turn running as it loads. Its
 /// backlogs come a record at a time, and a page that drew what it had so
 /// far said, for a moment, that its agent was working or waited on an
@@ -1119,6 +1161,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     early_socket(s, api, &mut chrome, &chat_name)?;
     loads_idle(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
+    preloaded_modules(s, api, &mut chrome, &chat_name)?;
     mic_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_after_access_ends(s, api, &mut chrome, &owner, &member, &member_session)?;
     signed_out_page(s, api, &mut chrome, &owner)?;
