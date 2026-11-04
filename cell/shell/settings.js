@@ -363,7 +363,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
     }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
     const connections = connectionsSection(linked, uses);
-    const skills = await skillsSection();
+    const skills = skillsSection();
     if (lost()) return;
     returnSaid(back);
     renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
@@ -501,7 +501,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
   // from the blessed template when they have none. The line says nothing
   // of which agents get them: only our Hermes image installs the set
   // (docs/computers.md, "Skills and the CLI")
-  async function skillsSection() {
+  function skillsSection() {
     const s = section("Skills");
     s.id = "settings-skills";
     const mine = skillsFragmentOf();
