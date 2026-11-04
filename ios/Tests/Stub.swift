@@ -53,7 +53,11 @@ final class Stub: Sendable {
     }
 }
 
-final class StubProtocol: URLProtocol {
+/// Each request answered on a queue of its own, never on the thread URLSession
+/// loads every stubbed request on: a test that holds one answer (`Gate`)
+/// holds no other.
+final class StubProtocol: URLProtocol, @unchecked Sendable {
+    private let stopped = Mutex(false)
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host.flatMap(Stub.named) != nil }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -64,13 +68,16 @@ final class StubProtocol: URLProtocol {
         for item in URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [] { query[item.name] = item.value ?? "" }
         let seen = Seen(method: request.httpMethod ?? "GET", path: url.path, query: query, body: request.httpBody ?? Self.read(request.httpBodyStream),
                         authorization: request.value(forHTTPHeaderField: "Authorization"))
-        let (status, body) = stub.answer(seen)
-        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(body.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        DispatchQueue.global().async { [self] in
+            let (status, body) = stub.answer(seen)
+            guard !stopped.withLock({ $0 }) else { return }
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
     }
-    override func stopLoading() {}
+    override func stopLoading() { stopped.withLock { $0 = true } }
     private static func read(_ stream: InputStream?) -> Data {
         guard let stream else { return Data() }
         stream.open(); defer { stream.close() }
@@ -146,4 +153,15 @@ struct StubTimeout: Error, CustomStringConvertible { let what: String; var descr
 /// A record frame or an answer's record, as the server writes it.
 func record(_ channel: String, _ seq: Int64, principal: String = "npub1agent", body: String) -> String {
     #"{"channel":"\#(channel)","seq":\#(seq),"at":\#(seq * 1000),"principal":"\#(principal)","kind":"message","body":\#(body)}"#
+}
+
+/// Holds the stub's answers it is asked in, until opened: a test's way to
+/// keep one request in flight while others are made.
+final class Gate: Sendable {
+    private let opened = DispatchSemaphore(value: 0)
+    private let state = Mutex(false)
+    var isOpen: Bool { state.withLock { $0 } }
+    /// On the stub's own thread: waits until the test opens it.
+    func pass() { if !isOpen { opened.wait(); opened.signal() } }
+    func open() { state.withLock { $0 = true }; opened.signal() }
 }

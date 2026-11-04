@@ -160,7 +160,10 @@ a long turn however the chat was opened. An archive's chats index is
 optional: an archive of other kinds alone has none, and a failed read never
 stops the list or its agents. An export is followed while it builds (every two
 seconds, as the web's Settings), downloads with the phone's signature to a file of
-its own, is shared from there, and can be made again beside it. Connected accounts follow the signed list watcher, discard
+its own, is shared from there, and can be made again beside it. Its reads and makes
+run one after another, so an older read never lands after a newer export; the file
+is kept with its export, deleted once the export shown is another, and a download
+still in flight for one no longer shown is never kept. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not

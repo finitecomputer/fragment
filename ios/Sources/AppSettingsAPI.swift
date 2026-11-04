@@ -189,17 +189,25 @@ extension FragmentAPI {
 /// The person's export, as Settings follows it (cell/shell/exports.js): its
 /// latest view, asked again every `every` while it builds, its archive once
 /// downloaded, and a new one made at any time (`POST /api/export` replaces
-/// the last, so the file downloaded from it goes).
+/// the last). Asks and makes run one after another, each answer applied in
+/// the order they were sent, so an older read never lands after a newer
+/// one. A downloaded archive is kept with the export it is of: once the
+/// export shown is another, it goes (deleted), and one still downloading
+/// for an export no longer shown is never kept.
 @MainActor @Observable
 final class ExportModel {
     let api: FragmentAPI
     let every: Duration
     private(set) var export: ExportView?
-    private(set) var file: URL?
-    private(set) var busy = false
+    private var archive: (id: String, file: URL)?
+    private var pending = 0
+    private var queue: Task<Void, Never>?
     var error: String?
     init(api: FragmentAPI, every: Duration = .seconds(2)) { self.api = api; self.every = every }
 
+    /// The archive downloaded for the export shown, while it is ready.
+    var file: URL? { archive.flatMap { export?.state == "ready" && $0.id == export?.id ? $0.file : nil } }
+    var busy: Bool { pending > 0 }
     var startLabel: String {
         switch export?.state {
         case "building": "Exporting…"
@@ -207,18 +215,49 @@ final class ExportModel {
         default: "Export everything"
         }
     }
-    private func run(_ step: () async throws -> Void) async {
-        busy = true; error = nil; defer { busy = false }
-        do { try await step() } catch { self.error = error.localizedDescription }
+
+    /// `step` after every ask or make sent before it.
+    private func serially(_ step: @escaping @MainActor () async -> Void) async {
+        pending += 1
+        let before = queue
+        let next = Task { @MainActor in
+            await before?.value
+            await step()
+        }
+        queue = next
+        await next.value
+        pending -= 1
     }
-    func refresh() async { await run { export = try await api.export() } }
+    private func shown(_ view: ExportView?) {
+        export = view
+        if let kept = archive, kept.id != view?.id || view?.state != "ready" { drop(kept.file) }
+    }
+    private func drop(_ file: URL) {
+        try? FileManager.default.removeItem(at: file)
+        if archive?.file == file { archive = nil }
+    }
+
+    func refresh() async {
+        await serially { [self] in
+            do { shown(try await api.export()); error = nil } catch { self.error = error.localizedDescription }
+        }
+    }
     func start() async {
-        file = nil
-        await run { export = try await api.startExport() }
+        await serially { [self] in
+            do { shown(try await api.startExport()); error = nil } catch { self.error = error.localizedDescription }
+        }
     }
     func download() async {
-        guard let export else { return }
-        await run { file = try await api.download(export) }
+        guard let export, export.state == "ready" else { return }
+        pending += 1; defer { pending -= 1 }
+        do {
+            let file = try await api.download(export)
+            // shown no longer (refreshed to another, or made again): never kept
+            guard self.export?.id == export.id, self.export?.state == "ready" else { return drop(file) }
+            if let old = archive?.file, old != file { drop(old) }
+            archive = (export.id, file)
+            error = nil
+        } catch { self.error = error.localizedDescription }
     }
     /// While it builds, its view again every `every`, until it is ready (or
     /// failed, or gone), or the screen goes.

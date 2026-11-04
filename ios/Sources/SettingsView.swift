@@ -201,7 +201,7 @@ private struct ExportSection: View {
             if model.busy { ProgressView() }
             if let error = model.error { Text(error).font(.footnote).foregroundStyle(.secondary) }
         }
-        .task { await model.refresh() }
+        // its first read is the Form's (SettingsDetail `load`), as is a pull to refresh
         .task(id: model.export?.state == "building") { await model.follow() }
     }
 }
