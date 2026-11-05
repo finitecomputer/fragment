@@ -178,6 +178,13 @@ const framed = (name, path = "/") => {
   const members = byName(name)?.sharing?.visibility === "members";
   return `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}${members ? "" : "&check=frame"}`;
 };
+// A fragment's origin, as the cell names it on this page (its
+// `fragment-origin` meta, `{name}` where the name goes: the origin its
+// status's canonical URL names), with no request; `originOf` as a
+// promise, as its callers ask it.
+const ORIGIN = document.querySelector('meta[name="fragment-origin"]').content;
+const originAt = (name) => ORIGIN.replace("{name}", name);
+const originOf = (name) => Promise.resolve(originAt(name));
 // An agent's face: its colour, by its identity (agent-color.js, the one
 // its own page and its chats' pages choose by), and its picture (its agent
 // fragment's avatar.png, as the person's list last said: an address on this
@@ -297,32 +304,21 @@ function frameOf(src, title, name = null) {
     // A bare `microphone` is the src's origin's, the mint's on this page's;
     // the page lands at the fragment's own, which the browser would refuse
     // without asking. So it names that origin before the frame navigates
-    // (a policy is read as a navigation starts), and loads regardless:
-    // until then a navigation asked of it waits (`go`), the last one kept.
+    // (a policy is read as a navigation starts): known here, no request.
     frame.dataset.fragment = name;
-    unready.set(frame, src);
-    originOf(name)
-      .then((origin) => { frame.allow = `clipboard-write; microphone ${origin}`; }, () => {})
-      .finally(() => {
-        const next = unready.get(frame);
-        unready.delete(frame);
-        frame.src = next;
-      });
-  } else frame.src = src;
+    frame.allow = `clipboard-write; microphone ${originAt(name)}`;
+  }
+  frame.src = src;
   frame.addEventListener("load", () => theme(frame));
   return frame;
 }
-// a fragment's frame whose policy does not name its origin yet -> the
-// navigation it makes once it does (frameOf)
-const unready = new WeakMap();
 // the middle column's frames' stand-ins while their pages come (frame-standin.js)
 const standins = standIns(el);
 // A frame sent to `src`: at once, or, its origin not known yet, once it is.
 // `replace`: in place of the page it shows, adding nothing to the tab's
 // history (a cross-origin frame's `location.replace` is one it may call).
 function go(frame, src, replace = false) {
-  if (unready.has(frame)) unready.set(frame, src);
-  else if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
+  if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
   // a page of the middle column sent elsewhere: its stand-in again until it comes
   standins.again(frame);
@@ -460,15 +456,6 @@ const ADD_CONFIRM_MS = 90_000;
 // the page's message cannot confirm it (the share sheet's 800 ms).
 const ADD_ARM_MS = 800;
 const rosterTo = new Map(); // a frame's window -> its fragment's origin
-const origins = new Map(); // fragment name -> its origin (a promise)
-function originOf(name) {
-  if (!origins.has(name)) {
-    const asked = api("GET", `/api/f/${seg(name)}/status`).then((s) => new URL(s.urls.canonical).origin);
-    asked.catch(() => origins.delete(name));
-    origins.set(name, asked);
-  }
-  return origins.get(name);
-}
 const roster = () => {
   const phase = state.computer?.phase;
   return [...state.agents.values()].map((a) => {
