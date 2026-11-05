@@ -477,12 +477,14 @@ impl<'a> Cs<'a> {
         }
     }
 
-    /// A token for an editor's own client: this repo only, git read and
-    /// write, fifteen minutes. The claims are checked after signing.
-    pub async fn storage_token(&self, repo: &str, principal: &str) -> CellResult<StorageToken> {
-        let scopes = ["git:read", "git:write"];
-        let sub = format!("editor:{principal}");
-        let (token, expires_ms) = keys::codestorage_token(self.env, &self.cfg.org, repo, &sub, &scopes, limits::STORAGE_TOKEN_TTL_S).await?;
+    /// A token for a member's own client: this repo only, fifteen minutes,
+    /// git read and write (an editor's), or git read alone (`write`
+    /// false: a viewer's, or a pull's). The claims are checked after
+    /// signing.
+    pub async fn storage_token(&self, repo: &str, principal: &str, write: bool) -> CellResult<StorageToken> {
+        let scopes: &[&str] = if write { &["git:read", "git:write"] } else { &["git:read"] };
+        let sub = format!("{}:{principal}", if write { "editor" } else { "reader" });
+        let (token, expires_ms) = keys::codestorage_token(self.env, &self.cfg.org, repo, &sub, scopes, limits::STORAGE_TOKEN_TTL_S).await?;
         let exp = expires_ms / 1000;
         let claims = token.split('.').nth(1).and_then(|p| {
             use base64::Engine;
@@ -492,6 +494,6 @@ impl<'a> Cs<'a> {
         if claims["repo"] != repo || claims["scopes"] != serde_json::json!(scopes) || claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) > limits::STORAGE_TOKEN_TTL_S {
             return Err(CellError::host("a minted storage token failed its claim check"));
         }
-        Ok(StorageToken { token, repo: repo.to_string(), api: self.cfg.api.clone(), expires_at: exp * 1000 })
+        Ok(StorageToken { token, repo: repo.to_string(), api: self.cfg.api.clone(), expires_at: exp * 1000, write })
     }
 }

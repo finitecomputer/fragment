@@ -9,8 +9,8 @@
 // stat cache only (path -> content sha + mtime + last-seen commit); the
 // repo is the truth, the folder is a disposable working copy.
 use crate::api::Client;
-use crate::api::CodedError;
-use crate::codestorage::{Author, Change, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
+use crate::api::{Code, CodedError};
+use crate::codestorage::{Author, Change, CodeStorage, CsError, Wants, LIVE, MAIN, MAX_CAS_ATTEMPTS};
 use fragment_core::blob::sha256_hex;
 use fragment_core::codestorage::TreeEntry;
 use fragment_proto::{NotRepoPath, RepoPath};
@@ -29,6 +29,19 @@ pub enum Mode {
     Push,
     Pull,
     Mirror,
+}
+
+impl Mode {
+    /// The token a pass asks for: a pull's only reads; a push's writes; a
+    /// mirror's writes where the host grants it, else reads (a viewer's
+    /// mirror pulls, and sends nothing).
+    pub fn wants(self) -> Wants {
+        match self {
+            Mode::Pull => Wants::Read,
+            Mode::Push => Wants::Write,
+            Mode::Mirror => Wants::Either,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -134,7 +147,7 @@ pub struct FileState {
     pub commit: String,
 }
 
-#[derive(Default, Serialize, Debug)]
+#[derive(Default, Serialize, Debug, Clone)]
 pub struct Report {
     pub pushed: Vec<String>,
     pub pulled: Vec<String>,
@@ -142,6 +155,15 @@ pub struct Report {
     pub deleted_local: Vec<String>,
     pub withheld_deletions: Vec<String>,
     pub conflicts: Vec<String>,
+    /// the token only read (a viewer's): nothing was sent
+    pub read_only: bool,
+    /// what a writer's mirror would have sent, kept in the folder unsent
+    /// (a file deleted here is pulled back): its token only read
+    pub unsent: Vec<String>,
+    /// synced paths the scan no longer takes, though something is still
+    /// there (a `.gitignore`d file, what is not a regular file): kept as
+    /// they are, never sent, and the fragment keeps its copy
+    pub outside_sync: Vec<String>,
     /// paths in the folder or the repo that are not repo paths
     /// (`valid_repo_path`): never pushed, pulled, or deleted. One in the
     /// repo was written past the cell (a storage token's commit); its
@@ -165,12 +187,15 @@ pub struct ScanStats {
 }
 
 impl Report {
-    /// exit code: 0 clean, 3 conflicts present, 4 mass-deletion guard
+    /// exit code: 0 clean, 3 conflicts present, 4 mass-deletion guard, 5
+    /// changes not sent (the fragment only read)
     pub fn exit_code(&self) -> i32 {
         if self.mass_delete_guard.is_some() {
             4
         } else if !self.conflicts.is_empty() {
             3
+        } else if !self.unsent.is_empty() {
+            5
         } else {
             0
         }
@@ -204,6 +229,18 @@ impl Report {
                 println!("    {f}");
             }
         }
+        if !self.unsent.is_empty() {
+            println!("  NOT SENT ({}): you may read this fragment, not change it. Your changes stay here, unsent; a file you deleted was pulled back", self.unsent.len());
+            for f in &self.unsent {
+                println!("    {f}");
+            }
+        }
+        if !self.outside_sync.is_empty() {
+            println!("  NO LONGER SYNCED ({}): ignored here now, or not a file; kept as they are, and the fragment keeps its copy", self.outside_sync.len());
+            for f in &self.outside_sync {
+                println!("    {f}");
+            }
+        }
         if let Some(n) = self.mass_delete_guard {
             println!("  REFUSING to propagate {n} deletion(s) — folder looks unmounted/reset.");
             println!("  re-run with --apply-mass-delete if this is intended");
@@ -212,7 +249,9 @@ impl Report {
             && self.pulled.is_empty()
             && self.conflicts.is_empty()
             && self.deleted_remote.is_empty()
-            && self.deleted_local.is_empty();
+            && self.deleted_local.is_empty()
+            && self.unsent.is_empty()
+            && self.outside_sync.is_empty();
         if clean {
             println!("all {} files match the repo", self.scan.files);
         }
@@ -405,6 +444,20 @@ impl Local {
     pub fn matches_journal(&self) -> bool {
         self.files.len() == self.state.files.len()
             && self.files.iter().all(|(path, lf)| self.state.files.get(path).is_some_and(|st| st.sha256 == lf.sha256))
+    }
+
+    /// The folder's paths and their content, as one hash: a watcher whose
+    /// pass left changes unsent (the fragment only reads) needs no pass
+    /// for a folder still the same.
+    pub fn content_hash(&self) -> String {
+        let mut text = String::new();
+        for (path, lf) in &self.files {
+            text.push_str(path.as_str());
+            text.push('\0');
+            text.push_str(&lf.sha256);
+            text.push('\n');
+        }
+        sha256_hex(text.as_bytes())
     }
 }
 
@@ -627,7 +680,7 @@ pub fn full_name(client: &Client, name: &str) -> Result<String, SyncError> {
 /// the cell's pins when a commit landed.
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
     let name = &full_name(client, name)?;
-    let storage = CodeStorage::connect(client, name)?;
+    let storage = CodeStorage::connect(client, name, opts.mode.wants())?;
     let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name)?)?;
     if report.landed {
         refresh_pins(client, name, MAIN);
@@ -639,6 +692,29 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
 /// first to learn whether it needs a pass at all), with a connected
 /// `storage`: a command's own, or a watcher's held one. It does not nudge
 /// the cell's pins: a caller whose pass `landed` calls `refresh_pins`.
+///
+/// The invariant every phase keeps (pull, push, mirror, a folder with no
+/// journal, a viewer made an editor, a pass again): **a pass changes only
+/// what its scan accounted for.**
+/// - In the folder, a write or a deletion lands only where the scan saw
+///   the bytes the journal says git holds, or where nothing at all is
+///   (`vacant`). Anything else there (an edit, a file never synced, one
+///   outside sync, a pipe) stays, and the fragment's bytes land beside it
+///   under a name nothing holds (`save_copy`).
+/// - On main, a push sends only bytes the scan read, and deletes a path
+///   only where the folder has nothing at all. A synced path the scan no
+///   longer takes, with something still there (a `.gitignore`d file, what
+///   is not a regular file, a path through a symlinked folder), is outside
+///   sync: its journal row is dropped before any plan reads it, nothing is
+///   sent or deleted for it, and the report names it (`drop_outside_sync`).
+/// - A journal row's hash is always bytes git holds, so a conflict records
+///   the fragment's bytes, never the folder's unsent ones
+///   (`record_conflicts`): a folder's own bytes are never "in sync" until
+///   sent.
+///
+/// It holds for the folder as scanned; a save during the pass's own
+/// requests is a race this does not close.
+/// Tested as a matrix: `every_pass_changes_only_what_its_scan_accounted_for`.
 pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions, local: Local) -> Result<Report, SyncError> {
     let Local { mut state, journal, files: local, stats, refused } = local;
     // World binding (`SyncState::host`): refuse before any read or write.
@@ -655,9 +731,18 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
             state.repo = Some(storage.repo().to_string());
         }
     }
+    let outside_sync = drop_outside_sync(dir, &local, &mut state)?;
+    // a token that only reads (a viewer's): the pass pulls alone, and what
+    // a mirror would have sent stays in the folder (`unsent`)
+    let read_only = !storage.writes();
+    if read_only && opts.mode == Mode::Push {
+        return Err(SyncError::Host(CodedError { code: Code::Forbidden, msg: format!("you may read {name}, not change it: a push is an editor's (`--mode pull` reads it)") }));
+    }
+    let mode = if read_only { Mode::Pull } else { opts.mode };
     let author = Author::writer(&opts.writer_id);
     let blobs = crate::blobs::Blobs::new(client, name);
-    let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
+    let outside_sync = outside_sync.iter().map(|p| p.to_string()).collect();
+    let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), read_only, outside_sync, ..Default::default() };
     let mut recorded: HashSet<RepoPath> = HashSet::new();
 
     // main as this pass sees it: read once, reused by the push's first
@@ -682,9 +767,13 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
         .map(|(p, _)| p.clone())
         .collect();
     let pre = push_plan(&local, &listing.files, &state);
+    if read_only && opts.mode == Mode::Mirror {
+        report.unsent = pre.upserts.iter().chain(&pre.deletes).chain(&pre.conflicts).map(|p| p.to_string()).collect();
+        report.unsent.sort();
+    }
     // pull mode never deletes remotely, so would-be push deletions must not
     // trip the guard there (a wiped folder in pull mode just re-downloads)
-    let push_side = if opts.mode == Mode::Pull { 0 } else { pre.deletes.len() };
+    let push_side = if mode == Mode::Pull { 0 } else { pre.deletes.len() };
     if let Some(n) = mass_delete_trips(push_side, local_delete_candidates.len(), state.files.len(), opts.apply_mass_delete) {
         report.mass_delete_guard = Some(n);
         // dropping stale rows keeps the guard from re-tripping forever on
@@ -698,7 +787,7 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
     }
 
     // ---- push: one commit with expected-parent CAS, bounded rebuilds ----
-    if opts.mode != Mode::Pull {
+    if mode != Mode::Pull {
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -790,17 +879,44 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
 
     // ---- pull: make the folder match main (fetch new/changed; propagate
     // remote deletions per mode) ----
-    if opts.mode != Mode::Push {
+    if mode != Mode::Push {
         let mut fetches: Vec<&TreeEntry> = vec![];
         for rf in listing.files.values() {
             let l = local.get(&rf.path);
             let s = state.files.get(&rf.path);
+            // what the scan did not take, at a path the fragment has: none,
+            // or something outside sync (`keep_unscanned`)
+            let occupied = match l {
+                None => match place(dir, &rf.path)? {
+                    Some(at) if !vacant(&at)? => Some(at),
+                    _ => None,
+                },
+                Some(_) => None,
+            };
             let fetch = match (l, s) {
-                // remote-only; or journal-absent but present locally: the
-                // bootstrap pass adopted every content-verified match, so
-                // what's left here is content-different — fetch (remote wins
-                // in pull/mirror; push modes already pushed local)
-                (None, _) | (Some(_), None) => true,
+                (None, _) if occupied.is_some() => {
+                    let target = occupied.expect("matched above");
+                    keep_unscanned(
+                        ConflictCtx { storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
+                        &rf.path,
+                        &target,
+                    )?;
+                    false
+                }
+                // nothing there: fetch it
+                (None, _) => true,
+                // journal-absent but present locally, and content-different
+                // (the bootstrap pass adopted every match): the folder's own
+                // bytes, never sent, stay, and the remote's land beside them.
+                // A writer's mirror pushed them already, so this is a pass
+                // that only reads.
+                (Some(_), None) => {
+                    record_conflicts(
+                        ConflictCtx { storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
+                        std::slice::from_ref(&rf.path),
+                    )?;
+                    false
+                }
                 (Some(lf), Some(st)) => {
                     let local_changed = st.sha256 != lf.sha256;
                     let remote_changed = st.commit != rf.last_commit_sha;
@@ -989,13 +1105,14 @@ fn adopt_identical(
     Ok(())
 }
 
-/// both sides changed: keep local, save the remote bytes beside it as
-/// `<path>.conflict-<ts>-<writer>`, then adopt (remote commit, LOCAL file
-/// sha) so the conflict reports once and the next pass pushes local
-/// content — the old copy-strategy semantics (theirs survives in the copy
-/// file and in git history). Both sides changed to the SAME bytes is no
-/// conflict (our own commit whose answer was lost, or two writers agreeing):
-/// that adopts silently.
+/// Both sides changed: keep local, save the remote bytes beside it
+/// (`save_copy`), then record the remote's bytes at its commit, never the
+/// folder's: the folder's stay a change, so a writer's next pass sends them
+/// (theirs survives in the copy and in git history), a pass that only reads
+/// keeps them unsent, and neither ever fetches over them. The remote's next
+/// change is a conflict again. Both sides changed to the SAME bytes is no
+/// conflict (our own commit whose answer was lost, or two writers
+/// agreeing): that adopts silently.
 fn record_conflicts(
     ctx: ConflictCtx<'_>,
     conflicts: &[RepoPath],
@@ -1008,42 +1125,28 @@ fn record_conflicts(
             continue; // already recorded this pass
         }
         let rf_commit = ctx.listing.files.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let text = path.as_str();
-        let (stem, ext) = match text.rfind('.') {
-            Some(i) if !text[i..].contains('/') => (&text[..i], &text[i..]),
-            _ => (text, ""),
-        };
-        // a path near the limit has no room for the copy's mark: then the
-        // remote bytes stay in git history, and the report says so
-        let conflict_path = RepoPath::parse(&format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id));
-        let git_bytes = ctx.storage.read_file(text, ctx.listing.rev());
-        let same = match (&git_bytes, ctx.local.get(path)) {
-            (Ok(bytes), Some(lf)) => crate::blobs::content_sha(bytes) == lf.sha256,
+        let git_bytes = ctx.storage.read_file(path.as_str(), ctx.listing.rev());
+        let remote_sha = git_bytes.as_ref().ok().map(|bytes| crate::blobs::content_sha(bytes));
+        let same = match (&remote_sha, ctx.local.get(path)) {
+            (Some(sha), Some(lf)) => *sha == lf.sha256,
             _ => false,
         };
         if !same {
-            let place = match &conflict_path {
-                Ok(copy) => place(ctx.dir, copy)?,
-                Err(_) => None,
-            };
-            match (conflict_path, place, git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b))) {
-                (Ok(copy), Some(target), Ok(bytes)) => {
-                    atomic_write(&target, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
-                    ctx.report.conflicts.push(format!("{path} (remote copy: {copy})"));
-                }
-                (Ok(copy), None, _) => {
-                    ctx.report.conflicts.push(format!("{path} (remote copy not saved: {})", through_link(&copy)));
-                }
-                (Err(not), _, _) => {
-                    ctx.report.conflicts.push(format!("{path} (remote copy not saved, its name {not}; it is in git history)"));
-                }
-                (_, _, Err(e)) => {
-                    ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})"));
-                }
+            match git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b)) {
+                Ok(bytes) => match save_copy(ctx.dir, path, ctx.writer_id, epoch_s(), &bytes)? {
+                    Ok(copy) => ctx.report.conflicts.push(format!("{path} (remote copy: {copy})")),
+                    Err(why) => ctx.report.conflicts.push(format!("{path} (remote copy not saved, {why}; it is in git history)")),
+                },
+                Err(e) => ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})")),
             }
         }
         let entry = match ctx.local.get(path) {
+            // the remote commit's bytes, not the folder's: an mtime no file
+            // has keeps the scan hashing the folder's
+            Some(_) if !same => {
+                let size = ctx.listing.files.get(path).map_or(0, |r| r.size);
+                FileState { sha256: remote_sha.clone().unwrap_or_default(), size, mtime_ns: -1, commit: rf_commit }
+            }
             Some(lf) => FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf_commit },
             None => match ctx.state.files.get(path) {
                 Some(st) => FileState { commit: rf_commit, ..st.clone() },
@@ -1053,6 +1156,140 @@ fn record_conflicts(
         ctx.state.files.insert(path.clone(), entry);
     }
     Ok(())
+}
+
+/// Conflict copies of one path `save_copy` names within one second: past
+/// it, the copy is not saved (its bytes are in git history), and the
+/// report says so.
+const COPIES_A_SECOND: usize = 100;
+
+/// The `n`th name (from 1) for the remote's bytes of `path` beside the
+/// folder's own in second `ts`: `<stem>.conflict-<ts>-<writer><ext>`, then
+/// `<ts>-2`, `<ts>-3`…; or why there is no room.
+fn conflict_copy(path: &RepoPath, writer_id: &str, ts: u64, n: usize) -> Result<RepoPath, NotRepoPath> {
+    let text = path.as_str();
+    let (stem, ext) = match text.rfind('.') {
+        Some(i) if !text[i..].contains('/') => (&text[..i], &text[i..]),
+        _ => (text, ""),
+    };
+    let time = if n == 1 { ts.to_string() } else { format!("{ts}-{n}") };
+    RepoPath::parse(&format!("{stem}.conflict-{time}-{writer_id}{ext}"))
+}
+
+/// Saves the remote's `bytes` of `path` beside the folder's own as a new
+/// file (`conflict_copy`), never over anything, an earlier copy included:
+/// the name is taken before the bytes land, and a taken one moves on to the
+/// next. Its name, or why it was not saved (a path near the limit has no
+/// room for the copy's mark; a folder on its way is a symlink). `ts`: the
+/// second it is named for (`epoch_s`).
+fn save_copy(dir: &Path, path: &RepoPath, writer_id: &str, ts: u64, bytes: &[u8]) -> Result<Result<RepoPath, String>, SyncError> {
+    for n in 1..=COPIES_A_SECOND {
+        let copy = match conflict_copy(path, writer_id, ts, n) {
+            Ok(copy) => copy,
+            Err(not) => return Ok(Err(format!("its name {not}"))),
+        };
+        let Some(target) = place(dir, &copy)? else { return Ok(Err(through_link(&copy))) };
+        let io = |e: std::io::Error| SyncError::Io(format!("{}: {e}", target.display()));
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(io)?;
+        }
+        match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(_) => {
+                atomic_write(&target, bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+                return Ok(Ok(copy));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io(e)),
+        }
+    }
+    Ok(Err(format!("{COPIES_A_SECOND} copies of it were saved this second")))
+}
+
+/// Seconds since the Unix epoch: the time in a conflict copy's name.
+fn epoch_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Something the scan did not take sits where the fragment has a file: a
+/// file outside sync (its .gitignore's), or what is not a regular file.
+/// Pulled over, it was lost (nothing of it is in git), so it stays as it
+/// is and outside sync: no journal row, so it is never sent nor its
+/// absence a deletion. The remote's bytes land beside it once per version
+/// (a copy of the same bytes there already is not written again): a
+/// conflict, reported each pass while both are there. The same bytes on
+/// both sides are nothing to report. Only a regular file is ever read,
+/// never through a link: a pipe waits forever for a writer, a device
+/// never ends.
+fn keep_unscanned(ctx: ConflictCtx<'_>, path: &RepoPath, target: &Path) -> Result<(), SyncError> {
+    let regular = |at: &Path| fs::symlink_metadata(at).is_ok_and(|md| md.file_type().is_file());
+    if !ctx.recorded.insert(path.clone()) {
+        return Ok(());
+    }
+    ctx.state.files.remove(path);
+    let git = ctx.storage.read_file(path.as_str(), ctx.listing.rev())?;
+    let bytes = ctx.blobs.resolve(git).map_err(|e| SyncError::blob(path.as_str(), e))?;
+    if regular(target) && fs::read(target).is_ok_and(|here| here == bytes) {
+        return Ok(());
+    }
+    // a copy of these bytes beside it already: this version's was saved
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_string).unwrap_or_default();
+    let theirs = name(target);
+    let (stem, ext) = match theirs.rfind('.') {
+        Some(i) if i > 0 => (&theirs[..i], &theirs[i..]),
+        _ => (theirs.as_str(), ""),
+    };
+    let (prefix, suffix) = (format!("{stem}.conflict-"), format!("-{}{ext}", ctx.writer_id));
+    let saved = target.parent().and_then(|at| fs::read_dir(at).ok()).is_some_and(|entries| {
+        entries.flatten().any(|e| {
+            let n = name(&e.path());
+            n.starts_with(&prefix) && n.ends_with(&suffix) && e.file_type().is_ok_and(|t| t.is_file()) && fs::read(e.path()).is_ok_and(|b| b == bytes)
+        })
+    });
+    let kept = "a file outside sync is here, kept";
+    if saved {
+        ctx.report.conflicts.push(format!("{path} ({kept}; remote copy beside it: {stem}.conflict-…{ext})"));
+        return Ok(());
+    }
+    match save_copy(ctx.dir, path, ctx.writer_id, epoch_s(), &bytes)? {
+        Ok(copy) => ctx.report.conflicts.push(format!("{path} ({kept}; remote copy: {copy})")),
+        Err(why) => ctx.report.conflicts.push(format!("{path} ({kept}; remote copy not saved, {why}; it is in git history)")),
+    }
+    Ok(())
+}
+
+/// A synced path the scan no longer takes stands for a deletion only when
+/// nothing at all is there. Anything else (a `.gitignore`d file, what is
+/// not a regular file, a path through a symlinked folder, which the scan
+/// never follows) is outside sync: its journal row is dropped here, before
+/// any plan reads it, so it is never sent, its absence never deletes the
+/// fragment's copy, and a pull keeps it (`keep_unscanned`). The paths, for
+/// the report.
+fn drop_outside_sync(dir: &Path, local: &BTreeMap<RepoPath, LocalFile>, state: &mut SyncState) -> Result<Vec<RepoPath>, SyncError> {
+    let mut outside = Vec::new();
+    for path in state.files.keys().filter(|p| !local.contains_key(*p)) {
+        let gone = match place(dir, path)? {
+            Some(at) => vacant(&at)?,
+            None => false,
+        };
+        if !gone {
+            outside.push(path.clone());
+        }
+    }
+    for path in &outside {
+        state.files.remove(path);
+    }
+    Ok(outside)
+}
+
+/// Whether nothing at all is at `at`, not even a link or a pipe: the one
+/// test of absence, for a pull's write and a push's deletion. A folder on
+/// the way that is a file means nothing is there either.
+fn vacant(at: &Path) -> Result<bool, SyncError> {
+    match fs::symlink_metadata(at) {
+        Ok(_) => Ok(false),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(true),
+        Err(e) => Err(SyncError::Io(format!("{}: {e}", at.display()))),
+    }
 }
 
 /// Everything record_conflicts needs; keeps it at one argument.
@@ -1149,7 +1386,7 @@ pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncErr
     let name = &full_name(client, name)?;
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let Scan { files: local, stats, refused } = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
-    let storage = CodeStorage::connect(client, name)?;
+    let storage = CodeStorage::connect(client, name, Wants::Read)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
     let listing = list_main(&storage)?;
     drift.refused = refused.iter().chain(&listing.refused).map(|not| not.to_string()).collect();
@@ -1382,13 +1619,17 @@ mod tests {
         let conflicted = Report { conflicts: paths(&["f.md (remote copy: f.conflict-1-deadbeef.md)"]), ..Report::default() };
         let guarded = Report { mass_delete_guard: Some(15), ..Report::default() };
         let both = Report { conflicts: paths(&["f.md"]), mass_delete_guard: Some(15), ..Report::default() };
+        let unsent = Report { unsent: paths(&["g.md"]), read_only: true, ..Report::default() };
+        let unsent_and_conflicted = Report { conflicts: paths(&["f.md"]), ..unsent.clone() };
         assert_eq!(Report::default().exit_code(), 0);
         assert_eq!(busy.exit_code(), 0, "work done, withheld deletions too, is a clean pass");
         assert_eq!(conflicted.exit_code(), 3);
         assert_eq!(guarded.exit_code(), 4);
         assert_eq!(both.exit_code(), 4);
+        assert_eq!(unsent.exit_code(), 5);
+        assert_eq!(unsent_and_conflicted.exit_code(), 3, "a conflict is the code a script sees beside changes unsent");
         let guide = include_str!("../GUIDE.md");
-        assert!(guide.contains("**Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped."), "GUIDE.md names the codes");
+        assert!(guide.contains("**Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped, 5 changes not sent (you may only read it)."), "GUIDE.md names the codes");
     }
 
     #[test]
@@ -1496,7 +1737,7 @@ mod tests {
         let mock = crate::mockcs::start();
         mock.seed_repo("t--k3x9", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
         let c = client_for(&mock);
-        let storage = CodeStorage::connect(&c, "t--k3x9").unwrap();
+        let storage = CodeStorage::connect(&c, "t--k3x9", Wants::Write).unwrap();
         let before = list_main(&storage).unwrap();
         let changes = [
             Change::Upsert { path: rp("a.txt"), bytes: b"a, longer now".to_vec() },
@@ -1930,7 +2171,7 @@ mod tests {
         let dir = tmpdir("conflict-paths");
         fs::write(dir.join("a"), b"ours a").unwrap();
         fs::write(dir.join("a.md"), b"ours a.md").unwrap();
-        let storage = CodeStorage::connect(&c, "t--k3x9").unwrap();
+        let storage = CodeStorage::connect(&c, "t--k3x9", Wants::Write).unwrap();
         let blobs = crate::blobs::Blobs::new(&c, "t--k3x9");
         let listing = list_main(&storage).unwrap();
         let local = scan_local(&dir, None, true).unwrap().files;
@@ -2139,6 +2380,536 @@ mod tests {
         let st = load_state(&dir, "t--k3x9").unwrap();
         assert_eq!(st.repo.as_deref(), Some("t--k3x9"), "journal binds to the repo identity");
         assert_eq!(st.host.as_deref(), Some(mock.url.as_str()), "journal binds to the host identity");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a viewer syncs a fragment read-only (its token only reads),
+    /// and never loses an edit: a mirror pulls, sends nothing, and keeps
+    /// what it would have sent in the folder, named and exiting 5; a file
+    /// deleted there comes back; both sides' change is a conflict with
+    /// theirs beside it (exit 3); a pull reads whoever asks. Method: the
+    /// host routes hold the caller a viewer; count the commit packs.
+    #[test]
+    fn a_viewers_mirror_pulls_and_sends_nothing() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"theirs 1"), ("b.md", b"b")]);
+        mock.view_only("t--k3x9", true);
+        let c = client_for(&mock);
+        let dir = tmpdir("viewer-mirror");
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(first.read_only && first.unsent.is_empty() && first.exit_code() == 0, "{first:?}");
+        assert_eq!(first.pulled, ["a.md", "b.md"]);
+
+        // edited, made and deleted here: none of it sent, none of it lost
+        fs::write(dir.join("a.md"), "mine").unwrap();
+        fs::write(dir.join("c.md"), "new").unwrap();
+        fs::remove_file(dir.join("b.md")).unwrap();
+        let held = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(held.unsent, ["a.md", "b.md", "c.md"]);
+        assert_eq!(held.exit_code(), 5);
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine");
+        assert_eq!(fs::read_to_string(dir.join("c.md")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(dir.join("b.md")).unwrap(), "b", "a file deleted here is pulled back");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").unwrap(), b"theirs 1");
+        assert!(mock.file_at("t--k3x9", "main", "c.md").is_none());
+
+        // its editor changes what this viewer changed: theirs lands beside
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"theirs 2"))], "theirs");
+        let both = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(both.conflicts.len(), 1, "{both:?}");
+        assert_eq!(both.exit_code(), 3);
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine", "the viewer's copy stays");
+        let beside: Vec<String> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.contains(".conflict-")).collect();
+        assert_eq!(beside.len(), 1, "theirs saved beside: {beside:?}");
+        assert_eq!(fs::read_to_string(dir.join(&beside[0])).unwrap(), "theirs 2");
+
+        // a pull asks for a token that only reads, so a viewer's pulls
+        let other = tmpdir("viewer-pull");
+        let pulled = sync_once(&c, "t--k3x9", &other, &opts(Mode::Pull)).unwrap();
+        assert!(pulled.read_only && pulled.unsent.is_empty() && fs::read_to_string(other.join("a.md")).unwrap() == "theirs 2", "{pulled:?}");
+        assert_eq!(mock.commit_pack_count(), 0, "nothing was ever sent");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other).ok();
+    }
+
+    /// Goal: a viewer's push is refused before anything moves, in the
+    /// host's words, and an editor's mirror still writes. Method: the host
+    /// routes hold the caller a viewer, then its editor again.
+    #[test]
+    fn a_viewers_push_is_refused_and_an_editors_mirror_writes() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"1")]);
+        mock.view_only("t--k3x9", true);
+        let c = client_for(&mock);
+        let dir = tmpdir("viewer-push");
+        fs::write(dir.join("b.md"), "mine").unwrap();
+        let refused = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap_err();
+        assert!(matches!(&refused, SyncError::Cs(CsError::Host(e)) if e.code == Code::Forbidden), "{refused}");
+        assert!(refused.to_string().contains("editor"), "{refused}");
+        assert_eq!(mock.commit_pack_count(), 0);
+
+        mock.view_only("t--k3x9", false);
+        let wrote = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(!wrote.read_only && wrote.pushed == ["b.md"] && wrote.unsent.is_empty(), "{wrote:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `.conflict-` copies in a folder, their text by name.
+    fn conflict_copies(dir: &Path) -> Vec<String> {
+        let mut copies: Vec<String> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.contains(".conflict-")).collect();
+        copies.sort();
+        copies.iter().map(|n| fs::read_to_string(dir.join(n)).unwrap()).collect()
+    }
+
+    /// Goal: a viewer's bytes are never overwritten, where the folder has
+    /// no journal for them (a folder its own, or a file the fragment adds
+    /// later beside the viewer's own new one): theirs lands beside, the
+    /// viewer's stays unsent, and the next pass leaves both. Method: the
+    /// host routes hold the caller a viewer; a folder without a journal,
+    /// then a remote addition colliding with an unsent new file.
+    #[test]
+    fn a_viewers_own_file_is_never_fetched_over() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"remote-original")]);
+        mock.view_only("t--k3x9", true);
+        let c = client_for(&mock);
+        let dir = tmpdir("viewer-bootstrap");
+        fs::write(dir.join("a.md"), "local-unpublished").unwrap();
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "local-unpublished");
+        assert_eq!(conflict_copies(&dir), ["remote-original"]);
+        assert!(first.unsent == ["a.md"] && first.exit_code() == 3, "{first:?}");
+        let again = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "local-unpublished");
+        assert!(again.unsent == ["a.md"] && again.conflicts.is_empty() && again.exit_code() == 5, "the same remote is no new conflict: {again:?}");
+        assert_eq!(conflict_copies(&dir).len(), 1);
+
+        // a new file of the viewer's, then the fragment adds one there
+        fs::write(dir.join("c.md"), "mine, new").unwrap();
+        let unsent = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(unsent.unsent, ["a.md", "c.md"]);
+        mock.external_commit("t--k3x9", "main", &[("c.md", Some(b"theirs, new"))], "theirs");
+        let collided = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("c.md")).unwrap(), "mine, new");
+        assert!(conflict_copies(&dir).contains(&"theirs, new".to_string()), "{collided:?}");
+        assert_eq!(collided.exit_code(), 3);
+        assert_eq!(mock.commit_pack_count(), 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a viewer's edit outlives every later remote change: each new
+    /// remote version is a conflict again (theirs beside, the edit kept),
+    /// across a restart (a fresh process reads the journal), and a remote
+    /// deletion leaves the edit. Method: the host routes hold the caller a
+    /// viewer; three remote changes after one local edit.
+    #[test]
+    fn a_viewers_edit_outlives_each_later_remote_change() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"v1")]);
+        mock.view_only("t--k3x9", true);
+        let c = client_for(&mock);
+        let dir = tmpdir("viewer-edit-lives");
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        fs::write(dir.join("a.md"), "mine").unwrap();
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"v2"))], "theirs");
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(second.exit_code(), 3);
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"v3"))], "theirs again");
+        let third = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine", "never fetched over: {third:?}");
+        assert!(third.exit_code() == 3 && third.unsent == ["a.md"], "{third:?}");
+        // theirs beside it, each version its own copy
+        let mut copies = conflict_copies(&dir);
+        copies.sort();
+        assert_eq!(copies, ["v2", "v3"]);
+        let quiet = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(quiet.conflicts.is_empty() && quiet.unsent == ["a.md"] && quiet.exit_code() == 5, "{quiet:?}");
+
+        mock.external_commit("t--k3x9", "main", &[("a.md", None)], "removed");
+        let removed = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine", "a remote deletion leaves the edit: {removed:?}");
+        assert!(removed.deleted_local.is_empty() && removed.unsent == ["a.md"] && removed.exit_code() == 5, "{removed:?}");
+
+        // its editor again, the same folder sends the edit
+        mock.view_only("t--k3x9", false);
+        let sent = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(sent.pushed == ["a.md"] && mock.file_at("t--k3x9", "main", "a.md").as_deref() == Some(&b"mine"[..]), "{sent:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A folder git keeps, ignoring `ignored` (the scan honors .gitignore
+    /// inside a git working tree).
+    fn git_folder(tag: &str, ignored: &str) -> PathBuf {
+        let dir = tmpdir(tag);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".gitignore"), format!("{ignored}\n")).unwrap();
+        dir
+    }
+
+    /// Goal: a file outside sync (.gitignore'd) where the fragment has one
+    /// is never pulled over, for a viewer or an editor, in a folder's first
+    /// pass or a later one: it stays as it is, theirs lands beside it once
+    /// per version, the pass reports a conflict, and the ignored file is
+    /// never sent. Method: a git folder ignoring a.md holds a draft of it;
+    /// the fragment has another a.md; a viewer's mirror, then an editor's
+    /// pull and mirror, then a new remote version.
+    #[test]
+    fn a_file_outside_sync_is_never_pulled_over() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"remote"), ("b.md", b"b")]);
+        mock.view_only("t--k3x9", true);
+        let c = client_for(&mock);
+        let dir = git_folder("outside-sync", "a.md");
+        fs::write(dir.join("a.md"), "my private draft").unwrap();
+        let copies = |dir: &Path| conflict_copies(dir);
+
+        let viewer = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "my private draft", "{viewer:?}");
+        assert!(viewer.pulled == ["b.md"] && viewer.conflicts.len() == 1 && viewer.unsent.is_empty() && viewer.exit_code() == 3, "{viewer:?}");
+        assert_eq!(copies(&dir), ["remote"]);
+        let again = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(again.conflicts.len() == 1 && again.pulled.is_empty(), "reported while both are there: {again:?}");
+        assert_eq!(copies(&dir), ["remote"], "one copy a version");
+
+        // its editor's pull and mirror keep it too, and never send it
+        mock.view_only("t--k3x9", false);
+        let pulled = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        let mirrored = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "my private draft");
+        assert!(pulled.conflicts.len() == 1 && mirrored.conflicts.len() == 1 && mirrored.pushed.is_empty() && mirrored.deleted_remote.is_empty(), "{pulled:?} {mirrored:?}");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"remote"[..]), "the ignored file is never sent, nor theirs deleted");
+        assert_eq!(mock.commit_pack_count(), 0);
+
+        // a new remote version lands beside it too
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"remote 2"))], "theirs");
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "my private draft");
+        assert!(copies(&dir).contains(&"remote 2".to_string()), "{:?}", copies(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: an editor's file, synced and then put outside sync (added to
+    /// .gitignore), is kept when the fragment's copy moves on, and the
+    /// fragment's is never deleted for it. Method: an editor syncs a.md,
+    /// ignores it and edits it; another writer changes it; mirror twice.
+    #[test]
+    fn an_editors_file_put_outside_sync_is_kept() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"v1")]);
+        let c = client_for(&mock);
+        let dir = git_folder("editor-outside", "nothing.md");
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        fs::write(dir.join(".gitignore"), "a.md\n").unwrap();
+        fs::write(dir.join("a.md"), "mine, now private").unwrap();
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"v2"))], "theirs");
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine, now private", "{first:?}");
+        assert!(first.conflicts.len() == 1 && second.deleted_remote.is_empty() && second.pushed.is_empty(), "{first:?} {second:?}");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"v2"[..]));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: what is not a regular file where the fragment has one (a pipe,
+    /// a link to one) is kept and reported, never read: a pass ends. Method:
+    /// a FIFO with no writer at a.md and a link to it at b.md; the pass runs
+    /// on a thread, and if it has not ended in 20 s the test opens the
+    /// pipe's write end (so the read ends) and fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_fragment_has_a_file_is_kept_unread() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"remote a"), ("b.md", b"remote b")]);
+        mock.view_only("t--k3x9", true);
+        let dir = tmpdir("pipe-kept");
+        let fifo = dir.join("a.md");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success(), "mkfifo");
+        std::os::unix::fs::symlink(&fifo, dir.join("b.md")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (url, at) = (mock.url.clone(), dir.clone());
+        let pass = std::thread::spawn(move || {
+            let c = Client::new(&url, auth::fixed(7));
+            tx.send(sync_once(&c, "t--k3x9", &at, &opts(Mode::Mirror)).map(|r| r.conflicts.len())).ok();
+        });
+        let mut ended = rx.recv_timeout(std::time::Duration::from_secs(20));
+        let stuck = ended.is_err();
+        // stuck reading the pipe (through either path): its write end,
+        // opened without waiting and closed, ends each read, at most 50
+        // times, so the test fails and never hangs
+        for _ in 0..50 {
+            if ended.is_ok() {
+                break;
+            }
+            use std::os::unix::fs::OpenOptionsExt;
+            drop(fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo));
+            ended = rx.recv_timeout(std::time::Duration::from_millis(200));
+        }
+        pass.join().unwrap();
+        assert!(!stuck, "a pass read the pipe: {ended:?}");
+        assert!(matches!(ended, Ok(Ok(2))), "the pass ended, both kept and reported: {ended:?}");
+        assert!(std::os::unix::fs::FileTypeExt::is_fifo(&fs::symlink_metadata(&fifo).unwrap().file_type()) && fs::symlink_metadata(dir.join("b.md")).unwrap().file_type().is_symlink());
+        assert_eq!(conflict_copies(&dir).len(), 2, "theirs beside each");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a conflict copy never replaces a file, an earlier copy of the
+    /// same second included: each takes the next free name. Invalid: past
+    /// `COPIES_A_SECOND` of one second, or through a symlinked folder, none
+    /// is saved, and nothing is written. Method: `save_copy` at one fixed
+    /// second, over a copy someone is editing.
+    #[test]
+    fn a_conflict_copy_never_replaces_a_file() {
+        let dir = tmpdir("copy-names");
+        let at = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+        fs::write(dir.join("a.conflict-7-deadbeef.md"), "my merge, half done").unwrap();
+        assert_eq!(save_copy(&dir, &rp("a.md"), "deadbeef", 7, b"v2").unwrap().unwrap(), rp("a.conflict-7-2-deadbeef.md"));
+        assert_eq!(save_copy(&dir, &rp("a.md"), "deadbeef", 7, b"v3").unwrap().unwrap(), rp("a.conflict-7-3-deadbeef.md"));
+        assert_eq!((at("a.conflict-7-deadbeef.md"), at("a.conflict-7-2-deadbeef.md"), at("a.conflict-7-3-deadbeef.md")), ("my merge, half done".into(), "v2".into(), "v3".into()));
+        assert_eq!(save_copy(&dir, &rp("n/b"), "deadbeef", 7, b"x").unwrap().unwrap(), rp("n/b.conflict-7-deadbeef"), "its folder is made");
+
+        for n in 4..=COPIES_A_SECOND {
+            fs::write(dir.join(format!("a.conflict-7-{n}-deadbeef.md")), "taken").unwrap();
+        }
+        let files = fs::read_dir(&dir).unwrap().count();
+        let full = save_copy(&dir, &rp("a.md"), "deadbeef", 7, b"v4").unwrap().unwrap_err();
+        assert!(full.contains("this second") && fs::read_dir(&dir).unwrap().count() == files, "{full}");
+        #[cfg(unix)]
+        {
+            let outside = tmpdir("copy-names-outside");
+            std::os::unix::fs::symlink(&outside, dir.join("cfg")).unwrap();
+            let linked = save_copy(&dir, &rp("cfg/c.md"), "deadbeef", 7, b"x").unwrap().unwrap_err();
+            assert!(linked.contains("is a symlink") && fs::read_dir(&outside).unwrap().count() == 0, "{linked}");
+            fs::remove_dir_all(&outside).ok();
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- the pass's invariant, as a matrix (`pass_over`) ----
+
+    /// What the folder holds at `a.md` when the pass runs, beside `b.md`
+    /// (synced, untouched).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Here {
+        Same,
+        Edited,
+        /// nothing is there
+        Deleted,
+        /// synced, then `.gitignore`d, its bytes as synced
+        Ignored,
+        /// synced, then `.gitignore`d and edited
+        IgnoredEdited,
+        /// the folder's own file, never synced (main had none)
+        New,
+        NewIgnored,
+        /// a folder with no journal holds its own `a.md`
+        Own,
+        OwnIgnored,
+    }
+
+    /// What main holds at `a.md` when the pass runs, against what the
+    /// folder last synced (a folder with no journal: the seed).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum There {
+        Same,
+        Edited,
+        Deleted,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Who {
+        Viewer,
+        Editor,
+        /// synced as a viewer, made an editor before the pass
+        Promoted,
+    }
+
+    /// One case's fragment and folder, and every (path, bytes) main has
+    /// ever held: the bytes git keeps.
+    struct World<'a> {
+        mock: &'a MockServer,
+        name: String,
+        dir: PathBuf,
+        held: HashSet<(String, Vec<u8>)>,
+    }
+
+    impl World<'_> {
+        fn main(&self) -> BTreeMap<String, Vec<u8>> {
+            self.mock.paths(&self.name, "main").into_iter().filter_map(|p| Some((p.clone(), self.mock.file_at(&self.name, "main", &p)?))).collect()
+        }
+
+        fn note_main(&mut self) {
+            let main = self.main();
+            self.held.extend(main);
+        }
+
+        fn commit(&mut self, bytes: Option<&[u8]>) {
+            self.mock.external_commit(&self.name, "main", &[("a.md", bytes)], "theirs");
+            self.note_main();
+        }
+
+        /// Every regular file in the folder but sync's and git's own.
+        fn folder(&self) -> BTreeMap<String, Vec<u8>> {
+            fn walk(root: &Path, at: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+                for e in fs::read_dir(at).unwrap().flatten() {
+                    let (path, kind) = (e.path(), e.file_type().unwrap());
+                    let rel = relative(root, &path);
+                    if rel == ".fragment" || rel == ".git" {
+                        continue;
+                    }
+                    if kind.is_dir() {
+                        walk(root, &path, out);
+                    } else if kind.is_file() {
+                        out.insert(rel, fs::read(&path).unwrap());
+                    }
+                }
+            }
+            let mut out = BTreeMap::new();
+            walk(&self.dir, &self.dir, &mut out);
+            out
+        }
+
+        /// One pass, checked against the invariant: bytes git never held
+        /// stay where they were; main loses a path only where the folder
+        /// had nothing; what is outside sync is never sent; a pass that
+        /// only reads sends nothing. `None`: a viewer's push, refused with
+        /// nothing moved.
+        fn pass(&mut self, mode: Mode, ignored: bool, case: &str) -> Option<Report> {
+            self.note_main();
+            let (folder, main) = (self.folder(), self.main());
+            let packs = self.mock.requests(&self.name, "POST commit-pack");
+            let o = SyncOptions { prune: true, ..opts(mode) };
+            let got = sync_once(&client_for(self.mock), &self.name, &self.dir, &o);
+            let (folder_after, main_after) = (self.folder(), self.main());
+            let sent = self.mock.requests(&self.name, "POST commit-pack") - packs;
+            let report = match got {
+                Ok(report) => report,
+                Err(SyncError::Cs(CsError::Host(e))) if e.code == Code::Forbidden && mode == Mode::Push => {
+                    assert!(folder == folder_after && main == main_after && sent == 0, "{case}: a refused push moves nothing");
+                    return None;
+                }
+                Err(e) => panic!("{case}: {e}"),
+            };
+            self.note_main();
+            for (path, bytes) in &folder {
+                if !self.held.contains(&(path.clone(), bytes.clone())) {
+                    assert_eq!(folder_after.get(path), Some(bytes), "{case}: {path}'s bytes, in no commit, are kept: {report:?}");
+                }
+            }
+            for path in main.keys().filter(|p| !main_after.contains_key(*p)) {
+                assert!(!folder.contains_key(path), "{case}: main lost {path}, which the folder still had: {report:?}");
+            }
+            if ignored {
+                if let Some(mine) = folder.get("a.md").filter(|b| b.starts_with(b"mine")) {
+                    assert!(main_after.get("a.md") != Some(mine), "{case}: an ignored file was sent: {report:?}");
+                }
+            }
+            if report.read_only {
+                assert_eq!(sent, 0, "{case}: a pass that only reads sends nothing");
+            }
+            Some(report)
+        }
+    }
+
+    /// Goal: one invariant holds for every pass, whoever runs it, in any
+    /// mode, whatever the folder and main did to a file: a pass changes
+    /// only what its scan accounted for. Bytes that are in no commit stay
+    /// in the folder; main loses a path only where the folder has nothing
+    /// at all; a file outside sync (here `.gitignore`d) is never sent, its
+    /// journal row is dropped and the pass names it once; a pass that only
+    /// reads sends nothing; and a writer's own bytes reach main. Method:
+    /// each (folder, main, role, mode) from a synced folder (or one with
+    /// no journal), then main changes the file again, then two more
+    /// passes, the last of which moves nothing. Replay and restart: each
+    /// pass is a fresh `sync_once`, which reads the journal again.
+    #[test]
+    fn every_pass_changes_only_what_its_scan_accounted_for() {
+        let mock = crate::mockcs::start();
+        let heres = [Here::Same, Here::Edited, Here::Deleted, Here::Ignored, Here::IgnoredEdited, Here::New, Here::NewIgnored, Here::Own, Here::OwnIgnored];
+        let mut cases = Vec::new();
+        for here in heres {
+            for there in [There::Same, There::Edited, There::Deleted] {
+                for who in [Who::Viewer, Who::Editor, Who::Promoted] {
+                    for mode in [Mode::Mirror, Mode::Pull, Mode::Push] {
+                        let fresh = matches!(here, Here::New | Here::NewIgnored);
+                        let own = matches!(here, Here::Own | Here::OwnIgnored);
+                        if !(fresh && there == There::Deleted) && !(own && who == Who::Promoted) {
+                            cases.push((cases.len(), here, there, who, mode));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases.len(), 207);
+        // each case its own fragment and folder, eight at a time
+        let ran = at_once(&cases, 8, |&(i, here, there, who, mode)| {
+            one_case(&mock, i, here, there, who, mode);
+            Ok::<(), ()>(())
+        });
+        assert!(ran.iter().all(|r| matches!(r, Some(Ok(())))));
+    }
+
+    /// One case of the matrix above.
+    fn one_case(mock: &MockServer, i: usize, here: Here, there: There, who: Who, mode: Mode) {
+        let case = format!("{here:?}/{there:?}/{who:?}/{mode:?}");
+        let name = format!("m{i}--k3x9");
+        let fresh = matches!(here, Here::New | Here::NewIgnored);
+        let seed: &[(&str, &[u8])] = if fresh { &[("b.md", b"b")] } else { &[("a.md", b"v1"), ("b.md", b"b")] };
+        mock.seed_repo(&name, seed);
+        mock.view_only(&name, who != Who::Editor);
+        let dir = git_folder(&format!("matrix-{i}"), "nothing.md");
+        let mut w = World { mock, name, dir: dir.clone(), held: HashSet::new() };
+        w.note_main();
+        if !matches!(here, Here::Own | Here::OwnIgnored) {
+            sync_once(&client_for(mock), &w.name, &dir, &opts(Mode::Mirror)).unwrap();
+        }
+        let ignore = || fs::write(dir.join(".gitignore"), "nothing.md\na.md\n").unwrap();
+        match here {
+            Here::Same => {}
+            Here::Edited => fs::write(dir.join("a.md"), "mine: edited").unwrap(),
+            Here::Deleted => fs::remove_file(dir.join("a.md")).unwrap(),
+            Here::Ignored => ignore(),
+            Here::IgnoredEdited | Here::NewIgnored | Here::OwnIgnored => {
+                ignore();
+                fs::write(dir.join("a.md"), "mine: ignored").unwrap();
+            }
+            Here::New | Here::Own => fs::write(dir.join("a.md"), "mine: own").unwrap(),
+        }
+        match there {
+            There::Same => {}
+            There::Edited => w.commit(Some(b"v2")),
+            There::Deleted => w.commit(None),
+        }
+        if who == Who::Promoted {
+            mock.view_only(&w.name, false);
+        }
+        let ignored = matches!(here, Here::Ignored | Here::IgnoredEdited | Here::NewIgnored | Here::OwnIgnored);
+        let Some(first) = w.pass(mode, ignored, &case) else {
+            assert!(who == Who::Viewer && mode == Mode::Push, "{case}: only a viewer's push is refused");
+            fs::remove_dir_all(&dir).ok();
+            return;
+        };
+        // a file synced, then put outside sync: named once, and the same
+        // bytes on both sides are no conflict
+        let left = matches!(here, Here::Ignored | Here::IgnoredEdited);
+        assert_eq!(first.outside_sync, if left { vec!["a.md".to_string()] } else { vec![] }, "{case}: {first:?}");
+        if here == Here::Ignored && there == There::Same {
+            assert!(first.conflicts.is_empty() && first.exit_code() == 0 && w.main().get("a.md").map(Vec::as_slice) == Some(b"v1"), "{case}: {first:?}");
+        }
+        w.commit(Some(b"v3"));
+        let second = w.pass(mode, ignored, &case).expect("a pass");
+        let third = w.pass(mode, ignored, &case).expect("a pass");
+        assert!(second.outside_sync.is_empty() && third.outside_sync.is_empty(), "{case}: named once: {second:?} {third:?}");
+        let (folder, main) = (w.folder(), w.main());
+        let last = w.pass(mode, ignored, &case).expect("a pass");
+        let still = last.pushed.is_empty() && last.pulled.is_empty() && last.deleted_remote.is_empty() && last.deleted_local.is_empty();
+        assert!(still && w.folder() == folder && w.main() == main, "{case}: the passes settle: {last:?}");
+        // a writer's own bytes reach main (a conflict keeps them, theirs
+        // beside, and the next pass sends them)
+        let writes = who != Who::Viewer && mode != Mode::Pull;
+        if writes && matches!(here, Here::Edited | Here::New | Here::Own) {
+            let mine = if here == Here::Edited { "mine: edited" } else { "mine: own" };
+            assert!(w.held.contains(&("a.md".to_string(), mine.as_bytes().to_vec())), "{case}: an editor's bytes are sent");
+        }
         fs::remove_dir_all(&dir).ok();
     }
 }
