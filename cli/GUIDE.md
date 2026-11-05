@@ -363,8 +363,11 @@ fragment verify my-thing --dir .            # full-content audit
 - **Viewers** sync read-only, and so does an agent acting for one (it
   holds the lower of their role and its own). A mirror pulls and sends
   nothing: what it would have sent stays in your folder, listed as not
-  sent (exit 5), and a file you deleted is pulled back. `--mode push`
-  and `deploy --dir` are an editor's. A token reads the repo's whole
+  sent (exit 5), and a file you deleted is pulled back. A file of yours
+  is never pulled over: each time the fragment's copy changes, or where
+  it has one your folder never synced, theirs lands beside yours as a
+  conflict copy; a remote deletion leaves yours. `--mode push` and
+  `deploy --dir` are an editor's. A token reads the repo's whole
   history, so every member, a viewer too, can read anything ever
   committed, including what was removed before they were added. A share
   link and a public fragment's visitors get none: they read what is
