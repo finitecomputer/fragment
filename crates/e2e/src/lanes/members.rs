@@ -297,6 +297,27 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "create": r.status, "row": row, "members": members.body, "waited": r.header("server-timing") }),
     );
     first_row_names_its_agent(s, api, &owner, &mine)?;
+    // one with no face at its making: no template, or one not blessed (whose
+    // release read gives none, as a read that fails does): its row names its
+    // agent all the same, as an untitled app's, from the create's answer
+    let faceless: Vec<Value> = [None, Some("todo")]
+        .into_iter()
+        .map(|template| {
+            let name = s.named(api, &owner, "members-faceless")?;
+            let mut body = json!({ "name": name, "agent": mine });
+            if let Some(t) = template {
+                body["template"] = json!(t);
+            }
+            let r = api.create_with(&owner, body)?;
+            s.owned(&r.body, &owner);
+            Ok(json!({ "template": template, "create": r.status, "row": row_of_named(api, &owner, &name)? }))
+        })
+        .collect::<Result<_>>()?;
+    s.ok(
+        "made with its agent and no face yet (no template, or one not blessed): its owner's row names its agent from the create's answer, an app's",
+        faceless.iter().all(|f| f["create"] == 200 && f["row"]["agents"] == json!([mine]) && f["row"]["kind"] == "app"),
+        json!(faceless),
+    );
     let again = api.create_with(&owner, json!({ "name": together, "template": "chat", "agent": mine }))?;
     let members = api.signed(&owner, "GET", &format!("/api/f/{together}/members"), None)?;
     let once = members.body["members"].as_array().map(|m| m.iter().filter(|m| m["principal"] == mine.as_str()).count());
