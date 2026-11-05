@@ -368,12 +368,11 @@ fn updating_platform_frames(s: &mut Suite, api: &Api, chrome: &mut Browser, shel
 
 /// A browser that keeps no cookie from a frame's sign-in (Safari from
 /// 18.5 to 26.1 keeps none from a cross-site frame, partitioned or not):
-/// in a browser of its own (no frame cookie from before), the
-/// shell's own window of the owner's app, its redemption's answer
-/// given to the frame without its `Set-Cookie`. Valid: the page it lands
-/// on refuses it as signed out and says so to the shell, which says this
-/// browser keeps a window's own sign-in from it, in the frame's place, and
-/// signs it in no more (no loop: no redemption after the one).
+/// in a browser of its own, the shell's own window of the owner's app,
+/// the frame cookie its redemption set dropped before its page is asked
+/// for. Valid: that page refuses it as signed out and says so to the
+/// shell, which says this browser keeps a window's own sign-in from it, in
+/// the frame's place, and signs it in no more (no loop: no mint after).
 fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str) -> Result<()> {
     let wait = Duration::from_secs(20);
     // a browser of its own, as the lane's blocks third-party cookies: no
@@ -386,25 +385,36 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str) -> Result<
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let shell = chrome.open(&format!("{}/", api.base))?;
     chrome.eval(&shell, LISTEN)?;
-    // its own redemption's alone (the shell signs its chat's frame in beside it)
-    chrome.hold_responses(&shell, &[&format!("{}*", api.site_url(own, "__signin"))])?;
+    // its page, where the sign-in lands, held: the redemption has set its
+    // frame cookie by then, which is dropped there, as such a browser drops it
+    let landing = api.site_url(own, "");
+    chrome.block(&shell, &[])?;
+    chrome.hold(&shell, &[&landing])?;
     let icon = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{own}\"]"))?);
     let up = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
     chrome.eval(&shell, &format!("({icon}?.click(), true)"))?;
-    let redeemed = s.eventually(wait, || chrome.held(&shell).is_ok_and(|h| h.iter().any(|u| u.contains("__signin?token="))));
-    let released = chrome.release_without_cookies(&shell)?;
+    let landed = s.eventually(wait, || chrome.held(&shell).is_ok_and(|h| h.iter().any(|u| u == &landing)));
+    let host = landing.split("//").nth(1).and_then(|h| h.split(':').next()).unwrap_or("").to_string();
+    let set = chrome.cookies()?.into_iter().find(|c| c["name"] == "fragment_frame" && c["domain"] == host.as_str());
+    if let Some(cookie) = &set {
+        chrome.delete_cookie(&shell, cookie)?;
+    }
+    let dropped = chrome.cookies()?.iter().all(|c| !(c["name"] == "fragment_frame" && c["domain"] == host.as_str()));
+    chrome.release(&shell, false)?;
     let note = "[...document.querySelectorAll('.frame-note')].some((n) => n.innerText.includes(\"can't sign in here\"))";
     let told = chrome.until(&shell, note, wait);
     let blocked = chrome.eval(&shell, &format!("document.querySelector({})?.dataset.blocked ?? null", serde_json::to_string(&format!("iframe[data-fragment=\"{own}\"]"))?))?;
+    // signed in no more: no other sign-in of the app's frame asked for
+    chrome.hold(&shell, &[&format!("*/auth/frame?name={own}*")])?;
     let more = chrome.held(&shell)?;
     let _ = chrome.screenshot(&shell, &s.scratch.join("frames-dropped-cookie.png"));
     // what it saw, if it says nothing: the frame's page, and what the shell heard
-    let landed = chrome.eval_in_frame(&shell, own, "({ href: location.href, text: document.body?.innerText?.slice(0, 200) })").unwrap_or_default();
+    let shown = chrome.eval_in_frame(&shell, own, "({ href: location.href, text: document.body?.innerText?.slice(0, 200) })").unwrap_or_default();
     let heard = chrome.eval(&shell, "JSON.stringify(heard)").unwrap_or_default();
     s.ok(
         "a browser that keeps no cookie from the frame's sign-in: its page refuses it as signed out, and the shell says this browser keeps a window's own sign-in from it, in its place, signing it in no more",
-        up && redeemed && released == 1 && told && blocked == "cookies" && more.is_empty(),
-        json!({ "up": up, "redeemed": redeemed, "released": released, "told": told, "blocked": blocked, "more": more, "landed": landed, "heard": heard }),
+        up && landed && set.is_some() && dropped && told && blocked == "cookies" && more.is_empty(),
+        json!({ "up": up, "landed": landed, "set": set.is_some(), "dropped": dropped, "told": told, "blocked": blocked, "more": more, "shown": shown, "heard": heard }),
     );
     chrome.release(&shell, false)?;
     chrome.close(shell)?;
