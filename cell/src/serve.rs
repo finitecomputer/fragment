@@ -650,6 +650,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
         let mime = site::mime_for_path(&row.path);
+        // no await between the row's read and this: the same tree's paths
         let cache = site::cache_control(self.declared_immutable(&row.path)?, public);
         // a file of a pointer's size may be one: its bytes are a blob's
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
@@ -787,16 +788,18 @@ impl FragmentCell {
     }
 
     /// Whether live's manifest keeps the site file at `path` (`site/…`) for
-    /// good (`immutable`, site.rs `declared_immutable`): read only for a
-    /// file that is no page, as a page never is.
+    /// good (`immutable`, site.rs `declared_immutable`): the paths stored
+    /// for the commit live is at now, read with it in one statement, and
+    /// asked with no await since the file's tree row was read, so of the
+    /// very tree that row is of. Read only for a file that is no page, as a
+    /// page never is.
     fn declared_immutable(&self, path: &str) -> CellResult<bool> {
         let Some(rest) = path.strip_prefix("site/") else { return Ok(false) };
         if site::mime_for_path(rest).starts_with("text/html") {
             return Ok(false);
         }
-        let Some(text) = self.meta(MetaKey::ImmutableLive)? else { return Ok(false) };
-        let patterns: Vec<String> = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored immutable paths do not decode: {e}")))?;
-        Ok(site::declared_immutable(&patterns, rest))
+        let [declared, live] = self.metas([MetaKey::ImmutableLive, MetaKey::PinLive])?;
+        Ok(site::declared_immutable(declared.as_deref(), live.as_deref().unwrap_or(""), rest))
     }
 
     /// What live's manifest says of the files view (`files`), if anything.

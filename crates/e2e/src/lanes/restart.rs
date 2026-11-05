@@ -50,6 +50,45 @@ fn added_key_price(book: &Value) -> Option<Value> {
     book["keys"].as_array()?.iter().find(|k| k["key"] == ADDED_KEY.0).cloned()
 }
 
+/// Each of `paths`' cache policy on public fragment `name`, revalidated
+/// (`public, max-age=60`) or not: `{ok, paths: {path: [status, cache]}}`.
+fn revalidated(api: &Api, name: &str, paths: &[&str]) -> Result<Value> {
+    let mut seen = serde_json::Map::new();
+    let mut ok = true;
+    for path in paths {
+        let r = api.page(name, path, None)?;
+        ok &= r.status == 200 && r.header("cache-control") == "public, max-age=60";
+        seen.insert(path.to_string(), json!([r.status, r.header("cache-control")]));
+    }
+    Ok(json!({ "ok": ok, "paths": seen }))
+}
+
+/// A public site that keeps `assets/**` for good (its first deploy, checked
+/// so), then a deploy of `manifest` (`immutable` gone or changed, and a
+/// refused field) adding `added`: its install refused, its tree served
+/// with none of the first's kept paths. Its name, and `added` under `site/`.
+fn kept_then_refused(s: &mut Suite, api: &Api, owner: &Keys, label: &str, manifest: &[u8], added: &str) -> Result<(String, String)> {
+    let name = s.named(api, owner, label)?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    s.commit(&c, &[("fragment.json", Some(br#"{"immutable":["assets/**"]}"#)), ("site/index.html", Some(b"<p>kept</p>")), ("site/assets/a-Ikq0sZO3.js", Some(b"1"))]);
+    s.deploy(&c);
+    let first = api.page(&name, "assets/a-Ikq0sZO3.js", None)?;
+    s.ok(&format!("{label}: its first deploy keeps assets/** for good"), first.status == 200 && first.header("cache-control") == "public, max-age=31536000, immutable", &first);
+    let added_bytes: &[u8] = b"2";
+    s.commit(&c, &[("fragment.json", Some(manifest)), (added, Some(added_bytes))]);
+    let live = s.deploy(&c);
+    let status = api.status(owner, &name)?;
+    let added = added.strip_prefix("site/").expect("a site file").to_string();
+    let seen = revalidated(api, &name, &["assets/a-Ikq0sZO3.js", &added])?;
+    s.ok(
+        &format!("{label}: a deploy whose install is refused (fragment.json {}) is served with none of the last install's kept paths: its old and new files revalidated", String::from_utf8_lossy(manifest)),
+        status.body["code"]["error"].as_str().is_some_and(|e| e.contains(&live[..12])) && seen["ok"] == true,
+        json!({ "code": status.body["code"], "seen": seen }),
+    );
+    Ok((name, added))
+}
+
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
@@ -414,8 +453,19 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let files = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(site.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
     let kept = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "kept.md")).and_then(|f| f["commit"].as_str()).unwrap_or_default().to_string();
     anyhow::ensure!(fragment_core::site::valid_version(&kept), "a version before the crash: {files}");
+    // FIN-391: a site's paths kept for good describe the commit they were
+    // read from: a deploy whose install is refused leaves its tree served
+    // with none of the last one's, before a crash and after it
+    let unkept = kept_then_refused(s, &api, &owner, "restart-unkept", br#"{"operations":3}"#, "site/assets/new-B4k9Qz2m.js")?;
+    let moved = kept_then_refused(s, &api, &owner, "restart-moved", br#"{"immutable":["fonts/**"],"operations":3}"#, "site/fonts/new.woff2")?;
     s.crash()?;
     let api = s.start(false)?;
+    let after: Vec<Value> = [&unkept, &moved].iter().map(|(name, added)| revalidated(&api, name, &["assets/a-Ikq0sZO3.js", added])).collect::<Result<_>>()?;
+    s.ok(
+        "after a crash a refused deploy's tree is still served with none of the last install's kept paths: its files revalidated, the new ones too",
+        after.iter().all(|r| r["ok"] == true),
+        json!(after),
+    );
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",

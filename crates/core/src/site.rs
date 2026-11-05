@@ -150,13 +150,26 @@ pub fn hashed(path: &str) -> bool {
     })
 }
 
-/// Whether a fragment's own site file (`site_path`, under `site/`) is kept
-/// for good: one its live fragment.json names (`immutable`: patterns, as
-/// file triggers' are, under `site/`), never a page. Nothing else is, what
-/// its name looks like aside: a dated, versioned or hand-made name
-/// (`report-Nov2024a.pdf`, `menu-Summer24.css`) is revalidated.
-pub fn declared_immutable(patterns: &[String], site_path: &str) -> bool {
-    !mime_for_path(site_path).starts_with("text/html") && patterns.iter().any(|p| crate::glob::matches_path(p, site_path))
+/// A site's `immutable` paths as its install stored them, with the live
+/// commit they were read from (cell/src/plane.rs `install_code`): they
+/// describe that commit's tree alone.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Declared {
+    pub commit: String,
+    pub paths: Vec<String>,
+}
+
+/// Whether a fragment's own site file (`site_path`, under `site/`), served
+/// from the live commit `live`, is kept for good: one the paths stored for
+/// that very commit match (`Declared`; file trigger patterns, under
+/// `site/`), never a page. Stored for another commit (live moved and its
+/// install was refused, or is still to come), stored in another shape, or
+/// none: revalidated. Nothing else is kept for good, what its name looks
+/// like aside: a dated, versioned or hand-made name (`report-Nov2024a.pdf`,
+/// `menu-Summer24.css`) is revalidated.
+pub fn declared_immutable(stored: Option<&str>, live: &str, site_path: &str) -> bool {
+    let Some(declared) = stored.and_then(|text| serde_json::from_str::<Declared>(text).ok()) else { return false };
+    declared.commit == live && !live.is_empty() && !mime_for_path(site_path).starts_with("text/html") && declared.paths.iter().any(|p| crate::glob::matches_path(p, site_path))
 }
 
 /// Cache policy for a served file, kept for good when `pinned` (its name
@@ -551,11 +564,14 @@ mod tests {
         ];
         for path in undeclared {
             assert!(!hashed(path), "{path}");
-            assert!(!declared_immutable(&[], path), "{path}");
+            assert!(!declared_immutable(None, "c0ffee", path), "{path}");
             assert_eq!(cache_control(hashed(path), true), "public, max-age=60", "{path}");
         }
-        // declared: what its fragment.json names, and nothing else
-        let declared = ["assets/**".to_string(), "fonts/inter.woff2".to_string()];
+        // declared: what its fragment.json names, and nothing else, for the
+        // commit it was read from alone
+        let live = "3f9a1c2e0123456789abcdef0123456789abcdef";
+        let stored = serde_json::to_string(&Declared { commit: live.into(), paths: vec!["assets/**".into(), "fonts/inter.woff2".into()] }).unwrap();
+        let declared = Some(stored.as_str());
         for (path, pinned) in [
             ("assets/index-Ikq0sZO3.js", true),
             ("assets/menu-Summer24.css", true), // declared: the person's word
@@ -568,7 +584,13 @@ mod tests {
             ("index-Ikq0sZO3.js", false),
             ("app.3f9a1c2e.js", false),
         ] {
-            assert_eq!(declared_immutable(&declared, path), pinned, "{path}");
+            assert_eq!(declared_immutable(declared, live, path), pinned, "{path}");
+        }
+        // another commit's paths (live moved, its install refused or to
+        // come), none, another shape, or no live: revalidated
+        let other = "0123456789abcdef0123456789abcdef3f9a1c2e";
+        for (stored, at) in [(declared, other), (declared, ""), (None, live), (Some(r#"["assets/**"]"#), live), (Some("{"), live), (Some(r#"{"commit":"x"}"#), live)] {
+            assert!(!declared_immutable(stored, at, "assets/index-Ikq0sZO3.js"), "{stored:?} at {at:?}");
         }
         assert_eq!(cache_control(true, true), "public, max-age=31536000, immutable");
         assert_eq!(cache_control(true, false), "private, max-age=31536000, immutable");
