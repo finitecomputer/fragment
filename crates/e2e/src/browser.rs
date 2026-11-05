@@ -947,8 +947,9 @@ impl Browser {
         }
         for p in &paused {
             let headers: Vec<&Value> = p["responseHeaders"].as_array().into_iter().flatten().filter(|h| !h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("set-cookie"))).collect();
-            let params = json!({ "requestId": p["requestId"], "responseCode": p["responseStatusCode"], "responseHeaders": headers, "body": "" });
-            self.send("Fetch.fulfillRequest", params, Some(&page.session))?;
+            // the response as it came, its headers but the cookie's: a redirect followed as one
+            let params = json!({ "requestId": p["requestId"], "responseCode": p["responseStatusCode"], "responseHeaders": headers });
+            self.send("Fetch.continueResponse", params, Some(&page.session))?;
         }
         Ok(paused.len())
     }

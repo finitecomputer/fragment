@@ -385,6 +385,7 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str) -> Result<
     let chrome = &mut fresh;
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let shell = chrome.open(&format!("{}/", api.base))?;
+    chrome.eval(&shell, LISTEN)?;
     // its own redemption's alone (the shell signs its chat's frame in beside it)
     chrome.hold_responses(&shell, &[&format!("{}*", api.site_url(own, "__signin"))])?;
     let icon = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{own}\"]"))?);
@@ -397,10 +398,13 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str) -> Result<
     let blocked = chrome.eval(&shell, &format!("document.querySelector({})?.dataset.blocked ?? null", serde_json::to_string(&format!("iframe[data-fragment=\"{own}\"]"))?))?;
     let more = chrome.held(&shell)?;
     let _ = chrome.screenshot(&shell, &s.scratch.join("frames-dropped-cookie.png"));
+    // what it saw, if it says nothing: the frame's page, and what the shell heard
+    let landed = chrome.eval_in_frame(&shell, own, "({ href: location.href, text: document.body?.innerText?.slice(0, 200) })").unwrap_or_default();
+    let heard = chrome.eval(&shell, "JSON.stringify(heard)").unwrap_or_default();
     s.ok(
         "a browser that keeps no cookie from the frame's sign-in: its page refuses it as signed out, and the shell says this browser keeps a window's own sign-in from it, in its place, signing it in no more",
         up && redeemed && released == 1 && told && blocked == "cookies" && more.is_empty(),
-        json!({ "up": up, "redeemed": redeemed, "released": released, "told": told, "blocked": blocked, "more": more }),
+        json!({ "up": up, "redeemed": redeemed, "released": released, "told": told, "blocked": blocked, "more": more, "landed": landed, "heard": heard }),
     );
     chrome.release(&shell, false)?;
     chrome.close(shell)?;
