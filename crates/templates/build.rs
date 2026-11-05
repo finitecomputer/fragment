@@ -14,7 +14,7 @@
 // no shell: `ALL` is the templates a person or an agent scaffolds, and
 // `SHELL` is empty, so neither is an input of the CLI's build.
 //
-// With `platform`, the pages `PAGES` names are built (bundle.rs), not held
+// With `bundle` (which `platform` turns on), the pages `PAGES` names are built (bundle.rs), not held
 // as written: the shell's and the chat, Telegram and Session Archive pages,
 // their scripts bundled and every script and stylesheet of their own named
 // by its hash. Each built
@@ -33,13 +33,13 @@ use sha2::{Digest, Sha256};
 
 include!("src/blessed_names.rs");
 
-#[cfg(feature = "platform")]
+#[cfg(feature = "bundle")]
 mod bundle;
 
 /// The pages the release builds (bundle.rs), each where it sits: the
 /// shell's (`shell`, cell/shell/), or a blessed template's site/, and how
 /// it names a file beside it.
-#[cfg(feature = "platform")]
+#[cfg(feature = "bundle")]
 const PAGES: &[(&str, &str)] = &[("chat", "./"), ("sessions", "./"), ("shell", "/__shell/"), ("telegram", "./")];
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
@@ -114,14 +114,14 @@ fn main() {
     let out_dir = fs::canonicalize(env::var("OUT_DIR").unwrap()).expect("OUT_DIR");
     // the files a page's build made or named anew (bundle.rs): where, and
     // path; and the shell's sources its bundle holds, which the release
-    // does not (none without `platform`, which builds no page)
+    // does not (none without `bundle`, which builds no page)
     #[allow(unused_mut)]
     let mut built: Vec<(String, String)> = Vec::new();
     #[allow(unused_mut)]
     let mut shell_bundled: Vec<String> = Vec::new();
-    #[cfg(feature = "platform")]
+    #[cfg(feature = "bundle")]
     let esbuild = bundle::Esbuild::installed(&repo);
-    #[cfg(feature = "platform")]
+    #[cfg(feature = "bundle")]
     let page = |at: &str, dir: PathBuf| {
         let &(_, link) = PAGES.iter().find(|(p, _)| *p == at)?;
         Some(bundle::build(&esbuild, &bundle::Page { dir, link }, &repo, &out_dir.join("web").join(at)))
@@ -130,7 +130,7 @@ fn main() {
         let mut files = Vec::new();
         collect(&tdir.join(name), &tdir.join(name), &mut files);
         // its page built (bundle.rs), in place of its own; its sources stay
-        #[cfg(feature = "platform")]
+        #[cfg(feature = "bundle")]
         if let Some(made) = page(name, tdir.join(name).join("site")) {
             files.retain(|(rel, _)| rel != "site/index.html");
             for b in made.files {
@@ -183,7 +183,7 @@ fn main() {
         // its page built (bundle.rs), in place of its own: shell.js
         // bundled, its stylesheets by their hash, and the sources the
         // bundle holds no file of the release
-        #[cfg(feature = "platform")]
+        #[cfg(feature = "bundle")]
         {
             let made = page("shell", shell.clone()).expect("the shell's page is built");
             files.retain(|(rel, path)| {
