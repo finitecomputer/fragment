@@ -136,10 +136,12 @@ fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
         deployed["kept"] == false && deployed["asset"][2] == "console.log('a, first')" && deployed["version"][0] == 200,
         &deployed,
     );
-    // the next commit's pointers; its refresh cut at the second's read
+    // the next commit's pointers, at main whole; then live's refresh to it
+    // cut at the second's read (main's, had it been cut, would stop the
+    // refresh before live's pointers)
     let (a2, b2) = (upload("console.log('a, second')")?, upload("console.log('b, second')")?);
-    s.fake.fail_file_read(Some(b));
     s.commit(&c, &[(a, Some(a2.as_bytes())), (b, Some(b2.as_bytes()))]);
+    s.fake.fail_file_read(Some(b));
     s.deploy(&c);
     let pins = api.status(owner, &name)?.body["pins"].clone();
     let cut = blob_caching(api, &blobbed)?;
