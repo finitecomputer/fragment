@@ -120,13 +120,45 @@ pub fn site_candidates(rest: &str) -> Vec<String> {
     vec![format!("site/{rest}"), format!("site/{rest}/index.html")]
 }
 
-/// A name with a content hash in it (`app.3f9a1c2e.js`) never changes:
-/// the one rule for a file kept for good by its name, a fragment's
-/// (`cache_control`) and the shell's built files alike (cell/src/shell.rs
-/// `asset`, crates/templates/bundle.rs).
+/// A name with a content hash in it never changes: the one rule for a file
+/// kept for good by its name, a fragment's (`cache_control`) and the
+/// shell's built files alike (cell/src/shell.rs `asset`,
+/// crates/templates/bundle.rs). A wrong yes pins a file's old bytes in a
+/// browser for a year, so it holds only the forms bundlers write by
+/// default, each a part of the name before its extension, after a `.` or
+/// a `-` (`hash_part`):
+///
+/// - hex, 8 to 64 digits: webpack's and Parcel's `app.3f9a1c2e.js`,
+///   Next.js's `main-3f9a2c1b4d5e6f70.js`, the platform's own;
+/// - Rollup's and Vite's, 8 of base64url: `index-Ikq0sZO3.js`;
+/// - esbuild's, 8 of base32: `index-S4M26L7U.js`.
+///
+/// Each holds a digit and a letter (and Rollup's, both cases), as words,
+/// dates and versions do not: `logo-dark.svg`, `2024-report.pdf`,
+/// `backup.20241105.tar` and `jquery-3.7.1.min.js` are not hashed. A real
+/// hash that lacks them is only revalidated, as any other file is. A name
+/// of a person's own that is one of these forms is taken for a hash
+/// (`nav-Footer2x.svg`, as Rollup's): such a file's new bytes need a new name.
 pub fn hashed(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
-    base.split('.').rev().skip(1).any(|part| part.len() >= 8 && part.bytes().all(|b| b.is_ascii_hexdigit()))
+    base.split('.').rev().skip(1).any(|part| {
+        // the part whole (`.3f9a1c2e.`), what follows its last dash
+        // (`-3f9a1c2e`), or its last 8 after a dash (Rollup's may hold one)
+        let after_dash = part.rsplit_once('-').map(|(_, h)| h);
+        let last8 = part.len().checked_sub(9).filter(|&at| part.as_bytes()[at] == b'-').map(|at| &part[at + 1..]);
+        [Some(part), after_dash, last8].into_iter().flatten().any(hash_part)
+    })
+}
+
+/// Whether `t` is a bundler's hash, in one of `hashed`'s forms.
+fn hash_part(t: &str) -> bool {
+    let has = |f: fn(&u8) -> bool| t.as_bytes().iter().any(f);
+    let all = |f: fn(&u8) -> bool| t.as_bytes().iter().all(f);
+    let (digit, upper, lower) = (has(u8::is_ascii_digit), has(u8::is_ascii_uppercase), has(u8::is_ascii_lowercase));
+    let hex = (8..=64).contains(&t.len()) && all(u8::is_ascii_hexdigit) && digit && (upper || lower);
+    let rollup = t.len() == 8 && all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_') && digit && upper && lower;
+    let esbuild = t.len() == 8 && all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(b)) && digit && upper;
+    hex || rollup || esbuild
 }
 
 /// Cache policy for a served file. Anything behind a share link or
@@ -484,7 +516,9 @@ mod tests {
     /// Goal: only a name with a content hash in it is cached for a year,
     /// and a public fragment's such file by shared caches too. The e2e's
     /// site section reads the other three rows off served pages. Method:
-    /// names at the edges of the hash rule, on a public fragment.
+    /// names at the edges of the hash rule, on a public fragment: each
+    /// bundler's real output, and the words, dates and versions that look
+    /// like one (FIN-391), which a wrong yes would pin for a year.
     #[test]
     fn only_a_hashed_name_is_immutable() {
         for (path, hashed) in [
@@ -496,6 +530,43 @@ mod tests {
             ("deadbeef", false), // the last part is the extension, never the hash
             ("app.deadbeef", false),
             ("3f9a1c2e.d/app.js", false), // a hashed folder names no file's bytes
+            // the platform's own (crates/templates/bundle.rs)
+            ("shell.f7db3bbd91f7.js", true),
+            ("chat.dca8eba10ae4.js.map", true),
+            // webpack's `[name].[contenthash]`, Next.js's `[name]-[hash]`
+            ("main.8d3f2a1c9b7e6f5a4d3c.js", true),
+            ("_next/static/chunks/main-3f9a2c1b4d5e6f70.js", true),
+            // Vite's and Rollup's `[name]-[hash]`, base64url: one may hold `-` or `_`
+            ("assets/index-Ikq0sZO3.js", true),
+            ("assets/index-BxK3abc1.css", true),
+            ("assets/vendor-B_x-K3ab.js", true),
+            ("assets/index-Ikq0sZO3.js.map", true),
+            ("_app/immutable/chunks/entry.Dk3h2aB1.js", true),
+            // esbuild's `[name]-[hash]`, base32
+            ("index-S4M26L7U.js", true),
+            ("chunk-ABCD2345.js", true),
+            // words, dates and versions, never a hash
+            ("logo-dark.svg", false),
+            ("2024-report.pdf", false),
+            ("my-component.js", false),
+            ("report-20241105.pdf", false),
+            ("backup.20241105.tar", false), // digits alone: a date or a number
+            ("export-1730800000000.zip", false),
+            ("app.12345678.js", false),
+            ("photo-deadbeef.png", false), // hex letters alone: a word
+            ("jquery-3.7.1.min.js", false),
+            ("react-dom-18.2.0.production.min.js", false),
+            ("app-v2.1.3.js", false),
+            ("photo-summer24.jpg", false), // no capital: no Rollup hash
+            ("nav-HomePage.js", false), // no digit
+            ("logo-FACEBOOK.svg", false),
+            ("funnel-sans-400.ttf", false),
+            ("platform-landscape-dark.jpg", false),
+            ("icons-v2Large.svg", false), // nine after the dash
+            ("index-Ikq0sZO.js", false), // seven: too short for Rollup's
+            ("index-S4M26L7U8.js", false), // nine: too long for esbuild's
+            // a name of one's own in Rollup's form is taken for its hash
+            ("nav-Footer2x.svg", true),
         ] {
             let expected = if hashed { "public, max-age=31536000, immutable" } else { "public, max-age=60" };
             assert_eq!(cache_control(path, true), expected, "{path}");
