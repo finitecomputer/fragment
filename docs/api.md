@@ -1728,6 +1728,14 @@ between two changes to the fragment, one at a time per id (429
 - `me()` → the hello's `{id, principal, role, platform}`; `closed(fn)`,
   called with `{code, reason}` after 4003 or 4004, which end the socket.
   Otherwise it reconnects by itself with jittered backoff.
+- A page may dial its socket before the library comes, from an inline
+  script: `window.__fragmentLive = {claim}`, `claim()` answering `{ws,
+  heard}` (its own `__live`, the messages it heard) once and ending its
+  bounds, or `null` when it gave up: unclaimed, a page's script closes it
+  and lets it go past the library's opening wait, a cap on what it holds,
+  or its close. The first connect adopts a socket claimed, with what it
+  heard, if it is still opening or open, and closes it otherwise. The chat
+  template does.
 
 **The stylesheet** (`<link rel="stylesheet" href="./__fragment.css">`,
 `cell/fragment.css`) is for a page that links it; the platform adds it to
