@@ -5,7 +5,24 @@ import Observation
 final class ChatSession {
     let fragment: FragmentSummary
     let api: FragmentAPI
-    private(set) var timeline = Timeline()
+    /// What was read of the chat. Views draw from what is made of it
+    /// (`rows`, `drafts`, `activeTurns`), each set only when it changes: a
+    /// draft's next words redraw its draft alone, never the chat's rows.
+    @ObservationIgnored private(set) var timeline = Timeline() { didSet { timelineChanged() } }
+    /// The records a chat shows (`ChatRow.shows`), in order.
+    private(set) var rows: [ChannelRecord] = []
+    /// Replies being written, the earliest first.
+    private(set) var drafts: [ReplyDraft] = []
+    private(set) var activeTurns: [String] = []
+    private(set) var chatCursor: Int64 = 0
+    /// Whether the chat was ever read to its end here: before, it is
+    /// loading, never shown as an empty chat.
+    private(set) var read = false
+    /// Whether its `work` was read to its end too: until then a turn's start
+    /// may be read without its end, so none is said to run (no Working…,
+    /// no Stop) while the backlog streams in.
+    private(set) var workRead = false
+    @ObservationIgnored private var rowsRevision = -1
     private(set) var pending: [PendingPost] = [] { didSet { scheduleDraftSave() } }
     private(set) var connected = false
     private(set) var caughtUp = false
@@ -37,6 +54,21 @@ final class ChatSession {
                 if cut { self.error = "Part of this chat’s saved draft was longer than a message can be, and was cut." }
             }
         } catch { self.error = error.localizedDescription }
+    }
+    private func timelineChanged() {
+        if rowsRevision != timeline.revision {
+            rowsRevision = timeline.revision
+            let shown = timeline.records.filter(ChatRow.shows)
+            if !shown.elementsEqual(rows, by: { $0.id == $1.id }) { rows = shown }
+        }
+        let writing = timeline.drafts.values.sorted { ($0.at, $0.turn) < ($1.at, $1.turn) }
+        if writing != drafts { drafts = writing }
+        let running = workRead ? timeline.activeTurns : []
+        if running != activeTurns { activeTurns = running }
+        let cursor = timeline.cursors["chat"] ?? 0
+        if cursor != chatCursor { chatCursor = cursor }
+        // What else a view draws from the timeline is made here the same
+        // way: projected from it, and set only when it changes.
     }
     private var saved: SavedChat { SavedChat(composer: composer, attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending) }
     private func scheduleDraftSave() {
@@ -119,8 +151,10 @@ final class ChatSession {
                                 try await subscribe(socket, channel: channel, after: frame.next)
                             } else if channel == "chat" {
                                 caughtUp = true
+                                read = true
                                 if timeline.records.filter({ $0.channel == "chat" }).count < Self.chatLast { hasEarlier = false }
                             } else if channel == "work" {
+                                if !workRead { workRead = true; timelineChanged() }
                                 await earlierWork()
                             }
                         }

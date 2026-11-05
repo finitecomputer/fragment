@@ -1,4 +1,6 @@
 import Foundation
+import Observation
+import Synchronization
 import Testing
 @testable import Fragment
 
@@ -107,6 +109,45 @@ struct TransportTests {
         #expect(session.timeline.records.map(\.seq) == [1, 2, 3])
         #expect(session.timeline.cursors["chat"] == 3)
         #expect(session.timeline.drafts.isEmpty)
+    }
+
+    /// Until it is first read to its end a chat is loading, never an empty
+    /// chat; it shows its messages and the work it tells of, and a reply's
+    /// words as they come redraw that reply alone, never the chat's rows.
+    @Test func aChatLoadsUntilReadAndADraftRedrawsOnlyItself() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("the socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        socket.push(frame("chat", 1, body: #"{"text":"Hello"}"#))
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"turn.step","turn":"t1","tool":"search"}"#))
+        try await waitUntil("its backlog") { session.timeline.records.count == 3 }
+        #expect(!session.read, "read in part, it is loading still")
+        socket.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        #expect(session.rows.map(\.id) == ["chat:1", "work:2"], "a turn's start is not shown")
+        #expect(session.activeTurns.isEmpty, "until its work is read, no turn is said to run")
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        try await waitUntil("its work read") { session.workRead }
+        #expect(session.activeTurns == ["t1"])
+
+        let told = Mutex(false)
+        withObservationTracking { _ = session.rows } onChange: { told.withLock { $0 = true } }
+        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hal","at":2500}"#)
+        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hallo","at":2600}"#)
+        try await waitUntil("the reply's words") { session.drafts.map(\.text) == ["Hallo"] }
+        #expect(!told.withLock { $0 }, "a draft never redraws the rows")
+
+        socket.drop()
+        try await waitUntil("the socket dropped") { !session.connected }
+        #expect(session.read && !session.caughtUp, "read once, a reconnect is never loading again")
     }
 
     @Test func stopPostsAStopForEachActiveTurn() async throws {

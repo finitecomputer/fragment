@@ -1,4 +1,6 @@
 import Foundation
+import Observation
+import UIKit
 import Synchronization
 import Testing
 @testable import Fragment
@@ -323,6 +325,111 @@ struct ShellTests {
         defer { NotificationCenter.default.removeObserver(observer) }
         await #expect(throws: APIError.self) { let _: JSONValue = try await api.request("api/identities/me") }
         #expect(heard.keys.withLock { $0.contains(api.identity.publicKey) })
+    }
+
+    /// A chat of the person's still "New chat" with a message is titled
+    /// from it, as the web titles one (`titleFromFirst`): once, and never
+    /// one renamed meanwhile.
+    @Test func aNewChatIsTitledFromItsFirstMessageOnce() async throws {
+        let list = #"""
+        {"fragments":[
+          {"name":"moss--a1","kind":"agent","title":"Moss","role":"owner"},
+          {"name":"trip--c1","kind":"chat","title":"New chat","preview":"Plan","agents":["npub1moss"],"role":"owner"},
+          {"name":"named--c2","kind":"chat","title":"New chat","preview":"Hi","role":"owner"},
+          {"name":"shared--c3","kind":"chat","title":"New chat","preview":"Hi","role":"editor"},
+          {"name":"quiet--c4","kind":"chat","title":"New chat","role":"owner"}
+        ]}
+        """#
+        let first = #"{"records":[\#(record("chat", 1, body: #"{"kind":"stop","turn":"t0"}"#)),\#(record("chat", 2, principal: "npub1me", body: #"{"text":"\n  Plan a weekend trip to the coast with the whole family and the dog too\nand more"}"#))]}"#
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": (200, list)
+            case "GET /api/f/moss--a1/status": (200, #"{"npub":"npub1moss","urls":{"canonical":"https://moss--a1.finite.test/"}}"#)
+            case "GET /api/f/trip--c1/channels/chat", "GET /api/f/named--c2/channels/chat": (200, first)
+            case "GET /api/f/trip--c1/manifest": (200, #"{"template":"chat","meta":{"title":"New chat"}}"#)
+            // renamed on the web after the list was read
+            case "GET /api/f/named--c2/manifest": (200, #"{"template":"chat","meta":{"title":"Our plans"}}"#)
+            case "POST /api/f/trip--c1/files": (200, #"{"commit":"c1"}"#)
+            case "POST /api/f/trip--c1/deploy": (200, #"{"deployed":true}"#)
+            default: (404, #"{"error":"not_found","message":"no route \#(seen.route)"}"#)
+            }
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        await library.load(api)
+        let writes = stub.seen.filter { $0.method == "POST" }
+        #expect(writes.map(\.path) == ["/api/f/trip--c1/files", "/api/f/trip--c1/deploy"])
+        let files = try #require(writes.first?.json)
+        #expect(files["message"].string == "its title, from its first message")
+        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data((files["files"].array.first?["text"].string ?? "").utf8))
+        #expect(manifest["meta"]["title"].string == "Plan a weekend trip to the coast with the whole…" && manifest["template"].string == "chat")
+        #expect(stub.seen.filter { $0.path == "/api/f/trip--c1/channels/chat" }.count == 1, "once a session")
+        #expect(stub.seen.first { $0.path == "/api/f/trip--c1/channels/chat" }?.query == ["after": "0", "limit": "20"])
+        // another's chat, and one with nothing said, are never read for it
+        #expect(!stub.seen.contains { $0.path.hasPrefix("/api/f/shared--c3/") || $0.path.hasPrefix("/api/f/quiet--c4/") })
+    }
+
+    @Test func aTitleIsItsFirstLineWithWordsCutAsTheWebCutsIt() {
+        #expect(Library.title(from: "\n \n  Two   words  \nnext") == "Two words")
+        #expect(Library.title(from: String(repeating: "a", count: 48)) == String(repeating: "a", count: 48))
+        #expect(Library.title(from: String(repeating: "a", count: 49)) == String(repeating: "a", count: 47) + "…")
+        #expect(Library.firstSaid([]) == nil)
+    }
+
+    /// The person's agents in their computer's order, as the web's sidebar
+    /// takes them: its first is their main agent, first everywhere here, and
+    /// its identities need no agent's status asked.
+    @Test func agentsFollowTheirComputersOrder() async throws {
+        let stub = Stub { seen, before in
+            if seen.route == "GET /api/computers" {
+                return (200, #"{"computers":[{"computer":"c1","phase":"awake","agents":[{"fragment":"juniper--a2","identity":"npub1juniper","label":"juniper"},{"fragment":"moss--a1","identity":"npub1moss","label":"moss"}]}],"support":null}"#)
+            }
+            return Self.platform(seen, before)
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        #expect(library.agents.map(\.name) == ["juniper--a2", "moss--a1"])
+        #expect(library.agent?.name == "juniper--a2", "new chats are with the main agent")
+        #expect(library.agentsByIdentity["npub1moss"]?.name == "moss--a1" && library.computerPhase == "awake")
+        #expect(!stub.seen.contains { $0.path.hasSuffix("/status") })
+        // a computer that cannot be read keeps the list's order
+        let plain = Library()
+        await plain.load(try Stub(Self.platform).api())
+        #expect(plain.agents.map(\.name) == ["moss--a1", "juniper--a2"])
+    }
+
+    /// The list read again saying the same tells nothing that draws from
+    /// it (a chat's rows, its agents' faces) to draw again.
+    @Test func aListReadAgainThatSaysTheSameRedrawsNothing() async throws {
+        let api = try Stub(Self.platform).api()
+        let library = Library()
+        await library.load(api)
+        let told = Mutex(false)
+        withObservationTracking { _ = library.fragments; _ = library.identities; _ = library.agentOrder; _ = library.computerPhase } onChange: { told.withLock { $0 = true } }
+        await library.load(api)
+        #expect(!told.withLock { $0 })
+    }
+
+    /// A picture is read once a session, however many places show it at once
+    /// or after: its URL names its version.
+    @Test func aPictureIsReadOnceASession() async throws {
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let stub = Stub { seen, _ in
+            seen.route == "GET /api/f/moss--a1/icon" ? (200, "base64:" + png.base64EncodedString()) : (404, "{}")
+        }
+        let api = try stub.api()
+        let url = URL(string: "https://\(stub.host)/api/f/moss--a1/icon?v=abc")!
+        async let one = ImageCache.shared.image(url, api: api)
+        async let two = ImageCache.shared.image(url, api: api)
+        let (a, b) = await (one, two)
+        let three = await ImageCache.shared.image(url, api: api)
+        #expect(a != nil && a === b && b === three && ImageCache.shared.cached(url) === a)
+        #expect(stub.seen.count == 1 && stub.seen[0].query == ["v": "abc"])
+        #expect(stub.seen[0].authorization?.hasPrefix("Nostr ") == true, "the platform's picture is read signed")
     }
 }
 
