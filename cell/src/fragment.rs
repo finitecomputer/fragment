@@ -1450,9 +1450,17 @@ impl FragmentCell {
     /// members' lists has been told, its owner's first: the alarm tells
     /// the rest and deletes the app's database and the blobs (ended.rs).
     async fn delete(&self, caller: &Caller) -> CellResult<Response> {
-        let name = self.name()?;
-        self.require(caller, false, Role::Owner)?;
-        let ended = self.end_life()?;
+        // a life ends between the plane's steps, never inside one: a
+        // refresh or install in flight (a seed's, publish.rs) finishes in
+        // this life, which its end then clears, and never writes its pins,
+        // tree or code into the next; asked again under the lock, which
+        // another end may have taken first
+        let (name, ended) = {
+            let _held = self.plane.lock().await;
+            let name = self.name()?;
+            self.require(caller, false, Role::Owner)?;
+            (name, self.end_life()?)
+        };
         self.tell_ended(Some(&ended.owner)).await;
         self.forget_invites(&name).await;
         self.schedule().await?;

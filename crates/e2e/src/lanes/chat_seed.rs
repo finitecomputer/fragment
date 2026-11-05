@@ -260,23 +260,37 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         format!("{token} {landed:?} {minted:?}"),
     );
 
-    // ---- its life ends while its deploy's install is in flight, the name
-    // made again (Alex, #1042: 2): the install's read of live's
-    // fragment.json, after which nothing awaits before the seed would clear
-    // what is pending, in whichever life is the fragment's then
+    // ---- its life ends while its deploy's first live refresh is in
+    // flight, the name made again (Alex, #1042: 2, at b6472432 and
+    // 6e9635a3): a 90-character title makes its fragment.json a possible
+    // blob pointer, which that refresh reads after listing live's files and
+    // before it writes live's pin and tree; then the install reads it again
     s.fake.set_latency(DEPLOY_SLOW);
     let label = s.name("seed-deploy-gone");
-    let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
+    let long = format!("Seeded {}", "a".repeat(83));
+    assert_eq!(long.chars().count(), 90, "a 90-character title");
+    let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": long }))?;
     let gone = first.body["name"].as_str().unwrap_or("").to_string();
-    // its deploy made live, and its pin read live's files: the install's
-    // read of its manifest is on its way
+    // its deploy made live, and its refresh listed live's files: its read
+    // of the manifest as a possible pointer is on its way
     let live_made = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.fake.branch(&url, "live").is_some()));
     let url = repo_url(s, &gone).unwrap_or_default();
     let listed = s.fake.requests(&url, "GET files/metadata");
     let deploying = live_made && s.eventually(wait, || s.fake.requests(&url, "GET files/metadata") > listed);
+    let reads = s.fake.requests(&url, "GET file");
     let deleted = api.signed(owner, "DELETE", &format!("/api/f/{gone}"), None)?;
-    let again = api.create_with(owner, json!({ "name": gone, "template": "chat", "title": "Seeded after its deploy" }))?;
-    s.owned(&again.body, owner);
+    // that read answered after the delete: whatever its refresh writes
+    // next (live's pin and tree) it has written before the name is made again
+    let read = s.eventually(wait, || s.fake.requests(&url, "GET file") > reads);
+    // (a stale live pin left in the next life broke its create: it never answered)
+    let again = api.create_with(owner, json!({ "name": gone, "template": "chat", "title": "Seeded after its deploy" }));
+    let again = match again {
+        Ok(r) => {
+            s.owned(&r.body, owner);
+            r.status.to_string()
+        }
+        Err(e) => format!("{e:#}"),
+    };
     s.fake.set_latency(Duration::ZERO);
     poll_now(&gone)?;
     let healed = s.eventually(wait, || {
@@ -286,8 +300,8 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let st = status(&gone);
     let manifest = manifest_at(s, st["repo"].as_str().unwrap_or(""));
     s.ok(
-        "a chat deleted while its first deploy's install is in flight, the name made again: the old seed leaves the new life's template pending, and the new life's seed lands its own, its title on main",
-        first.status == 200 && deploying && deleted.status == 200 && again.status == 200 && healed
+        "a chat deleted while its first deploy's live refresh is in flight, the name made again: the delete waits for that step, the old seed writes nothing into the new life, which is made (no stale pin) and lands its own template, its title on main",
+        first.status == 200 && deploying && deleted.status == 200 && read && again == "200" && healed
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded after its deploy" } }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
     );
