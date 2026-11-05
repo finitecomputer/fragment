@@ -385,7 +385,9 @@ impl FragmentCell {
         for &which in self.content_pins()? {
             match self.tree_row(which, p)? {
                 Some(row) if row.last_commit == v => {
-                    let cache = site::pinned_cache(public);
+                    // a blob's bytes come by the pointer table, not by the
+                    // commit `v` names: revalidated, never kept (`kept_bytes`)
+                    let cache = if kept_bytes(row.size) { site::pinned_cache(public) } else { "no-cache" };
                     let etag = site::file_etag(v);
                     if let Some(resp) = not_modified(req, &etag, cache)? {
                         return Ok(Some(resp));
@@ -650,8 +652,11 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
         let mime = site::mime_for_path(&row.path);
-        // no await between the row's read and this: the same tree's paths
-        let cache = site::cache_control(self.declared_immutable(&row.path)?, public);
+        // no await between the row's read and this: the same tree's paths.
+        // Never a file that may be a blob's pointer: its bytes are read by
+        // the pointer table, which a refresh rewrites as it goes, not by
+        // this tree (`kept_bytes`)
+        let cache = site::cache_control(kept_bytes(row.size) && self.declared_immutable(&row.path)?, public);
         // a file of a pointer's size may be one: its bytes are a blob's
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
         // Only a page gets Open Graph tags, so only a page reads `meta`.
@@ -696,6 +701,16 @@ impl FragmentCell {
         }
         with_etag(self.stream_git(facts, "live", &row.path).await?)
     }
+}
+
+/// Whether a file whose tree row is `size` bytes may be kept for good: its
+/// bytes the tree's own, never a blob's (a file of `BLOB_MIN_BYTES` or
+/// more, its git file a pointer). A pointer's bytes are read from the
+/// pointer table, which a refresh rewrites path by path before it moves the
+/// tree and its pin (blobs.rs `track_pointers`), so they need not be the
+/// served tree's; any file the size of a pointer is revalidated (FIN-391).
+fn kept_bytes(size: u64) -> bool {
+    !crate::blobs::maybe_pointer(size)
 }
 
 impl FragmentCell {
