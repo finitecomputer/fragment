@@ -29,7 +29,7 @@ struct ChatView: View {
                     ChatRows(session: session, library: library)
                     PendingRows(session: session)
                     DraftRows(session: session, library: library)
-                    WorkingLine(session: session)
+                    WorkingLine(session: session, library: library)
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .frame(maxWidth: 660, alignment: .leading)
@@ -167,7 +167,7 @@ private struct ChatRows: View {
         let faces = library.agentsByIdentity
         let you = session.principal
         ForEach(session.rows) { record in
-            ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal],
+            ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal], card: session.activity.cards[record.id],
                     api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 })
                 .equatable()
         }
@@ -180,23 +180,13 @@ struct ChatRow: View, Equatable {
     let record: ChannelRecord
     let isYou: Bool
     let agent: FragmentSummary?
+    var card: ToolCard? = nil
     let api: FragmentAPI
     let fragment: String
     let reply: (ChannelRecord) -> Void
 
-    /// Whether a record is one a chat shows: a message, or the work it
-    /// tells of (`WorkRecordView`). The rest only says which turns run.
-    static func shows(_ record: ChannelRecord) -> Bool {
-        if record.isMessage { return true }
-        guard record.channel == "work" else { return false }
-        switch record.body["kind"].string {
-        case "turn.step", "turn.prompt": return true
-        case "turn.end": return record.body["error"].string != nil || record.body["status"].string == "stopped"
-        default: return false
-        }
-    }
     nonisolated static func == (a: ChatRow, b: ChatRow) -> Bool {
-        a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment
+        a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment && a.card == b.card
     }
 
     var body: some View {
@@ -213,6 +203,8 @@ struct ChatRow: View, Equatable {
                 }
                 Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
             }
+        } else if let card {
+            WorkingIndicator(card: card, agent: agent)
         } else {
             WorkRecordView(record: record)
         }
@@ -258,10 +250,10 @@ private struct DraftRows: View {
 /// What a running turn shows before its reply's words come.
 private struct WorkingLine: View {
     let session: ChatSession
+    let library: Library
     var body: some View {
-        if !session.activeTurns.isEmpty && session.drafts.isEmpty {
-            Label("Working…", systemImage: "ellipsis").font(.callout).foregroundStyle(.secondary)
-        }
+        WorkingIndicator(hints: session.workingHints, library: library, principal: session.principal,
+                         phase: library.computerPhase, present: Set(session.presence.values))
     }
 }
 

@@ -9,8 +9,18 @@ final class ChatSession {
     /// (`rows`, `drafts`, `activeTurns`), each set only when it changes: a
     /// draft's next words redraw its draft alone, never the chat's rows.
     @ObservationIgnored private(set) var timeline = Timeline() { didSet { timelineChanged() } }
-    /// The records a chat shows (`ChatRow.shows`), in order.
+    /// The records a chat shows (WorkingActivity), in order.
     private(set) var rows: [ChannelRecord] = []
+    private(set) var activity = WorkingActivity(Timeline())
+    private(set) var presence: [String: String] = [:]
+    private(set) var awaitingReply: WorkingHint?
+    @ObservationIgnored private var activityReady = false
+    var workingHints: [WorkingHint] {
+        guard workRead else { return [] }
+        var hints = activity.hints.filter { hint in !drafts.contains { $0.turn == hint.id.id && $0.principal == hint.id.agent } }
+        if let pending = awaitingReply, !hints.contains(where: { $0.id.agent == pending.id.agent }) { hints.append(pending) }
+        return hints
+    }
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
@@ -60,10 +70,16 @@ final class ChatSession {
         } catch { self.error = error.localizedDescription }
     }
     private func timelineChanged() {
-        if rowsRevision != timeline.revision {
+        if rowsRevision != timeline.revision || activityReady != workRead {
             rowsRevision = timeline.revision
-            let shown = timeline.records.filter(ChatRow.shows)
-            if !shown.elementsEqual(rows, by: { $0.id == $1.id }) { rows = shown }
+            activityReady = workRead
+            let next = WorkingActivity(timeline, ready: workRead)
+            if next != activity { activity = next }
+            if !next.rows.elementsEqual(rows, by: { $0.id == $1.id }) { rows = next.rows }
+            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: fragment.agents?.first)
+            if let candidate, case .pending(let since) = candidate.kind,
+               candidate.id == awaitingReply?.id || Int64(Date().timeIntervalSince1970 * 1000) - since < 90_000 { awaitingReply = candidate }
+            else { awaitingReply = nil }
         }
         let writing = timeline.drafts.values.sorted { ($0.at, $0.turn) < ($1.at, $1.turn) }
         if writing != drafts { drafts = writing }
@@ -140,6 +156,7 @@ final class ChatSession {
                         if frame.type == "hello" {
                             chatReadNow = false
                             if workRead { workRead = false; timelineChanged() }
+                            presence = Dictionary((frame.presence ?? []).prefix(256).filter { $0.data != nil && $0.data != .null }.map { ($0.id, $0.principal) }, uniquingKeysWith: { _, last in last })
                             principal = frame.principal ?? ""
                             connected = true
                             error = nil
@@ -147,6 +164,10 @@ final class ChatSession {
                             for channel in ["chat", "work"] {
                                 try await subscribe(socket, channel: channel, after: timeline.cursors[channel])
                             }
+                        }
+                        if frame.type == "presence", let id = frame.id {
+                            if frame.data == nil || frame.data == .null { presence.removeValue(forKey: id) }
+                            else if let principal = frame.principal, presence.count < 256 || presence[id] != nil { presence[id] = principal }
                         }
                         try timeline.apply(frame)
                         if let clientID = frame.body?["client_id"].string, frame.principal == principal {
@@ -189,6 +210,7 @@ final class ChatSession {
             // says again which do, once its work is read
             workRead = false
             timeline.disconnected()
+            presence = [:]
             guard !Task.isCancelled, !refused else { return }
             attempt = min(attempt + 1, 4)
             do { try await Task.sleep(for: .seconds(min(15, 1 << attempt))) }
