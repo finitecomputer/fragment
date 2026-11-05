@@ -1,6 +1,6 @@
 import { avatar } from "./agent-identity.js";
 import { icon } from "./icons.js";
-import { ownRow } from "./making.js";
+import { ownRow, holdsView } from "./making.js";
 
 // Newest first, with a newly made chat (no preview yet) before older ones.
 export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
@@ -42,16 +42,18 @@ export function askedAgentOf({ open, own, agentsOf, mine, main }) {
 export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
-  // `onScreen`: the chat on screen in the middle column (making.js `shownChat`),
-  // the one its row marks open, counts nothing unread on, and marks seen
-  const { current, page, getFrame, making, onScreen } = selection;
+  // `onScreen`: the chat whose row is active (making.js `shownChat`);
+  // `reading`: the chat whose messages are on screen (`readChat`), the one
+  // alone marked seen and counted nothing unread (a chat being made's room
+  // shows none)
+  const { current, page, getFrame, making, onScreen, reading } = selection;
   const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
     // a chat its New chat is making, its room shown (making.js): its
     // title, nothing to do with it yet
-    const m = making()?.phase === "shown" ? making() : null;
+    const m = holdsView(making()) ? making() : null;
     const open = !!m || (current() && byName(current()) && !page());
     // the session archive is read here, never a chat to add to or share
     const archive = !m && byName(current())?.kind === "sessions";
@@ -78,7 +80,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // xtask/src/guards.rs `the_shell_copies_its_limits`).
   const UNREAD_MAX = 100;
   function unreadMark(f) {
-    const n = f.name === onScreen() ? 0 : f.unread ?? 0;
+    const n = f.name === reading() ? 0 : f.unread ?? 0;
     if (!n) return [];
     const b = el("span", "unread", n >= UNREAD_MAX ? "99+" : String(n));
     b.setAttribute("aria-label", n >= UNREAD_MAX ? "More than 99 unread" : `${n} unread`);
@@ -374,7 +376,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const makingRow = (key) => {
       const m = making();
       if (!ownRow(m, (name) => !!byName(name)) || m.agent !== key) return [];
-      const active = m.phase === "shown";
+      const active = holdsView(m);
       const row = el("div", `row chat-row${active ? " active" : ""} making`);
       row.dataset.key = `making:${m.agent}`;
       const open = el("button", "chat-open");
@@ -519,7 +521,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // is hidden; one ask at a time.
   let marking = null;
   function markSeen() {
-    const f = byName(onScreen());
+    const f = byName(reading());
     if (!f || document.hidden || !f.unread || marking === f.name) return;
     marking = f.name;
     api("PUT", `/api/fragments/${seg(f.name)}/seen`)

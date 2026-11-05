@@ -899,7 +899,8 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ask
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
     offers: (agent, what) => offers(agent, what) },
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,
-    onScreen: () => making.shownChat(state.making, state.current, state.page) },
+    onScreen: () => making.shownChat(state.making, state.current, state.page),
+    reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
@@ -967,7 +968,7 @@ function newView() {
   views++;
   unsaid();
   state.making = making.left(state.making);
-  if (state.making?.phase === "away" && makingRoom) {
+  if (!making.holdsView(state.making) && makingRoom) {
     makingRoom.remove();
     makingRoom = null;
   }
@@ -1467,15 +1468,17 @@ function showMaking(identity, name) {
   renderChats();
   leaveSidebar();
 }
-// Its create answered (`made` or `refused`): it is no more, and the screen
-// moves as making.js `settled` says. True when its chat opened.
+// Its create answered (`made` or `refused`): the screen moves as
+// making.js `settled` says. True when its chat opened.
 function settleMaking(outcome) {
   const m = state.making;
-  const then = making.settled(m, outcome);
-  state.making = null;
+  const { next, then } = making.settled(m, outcome, !!m && !!byName(m.name));
+  state.making = next;
+  // made, its list not read yet: its room stays until it is (`load`)
+  if (then === "wait") return false;
   makingRoom?.remove();
   makingRoom = null;
-  if (then === "open" && byName(m.name)) {
+  if (then === "open") {
     openChat(m.name);
     return true;
   }
@@ -1485,6 +1488,17 @@ function settleMaking(outcome) {
     renderChats();
   }
   return false;
+}
+// A list read that has the chat a create made, its room waiting for it
+// (making.js `listed`): it opens in its room's place.
+function listedMade() {
+  if (making.listed(state.making, (name) => !!byName(name)) !== "open") return;
+  const { name } = state.making;
+  state.making = null;
+  makingRoom?.remove();
+  makingRoom = null;
+  openChat(name);
+  leaveSidebar();
 }
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
@@ -1531,7 +1545,10 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
           state.making = making.renamed(state.making, name);
         }
       }
-      await load();
+      // made: a list read that fails says so itself (the band's Try
+      // again), and its room waits for the next (`listedMade`)
+      if (open) await load().catch(() => {});
+      else await load();
     }
     if (!open) return name;
     if (!state.making) {
@@ -1890,6 +1907,7 @@ async function load(changed = false) {
   const list = listRead.value, computers = computerRead.value;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   if (list) state.fragments = list.fragments ?? [];
+  if (list) listedMade();
   // failed, it is not "no computer": what was read before stays, and is said to be old
   const unknown = state.computerFailed && !state.computer;
   state.computerFailed = !computers;

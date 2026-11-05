@@ -5824,6 +5824,12 @@ fn making_states(
     };
     let making_shown = "!!document.querySelector('#chats .chat-row.making.active') && !!document.querySelector('#frames .making-standin') && document.getElementById('chat-title').textContent === 'New chat'";
     let said_refused = "(document.getElementById('action-notices')?.innerText ?? '').includes('The chat was not made')";
+    // each `PUT …/seen` the page asks, kept (installed after a hold, so
+    // restoring the page's fetch takes it away too)
+    let watch_seen = "(() => { const f = window.fetch; window.__seenAsked = []; window.fetch = (url, o) => { if (o?.method === 'PUT' && /\\/seen$/.test(String(url))) window.__seenAsked.push(String(url)); return f(url, o); }; return true; })()";
+    let seen_asked = |b: &mut Browser, name: &str| -> Result<bool> {
+        Ok(b.eval(page, "window.__seenAsked")?.as_array().is_some_and(|a| a.iter().any(|u| u.as_str().is_some_and(|u| u.contains(name)))))
+    };
 
     // ---- its answer held after the platform made it; the list reads it
     // first, and another device makes a chat with the Reader meanwhile
@@ -5831,6 +5837,7 @@ fn making_states(
     b.until(page, &format!("{shown} === {}", js(&first_chat)), wait);
     let before = names();
     b.eval(page, &hold("POST", "/api/fragments$", Hold::Answer))?;
+    b.eval(page, watch_seen)?;
     let picked = new_chat(b, reader_hero)?;
     let shown_first = b.until(page, making_shown, wait);
     let other = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "reader-elsewhere", "template": "chat", "title": "Elsewhere", "agent": reader_id })), &[])?;
@@ -5846,17 +5853,55 @@ fn making_states(
     let active = b.eval(page, "[...document.querySelectorAll('#chats .chat-row.active')].map((r) => r.dataset.key)")?;
     let count = |key: String| keys.as_array().map(|k| k.iter().filter(|x| x.as_str() == Some(key.as_str())).count()).unwrap_or(0);
     let room = b.eval(page, "!!document.querySelector('#frames .making-standin')")?;
+    s.ok(
+        "its answer held after it was made, the live list read first and another device's chat with the Reader made meanwhile: one row for it, active in its stand-in row's place, one for the other's",
+        picked && shown_first && held && listed && reconciled && !mine.is_empty() && count(format!("chat:{mine}")) == 1 && count(format!("chat:{other}")) == 1
+            && active == json!([format!("chat:{mine}")]) && room == json!(true),
+        json!({ "mine": mine, "other": other, "keys": keys, "active": active, "room": room }),
+    );
+    // a message to it from another device while only its room shows: its
+    // row is active, but none of its messages are on screen, so it is not
+    // marked seen and its unread are badged until it opens
+    let said = "into the chat still being made here";
+    let r = shell(api, me.session, "POST", &format!("/api/f/{mine}/channels/chat"), Some(&json!({ "id": "making-listed-1", "body": { "text": said } })), &[])?;
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &mine, &reader_id, said) == 1);
+    let badge = b.until(page, &format!("{}?.querySelector('.unread')?.textContent === '2'", row_of(&mine)), wait);
+    let asked = seen_asked(b, &mine)?;
+    let kept = unread_of(api, me.session, &mine);
     b.eval(page, "(window.__held.release(), true)")?;
     let opened = b.until(page, &format!("{shown} === {} && !document.querySelector('#frames .making-standin') && location.pathname === '/'", js(&mine)), wait);
+    let cleared = s.eventually(wait, || unread_of(api, me.session, &mine) == 0);
     b.eval(page, "(window.__held.restore(), true)")?;
     s.ok(
-        "its answer held after it was made, the live list read first and another device's chat with the Reader made meanwhile: one row for it, active in its stand-in row's place, one for the other's; let go, it opens",
-        picked && shown_first && held && listed && reconciled && !mine.is_empty() && count(format!("chat:{mine}")) == 1 && count(format!("chat:{other}")) == 1
-            && active == json!([format!("chat:{mine}")]) && room == json!(true) && opened,
-        json!({ "mine": mine, "other": other, "keys": keys, "active": active, "room": room, "opened": opened }),
+        "a message to the chat being made, listed while only its room shows: not marked seen (no PUT …/seen, its 2 unread counted and badged); let go, it opens and is seen",
+        r.status == 200 && answered && badge && !asked && kept == 2 && opened && cleared,
+        json!({ "badge": badge, "asked": asked, "kept": kept, "opened": opened, "unread": unread_of(api, me.session, &mine) }),
     );
     archive(b, &mine)?;
     archive(b, &other)?;
+
+    // ---- made, but the list's reads refused (a deploy going out): its room
+    // waits, never a blank page; the list answering, the chat opens there
+    let before = names();
+    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__refusedAfter = 0; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posted) { window.__refusedAfter++; return new Response(JSON.stringify({ error: 'deploying', message: 'a deploy is going out (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); } \
+                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posted = true; return r; }; return true; })()")?;
+    let picked = new_chat(b, reader_hero)?;
+    // two of its reads refused since it was made: the create has answered
+    let refused_twice = b.until(page, "window.__refusedAfter >= 2", wait);
+    let waiting = b.eval(page, &format!("{making_shown} && ![...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden)"))?;
+    b.eval(page, "(window.__listOff = false, true)")?;
+    let made: Vec<String> = names().into_iter().filter(|n| !before.contains(n)).collect();
+    let made = made.first().cloned().unwrap_or_default();
+    let opened = b.until(page, &format!("{shown} === {} && !document.querySelector('#frames .making-standin') && location.pathname === '/'", js(&made)), wait);
+    b.eval(page, "(window.__restoreList(), true)")?;
+    s.ok(
+        "made while the list's reads are refused (a deploy going out): its room waits in its place, never a blank page; the list answering, the chat opens there",
+        picked && refused_twice && waiting == json!(true) && !made.is_empty() && opened,
+        json!({ "waiting": waiting, "made": made, "shown": open_chat(b, page) }),
+    );
+    archive(b, &made)?;
 
     // ---- another chat opened meanwhile, then refused
     click_chat(b, page, &first_chat)?;
@@ -5926,7 +5971,7 @@ fn making_states(
     let before = names();
     b.eval(page, &hold("POST", "/api/fragments$", Hold::Request))?;
     // after the hold, so restoring the page's fetch takes it away too
-    b.eval(page, "(() => { const f = window.fetch; window.__seenAsked = []; window.fetch = (url, o) => { if (o?.method === 'PUT' && /\\/seen$/.test(String(url))) window.__seenAsked.push(String(url)); return f(url, o); }; return true; })()")?;
+    b.eval(page, watch_seen)?;
     let picked = new_chat(b, reader_hero)?;
     let made_shown = b.until(page, making_shown, wait);
     let said = "while a new chat is made";
@@ -5936,7 +5981,7 @@ fn making_states(
     b.eval(page, "(window.__held.release(), true)")?;
     let opened = b.until(page, &format!("!document.querySelector('#frames .making-standin') && !document.querySelector('#chats .making') && !!{shown} && {shown} !== {}", js(&first_chat)), wait);
     let made = open_chat(b, page);
-    let asked = b.eval(page, "window.__seenAsked")?;
+    let asked = seen_asked(b, &first_chat)?;
     let kept = unread_of(api, me.session, &first_chat);
     b.eval(page, "(window.__held.restore(), true)")?;
     click_chat(b, page, &first_chat)?;
@@ -5944,7 +5989,7 @@ fn making_states(
     s.ok(
         "a message to the chat a new chat's room covers: that chat is not marked seen (no PUT …/seen, its 2 unread counted and badged) until it is opened",
         none_before && picked && made_shown && r.status == 200 && answered && badge && opened && !before.contains(&made)
-            && !asked.as_array().is_some_and(|a| a.iter().any(|u| u.as_str().is_some_and(|u| u.contains(first_chat.as_str())))) && kept == 2 && cleared,
+            && !asked && kept == 2 && cleared,
         json!({ "asked": asked, "kept": kept, "made": made }),
     );
     archive(b, &made)?;

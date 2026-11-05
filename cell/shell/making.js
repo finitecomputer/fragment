@@ -4,14 +4,23 @@
 // answers.
 //
 //   none ──start──▶ shown    its room is the middle column's view
+//   shown ──settled──▶       its create answered:
+//       made, listed:    none, its chat opens in its place
+//       made, unlisted:  made: its room stays until the list has its chat
+//                        (a list read that failed, or a deploy going out)
+//       refused:         none, the view it was started from comes back
+//   made ──listed──▶ none    the list has its chat: it opens in its place
 //   shown ──left──▶ away     another view was given since (a chat,
 //                            Settings, Apps, History): its room is hidden,
 //                            its row stays, inactive, until the create answers
+//   made ──left──▶ none      nothing is left to wait for: the list lists it
+//   away ──settled──▶ none   nothing moves; the list says what there is
 //   shown|away ──renamed──▶ the same, its name drawn again (taken: 409)
-//   shown|away ──settled──▶ none
-//       made, shown:     its chat opens in its place
-//       refused, shown:  the view it was started from comes back
-//       away, either:    nothing moves; the list says what there is
+//
+// Two answers come of it, never one: the chat whose row is active (its
+// own while its room is shown), and the chat whose messages are on screen
+// (none while its room is shown: a room shows no messages, even once the
+// list has its chat), which alone is marked seen and shows no unread.
 //
 // Its name is chosen before the create (`CreateFragment.name`), so the
 // row the list reads for it is known as it, whichever comes first: the
@@ -28,22 +37,45 @@ export function renamed(m, name) {
   return m ? { ...m, name } : m;
 }
 
-/// Another view was given: a shown one is away from now on.
+/// Another view was given: a shown one is away from now on, and a made
+/// one is no more (the list lists its chat).
 export function left(m) {
+  if (m?.phase === "made") return null;
   return m?.phase === "shown" ? { ...m, phase: "away" } : m;
 }
 
-/// What its create's answer (`made` or `refused`) does: `open` its chat,
-/// `restore` the view before, or `stay` as the screen is.
-export function settled(m, outcome) {
-  if (m?.phase !== "shown") return "stay";
-  return outcome === "made" ? "open" : "restore";
+/// Whether its room has the middle column (shown, or made and waiting).
+export function holdsView(m) {
+  return m?.phase === "shown" || m?.phase === "made";
 }
 
-/// The chat on screen in the middle column: the one being made while its
-/// room is shown, else the open chat unless a page is (`page`).
+/// Its create answered (`made` or `refused`), `listed`: whether the list
+/// has its chat. `{next, then}`: its state after, and what shows: `open`
+/// its chat, `restore` the view before, `wait` in its room, or `stay`.
+export function settled(m, outcome, listed) {
+  if (m?.phase !== "shown") return { next: null, then: "stay" };
+  if (outcome !== "made") return { next: null, then: "restore" };
+  return listed ? { next: null, then: "open" } : { next: { ...m, phase: "made" }, then: "wait" };
+}
+
+/// A list read (`listed(name)`): a made one the list has opens.
+export function listed(m, isListed) {
+  return m?.phase === "made" && isListed(m.name) ? "open" : "stay";
+}
+
+/// The chat whose row is active: the one being made while its room has
+/// the middle column, else the open chat unless a page is (`page`).
 export function shownChat(m, current, page) {
-  if (m?.phase === "shown") return m.name;
+  if (holdsView(m)) return m.name;
+  return page ? null : current;
+}
+
+/// The chat whose messages are on screen, the one marked seen and counted
+/// nothing unread: none while a room has the middle column (it shows no
+/// messages, even once the list has its chat), else the open chat unless a
+/// page is.
+export function readChat(m, current, page) {
+  if (holdsView(m)) return null;
   return page ? null : current;
 }
 
