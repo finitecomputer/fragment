@@ -7,9 +7,9 @@
 // the boundary, and every retry/loop has an explicit bound. What goes over
 // the wire and what comes back is fragment_core::codestorage's, the same
 // encoder and decoders the cell uses; this file is the transport.
-use crate::api::{encode_q, send_retrying, timeout_for, Client as HostClient, CodedError, Failed, Replay, CONNECT_TIMEOUT};
+use crate::api::{encode_q, send_retrying, timeout_for, Client as HostClient, Code, CodedError, Failed, Replay, CONNECT_TIMEOUT};
 use fragment_core::codestorage::{self as core_cs, FileChange, TreeEntry};
-use fragment_proto::{NotRepoPath, RepoPath, StorageToken};
+use fragment_proto::{NotRepoPath, RepoPath, StorageAccess, StorageToken};
 use serde_json::Value;
 use std::fmt;
 
@@ -97,19 +97,54 @@ struct Minted {
     repo: String,
     token: String,
     expires_at_ms: i64,
+    /// it writes (`git:write`): the host's `write`, true from a host that
+    /// names none (it minted writers' alone)
+    write: bool,
+}
+
+/// What a command asks the fragment host for (docs/api.md, storage-token).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wants {
+    /// a token that writes (a push, a rollback): an editor's, else refused
+    Write,
+    /// one that only reads (`?access=read`: a pull, a listing): any
+    /// member's, viewer and up
+    Read,
+    /// one that writes when the host grants it, else one that reads: a
+    /// mirror, whose viewer pulls and sends nothing
+    Either,
 }
 
 /// The fragment host mints a short-lived, repo-scoped code.storage JWT
 /// (`StorageToken`); the CLI never sees the org key. Its `api` is the
 /// spec's server URL (endpoints append /api/repos/...).
-fn mint_from_host(host: &HostClient, name: &str) -> Result<Minted, CsError> {
-    let resp = host.get(&format!("/api/f/{name}/storage-token")).map_err(host_error)?;
+fn mint_from_host(host: &HostClient, name: &str, access: StorageAccess) -> Result<Minted, CsError> {
+    let query = match access {
+        StorageAccess::Write => "",
+        StorageAccess::Read => "?access=read",
+    };
+    let resp = host.get(&format!("/api/f/{name}/storage-token{query}")).map_err(host_error)?;
     let minted: StorageToken = host.call_as(resp).map_err(host_error)?;
     let server = minted.api.trim_end_matches('/').to_string();
     if server.is_empty() || minted.repo.is_empty() || minted.token.is_empty() {
         return Err(CsError::Malformed(format!("a storage token needs a token, a repo, and an api (repo {:?}, api {server:?})", minted.repo)));
     }
-    Ok(Minted { server, repo: minted.repo, token: minted.token, expires_at_ms: minted.expires_at })
+    Ok(Minted { server, repo: minted.repo, token: minted.token, expires_at_ms: minted.expires_at, write: minted.write })
+}
+
+/// The token `wants` names. A mirror's asks for one that writes, and only
+/// when the host refuses the caller that (forbidden: a viewer) one that
+/// reads. A host before `?access=read` refuses that too, as it refused a
+/// viewer before.
+fn mint_wanted(host: &HostClient, name: &str, wants: Wants) -> Result<Minted, CsError> {
+    match wants {
+        Wants::Write => mint_from_host(host, name, StorageAccess::Write),
+        Wants::Read => mint_from_host(host, name, StorageAccess::Read),
+        Wants::Either => match mint_from_host(host, name, StorageAccess::Write) {
+            Err(CsError::Host(refused)) if refused.code == Code::Forbidden => mint_from_host(host, name, StorageAccess::Read),
+            minted => minted,
+        },
+    }
 }
 
 fn now_ms() -> i64 {
@@ -154,6 +189,8 @@ pub struct CodeStorage {
     server: String,
     repo: String,
     token: String,
+    /// its token writes; one that does not, a viewer's, only reads
+    write: bool,
     /// the token's `expiresAt` (ms), as the host said
     expires_at_ms: i64,
     /// when this machine minted it (ms, by its clock)
@@ -162,13 +199,15 @@ pub struct CodeStorage {
 }
 
 impl CodeStorage {
-    /// Mint a scoped token from the fragment host and build the client.
-    pub fn connect(host: &HostClient, name: &str) -> Result<CodeStorage, CsError> {
-        let Minted { server, repo, token, expires_at_ms } = mint_from_host(host, name)?;
+    /// Mint a scoped token from the fragment host (what `wants` names)
+    /// and build the client.
+    pub fn connect(host: &HostClient, name: &str, wants: Wants) -> Result<CodeStorage, CsError> {
+        let Minted { server, repo, token, expires_at_ms, write } = mint_wanted(host, name, wants)?;
         Ok(CodeStorage {
             server,
             repo,
             token,
+            write,
             expires_at_ms,
             minted_at_ms: now_ms(),
             // every request sets its own total timeout (`timeout_for`)
@@ -186,8 +225,13 @@ impl CodeStorage {
 
     /// A new token for the same client: its connections stay open.
     fn renew(&mut self, minted: Minted) {
-        let Minted { server, repo, token, expires_at_ms } = minted;
-        (self.server, self.repo, self.token, self.expires_at_ms, self.minted_at_ms) = (server, repo, token, expires_at_ms, now_ms());
+        let Minted { server, repo, token, expires_at_ms, write } = minted;
+        (self.server, self.repo, self.token, self.expires_at_ms, self.write, self.minted_at_ms) = (server, repo, token, expires_at_ms, write, now_ms());
+    }
+
+    /// Whether its token writes: false for a viewer's, which only reads.
+    pub fn writes(&self) -> bool {
+        self.write
     }
 
     /// url-form repo identity this client is scoped to — the world a sync
@@ -354,12 +398,13 @@ impl CodeStorage {
 /// command connects once: `CodeStorage::connect`.)
 pub struct Held {
     name: String,
+    wants: Wants,
     client: Option<CodeStorage>,
 }
 
 impl Held {
-    pub fn new(name: &str) -> Held {
-        Held { name: name.to_string(), client: None }
+    pub fn new(name: &str, wants: Wants) -> Held {
+        Held { name: name.to_string(), wants, client: None }
     }
 
     /// The client, with a token that has time left: the first call
@@ -367,8 +412,9 @@ impl Held {
     pub fn get(&mut self, host: &HostClient) -> Result<&CodeStorage, CsError> {
         if !self.client.as_ref().is_some_and(CodeStorage::fresh) {
             match self.client.as_mut() {
-                Some(client) => client.renew(mint_from_host(host, &self.name)?),
-                None => self.client = Some(CodeStorage::connect(host, &self.name)?),
+                // asked again as at first: a role that changed since is the new one's
+                Some(client) => client.renew(mint_wanted(host, &self.name, self.wants)?),
+                None => self.client = Some(CodeStorage::connect(host, &self.name, self.wants)?),
             }
         }
         // a token minted just now is used whatever it has left: a host whose
@@ -399,7 +445,7 @@ mod tests {
 
     fn cs_for(mock: &MockServer, repo: &str) -> CodeStorage {
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        CodeStorage::connect(&host, repo).expect("connect")
+        CodeStorage::connect(&host, repo, Wants::Write).expect("connect")
     }
 
     fn author() -> Author {
@@ -558,7 +604,7 @@ mod tests {
         let short = crate::mockcs::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
         short.seed_repo("t--k3x9", &[("a", b"1")]);
         let host = crate::api::Client::new(&short.url, auth::fixed(7));
-        let mut held = Held::new("t--k3x9");
+        let mut held = Held::new("t--k3x9", Wants::Write);
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert_eq!(short.take_requests("").get("GET storage-token"), Some(&2), "a token inside the margin is minted again");
@@ -566,7 +612,7 @@ mod tests {
         // a token a minute old is minted again, though it has long left:
         // a removed editor's watcher pushes for at most that long
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        let mut held = Held::new("t--k3x9");
+        let mut held = Held::new("t--k3x9", Wants::Write);
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         held.client.as_mut().expect("connected").minted_at_ms -= TOKEN_REUSE_MAX_MS;
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());

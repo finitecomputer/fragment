@@ -671,7 +671,10 @@ What our Hermes image guarantees beyond the contract:
 
 - **One profile per agent of Hermes'**, named as its agent fragment,
   holding its `SOUL.md`, `memories/` and `skills/`, synced both ways with
-  it. An agent whose `agent.json` names another runtime (Claude) has no
+  it through the files route, never a storage token: the agent edits its
+  own fragment, so a viewer's read-only sync is not this one's. A fragment
+  shared with the agent's owner it syncs with the `fragment` CLI, as its
+  owner would, at the lower of their roles (cli/GUIDE.md, Sync in depth). An agent whose `agent.json` names another runtime (Claude) has no
   profile, desktop, route or sync: the boot reads `runtime` as the bridge
   does (`with_runtimes`), and the ready file names it at once, for the
   bridge to run on its runtime. A start reads every agent's before it

@@ -18,7 +18,7 @@ mod mockcs;
 use fragment_templates::ALL as TEMPLATES;
 
 use crate::api::{encode_q, Code, CodedError};
-use crate::codestorage::{Author, CodeStorage, CsError, LIVE};
+use crate::codestorage::{Author, CodeStorage, CsError, Wants, LIVE};
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
@@ -1878,7 +1878,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Rollback { name, to } => {
-            let storage = CodeStorage::connect(&c, &name).map_err(cs_anyhow)?;
+            let storage = CodeStorage::connect(&c, &name, Wants::Write).map_err(cs_anyhow)?;
             let history = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
             let live_tip = history.first().map(|cm| cm.sha.clone())
                 .ok_or_else(|| anyhow!("live has no deploys yet (see `fragment deploy {name}`)"))?;
@@ -1895,7 +1895,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("rolled back to {}: live is now {}", &target[..8.min(target.len())], &new_tip[..8.min(new_tip.len())]);
         }
         Cmd::Drafts { name } => {
-            let storage = CodeStorage::connect(&c, &name).map_err(cs_anyhow)?;
+            let storage = CodeStorage::connect(&c, &name, Wants::Read).map_err(cs_anyhow)?;
             let commits = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
             json_exit(j, &json!({ "deploys": commits }));
             if commits.is_empty() {

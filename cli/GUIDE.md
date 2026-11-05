@@ -327,11 +327,12 @@ working copy: sync again to bring the new name into it before editing it.
 
 The repo is the truth; your folder is a working copy. Sync talks to
 code.storage directly with a short-lived, repo-scoped token the host
-mints (editors and up): one per command; a watcher keeps one for at most
-a minute, and mints again after that, before it expires, or when
-code.storage refuses it (the host checks the role when it mints, so an
-editor removed from the fragment stops syncing within a minute). No
-local `.git` is made.
+mints: one that writes for editors and up, one that only reads for any
+member (a pull asks for that one, whoever you are). It mints one per
+command; a watcher keeps one for at most a minute, and mints again after
+that, before it expires, or when code.storage refuses it (the host
+checks the role when it mints, so an editor removed from the fragment
+stops syncing within a minute). No local `.git` is made.
 
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)
@@ -359,6 +360,15 @@ fragment verify my-thing --dir .            # full-content audit
   `--apply-mass-delete`.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
+- **Viewers** sync read-only, and so does an agent acting for one (it
+  holds the lower of their role and its own). A mirror pulls and sends
+  nothing: what it would have sent stays in your folder, listed as not
+  sent (exit 5), and a file you deleted is pulled back. `--mode push`
+  and `deploy --dir` are an editor's. A token reads the repo's whole
+  history, so every member, a viewer too, can read anything ever
+  committed, including what was removed before they were added. A share
+  link and a public fragment's visitors get none: they read what is
+  served.
 - **What syncs**: everything but dot files and folders (`.fragment/`,
   `.git/`, `.obsidian/`, `.DS_Store`), the top-level `node_modules/` (one
   deeper down, as under `site/`, is served and syncs), editor droppings
@@ -372,7 +382,7 @@ fragment verify my-thing --dir .            # full-content audit
   folder with its journal and main with the last head it saw (one
   request), and passes only when either moved or the change feed is
   down.
-- **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped.
+- **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped, 5 changes not sent (you may only read it).
 
 ## The app
 

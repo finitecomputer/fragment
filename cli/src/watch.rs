@@ -87,11 +87,15 @@ struct Watcher<'a> {
     /// main's head as the last pass left it: the feed's frame naming it is
     /// our own commit's echo, or a move a pass already took
     head: Option<String>,
+    /// the folder as it was (`Local::content_hash`) when a pass left
+    /// changes in it unsent, its fragment only read: the same folder is
+    /// no change to pass for
+    unsent_at: Option<String>,
 }
 
 impl<'a> Watcher<'a> {
     fn new(client: &'a Client, name: &'a str, dir: &'a Path, opts: &'a SyncOptions) -> Watcher<'a> {
-        Watcher { client, name, dir, opts, storage: Held::new(name), head: None }
+        Watcher { client, name, dir, opts, storage: Held::new(name, opts.mode.wants()), head: None, unsent_at: None }
     }
 
     /// Folds one wakeup into its batch.
@@ -113,7 +117,9 @@ impl<'a> Watcher<'a> {
             return Ok(Served::Nothing);
         }
         let local = sync::read_local(self.dir, self.name)?;
-        let full = due.remote || !local.matches_journal() || (due.sweep && (!live_up || self.head_moved()?));
+        let folder = local.content_hash();
+        let settled = local.matches_journal() || self.unsent_at.as_ref() == Some(&folder);
+        let full = due.remote || !settled || (due.sweep && (!live_up || self.head_moved()?));
         if !full {
             return Ok(if due.sweep { Served::Checked } else { Served::Nothing });
         }
@@ -124,6 +130,7 @@ impl<'a> Watcher<'a> {
             sync::refresh_pins(client, name, MAIN);
         }
         self.head = report.head.clone();
+        self.unsent_at = (!report.unsent.is_empty()).then_some(folder);
         Ok(Served::Passed(Box::new(report)))
     }
 
@@ -213,9 +220,10 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
             Ok(served) => {
                 err_backoff = 1;
                 if let Served::Passed(report) = served {
-                    if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() {
+                    if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() || !report.unsent.is_empty() {
                         let at = now_utc();
-                        println!("{at} pushed {} pulled {} deleted {} conflicts {}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
+                        let unsent = if report.unsent.is_empty() { String::new() } else { format!(" not sent {} (you may only read it)", report.unsent.len()) };
+                        println!("{at} pushed {} pulled {} deleted {} conflicts {}{unsent}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
                     }
                 }
             }
@@ -506,6 +514,38 @@ mod tests {
         assert_eq!(next_batch(&rx, &watcher), Due::default(), "an echo alone asks nothing");
         tx.send(Wakeup::Head(Some("c".repeat(40)))).unwrap();
         assert_eq!(next_batch(&rx, &watcher), REMOTE);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a viewer's watcher (its token only reads) passes once for an
+    /// edit it may not send, and not again while the folder stays as that
+    /// pass left it: a save, or a sweep with the feed up, asks nothing, and
+    /// mints nothing. Another edit is a pass again. Method: the host routes
+    /// hold the caller a viewer; count the fake's requests.
+    #[test]
+    fn a_viewers_unsent_edit_is_one_pass_not_one_a_sweep() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
+        mock.view_only("t--k3x9", true);
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let dir = tmpdir("viewer-watch");
+        let o = opts();
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+        assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.pulled == ["a.md"] && r.read_only));
+
+        fs::write(dir.join("a.md"), "mine").unwrap();
+        let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("an edit is a pass") };
+        assert_eq!(report.unsent, ["a.md"]);
+        mock.take_requests("");
+        assert!(matches!(watcher.serve(LOCAL, true).unwrap(), Served::Nothing), "the same folder: no pass");
+        assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "a sweep reads main's head alone");
+        let asked = mock.take_requests("");
+        assert!(asked.get("GET storage-token").is_none() && asked.get("GET files/metadata").is_none(), "{asked:?}");
+
+        fs::write(dir.join("b.md"), "more").unwrap();
+        let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("another edit is a pass") };
+        assert_eq!(report.unsent, ["a.md", "b.md"]);
+        assert_eq!(mock.commit_pack_count(), 0);
         fs::remove_dir_all(&dir).ok();
     }
 
