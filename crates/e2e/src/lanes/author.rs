@@ -1067,6 +1067,42 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && past["error"]["message"].as_str().is_some_and(|m| m.contains(&format!("at most {} KiB", limits::API_FILES_WRITE_MAX_BYTES / 1024))),
         json!({ "wrote": wrote, "read": read.status, "bytes": read.bytes.len(), "past": past }),
     );
+    // `fragment write --dir`: several files in one commit, whole or not at
+    // all, as a parent brain publishes its synthesis beside its revision
+    // record. Over another writer's commit to one of them it lands both
+    // (the files route commits onto main as it finds it); one path that is
+    // not a repo path, or one file missing, sends nothing.
+    let staged = s.scratch.join("write-batch");
+    std::fs::create_dir_all(staged.join("out/wiki"))?;
+    std::fs::create_dir_all(staged.join("out/datasets"))?;
+    std::fs::write(staged.join("out/wiki/launch.md"), "synthesis v2\n")?;
+    std::fs::write(staged.join("out/datasets/incorporated.json"), "{\"child\":{\"revision\":\"v2\"}}\n")?;
+    let theirs = api.signed(&keys, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "files": [{ "path": "out/wiki/launch.md", "text": "another writer's\n" }] })))?;
+    let staged_s = staged.to_str().ok_or_else(|| anyhow::anyhow!("a utf-8 path"))?;
+    let batch = s.cli_json(api, &home, &["write", &name, "out/wiki/launch.md", "out/datasets/incorporated.json", "--dir", staged_s, "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let listed = api.signed(&keys, "GET", &format!("/api/f/{name}/files"), None)?;
+    let commit_of = |path: &str| listed.body["files"].as_array().and_then(|l| l.iter().find(|f| f["path"] == path)).map(|f| f["lastCommitSha"].clone()).unwrap_or_default();
+    let text_of = |path: &str| api.signed(&keys, "GET", &format!("/api/f/{name}/file?path={path}"), None).map(|r| r.text).unwrap_or_default();
+    s.ok(
+        "fragment write --dir commits several files as one, over another writer's commit to one of them",
+        theirs.status == 200
+            && batch["commit"].is_string()
+            && batch["paths"] == json!(["out/wiki/launch.md", "out/datasets/incorporated.json"])
+            && commit_of("out/wiki/launch.md") == batch["commit"]
+            && commit_of("out/datasets/incorporated.json") == batch["commit"]
+            && text_of("out/wiki/launch.md") == "synthesis v2\n"
+            && text_of("out/datasets/incorporated.json") == "{\"child\":{\"revision\":\"v2\"}}\n",
+        json!({ "theirs": theirs.status, "batch": batch, "files": listed.body["files"] }),
+    );
+    std::fs::write(staged.join("out/wiki/launch.md"), "synthesis v3\n")?;
+    let (bad_exit, bad) = refused(s, &["write", &name, "out/wiki/launch.md", "../outside.md", "--dir", staged_s, "--json"]);
+    let (missing_exit, missing) = refused(s, &["write", &name, "out/wiki/launch.md", "out/wiki/none.md", "--dir", staged_s, "--json"]);
+    let (one_exit, one) = refused(s, &["write", &name, "out/wiki/launch.md", "out/datasets/incorporated.json", "--text", "x", "--json"]);
+    s.ok(
+        "a write with a path outside the repo or a missing file sends nothing (exit 2, 1), and --text writes one file alone (exit 2)",
+        bad_exit == Some(2) && bad["error"]["code"] == "invalid_usage" && missing_exit == Some(1) && one_exit == Some(2) && text_of("out/wiki/launch.md") == "synthesis v2\n",
+        json!({ "bad": bad, "missing": missing, "one": one }),
+    );
     Ok(())
 }
 
