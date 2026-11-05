@@ -1157,15 +1157,18 @@ fn conflict_copy(path: &RepoPath, writer_id: &str) -> Result<RepoPath, NotRepoPa
 /// absence a deletion. The remote's bytes land beside it once per version
 /// (a copy of the same bytes there already is not written again): a
 /// conflict, reported each pass while both are there. The same bytes on
-/// both sides are nothing to report.
+/// both sides are nothing to report. Only a regular file is ever read,
+/// never through a link: a pipe waits forever for a writer, a device
+/// never ends.
 fn keep_unscanned(ctx: ConflictCtx<'_>, path: &RepoPath, target: &Path) -> Result<(), SyncError> {
+    let regular = |at: &Path| fs::symlink_metadata(at).is_ok_and(|md| md.file_type().is_file());
     if !ctx.recorded.insert(path.clone()) {
         return Ok(());
     }
     ctx.state.files.remove(path);
     let git = ctx.storage.read_file(path.as_str(), ctx.listing.rev())?;
     let bytes = ctx.blobs.resolve(git).map_err(|e| SyncError::blob(path.as_str(), e))?;
-    if fs::read(target).is_ok_and(|here| here == bytes) {
+    if regular(target) && fs::read(target).is_ok_and(|here| here == bytes) {
         return Ok(());
     }
     let copy = match conflict_copy(path, ctx.writer_id) {
@@ -1190,7 +1193,7 @@ fn keep_unscanned(ctx: ConflictCtx<'_>, path: &RepoPath, target: &Path) -> Resul
     let saved = beside.parent().and_then(|at| fs::read_dir(at).ok()).is_some_and(|entries| {
         entries.flatten().any(|e| {
             let n = name(&e.path());
-            n.starts_with(&prefix) && n.ends_with(&suffix) && fs::read(e.path()).is_ok_and(|b| b == bytes)
+            n.starts_with(&prefix) && n.ends_with(&suffix) && e.file_type().is_ok_and(|t| t.is_file()) && fs::read(e.path()).is_ok_and(|b| b == bytes)
         })
     });
     if !saved {
@@ -2517,6 +2520,48 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine, now private", "{first:?}");
         assert!(first.conflicts.len() == 1 && second.deleted_remote.is_empty() && second.pushed.is_empty(), "{first:?} {second:?}");
         assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"v2"[..]));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: what is not a regular file where the fragment has one (a pipe,
+    /// a link to one) is kept and reported, never read: a pass ends. Method:
+    /// a FIFO with no writer at a.md and a link to it at b.md; the pass runs
+    /// on a thread, and if it has not ended in 20 s the test opens the
+    /// pipe's write end (so the read ends) and fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_fragment_has_a_file_is_kept_unread() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"remote a"), ("b.md", b"remote b")]);
+        mock.view_only("t--k3x9", true);
+        let dir = tmpdir("pipe-kept");
+        let fifo = dir.join("a.md");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success(), "mkfifo");
+        std::os::unix::fs::symlink(&fifo, dir.join("b.md")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (url, at) = (mock.url.clone(), dir.clone());
+        let pass = std::thread::spawn(move || {
+            let c = Client::new(&url, auth::fixed(7));
+            tx.send(sync_once(&c, "t--k3x9", &at, &opts(Mode::Mirror)).map(|r| r.conflicts.len())).ok();
+        });
+        let mut ended = rx.recv_timeout(std::time::Duration::from_secs(20));
+        let stuck = ended.is_err();
+        // stuck reading the pipe (through either path): its write end,
+        // opened without waiting and closed, ends each read, at most 50
+        // times, so the test fails and never hangs
+        for _ in 0..50 {
+            if ended.is_ok() {
+                break;
+            }
+            use std::os::unix::fs::OpenOptionsExt;
+            drop(fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo));
+            ended = rx.recv_timeout(std::time::Duration::from_millis(200));
+        }
+        pass.join().unwrap();
+        assert!(!stuck, "a pass read the pipe: {ended:?}");
+        assert!(matches!(ended, Ok(Ok(2))), "the pass ended, both kept and reported: {ended:?}");
+        assert!(std::os::unix::fs::FileTypeExt::is_fifo(&fs::symlink_metadata(&fifo).unwrap().file_type()) && fs::symlink_metadata(dir.join("b.md")).unwrap().file_type().is_symlink());
+        assert_eq!(conflict_copies(&dir).len(), 2, "theirs beside each");
         fs::remove_dir_all(&dir).ok();
     }
 }
