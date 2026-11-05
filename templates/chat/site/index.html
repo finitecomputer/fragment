@@ -30,20 +30,9 @@ ws.addEventListener("message",keep);ws.addEventListener("close",drop);window.__f
        relative, so it works on a fragment's host, under /f/<name>/, and
        served from the platform's release (decision 40) -->
   <link rel="stylesheet" href="./chat.css">
-  <!-- every module the page runs, asked at once: else each wave of imports
-       waits for the one before (crates/templates/tests/page_imports.rs
-       keeps this list the page's whole module graph) -->
-  <link rel="modulepreload" href="./chat.js">
-  <link rel="modulepreload" href="./__fragment.js">
-  <link rel="modulepreload" href="./agent-color.js">
-  <link rel="modulepreload" href="./control.js">
-  <link rel="modulepreload" href="./icons.js">
-  <link rel="modulepreload" href="./markdown.js">
-  <link rel="modulepreload" href="./__markdown.js">
-  <link rel="modulepreload" href="./media.js">
-  <link rel="modulepreload" href="./response-actions.js">
-  <link rel="modulepreload" href="./tooltips.js">
-  <link rel="modulepreload" href="./frame-messages.js">
+  <!-- its script and stylesheet are built (crates/templates/bundle.rs):
+       named by their hash, and its bundle and the platform's modules it
+       imports preloaded, here, in the page the release serves -->
 </head>
 <body>
   <!-- said only if the page has not drawn itself after a while (its script,

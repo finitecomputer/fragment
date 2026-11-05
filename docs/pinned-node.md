@@ -1,7 +1,8 @@
 # The pinned Node
 
-The JavaScript the platform needs (wrangler, and the Sandbox SDK it
-bundles; `package.json`) runs on one Node release, pinned in
+The JavaScript the platform needs (wrangler, the Sandbox SDK it
+bundles, and esbuild, which bundles the shell's and the chat's pages;
+`package.json`) runs on one Node release, pinned in
 `crates/devstack/src/node_release.rs` with the SHA-256 of each
 platform's official tarball. `dev`, `e2e`, `deploy` and `teardown`
 fetch it into `target/tools/` on first use (refusing a tarball whose
@@ -9,8 +10,16 @@ hash differs), run its own npm's `npm ci` when node_modules is missing
 or stale, and start every JavaScript process on it, first on PATH, with
 its caches under `target/cache/` (Browser Rendering's Chrome included).
 `check` fetches it too, and runs `node --check` on it (no `npm ci`).
-A `node` on PATH is never used, and there is no other: a machine the
-pin has no tarball for runs nothing.
+The build of the platform's files (crates/templates, its `platform`
+feature: the cell, xtask, the e2e) does the same from its build script,
+as it bundles the shell's and the chat's pages with esbuild
+(crates/templates/bundle.rs): it fetches the pinned Node and runs `npm
+ci` when node_modules is missing or stale, so a fresh clone builds with
+no step first. It runs esbuild's native binary from node_modules,
+checking its version against `package.json`'s exact pin. The CLI builds
+without that feature and needs no Node. A `node` on PATH is never used,
+and there is no other: a machine the pin has no tarball for runs
+nothing.
 
 To move the pin:
 

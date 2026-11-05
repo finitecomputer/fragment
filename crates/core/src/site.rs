@@ -120,8 +120,11 @@ pub fn site_candidates(rest: &str) -> Vec<String> {
     vec![format!("site/{rest}"), format!("site/{rest}/index.html")]
 }
 
-/// A name with a content hash in it (`app.3f9a1c2e.js`) never changes.
-fn hashed(path: &str) -> bool {
+/// A name with a content hash in it (`app.3f9a1c2e.js`) never changes:
+/// the one rule for a file kept for good by its name, a fragment's
+/// (`cache_control`) and the shell's built files alike (cell/src/shell.rs
+/// `asset`, crates/templates/bundle.rs).
+pub fn hashed(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.split('.').rev().skip(1).any(|part| part.len() >= 8 && part.bytes().all(|b| b.is_ascii_hexdigit()))
 }

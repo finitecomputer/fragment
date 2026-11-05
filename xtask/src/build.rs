@@ -535,7 +535,10 @@ mod tests {
             let manifest = PathBuf::from(p["manifest_path"].as_str().expect("its manifest"));
             dirs.insert(name.clone(), rel(manifest.parent().expect("its directory").to_str().expect("a path")));
             let deps = p["dependencies"].as_array().into_iter().flatten();
-            let built = deps.filter(|d| d["kind"].is_null() || d["kind"] == "build").filter(|d| d["path"].is_string());
+            // an optional one is built only by a feature that turns it on,
+            // which the CLI's do not (crates/templates' `bundle`: its
+            // manifest, copied with the members', is all cargo reads)
+            let built = deps.filter(|d| d["kind"].is_null() || d["kind"] == "build").filter(|d| d["path"].is_string() && d["optional"] != true);
             needs.insert(name, built.map(|d| d["name"].as_str().expect("a name").to_string()).collect());
         }
         let mut closure = BTreeSet::from(["fragment-cli".to_string()]);
