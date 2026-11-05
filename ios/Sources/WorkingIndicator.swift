@@ -6,6 +6,7 @@ struct WorkingIndicator: View {
     struct Agent: Identifiable {
         let id: TurnKey
         let name: String
+        var home: String? = nil
     }
 
     let agents: [Agent]
@@ -39,7 +40,7 @@ struct WorkingIndicator: View {
     }
 
     init(card: ToolCard, agent: FragmentSummary?) {
-        agents = [Agent(id: card.turn, name: agent?.displayTitle ?? "The agent")]
+        agents = [Agent(id: card.turn, name: agent?.displayTitle ?? "The agent", home: agent?.name)]
         cards = [card]
     }
 
@@ -47,7 +48,7 @@ struct WorkingIndicator: View {
         self.hints = hints; self.cards = card.map { [$0] } ?? []
         self.principal = principal; self.phase = phase; self.present = present
         let keys = hints.map(\.id) + self.cards.map(\.turn)
-        agents = keys.map { Agent(id: $0, name: library.agent(for: $0.agent)?.displayTitle ?? "The agent") }
+        agents = keys.map { Agent(id: $0, name: library.agent(for: $0.agent)?.displayTitle ?? "The agent", home: library.agent(for: $0.agent)?.name) }
     }
 
     var body: some View {
@@ -82,7 +83,7 @@ struct WorkingIndicator: View {
 
     private var secondary: Color { Color(rgb: colorScheme == .dark ? 0xa6a19d : 0x66615b) }
     private var stepColor: Color { Color(rgb: colorScheme == .dark ? 0x85817d : 0x726c66) }
-    private func name(_ identity: String) -> String { agents.first { $0.id.agent == identity }?.name ?? identity }
+    private func name(_ identity: String) -> String { agents.first { $0.id.agent == identity }?.name ?? "npub…" + identity.suffix(6) }
 
     private func hintLine(_ agent: Agent, hint: WorkingHint, now: Date, elapsed: TimeInterval) -> some View {
         let milliseconds = Int64(now.timeIntervalSince1970 * 1000)
@@ -170,7 +171,7 @@ struct WorkingIndicator: View {
                         Text("Worked for " + Self.duration((card.until ?? card.since) - card.since))
                     }
                     Text("· \(card.steps.count) \(card.steps.count == 1 ? "step" : "steps")")
-                    glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0))
+                    glyph("chevron", size: 14).rotationEffect(.degrees(expanded ? 90 : 0)).animation(.easeInOut(duration: 0.14), value: expanded)
                 }.frame(minHeight: 24).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityIdentifier("workingTools")
             if !shown.isEmpty {
@@ -178,10 +179,9 @@ struct WorkingIndicator: View {
                     ForEach(shown) { step in
                         let age = card.steps.count - 1 - (card.steps.firstIndex { $0.id == step.id } ?? 0)
                         let opacity = !rolling || age == 0 ? 1.0 : age == 1 ? 0.6 : age == 2 ? 0.3 : 0
-                        toolLine(step, agent: card.turn.agent, now: now, elapsed: elapsed, rolling: rolling)
+                        toolLine(step, agent: card.turn.agent, now: now, elapsed: elapsed, rolling: rolling, verticalPadding: rolling && eased < 1 && age == 3 ? 3 * (1 - eased) : 3)
                             .opacity(rolling && eased < 1 ? (age == 0 ? eased : age == 1 ? 1 - 0.4 * eased : age == 2 ? 0.6 - 0.3 * eased : 0.3 * (1 - eased)) : opacity)
-                            .frame(maxHeight: rolling && eased < 1 && age == 0 ? 3 * 20.15 * eased : nil, alignment: .top).clipped()
-                            .frame(height: rolling && eased < 1 && age == 3 ? 26.15 * (1 - eased) : nil, alignment: .top).clipped()
+                            .frame(height: rolling && eased < 1 && age == 0 ? max(6, min(textSize * 1.55 + 6, 3 * textSize * eased)) : rolling && eased < 1 && age == 3 ? min(textSize * 1.55 + 6 * (1 - eased), 3 * textSize * (1 - eased)) : nil, alignment: .top).clipped()
                     }
                 }.padding(.top, 6)
             }
@@ -189,10 +189,11 @@ struct WorkingIndicator: View {
         .font(.system(size: textSize)).foregroundStyle(stepColor)
     }
 
-    private func toolLine(_ step: ToolStep, agent: String, now: Date, elapsed: TimeInterval, rolling: Bool) -> some View {
+    private func toolLine(_ step: ToolStep, agent: String, now: Date, elapsed: TimeInterval, rolling: Bool, verticalPadding: Double = 3) -> some View {
         let detailed = openSteps.contains(step.id) && !rolling
-        let args = step.args.replacingOccurrences(of: "/data/work/\(agent)/home/", with: "~/")
-            .replacingOccurrences(of: "/data/work/\(agent)/", with: "work/")
+        let home = agents.first { $0.id.agent == agent }?.home ?? agent
+        let args = step.args.replacingOccurrences(of: "/data/work/\(home)/home/", with: "~/")
+            .replacingOccurrences(of: "/data/work/\(home)/", with: "work/")
             .replacingOccurrences(of: "/data/hermes/managed-skills/", with: "skills/")
         let failure = Color(rgb: colorScheme == .dark ? 0xf3b3b3 : 0xa8324f)
         return VStack(alignment: .leading, spacing: 4) {
@@ -214,7 +215,7 @@ struct WorkingIndicator: View {
                     .frame(maxWidth: .infinity, alignment: .leading).background(FragmentStyle.bubble, in: RoundedRectangle(cornerRadius: 8))
             }
         }
-        .padding(.vertical, 3).padding(.leading, 16)
+        .padding(.vertical, verticalPadding).padding(.leading, 16)
         .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.18)).frame(width: 1) }
         .padding(.leading, 9)
     }

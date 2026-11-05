@@ -204,7 +204,10 @@ struct ChatRow: View, Equatable {
                 Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
             }
         } else if let card {
-            WorkingIndicator(card: card, agent: agent)
+            VStack(alignment: .leading, spacing: 20) {
+                if let words = card.words { MessageView(text: words, isYou: false, agent: agent) }
+                WorkingIndicator(card: card, agent: agent)
+            }
         } else {
             WorkRecordView(record: record)
         }

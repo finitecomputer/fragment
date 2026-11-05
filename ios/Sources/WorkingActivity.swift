@@ -59,6 +59,7 @@ struct ToolCard: Equatable, Identifiable {
     var steps: [ToolStep]
     var since: Int64
     var until: Int64?
+    var words: String? = nil
     var running: Bool { until == nil }
 }
 
@@ -145,12 +146,21 @@ struct WorkingActivity: Equatable {
             guard let step = item.step, let key = item.turn else {
                 rows.append(item.record); lastCard = nil; continue
             }
+            let said = step.record.body["text"].string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let cut = said.hasSuffix("…")
+            let words = cut ? String(said.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) : said
+            let echoed = (replies[key] ?? []).contains { reply in
+                let text = reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return cut ? text.hasPrefix(words) : text == words
+            }
+            let preface = !said.isEmpty && !echoed ? said : nil
+            if preface != nil { lastCard = nil }
             if let id = lastCard, cards[id]?.turn == key {
                 cards[id]?.steps.append(step)
             } else {
                 lastCard = item.record.id
                 rows.append(item.record)
-                cards[item.record.id] = ToolCard(id: item.record.id, turn: key, steps: [step], since: item.record.at, until: nil)
+                cards[item.record.id] = ToolCard(id: item.record.id, turn: key, steps: [step], since: item.record.at, until: nil, words: preface)
             }
         }
         for id in cards.keys.sorted() {

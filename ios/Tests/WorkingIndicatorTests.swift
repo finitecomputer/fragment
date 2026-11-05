@@ -60,6 +60,21 @@ struct WorkingIndicatorTests {
         #expect(WorkingIndicator.duration(59_500) == "1m 00s")
         #expect(WorkingIndicator.duration(3_601_000) == "1h 0m")
     }
+    @Test func olderStepWordsSplitCardsAndRepliesDeduplicateThem() throws {
+        var timeline = Timeline()
+        timeline.insert(try work(1, #"{"kind":"turn.start","turn":"working-card"}"#))
+        timeline.insert(try work(2, #"{"kind":"turn.step","turn":"working-card","step":1,"category":"read","tool":"read_file","args":"README.md","ok":true,"text":"I’ll read it."}"#))
+        timeline.insert(try work(3, #"{"kind":"turn.step","turn":"working-card","step":2,"category":"write","tool":"patch","args":"WorkingCard.tsx","ok":true}"#))
+        timeline.insert(try work(4, #"{"kind":"turn.step","turn":"working-card","step":3,"tool":"terminal","args":"ls","ok":true,"text":"Installed cleanly. Now listing the app:"}"#))
+        let activity = WorkingActivity(timeline)
+        #expect(activity.cards.count == 2)
+        #expect(activity.cards["work:2"]?.words == "I’ll read it.")
+        #expect(activity.cards["work:2"]?.steps.count == 2)
+        #expect(activity.cards["work:4"]?.words == "Installed cleanly. Now listing the app:")
+        timeline.insert(.init(channel: "chat", seq: 1, at: 1500, principal: "npub1preview", kind: "message", body: .object(["turn": .string("working-card"), "text": .string("I’ll read it.")])))
+        #expect(WorkingActivity(timeline).cards["work:2"]?.words == nil)
+    }
+
     @Test func bounceKeepsTheWebsRestPeakAndStaggerAcrossCycles() {
         for dot in 0..<3 {
             let delay = Double(dot) * 0.13
