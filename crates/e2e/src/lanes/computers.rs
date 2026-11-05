@@ -600,7 +600,7 @@ fn keepalive_across_a_reload(s: &mut Suite, api: &Api, owner: &crate::Keys, id: 
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
-const RECOVERY_CHECKS: [&str; 12] = [
+const RECOVERY_CHECKS: [&str; 13] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
     "its owner's restart, its save failing too: it answers starting, and comes up again from its last save",
@@ -613,6 +613,7 @@ const RECOVERY_CHECKS: [&str; 12] = [
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
     "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
+    "its owner told late (the lever's slow-tell), the restart still answers starting, its view as its start was owed, though the alarm made that start while it waited; then awake",
 ];
 
 /// What its owner is told, and the way back to working (
@@ -802,6 +803,32 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
             && woke["restored"]["rollback"] == false
             && woke["notices"].as_array().is_none_or(|l| l.is_empty()),
         format!("{r} / {pressed} / {woke}"),
+    );
+    // its owner's notification slow (the lever): the alarm makes the start
+    // the restart owed, and the stub's comes up, while the restart's request
+    // waits; its answer is still the view as that start was owed (Codex on
+    // #1053: it was the view at the request's end, awake)
+    std::thread::sleep(QUEUE_DRAIN);
+    let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let asleep = r.body["generation"].as_u64().unwrap_or(0);
+    let slow = Duration::from_secs(20);
+    let slowed = lever_with(api, c.id, json!({ "op": "slow-tell", "ms": slow.as_millis() as u64 }))?;
+    let t0 = std::time::Instant::now();
+    let pressed = api.patient(slow + Duration::from_secs(60)).signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
+    let took = t0.elapsed();
+    let then = view();
+    let up = s.eventually(c.wake, || view()["phase"] == "awake" && view()["generation"].as_u64() == Some(asleep + 1));
+    s.ok(
+        RECOVERY_CHECKS[12],
+        r.body["phase"] == "asleep"
+            && slowed.status == 200
+            && pressed.status == 200
+            && pressed.body["phase"] == "starting"
+            && pressed.body["generation"].as_u64() == Some(asleep)
+            && took >= slow
+            && then["generation"].as_u64() == Some(asleep + 1)
+            && up,
+        format!("answered in {took:.1?}: {pressed} / then {then}"),
     );
     // a life on which nothing is done: its owner's sleep saves it once its
     // guest settled (a start after a rollback first ends what its save left

@@ -3320,6 +3320,27 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         hold,
     );
     let _ = b.screenshot(page, &shots.join("computer-restart-starting.png"));
+    // its progress reads failing (injected at fetch, as a blip's): said as
+    // the read's failure, never the restart's, with Check again, and
+    // nothing read on (Codex on #1053: it said Starting… over them); let
+    // through, Check again goes on following
+    b.eval(page, "(window.__restartReads = 0, window.__failRestartReads = true)")?;
+    let unread = b.until(
+        page,
+        &format!("{RESTART_ROW}?.innerText.includes(\"Couldn't check on the restart\") && !!{RESTART_ROW}.querySelector('button[data-action=restart-read]') && !!document.querySelector('#settings-page [data-action=restart-read]') && !{RESTART_ROW}.innerText.includes(\"didn't restart\") && !document.querySelector('.restart-status')"),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("computer-restart-unread.png"));
+    let tried = b.eval(page, "window.__restartReads")?;
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let quiet = b.eval(page, "window.__restartReads")? == tried;
+    b.eval(page, &format!("(window.__failRestartReads = false, {RESTART_ROW}.querySelector('button[data-action=restart-read]').click(), true)"))?;
+    let again = b.until(page, &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…'"), wait);
+    s.ok(
+        "its progress reads failing are said as such, with Check again, never as a restart that failed, and nothing is read on until it is pressed; then it follows again",
+        unread && quiet && again,
+        json!({ "tried": tried, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
+    );
     let slow = b.until(page, &format!("{RESTART_ROW}?.innerText.includes('A big restore can take a few minutes.')"), hold);
     let _ = b.screenshot(page, &shots.join("computer-restart-slow.png"));
     let steps = b.eval(page, "window.__restartSaid")?;
@@ -3366,10 +3387,14 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
 /// The band's row of a restart the person asked for (computer.js), or null.
 const RESTART_ROW: &str = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=restart]')";
 /// The page's restarts refused as a ledger at zero credit refuses one (402,
-/// its words), while `window.__restartFails` (from here on, `true`).
+/// its words), while `window.__restartFails` (from here on, `true`); and
+/// its reads of its computer's view (a restart's progress) failing as a
+/// blip's do while `window.__failRestartReads`, each counted
+/// (`__restartReads`).
 const FAIL_RESTART: &str = "(() => { if (window.__restartFails !== undefined) return (window.__restartFails = true); const real = window.fetch.bind(window); window.__restartFails = true; \
     window.fetch = async (url, o) => { if (window.__restartFails && o?.method === 'POST' && /^\\/api\\/computers\\/[^/]+\\/restart$/.test(url)) \
       return new Response(JSON.stringify({ error: 'payment_required', message: 'agents are stopped: the credit is used up; adding credit starts them again' }), { status: 402, headers: { 'content-type': 'application/json' } }); \
+      if ((o?.method ?? 'GET') === 'GET' && /^\\/api\\/computers\\/[^/]+$/.test(url)) { window.__restartReads = (window.__restartReads ?? 0) + 1; if (window.__failRestartReads) throw new TypeError('Failed to fetch'); } \
       return real(url, o); }; return true; })()";
 /// Each step a restart's status says (`.restart-status`, the band's and
 /// settings'), in order, a step said again in a row once:

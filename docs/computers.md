@@ -210,10 +210,12 @@ every chat and Settings.
   sleep and fresh start above. It names the start its owner saw, so
   pressed twice it restarts once, and the ledger is asked first, as for a
   wake. While it runs, the shell shows its phase where the button was
-  (saving, then starting), read every two seconds, and a line that a big
-  save or restore can take a few minutes once it has run 30 seconds;
-  awake on its new start, the notice goes. One that fails says so, with
-  Try again.
+  (saving, then starting), read every two seconds while the page is shown
+  (`cell/shell/restart-follow.js`), and a line that a big save or restore
+  can take a few minutes once it has run 30 seconds; awake on its new
+  start, the notice goes. A read that fails says so, with Check again,
+  never that the restart failed; an ask that fails while the computer
+  shows no restart under way says it didn't restart, with Try again.
 - **An update is told, never forced** (Paul, 2026-10-09). A deploy that
   changes an image pushes it under the same name: asleep, a computer takes
   it at its next wake; awake, it runs the image it started on until it

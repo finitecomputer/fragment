@@ -1,4 +1,5 @@
 import { icon } from "./icons.js";
+import { createRestartFollow, FAILED, READ_FAILED } from "./restart-follow.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 
 const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
@@ -59,23 +60,30 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // a restart the person asked for in this page, and of which start: a
   // computer that still won't start after one says where to get help
   let restarted = 0;
-  // That restart while it runs (`asked`: the start it restarts; `at`: when
-  // it was pressed; `failed`: why its ask failed), shown where its buttons
-  // were as the phase the computer reports, read every `FOLLOW_MS`, until
-  // it is awake on a newer start or won't start (docs/api.md: a restart
-  // answers `starting`, never awake). Past `SLOW_MS` a line says a big one
-  // takes minutes; past `FOLLOW_MAX_MS` (a save's and a start's bounds,
-  // and their retries) it is no longer followed.
-  let restart = null;
-  const FOLLOW_MS = 2000;
+  // That restart, followed until the computer says it is done
+  // (restart-follow.js: its states and their ways out), shown where its
+  // buttons were as the phase the computer reports; past `SLOW_MS` a line
+  // says a big one takes minutes. Hidden, the page reads nothing.
   const SLOW_MS = 30_000;
-  const FOLLOW_MAX_MS = 40 * 60_000;
+  const follow = createRestartFollow({
+    read: () => (computer() ? api("GET", `/api/computers/${seg(computer().computer)}`) : Promise.reject(new Error("no computer"))),
+    ask: (asked) => api("POST", `/api/computers/${seg(computer().computer)}/restart`, { generation: asked }),
+    view: () => computer(),
+    // a view unchanged draws only the restart's line (its slow line comes)
+    take: (v) => (v?.computer && JSON.stringify(v) !== JSON.stringify(computer()) ? computerIs(v) : renderComputer()),
+    changed: () => renderComputer(),
+    hidden: () => document.hidden,
+  });
+  const followVisibility = () => follow.visibility();
+  document.addEventListener("visibilitychange", followVisibility);
+  // whether the last drawing showed a restart: one gone since is done
+  let drewRestart = false;
   // what the restart is doing, as the computer last said
-  function restartStep(c) {
+  function restartStep(c, op) {
     if (c?.phase === "sleeping") return "Saving…";
     if (c?.phase === "starting") return "Starting…";
     // a start of the restart's that failed, tried again after a pause
-    if (c?.phase === "asleep" && c.generation > restart.asked) return "Starting again…";
+    if (c?.phase === "asleep" && c.generation > op.asked) return "Starting again…";
     return "Restarting…";
   }
   // the notices a restart answers (each with a Restart): not shown while it runs
@@ -110,14 +118,23 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       actions.append(b);
     };
     if (n.kind === "restart") {
-      if (restart.failed) {
+      const op = follow.op();
+      if (op.state === FAILED) {
         row.classList.add("warn");
-        say("Your computer didn't restart", restart.failed);
+        say("Your computer didn't restart", op.error);
         restartButton("Try again");
+      } else if (op.state === READ_FAILED) {
+        // a read that failed: no news of the restart, which may go on
+        copy.append(el("strong", null, "Couldn't check on the restart"), el("p", "notice-detail", op.error));
+        const check = el("button", "primary", "Check again");
+        check.type = "button";
+        check.dataset.action = "restart-read";
+        check.onclick = () => follow.readAgain();
+        actions.append(check);
       } else {
-        const step = restartStep(computer());
+        const step = restartStep(computer(), op);
         copy.append(el("strong", null, "Restarting your computer"));
-        if (Date.now() - restart.at >= SLOW_MS) copy.append(el("p", null, step === "Saving…" ? "A big save can take a few minutes." : "A big restore can take a few minutes."));
+        if (Date.now() - op.at >= SLOW_MS) copy.append(el("p", null, step === "Saving…" ? "A big save can take a few minutes." : "A big restore can take a few minutes."));
         const status = el("span", "restart-status", step);
         status.setAttribute("role", "status");
         actions.append(status);
@@ -189,7 +206,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // a read of it that failed (a blip, a 5xx) says so first, over what the
   // last read said, with Try again; a confirmed deploy waits by itself
   function renderComputer() {
-    followed();
+    // a view taken from elsewhere (the list's read) may say it is done
+    follow.check();
+    const restart = !!follow.op();
+    if (drewRestart && !restart) redrawSection();
+    drewRestart = restart;
     const box = document.getElementById("computer-notices");
     const told = (computer()?.notices ?? []).filter((n) => !(restart && RESTARTS.has(n.kind)));
     const rows = [...(reads().updating ? [{ kind: "deploying" }] : computerFailed() || reads().listFailed ? [{ kind: "refresh" }] : []), ...(restart ? [{ kind: "restart" }] : []), ...told].map(noticeRow).filter(Boolean);
@@ -201,14 +222,10 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // (its notice then says so, with Try again). Settings' Computer, shown,
   // is drawn again in place (its version, the latest), under its heading,
   // which settings' links name: nothing else read again, nothing moved.
-  // A failed ask is forgotten once the computer restarted all the same
-  // (another tab's press).
-  function followed() {
-    const c = computer();
-    if (!restart || !c || !(c.generation > restart.asked) || !(restart.failed || ["awake", "wont_wake"].includes(c.phase))) return;
-    restart = null;
+  function redrawSection() {
     const old = shown.section;
-    if (!old?.isConnected) return;
+    const c = computer();
+    if (!old?.isConnected || !c) return;
     const fresh = computerSection(c);
     old.replaceChildren(old.querySelector(":scope > h2"), ...[...fresh.children].slice(1));
     shown.section = old;
@@ -225,44 +242,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   }
   // Restart: the computer saves if it can, then starts fresh from its newest
   // good save. It names the start the person saw, so pressed twice (or in two
-  // tabs) it restarts once. Its progress shows where its buttons were, the
-  // computer's phase read again until it is done (`followed`); its ask
-  // failing is said there, with Try again.
-  async function restartComputer() {
-    const c = computer();
-    if (!c || (restart && !restart.failed)) return;
-    const r = { asked: c.generation || 0, at: Date.now(), failed: null, answered: 0 };
-    restart = r;
-    restarted = r.asked;
-    renderComputer();
-    follow(r, seg(c.computer));
-    try {
-      const v = await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: r.asked });
-      r.answered++;
-      if (restart === r) computerIs(v);
-    } catch (e) {
-      if (restart !== r) return;
-      r.failed = e.message;
-      renderComputer();
-    }
-  }
-  // its view read again while the restart `r` runs: one asked before the
-  // restart's own answer came is older than it, and dropped
-  async function follow(r, id) {
-    while (restart === r && !r.failed) {
-      if (Date.now() - r.at >= FOLLOW_MAX_MS) {
-        restart = null;
-        renderComputer();
-        return;
-      }
-      await new Promise((go) => setTimeout(go, FOLLOW_MS));
-      if (restart !== r || r.failed) return;
-      const answered = r.answered;
-      const v = await api("GET", `/api/computers/${id}`).catch(() => null);
-      if (restart !== r || r.failed) return;
-      if (v && answered === r.answered && JSON.stringify(v) !== JSON.stringify(computer())) computerIs(v);
-      else renderComputer();
-    }
+  // tabs) it restarts once. Its progress shows where its buttons were
+  // (`follow`), and so does its ask's failure, with Try again.
+  function restartComputer() {
+    const asked = computer()?.generation || 0;
+    if (follow.press()) restarted = asked;
   }
   // The person read what a start went back to: told no more, anywhere.
   async function sawNotice(life, button) {
@@ -360,20 +344,29 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // what settings' Restart says now: nothing but its button, the restart's
   // step, or why its ask failed
   function restartSaid() {
-    return !restart ? "" : restart.failed ? `failed: ${restart.failed}` : restartStep(computer());
+    const op = follow.op();
+    return !op ? "" : op.state === FAILED || op.state === READ_FAILED ? `${op.state}: ${op.error}` : restartStep(computer(), op);
   }
   function paintAsks(asks) {
     const step = restartSaid();
+    const op = follow.op();
     shown.painted = step;
-    shown.said.textContent = restart?.failed ? `It didn't restart: ${restart.failed}` : "";
-    shown.said.hidden = !restart?.failed;
-    if (restart && !restart.failed) {
+    shown.said.textContent = op?.state === FAILED ? `It didn't restart: ${op.error}` : op?.state === READ_FAILED ? `Couldn't check on the restart: ${op.error}` : "";
+    shown.said.hidden = !shown.said.textContent;
+    if (op?.state === READ_FAILED) {
+      const check = iconed("reload", "Check again");
+      check.dataset.action = "restart-read";
+      check.onclick = () => follow.readAgain();
+      asks.replaceChildren(check);
+      return;
+    }
+    if (op && op.state !== FAILED) {
       const status = el("span", "restart-status", step);
       status.setAttribute("role", "status");
       asks.replaceChildren(status);
       return;
     }
-    const go = iconed("reload", restart ? "Try again" : "Restart computer");
+    const go = iconed("reload", op ? "Try again" : "Restart computer");
     go.dataset.action = "restart-ask";
     go.onclick = () => {
       const sure = iconed("reload", "Restart now");
@@ -386,5 +379,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     };
     asks.replaceChildren(go);
   }
-  return { computerOf, prewake, renderComputer, restartComputer, computerSection, dispose: () => document.removeEventListener("visibilitychange", prewake) };
+  return { computerOf, prewake, renderComputer, restartComputer, computerSection, dispose: () => {
+    document.removeEventListener("visibilitychange", prewake);
+    document.removeEventListener("visibilitychange", followVisibility);
+    follow.dispose();
+  } };
 }

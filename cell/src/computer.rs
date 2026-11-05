@@ -213,6 +213,9 @@ const BACKUPS_MS: i64 = ALARM_WALL_MS - ALARM_OTHER_MS - HOLD_STEPS_MS - MARK_EX
 /// start fits an alarm of its own (a retry's, or one owed after a sleep:
 /// `Lifecycle::start_due`).
 const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK_EXEC_MS - DISK_READ_MS - ALARM_OTHER_MS;
+/// The lever's `slow-tell` waits at most this: a restart's request is held
+/// no longer than a request's wait in the lane.
+const SLOW_TELL_MAX_MS: u64 = 30_000;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -311,6 +314,9 @@ enum MetaKey {
     /// The clock a test fleet moved (the `clock` lever): the milliseconds its
     /// uses' months are counted and read ahead by. None elsewhere.
     ClockOffset,
+    /// The test lever's slow owner notification for its next restart
+    /// (`slow-tell`), in ms.
+    SlowTell,
 }
 
 impl MetaKey {
@@ -332,6 +338,7 @@ impl MetaKey {
             MetaKey::Simplex => "simplex",
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
+            MetaKey::SlowTell => "slow_tell",
         }
     }
 }
@@ -699,7 +706,7 @@ struct TestLever {
     times: Option<u32>,
     #[serde(default)]
     on: Option<bool>,
-    /// `hang-backups`' bound, and `alive-check`'s.
+    /// `hang-backups`' bound, `alive-check`'s, and `slow-tell`'s.
     #[serde(default)]
     ms: Option<u32>,
     /// `alive-check`'s: its start's guest stopped as it starts.
@@ -843,10 +850,16 @@ impl ComputerCell {
     /// An owner's restart leaves its start to the alarm too, so it answers
     /// the same on every path (`restart`).
     async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
+        self.drive_answering(first, asked, None).await
+    }
+
+    /// `drive_with`, its answer taken as its start is owed when `answer` is
+    /// asked for (an owner's restart: `drive_events`).
+    async fn drive_answering(&self, first: Option<Event>, asked: bool, mut answer: Option<&mut Option<ComputerView>>) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
-        let mut refused = self.drive_events(first).await;
+        let mut refused = self.drive_events(first, answer.as_deref_mut()).await;
         if asked {
             // bounded: the lifecycle owes at most STARTS_OWED_MAX in a row
             for _ in 0..STARTS_OWED_MAX {
@@ -855,12 +868,17 @@ impl ComputerCell {
                     break;
                 }
                 let said = said.clone();
-                refused = self.drive_events(Some(Event::Alarm)).await.map(|again| said.or(again));
+                refused = self.drive_events(Some(Event::Alarm), None).await.map(|again| said.or(again));
             }
             if refused.is_ok() && self.lifecycle()?.start_due(js::now_ms()) {
                 // past the lifecycle's own bound: its alarm makes the next
                 console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "starts": "owed past the bound", "max": STARTS_OWED_MAX }));
             }
+        }
+        if answer.is_some() {
+            // the lever's slow owner notification (`slow-tell`): the window
+            // in which the alarm makes the start a restart owed
+            self.slow_tell().await;
         }
         // what its owner is told changed: their open pages read it again
         // (whatever the events did, a step that failed half way included)
@@ -868,6 +886,16 @@ impl ComputerCell {
             self.tell_owner().await;
         }
         refused
+    }
+
+    /// The lever's `slow-tell`, taken once: the restart that takes it waits
+    /// its ms before its owner is told, as a slow principal answers.
+    async fn slow_tell(&self) {
+        let Ok(Some(ms)) = self.meta(MetaKey::SlowTell) else { return };
+        let _ = self.delete_meta(MetaKey::SlowTell);
+        let ms = ms.parse::<u64>().unwrap_or(0).min(SLOW_TELL_MAX_MS);
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": "slow-tell", "waits": ms }));
+        Delay::from(std::time::Duration::from_millis(ms)).await;
     }
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
@@ -918,7 +946,13 @@ impl ComputerCell {
         }
     }
 
-    async fn drive_events(&self, first: Option<Event>) -> CellResult<Option<String>> {
+    /// `answer`, when asked for and still empty, takes the view as its
+    /// lifecycle first says it is starting (`Lifecycle::starting`): stored,
+    /// before anything awaits that would let its alarm make that start
+    /// first, so an owner's restart answers `starting` on every path, its
+    /// owner's notification however slow (Codex on #1053: the alarm could
+    /// make the start and its `Ready` while the request awaited that).
+    async fn drive_events(&self, first: Option<Event>, mut answer: Option<&mut Option<ComputerView>>) -> CellResult<Option<String>> {
         let mut queue: Vec<Event> = first.into_iter().collect();
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
@@ -959,6 +993,11 @@ impl ComputerCell {
                 SaveNote::Same => {}
                 SaveNote::Says(note) => self.set_meta(MetaKey::SaveNote, note)?,
                 SaveNote::Clear => self.delete_meta(MetaKey::SaveNote)?,
+            }
+            if let Some(slot) = answer.as_deref_mut().filter(|slot| slot.is_none()) {
+                if life.starting(js::now_ms()) {
+                    *slot = Some(self.view()?);
+                }
             }
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
@@ -1086,11 +1125,11 @@ impl ComputerCell {
     /// image's alike (FIN-399: the alarm the owed start asks for raced this
     /// request to make it, so it answered `awake` or `starting` by timing).
     /// Its owner's page follows the phase from there to awake.
-    async fn restart(&self, asked: u64) -> CellResult<()> {
+    async fn restart(&self, asked: u64) -> CellResult<ComputerView> {
         let life = self.lifecycle()?;
         if !life.restarts(asked) {
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": asked, "made": "already", "generation": life.generation() }));
-            return Ok(());
+            return self.view();
         }
         if !matches!(life.phase, Phase::Starting { .. }) {
             // the start under way is the restart's, asked of no ledger again
@@ -1098,8 +1137,11 @@ impl ComputerCell {
             self.update_saves(|s| s.restart_fresh())?;
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
-        self.drive_with(Some(Event::Restart { generation: asked }), false).await?;
-        Ok(())
+        // its answer, the view as its start was owed (`drive_events`); one
+        // that never was (a sleep under way, now the restart's) as it ends
+        let mut answer = None;
+        self.drive_answering(Some(Event::Restart { generation: asked }), false, Some(&mut answer)).await?;
+        answer.map_or_else(|| self.view(), Ok)
     }
 
     /// Sends the awake intervals the ledger has not taken to the owner's
@@ -2198,6 +2240,18 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
+            "slow-tell" => {
+                // its next restart's owner is told `ms` late (0: on time),
+                // as a slow principal answers: the window in which its alarm
+                // makes the start the restart owed (`drive_events`' answer)
+                let ms = b.ms.map(u64::from).filter(|ms| *ms <= SLOW_TELL_MAX_MS).ok_or_else(|| CellError::invalid(format!("slow-tell names its ms, 0 to {SLOW_TELL_MAX_MS}")))?;
+                match ms {
+                    0 => self.delete_meta(MetaKey::SlowTell)?,
+                    ms => self.set_meta(MetaKey::SlowTell, &ms.to_string())?,
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
+                Ok(json!({ "computer": id, "slowTell": ms }))
+            }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
                 // minutes would leave it: its row stays, refused by its expiry
@@ -2263,7 +2317,7 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell or always-on"))),
         }
     }
 
@@ -2352,8 +2406,7 @@ impl ComputerCell {
             "computer/restart" => {
                 let b: RestartAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
-                self.restart(b.generation.unwrap_or(0)).await?;
-                json_response(&self.view()?)
+                json_response(&self.restart(b.generation.unwrap_or(0)).await?)
             }
             "computer/notices-seen" => {
                 let b: NoticeSeen = body_json(&mut req).await?;
