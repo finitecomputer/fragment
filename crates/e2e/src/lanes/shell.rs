@@ -890,6 +890,22 @@ fn search_follows_reading(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// The shell's bundle's name (`shell.<hash>.js`): its page's one script,
+/// which holds every module of its own (crates/templates/bundle.rs).
+pub(super) fn shell_bundle() -> &'static str {
+    fragment_templates::BUILT.iter().find(|(at, p)| *at == "shell" && p.starts_with("shell.") && p.ends_with(".js")).map(|(_, p)| *p).expect("the shell's page is built")
+}
+
+/// An agent's colour by its identity, as the agent template's
+/// agent-color.js makes it (the shell's bundle holds it, and the chat links
+/// it): its source run on the page, its `export` aside, as the shell
+/// publishes it at no name of its own.
+fn colour_of(b: &mut Browser, page: &Page, id: &str) -> Result<Value> {
+    let file = fragment_templates::blessed::template("agent").and_then(|t| t.file("site/agent-color.js")).context("agent-color.js")?;
+    let source = std::str::from_utf8(file.bytes)?.replace("export function colorOf", "function colorOf");
+    b.eval(page, &format!("(() => {{ {source}\nreturn colorOf({}); }})()", js(id)))
+}
+
 /// A fragment's page, as the shell's person sees it once signed in there.
 /// The release's files (cell/src/assets.rs), read from the cell's Static
 /// Assets and served by the router alone, each as its route answered it
@@ -897,23 +913,40 @@ fn search_follows_reading(s: &mut Suite, api: &Api) -> Result<()> {
 /// policy, a blessed template's site file as the release's bytes, and none
 /// of the assets at a path of its own (`run_worker_first`).
 fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Result<()> {
-    let js = fragment_templates::shell("shell.js").context("the release's shell.js")?;
-    let r = api.unsigned("GET", "/__shell/shell.js", None)?;
-    let tag = r.header("etag");
+    // its bundle, named by its hash (crates/templates/bundle.rs): kept for good
+    let bundle = shell_bundle();
+    let built = fragment_templates::shell(bundle).context("the release's bundle")?;
+    let r = api.unsigned("GET", &format!("/__shell/{bundle}"), None)?;
     s.ok(
-        "the shell's script is the release's bytes, typed, revalidated by their hash, never sniffed",
+        "the shell's bundle, named by its hash, is the release's bytes, typed, kept for good, never sniffed",
+        r.status == 200
+            && r.bytes == built.bytes
+            && r.header("content-type") == "text/javascript; charset=utf-8"
+            && r.header("cache-control") == "public, max-age=31536000, immutable"
+            && r.header("x-content-type-options") == "nosniff",
+        format!("{} {} bytes, {} {}", r.status, r.bytes.len(), r.header("content-type"), r.header("cache-control")),
+    );
+    // a script it holds at its own name (the platform's pages'), and not
+    // the sources its bundle holds
+    let js = fragment_templates::shell("platform-pages.js").context("the release's platform-pages.js")?;
+    let r = api.unsigned("GET", "/__shell/platform-pages.js", None)?;
+    let tag = r.header("etag");
+    let source = api.unsigned("GET", "/__shell/shell.js", None)?;
+    s.ok(
+        "a script of the shell's at its own name is the release's bytes, typed, revalidated by their hash, never sniffed; shell.js, in its bundle, is no file of its own",
         r.status == 200
             && r.bytes == js.bytes
             && r.header("content-type") == "text/javascript; charset=utf-8"
             && tag == format!("\"s-{}\"", &js.sha256[..20])
             && r.header("cache-control") == "no-cache"
-            && r.header("x-content-type-options") == "nosniff",
-        format!("{} {} bytes, {} {tag}", r.status, r.bytes.len(), r.header("content-type")),
+            && r.header("x-content-type-options") == "nosniff"
+            && source.status == 404,
+        format!("{} {} bytes, {} {tag}; shell.js {}", r.status, r.bytes.len(), r.header("content-type"), source.status),
     );
-    let again = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), extra: vec![("if-none-match", tag.clone())], ..Call::default() })?;
+    let again = api.call(Call { method: "GET", url: format!("{}/__shell/platform-pages.js", api.base), extra: vec![("if-none-match", tag.clone())], ..Call::default() })?;
     // as a browser sends back the tag Cloudflare weakened as it compressed
     // the answer, among others
-    let weak = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), extra: vec![("if-none-match", format!("\"s-other\", W/{tag}"))], ..Call::default() })?;
+    let weak = api.call(Call { method: "GET", url: format!("{}/__shell/platform-pages.js", api.base), extra: vec![("if-none-match", format!("\"s-other\", W/{tag}"))], ..Call::default() })?;
     let wallpaper = fragment_templates::shell("wallpaper.jpg").context("the release's wallpaper")?;
     let head = api.call(Call { method: "HEAD", url: format!("{}/__shell/wallpaper.jpg", api.base), ..Call::default() })?;
     s.ok(
@@ -1628,10 +1661,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 /// imports never came, and the page stayed blank with nothing to press;
 /// its first answer never coming leaves it the same): it says it is still
 /// loading, with a reload of the same page, and only then. Valid: a page
-/// that loads never says it (drawn, it takes the line away). One of
-/// shell.js's imports refused: nothing for a while (a slow load is no
-/// failure), then "Still loading… Reload", its words and link on a phone's
-/// screen too; its Reload, the import let through, loads the same page,
+/// that loads never says it (drawn, it takes the line away). Its bundle
+/// (`shell.<hash>.js`, its one script) refused: nothing for a while (a slow
+/// load is no failure), then "Still loading… Reload", its words and link on
+/// a phone's screen too, as a tab of the last release asking for its bundle
+/// after a deploy sees it; its Reload, the bundle let through, loads the same page,
 /// and the shell starts. Its scripts come but who is signed in is never
 /// answered: the same, and its Reload draws the shell.
 fn still_loading_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path::Path) -> Result<()> {
@@ -1645,7 +1679,7 @@ fn still_loading_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path
     s.ok("a shell page that loads starts, and never says it is still loading (the line is taken away)", up && gone == true, &gone);
     b.close(page)?;
 
-    let page = b.open_blocking(&home, &["*/__shell/billing.js"])?;
+    let page = b.open_blocking(&home, &["*/__shell/shell.*.js"])?;
     b.viewport(&page, 1280, 800, false)?;
     let t0 = std::time::Instant::now();
     let quiet = b.until(&page, &format!("document.readyState === 'complete' && !!{line} && getComputedStyle({line}).visibility === 'hidden'"), wait);
@@ -1654,7 +1688,7 @@ fn still_loading_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path
     let seen = b.eval(&page, &format!("({{ said: {line}?.textContent ?? null, link: {line}?.querySelector('a')?.href ?? null, started: {started} }})"))?;
     let _ = b.screenshot(&page, &shots.join("still-loading.png"));
     s.ok(
-        "one of shell.js's imports refused: nothing at first, then \"Still loading… Reload\", the link to this same page, the shell not started",
+        "its bundle refused: nothing at first, then \"Still loading… Reload\", the link to this same page, the shell not started",
         quiet && shown && after >= std::time::Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["link"] == home.as_str() && seen["started"] == false,
         json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
     );
@@ -1669,7 +1703,7 @@ fn still_loading_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path
     b.viewport(&page, 1280, 800, false)?;
     b.click(&page, "#still-loading a")?;
     let reloaded = b.until(&page, &format!("{started} && !{line}"), wait);
-    s.ok("its Reload, the import let through now, loads the same page, and the shell starts", reloaded, b.eval(&page, "location.href")?);
+    s.ok("its Reload, the bundle let through now, loads the same page, and the shell starts", reloaded, b.eval(&page, "location.href")?);
     b.close(page)?;
 
     // its scripts came, and the first thing it asks (who is signed in) is
@@ -2568,7 +2602,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // the shell and the chat link to), is one colour on its page, in the
     // sidebar and on its chat's page; agent.json names none
     let tint = "(e) => e?.style.getPropertyValue('--agent-color') ?? null";
-    let want = b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(&id)))?;
+    let want = colour_of(b, page, &id)?;
     let sidebar = b.eval(page, &format!("({tint})(document.querySelector({}))", js(&format!("{hero} .agent-avatar"))))?;
     open_row(b, page, chat, wait)?;
     let in_chat = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("({tint})(document.querySelector('#head-marks .agent-avatar'))")).ok() == Some(want.clone()));
@@ -7157,6 +7191,11 @@ fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::
 const APPS_HASH_PROBE: &str = "(() => { const blobs = window.__appsBlobs ??= new Map(); if (!window.__appsObjectURL) { const make = URL.createObjectURL.bind(URL); window.__appsObjectURL = make; URL.createObjectURL = (blob) => { const url = make(blob); blobs.set(url, blob); return url; }; } window.__appsHash = async (value) => { const blob = typeof value === 'string' ? blobs.get(value) ?? await fetch(value, { headers: { 'x-fragment-shell': '1' } }).then((r) => r.blob()) : value; const bytes = await blob.arrayBuffer(); const hash = await crypto.subtle.digest('SHA-256', bytes); return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join(''); }; return true; })()";
 
 const APPS_RACE_PROBE: &str = "(() => {
+  // where apps-page.js sits in the shell's bundle (`bundle_ranges`): a
+  // stack names a frame's line and column there, not its module
+  const ranges = APPS_PAGE_RANGES;
+  const fromAppsPage = () => [...new Error().stack.matchAll(/\\/__shell\\/shell\\.[0-9a-f]+\\.js:(\\d+):(\\d+)/g)]
+    .some(([, line, col]) => ranges.some(([l, from, to]) => l === line - 1 && col - 1 >= from && col - 1 < to));
   const real = window.fetch.bind(window);
   const revoke = URL.revokeObjectURL;
   URL.revokeObjectURL = () => {};
@@ -7176,7 +7215,7 @@ const APPS_RACE_PROBE: &str = "(() => {
     const u = String(url);
     if (u === '/api/access') return hold('access', url, o);
     // the Apps page's own card reads: the dock's are the dock's
-    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET' && new Error().stack.includes('apps-page.js')) return hold('card', url, o);
+    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET' && fromAppsPage()) return hold('card', url, o);
     return real(url, o);
   };
   window.__appsRace = {
@@ -7200,12 +7239,67 @@ const APPS_RACE_PROBE: &str = "(() => {
   return true;
 })()";
 
+/// The probe that holds the Apps page's own reads (`APPS_RACE_PROBE`), told
+/// where apps-page.js sits in the shell's bundle.
+fn apps_race_probe() -> Result<String> {
+    let ranges = bundle_ranges("cell/shell/apps-page.js")?;
+    anyhow::ensure!(!ranges.is_empty(), "the shell's bundle holds apps-page.js");
+    Ok(APPS_RACE_PROBE.replacen("const ranges = APPS_PAGE_RANGES;", &format!("const ranges = {};", serde_json::to_string(&ranges)?), 1))
+}
+
+/// Where `source` (a repo path) sits in the shell's bundle, by its source
+/// map: each run of generated code it maps to that source, as its line,
+/// first column and the column past it (0-based, as a map counts them).
+fn bundle_ranges(source: &str) -> Result<Vec<(u32, u32, u32)>> {
+    let js = std::str::from_utf8(fragment_templates::shell(shell_bundle()).context("the shell's bundle")?.bytes)?;
+    let map_name = js.trim_end().rsplit("//# sourceMappingURL=").next().context("the bundle names its map")?;
+    let map: Value = serde_json::from_slice(fragment_templates::shell(map_name).context("the bundle's map")?.bytes)?;
+    let wanted = map["sources"].as_array().and_then(|s| s.iter().position(|s| s == source)).with_context(|| format!("the map names {source}"))? as i64;
+    let digit = |c: u8| b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().position(|&d| d == c).map(|d| d as i64);
+    let mut ranges: Vec<(u32, u32, u32)> = Vec::new();
+    let mut source_at = 0i64;
+    for (line, segments) in map["mappings"].as_str().context("its mappings")?.split(';').enumerate() {
+        let mut column = 0i64;
+        let mut open: Option<u32> = None;
+        for segment in segments.split(',').filter(|g| !g.is_empty()) {
+            // a segment's fields, each a base64 VLQ, relative to the last
+            let (mut fields, mut value, mut shift) = (Vec::new(), 0i64, 0);
+            for c in segment.bytes() {
+                let d = digit(c).context("a mapping's digit")?;
+                value += (d & 31) << shift;
+                shift += 5;
+                if d & 32 == 0 {
+                    fields.push(if value & 1 == 1 { -(value >> 1) } else { value >> 1 });
+                    (value, shift) = (0, 0);
+                }
+            }
+            column += fields[0];
+            if let Some(from) = open.take() {
+                ranges.push((line as u32, from, column as u32));
+            }
+            if fields.len() > 1 {
+                source_at += fields[1];
+                if source_at == wanted {
+                    open = Some(column as u32);
+                }
+            }
+        }
+        if let Some(from) = open {
+            ranges.push((line as u32, from, u32::MAX));
+        }
+    }
+    // runs next to each other, one
+    ranges.dedup_by(|b, a| if a.0 == b.0 && a.2 == b.1 { a.2 = b.2; true } else { false });
+    Ok(ranges)
+}
+
 /// Access and card responses held at the browser, then answered in both
 /// orders around a sharing change and around closing and reopening Apps.
 /// Every answer is the server's own at the time its request was made; the
 /// final text and card's bytes must be the newest visit's and request's.
 fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(60);
+    let race_probe = apps_race_probe()?;
     let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
     let access = format!("{row}?.querySelector('.app-row-access')?.textContent ?? ''");
     let card = format!("{row}?.querySelector('.app-row-card')");
@@ -7239,7 +7333,7 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
 
     // A no-change share sheet asks for the old access view; a real sharing
     // change asks for the new one. Newest first, then oldest first.
-    b.eval(page, APPS_RACE_PROBE)?;
+    b.eval(page, &race_probe)?;
     let shared = share(s, b)?;
     let public = set_visibility(b, "public")?;
     b.until(page, "window.__appsRace.count('access') >= 2", wait);
@@ -7265,7 +7359,7 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
         (true, "public", "window.__appsChangedCard", "Public", changed_card.clone()),
         (false, "link", "window.__appsOriginalCard", "Anyone with the link", original.clone()),
     ] {
-        b.eval(page, APPS_RACE_PROBE)?;
+        b.eval(page, &race_probe)?;
         let old_visit = revisit(b)?;
         b.until(page, "window.__appsRace.count('access') >= 1 && window.__appsRace.count('card') >= 1", wait);
         b.eval(page, "(document.getElementById('settings').click(), true)")?;
@@ -7872,7 +7966,7 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // identity's); the rows under it show none
     let first_label = label_of(first_chat).trim_end_matches("-chat").to_string();
     let ids = agent_ids(api, session, &[first_label.as_str(), "reader"])?;
-    let colour = |b: &mut Browser, id: &str| b.eval(page, &format!("import('/__shell/agent-color.js').then((m) => m.colorOf({}))", js(id)));
+    let colour = |b: &mut Browser, id: &str| colour_of(b, page, id);
     let (main_colour, reader_colour) = (colour(b, &ids[0])?, colour(b, &ids[1])?);
     let faceless = b.eval(page, "!document.querySelector('#chats .chat-row .agent-avatar')")?;
     s.ok(
@@ -7996,11 +8090,14 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     b.eval(page, &format!("({sure}.click(), true)"))?;
     let gone_row = b.until(page, &format!("!document.querySelector({})", js(&format!(".agent-setting[data-agent={}]", js(&agent)))), wait);
     let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
-    let after = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["agents"].as_array().map(Vec::len).unwrap_or(0);
+    // off its computer a moment after its list (agent-settings.js `liveOwn`)
+    let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().and_then(|r| r.body["computers"][0]["agents"].as_array().map(Vec::len)).unwrap_or(0);
+    let left = s.eventually(wait, || on_computer() + 1 == before);
+    let after = on_computer();
     let archived = own_row_of(api, session, &chat)["archived"] == true;
     s.ok(
         "Remove agent: offered for every agent but the main one, asked once more saying its chats go to History and its routines stop; then off its computer and the list, its own chat archived",
-        offered && rows[0].as_u64().zip(rows[1].as_u64()).is_some_and(|(all, offered)| all >= 2 && offered == all - 1) && asked && gone_row && gone && after + 1 == before && archived,
+        offered && rows[0].as_u64().zip(rows[1].as_u64()).is_some_and(|(all, offered)| all >= 2 && offered == all - 1) && asked && gone_row && gone && left && archived,
         json!({ "rows": rows, "computer": [before, after], "chat": own_row_of(api, session, &chat) }),
     );
     // in History, under Archived: its words still read, and Continue offered

@@ -15,7 +15,13 @@ default = ["platform"]
 # shell, so a change to the chat page, a blessed template or the shell is
 # no change to it, nor to the computer image that carries it
 # (docs/computers.md, "Preview and production").
-platform = []
+platform = ["bundle"]
+# The shell's and the chat's pages built (build.rs `PAGES`, bundle.rs):
+# bundled by esbuild, with the pinned Node and node_modules the build
+# fetches and installs as xtask does (fragment-devstack's node). A feature
+# of its own, as xtask's test of the build script's reruns (stamp.rs)
+# builds `platform` alone, with no Node.
+bundle = ["dep:fragment-devstack"]
 # Each file's bytes beside its index entry: the CLI scaffolds them, xtask
 # writes them into the assets directory a cell build uploads, and the e2e
 # compares what the cell serves with them. The cell builds without, and
@@ -32,7 +38,13 @@ hex = { version = "0.4", optional = true }
 [build-dependencies]
 sha2 = "0.10"
 hex = "0.4"
+# a page's source map, its sources renamed by their repo paths, and
+# esbuild's metafile (bundle.rs)
+serde_json = "1"
+# the pinned Node and its npm ci, which install esbuild (bundle.rs)
+fragment-devstack = { path = "../devstack", optional = true }
 
 [dev-dependencies]
 sha2 = "0.10"
 hex = "0.4"
+serde_json = "1"
