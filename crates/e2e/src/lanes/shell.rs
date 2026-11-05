@@ -5888,6 +5888,8 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let picked = new_chat(b, &reader_hero)?;
     let making = b.until(page, "!!document.querySelector('#chats .chat-row.making.active') && document.getElementById('chat-title').textContent === 'New chat' && !!document.querySelector('#frames .making-standin') && [...document.querySelectorAll('#frames iframe')].every((f) => f.hidden)", wait);
     let under = b.eval(page, &section_of(".chat-row.making"))?;
+    // as it is seen: its agent's menu gone (it closes as New chat is pressed)
+    b.until(page, "document.getElementById('menu').hidden", wait);
     let _ = b.screenshot(page, &shots.join("desktop-new-chat-making.png"));
     b.eval(page, "(window.__held.release(), true)")?;
     let landed = b.until(page, "!document.querySelector('#chats .making') && !document.querySelector('#frames .making-standin') && document.getElementById('chat-title').textContent === 'New chat'", wait);
