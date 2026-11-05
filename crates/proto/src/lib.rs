@@ -194,6 +194,8 @@ pub mod limits {
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// Triggers per fragment.
     pub const TRIGGERS_MAX: usize = 32;
+    /// Paths a fragment.json names as kept for good (`immutable`).
+    pub const IMMUTABLE_MAX: usize = 16;
     /// How many hops a chain of triggered runs may take (a mutation's record
     /// triggering a run whose record triggers another …) before the next is
     /// blocked as a loop.

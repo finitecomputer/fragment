@@ -397,6 +397,7 @@ impl FragmentCell {
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::FilesLive)?;
+            self.del_meta(MetaKey::ImmutableLive)?;
             self.del_meta(MetaKey::Blessed)?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
@@ -479,6 +480,10 @@ impl FragmentCell {
         match &manifest.files {
             Some(files) => self.set_meta(MetaKey::FilesLive, &serde_json::to_string(files).expect("files serialize"))?,
             None => self.del_meta(MetaKey::FilesLive)?,
+        }
+        match manifest.immutable.is_empty() {
+            false => self.set_meta(MetaKey::ImmutableLive, &serde_json::to_string(&manifest.immutable).expect("paths serialize"))?,
+            true => self.del_meta(MetaKey::ImmutableLive)?,
         }
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,

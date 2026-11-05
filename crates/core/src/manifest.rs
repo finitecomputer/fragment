@@ -56,6 +56,11 @@ pub struct Manifest {
     pub inbox: Option<InboxDecl>,
     /// Its page as the platform's files view, and that view's layer (`files`).
     pub files: Option<FilesDecl>,
+    /// The site's paths kept for good (`immutable`: file trigger patterns,
+    /// under `site/`): a bundler's output folder (`assets/**`), whose names
+    /// change with their bytes. Nothing else of a site is (site.rs
+    /// `declared_immutable`).
+    pub immutable: Vec<String>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -133,6 +138,7 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("triggers", !own.triggers.is_empty()),
         ("inbox", own.inbox.is_some()),
         ("files", own.files.is_some()),
+        ("immutable", !own.immutable.is_empty()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -490,7 +496,34 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         None | Some(Value::Null) => {}
         Some(v) => m.files = Some(files(v, &m)?),
     }
+    match obj.get("immutable") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            if list.len() > limits::IMMUTABLE_MAX {
+                return Err(format!("immutable names at most {} paths", limits::IMMUTABLE_MAX));
+            }
+            for p in list {
+                let p = p.as_str().ok_or("immutable lists paths under site/, as strings")?;
+                m.immutable.push(immutable_path(p)?.to_string());
+            }
+        }
+        Some(_) => return Err("immutable must be an array of paths under site/ (\"assets/**\")".into()),
+    }
     Ok(m)
+}
+
+/// One of `immutable`'s paths: a pattern as a file trigger's is (`*`,
+/// `**`, `?`, a trailing `/`), under `site/`, its first folder or file
+/// named outright (`assets/**`, `fonts/inter.woff2`). A pattern that could
+/// take the whole site (`**`, `*.js`) is refused: a file kept for good by
+/// mistake keeps its old bytes in browsers for a year.
+fn immutable_path(p: &str) -> Result<&str, String> {
+    let first = p.split('/').next().unwrap_or("");
+    let named = !first.is_empty() && !first.contains(['*', '?']) && first != "." && first != "..";
+    if !crate::glob::valid(p) || !named || p.split('/').any(|s| s == "..") || p.starts_with("site/") {
+        return Err(format!("immutable paths are under site/, each naming its first folder or file (\"assets/**\"), not {p:?}"));
+    }
+    Ok(p)
 }
 
 #[cfg(test)]
@@ -877,5 +910,28 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
+    }
+
+    /// Goal (FIN-391): a site names what is kept for good, its bundler's
+    /// output folder, and nothing can take the whole site. Valid: folders
+    /// and files named outright. Invalid: a pattern from the root (`**`,
+    /// `*.js`), a path out of `site/` or naming it, not a list of strings,
+    /// past `IMMUTABLE_MAX`, and on a blessed template (its site is the
+    /// release's).
+    #[test]
+    fn immutable_names_a_sites_long_lived_paths() {
+        let m = parse(br#"{"immutable":["assets/**","fonts/inter.woff2","_app/immutable/"]}"#).unwrap();
+        assert_eq!(m.immutable, ["assets/**", "fonts/inter.woff2", "_app/immutable/"]);
+        assert!(parse(br#"{"immutable":[]}"#).unwrap().immutable.is_empty() && parse(b"{}").unwrap().immutable.is_empty());
+        for bad in [r#""assets/**""#, r#"["**"]"#, r#"["*.js"]"#, r#"["?ssets/**"]"#, r#"["/assets/**"]"#, r#"["../assets/**"]"#, r#"["assets/../x"]"#, r#"["site/assets/**"]"#, r#"[""]"#, r#"[3]"#, r#"["assets//x"]"#] {
+            let why = parse(format!(r#"{{"immutable":{bad}}}"#).as_bytes()).unwrap_err();
+            assert!(why.starts_with("immutable"), "{bad}: {why}");
+        }
+        let most: Vec<String> = (0..=limits::IMMUTABLE_MAX).map(|i| format!("\"a{i}/**\"")).collect();
+        assert!(parse(format!(r#"{{"immutable":[{}]}}"#, most[1..].join(",")).as_bytes()).is_ok(), "IMMUTABLE_MAX paths");
+        assert!(parse(format!(r#"{{"immutable":[{}]}}"#, most.join(",")).as_bytes()).unwrap_err().contains("at most"));
+        let blessed = parse(br#"{"kind":"chat","meta":{"title":"Chat"}}"#).unwrap();
+        let own = parse(br#"{"template":"chat","immutable":["assets/**"]}"#).unwrap();
+        assert!(on_template(&own, &blessed).unwrap_err().contains("immutable"));
     }
 }

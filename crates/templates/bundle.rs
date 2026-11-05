@@ -102,8 +102,8 @@ impl Esbuild {
 }
 
 /// A name with its bytes' hash in it: `shell.js` → `shell.<12 hex>.js`,
-/// more digits only where the 12 lack a digit or a letter, which
-/// crates/core/src/site.rs `hashed` needs (a date, or a word, is not a hash).
+/// more digits only where the 12 lack a digit or a letter: the platform's
+/// own form, which crates/core/src/site.rs `hashed` keeps for good.
 fn hashed_name(name: &str, bytes: &[u8]) -> String {
     let hex = hex::encode(Sha256::digest(bytes));
     let fits = |h: &str| h.bytes().any(|b| b.is_ascii_digit()) && h.bytes().any(|b| b.is_ascii_alphabetic());

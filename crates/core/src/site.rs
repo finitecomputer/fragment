@@ -120,51 +120,51 @@ pub fn site_candidates(rest: &str) -> Vec<String> {
     vec![format!("site/{rest}"), format!("site/{rest}/index.html")]
 }
 
-/// A name with a content hash in it never changes: the one rule for a file
-/// kept for good by its name, a fragment's (`cache_control`) and the
-/// shell's built files alike (cell/src/shell.rs `asset`,
-/// crates/templates/bundle.rs). A wrong yes pins a file's old bytes in a
-/// browser for a year, so it holds only the forms bundlers write by
-/// default, each a part of the name before its extension, after a `.` or
-/// a `-` (`hash_part`):
+/// Whether `path` is a name the platform's own build gave a file of its
+/// release, its bytes' hash in it (`shell.f7db3bbd91f7.js`: 12 hex digits
+/// or more, a digit and a letter among them; crates/templates/bundle.rs):
+/// the shell's and a blessed template's (cell/src/shell.rs `asset`,
+/// cell/src/serve.rs `blessed_page`), kept for good by their name.
 ///
-/// - hex, 8 to 64 digits: webpack's and Parcel's `app.3f9a1c2e.js`,
-///   Next.js's `main-3f9a2c1b4d5e6f70.js`, the platform's own;
-/// - Rollup's and Vite's, 8 of base64url: `index-Ikq0sZO3.js`;
-/// - esbuild's, 8 of base32: `index-S4M26L7U.js`.
+/// Never a person's own file. A name is no promise that its bytes never
+/// change: a file pinned by a wrong guess keeps its old bytes in a browser
+/// for a year, and the person's change never shows, while a miss costs a
+/// 304. Their site's files are kept for good only where its fragment.json
+/// says (`immutable`, `declared_immutable`). Deliberately not pinned by
+/// their name alone (FIN-391):
 ///
-/// Each holds a digit and a letter (and Rollup's, both cases), as words,
-/// dates and versions do not: `logo-dark.svg`, `2024-report.pdf`,
-/// `backup.20241105.tar` and `jquery-3.7.1.min.js` are not hashed. A real
-/// hash that lacks them is only revalidated, as any other file is. A name
-/// of a person's own that is one of these forms is taken for a hash
-/// (`nav-Footer2x.svg`, as Rollup's): such a file's new bytes need a new name.
+/// - a bundler's: Vite's and Rollup's `index-Ikq0sZO3.js`, esbuild's
+///   `index-S4M26L7U.js`, webpack's and Parcel's `app.3f9a1c2e.js`,
+///   Next.js's `main-3f9a2c1b4d5e6f70.js` (each a site declares instead);
+/// - a hand-made, dated or versioned one: `menu-Summer24.css`,
+///   `hero-V2final.png`, `report-Nov2024a.pdf`, `styles-col2Grid.css`,
+///   `backup.20241105.tar`, `jquery-3.7.1.min.js`;
+/// - a UUID or a git SHA in a name: `data-550e8400-e29b-41d4-a716-44665544abcd.json`,
+///   `build-3f9a1c2e.js`;
+/// - a page, even where a site declares it.
 pub fn hashed(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.split('.').rev().skip(1).any(|part| {
-        // the part whole (`.3f9a1c2e.`), what follows its last dash
-        // (`-3f9a1c2e`), or its last 8 after a dash (Rollup's may hold one)
-        let after_dash = part.rsplit_once('-').map(|(_, h)| h);
-        let last8 = part.len().checked_sub(9).filter(|&at| part.as_bytes()[at] == b'-').map(|at| &part[at + 1..]);
-        [Some(part), after_dash, last8].into_iter().flatten().any(hash_part)
+        let b = part.as_bytes();
+        b.len() >= 12 && b.iter().all(u8::is_ascii_hexdigit) && b.iter().any(u8::is_ascii_digit) && b.iter().any(u8::is_ascii_alphabetic)
     })
 }
 
-/// Whether `t` is a bundler's hash, in one of `hashed`'s forms.
-fn hash_part(t: &str) -> bool {
-    let has = |f: fn(&u8) -> bool| t.as_bytes().iter().any(f);
-    let all = |f: fn(&u8) -> bool| t.as_bytes().iter().all(f);
-    let (digit, upper, lower) = (has(u8::is_ascii_digit), has(u8::is_ascii_uppercase), has(u8::is_ascii_lowercase));
-    let hex = (8..=64).contains(&t.len()) && all(u8::is_ascii_hexdigit) && digit && (upper || lower);
-    let rollup = t.len() == 8 && all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_') && digit && upper && lower;
-    let esbuild = t.len() == 8 && all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(b)) && digit && upper;
-    hex || rollup || esbuild
+/// Whether a fragment's own site file (`site_path`, under `site/`) is kept
+/// for good: one its live fragment.json names (`immutable`: patterns, as
+/// file triggers' are, under `site/`), never a page. Nothing else is, what
+/// its name looks like aside: a dated, versioned or hand-made name
+/// (`report-Nov2024a.pdf`, `menu-Summer24.css`) is revalidated.
+pub fn declared_immutable(patterns: &[String], site_path: &str) -> bool {
+    !mime_for_path(site_path).starts_with("text/html") && patterns.iter().any(|p| crate::glob::matches_path(p, site_path))
 }
 
-/// Cache policy for a served file. Anything behind a share link or
-/// membership is `private`: a shared cache must never hand it to someone else.
-pub fn cache_control(path: &str, public_fragment: bool) -> &'static str {
-    match (hashed(path), public_fragment) {
+/// Cache policy for a served file, kept for good when `pinned` (its name
+/// the platform's hash, `hashed`, or its fragment's declared,
+/// `declared_immutable`). Anything behind a share link or membership is
+/// `private`: a shared cache must never hand it to someone else.
+pub fn cache_control(pinned: bool, public_fragment: bool) -> &'static str {
+    match (pinned, public_fragment) {
         (true, _) => pinned_cache(public_fragment),
         (false, true) => "public, max-age=60",
         (false, false) => "private, no-cache",
@@ -513,64 +513,66 @@ mod tests {
         }
     }
 
-    /// Goal: only a name with a content hash in it is cached for a year,
-    /// and a public fragment's such file by shared caches too. The e2e's
-    /// site section reads the other three rows off served pages. Method:
-    /// names at the edges of the hash rule, on a public fragment: each
-    /// bundler's real output, and the words, dates and versions that look
-    /// like one (FIN-391), which a wrong yes would pin for a year.
+    /// Goal (FIN-391): a file is kept for good only when nothing can change
+    /// under its name: the platform's own built names, and a fragment's
+    /// files its fragment.json declares, never a page. A wrong yes hides a
+    /// person's change for a year; a miss costs a 304. Valid: the
+    /// platform's names; declared paths. Invalid: every bundler's name and
+    /// look-alike undeclared, a UUID, a git SHA, a page, a name outside the
+    /// declared folder.
     #[test]
-    fn only_a_hashed_name_is_immutable() {
-        for (path, hashed) in [
-            ("app.3f9a1c2e.js", true),
-            ("assets/app.3F9A1C2E.min.css", true),
-            ("app.0123456789abcdef.js", true),
-            ("app.3f9a1c2.js", false), // seven hex digits: too short to be a hash
-            ("app.3f9a1c2g.js", false),
-            ("deadbeef", false), // the last part is the extension, never the hash
-            ("app.deadbeef", false),
-            ("3f9a1c2e.d/app.js", false), // a hashed folder names no file's bytes
-            // the platform's own (crates/templates/bundle.rs)
-            ("shell.f7db3bbd91f7.js", true),
-            ("chat.dca8eba10ae4.js.map", true),
-            // webpack's `[name].[contenthash]`, Next.js's `[name]-[hash]`
-            ("main.8d3f2a1c9b7e6f5a4d3c.js", true),
-            ("_next/static/chunks/main-3f9a2c1b4d5e6f70.js", true),
-            // Vite's and Rollup's `[name]-[hash]`, base64url: one may hold `-` or `_`
-            ("assets/index-Ikq0sZO3.js", true),
-            ("assets/index-BxK3abc1.css", true),
-            ("assets/vendor-B_x-K3ab.js", true),
-            ("assets/index-Ikq0sZO3.js.map", true),
-            ("_app/immutable/chunks/entry.Dk3h2aB1.js", true),
-            // esbuild's `[name]-[hash]`, base32
-            ("index-S4M26L7U.js", true),
-            ("chunk-ABCD2345.js", true),
-            // words, dates and versions, never a hash
-            ("logo-dark.svg", false),
-            ("2024-report.pdf", false),
-            ("my-component.js", false),
-            ("report-20241105.pdf", false),
-            ("backup.20241105.tar", false), // digits alone: a date or a number
-            ("export-1730800000000.zip", false),
-            ("app.12345678.js", false),
-            ("photo-deadbeef.png", false), // hex letters alone: a word
-            ("jquery-3.7.1.min.js", false),
-            ("react-dom-18.2.0.production.min.js", false),
-            ("app-v2.1.3.js", false),
-            ("photo-summer24.jpg", false), // no capital: no Rollup hash
-            ("nav-HomePage.js", false), // no digit
-            ("logo-FACEBOOK.svg", false),
-            ("funnel-sans-400.ttf", false),
-            ("platform-landscape-dark.jpg", false),
-            ("icons-v2Large.svg", false), // nine after the dash
-            ("index-Ikq0sZO.js", false), // seven: too short for Rollup's
-            ("index-S4M26L7U8.js", false), // nine: too long for esbuild's
-            // a name of one's own in Rollup's form is taken for its hash
-            ("nav-Footer2x.svg", true),
-        ] {
-            let expected = if hashed { "public, max-age=31536000, immutable" } else { "public, max-age=60" };
-            assert_eq!(cache_control(path, true), expected, "{path}");
+    fn only_a_platform_hash_or_a_declared_path_is_immutable() {
+        // the platform's own (crates/templates/bundle.rs)
+        for path in ["shell.f7db3bbd91f7.js", "chat.dca8eba10ae4.js.map", "site/chat.44e1677f9924.css", "shell.0123456789abcdef.js"] {
+            assert!(hashed(path), "{path}");
         }
+        // anything else, a bundler's name, a look-alike, or hand-made
+        let undeclared = [
+            "app.3f9a1c2e.js",              // 8 hex: Parcel's, or a git SHA
+            "build-3f9a1c2e.js",            // a git SHA in a name
+            "app.3f9a1c2ab.js",             // 9 hex
+            "shell.123456789012.js",        // digits alone: a number
+            "shell.abcdefabcdef.js",        // letters alone: a word
+            "assets/index-Ikq0sZO3.js",     // Vite's
+            "index-S4M26L7U.js",            // esbuild's
+            "main-3f9a2c1b4d5e6f70.js",     // Next.js's
+            "report-Nov2024a.pdf",
+            "styles-col2Grid.css",
+            "data-550e8400-e29b-41d4-a716-44665544abcd.json",
+            "menu-Summer24.css",
+            "hero-V2final.png",
+            "logo-dark.svg",
+            "2024-report.pdf",
+            "my-component.js",
+            "backup.20241105.tar",
+            "jquery-3.7.1.min.js",
+            "3f9a1c2e0123.d/app.js",        // a hashed folder names no file's bytes
+            "deadbeef0123",                 // the last part is the extension
+        ];
+        for path in undeclared {
+            assert!(!hashed(path), "{path}");
+            assert!(!declared_immutable(&[], path), "{path}");
+            assert_eq!(cache_control(hashed(path), true), "public, max-age=60", "{path}");
+        }
+        // declared: what its fragment.json names, and nothing else
+        let declared = ["assets/**".to_string(), "fonts/inter.woff2".to_string()];
+        for (path, pinned) in [
+            ("assets/index-Ikq0sZO3.js", true),
+            ("assets/menu-Summer24.css", true), // declared: the person's word
+            ("assets/deep/chunk-S4M26L7U.js", true),
+            ("fonts/inter.woff2", true),
+            ("fonts/other.woff2", false),
+            ("assets/index.html", false), // a page, never
+            ("assets/about.htm", false),
+            ("assetsx/a.js", false),
+            ("index-Ikq0sZO3.js", false),
+            ("app.3f9a1c2e.js", false),
+        ] {
+            assert_eq!(declared_immutable(&declared, path), pinned, "{path}");
+        }
+        assert_eq!(cache_control(true, true), "public, max-age=31536000, immutable");
+        assert_eq!(cache_control(true, false), "private, max-age=31536000, immutable");
+        assert_eq!(cache_control(false, false), "private, no-cache");
     }
 
     /// Goal (FIN-340): a versioned `__file` names a commit as its tree row
@@ -586,7 +588,7 @@ mod tests {
             assert!(!valid_version(bad), "{bad}");
         }
         assert_eq!((pinned_cache(true), pinned_cache(false)), ("public, max-age=31536000, immutable", "private, max-age=31536000, immutable"));
-        assert_eq!(cache_control("app.3f9a1c2e.js", false), pinned_cache(false), "a hashed name is pinned the same way");
+        assert_eq!(cache_control(true, false), pinned_cache(false), "a pinned file is pinned the same way");
     }
 
     /// Goal: a conditional GET is answered 304 exactly when it names the

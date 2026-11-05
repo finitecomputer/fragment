@@ -650,7 +650,7 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
         let mime = site::mime_for_path(&row.path);
-        let cache = site::cache_control(&row.path, public);
+        let cache = site::cache_control(self.declared_immutable(&row.path)?, public);
         // a file of a pointer's size may be one: its bytes are a blob's
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
         // Only a page gets Open Graph tags, so only a page reads `meta`.
@@ -704,7 +704,8 @@ impl FragmentCell {
     async fn blessed_page(&self, req: &Request, caller: &Caller, facts: &Facts, file: &'static File, release: &str, public: bool) -> CellResult<Response> {
         let path = file.path;
         let mime = site::mime_for_path(path);
-        let cache = site::cache_control(path, public);
+        // the release's own files: kept for good by the platform's hash alone
+        let cache = site::cache_control(site::hashed(path), public);
         let page = mime.starts_with("text/html");
         let og: Option<fragment_core::manifest::Meta> = match page.then(|| self.meta(MetaKey::MetaLive)).transpose()?.flatten() {
             Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
@@ -783,6 +784,19 @@ impl FragmentCell {
             fragment_proto::FragmentKind::Agent | fragment_proto::FragmentKind::Sessions => &["main", "live"],
             _ => &["live", "main"],
         })
+    }
+
+    /// Whether live's manifest keeps the site file at `path` (`site/…`) for
+    /// good (`immutable`, site.rs `declared_immutable`): read only for a
+    /// file that is no page, as a page never is.
+    fn declared_immutable(&self, path: &str) -> CellResult<bool> {
+        let Some(rest) = path.strip_prefix("site/") else { return Ok(false) };
+        if site::mime_for_path(rest).starts_with("text/html") {
+            return Ok(false);
+        }
+        let Some(text) = self.meta(MetaKey::ImmutableLive)? else { return Ok(false) };
+        let patterns: Vec<String> = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored immutable paths do not decode: {e}")))?;
+        Ok(site::declared_immutable(&patterns, rest))
     }
 
     /// What live's manifest says of the files view (`files`), if anything.

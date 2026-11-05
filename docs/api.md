@@ -972,6 +972,15 @@ agent, or carrying code, keeps the last good code and says to fork it.
   and `busy` the view shows as a status line, asking again while busy.
   Unknown keys are refused at deploy; a fragment on a blessed template
   declares none (its template's applies).
+- `immutable` (optional, FIN-391): at most `IMMUTABLE_MAX` paths under
+  `site/`, patterns as file triggers' are, each naming its first folder or
+  file (`["assets/**"]`; `**` or `*.js` is refused at deploy). A site file
+  they match is served `max-age=31536000, immutable` (`private` unless the
+  fragment is public); a page never is. Every other file of a site is
+  revalidated (`no-cache`, `max-age=60` when public), however hashed its
+  name looks: a bundler's output folder, whose names change with their
+  bytes, is the one to name. A fragment on a blessed template declares
+  none (its release's own built names are kept for good).
 - `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
   "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
   with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
