@@ -422,6 +422,12 @@ impl Held {
         Ok(self.client.as_ref().expect("connected above"))
     }
 
+    /// Whether the token held now writes: none held yet, or one that only
+    /// reads (a viewer's), does not.
+    pub fn writes(&self) -> bool {
+        self.client.as_ref().is_some_and(CodeStorage::writes)
+    }
+
     /// code.storage refused the token (its clock and ours disagree, or it
     /// was revoked): the next `get` mints another.
     pub fn refused(&mut self) {

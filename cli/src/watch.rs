@@ -118,8 +118,15 @@ impl<'a> Watcher<'a> {
         }
         let local = sync::read_local(self.dir, self.name)?;
         let folder = local.content_hash();
-        let settled = local.matches_journal() || self.unsent_at.as_ref() == Some(&folder);
-        let full = due.remote || !settled || (due.sweep && (!live_up || self.head_moved()?));
+        // the folder as a pass that only read left it is settled while the
+        // token still only reads: once it writes (the viewer made an editor,
+        // which a sweep's head read mints again within a minute), the
+        // changes it held go out with the next pass
+        let unsent = self.unsent_at.as_ref() == Some(&folder);
+        let full = due.remote
+            || !(local.matches_journal() || unsent)
+            || (due.sweep && (!live_up || self.head_moved()?))
+            || (unsent && self.storage.writes());
         if !full {
             return Ok(if due.sweep { Served::Checked } else { Served::Nothing });
         }
@@ -546,6 +553,38 @@ mod tests {
         let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("another edit is a pass") };
         assert_eq!(report.unsent, ["a.md", "b.md"]);
         assert_eq!(mock.commit_pack_count(), 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a viewer's watcher made an editor sends what it held, with
+    /// the folder and main as they were: a reconnect naming the same head
+    /// asks nothing, and the next sweep, whose head read mints a token
+    /// that writes, passes and pushes it. Method: tokens that are minted
+    /// again at each use (a lifetime inside the margin); the host routes
+    /// hold the caller a viewer, then its editor.
+    #[test]
+    fn a_viewers_watcher_made_an_editor_sends_what_it_held() {
+        let mock = crate::mockcs::with_token_ttl(crate::codestorage::TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
+        mock.view_only("t--k3x9", true);
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let dir = tmpdir("viewer-promoted");
+        let o = opts();
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+        assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.read_only));
+        fs::write(dir.join("a.md"), "mine").unwrap();
+        let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("an edit is a pass") };
+        assert_eq!(report.unsent, ["a.md"]);
+        assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "a viewer's sweep holds it");
+
+        mock.view_only("t--k3x9", false);
+        let mut reconnect = Due::default();
+        watcher.note(&mut reconnect, Wakeup::Head(watcher.head.clone()));
+        assert!(matches!(watcher.serve(reconnect, true).unwrap(), Served::Nothing), "the same head asks nothing");
+        let Served::Passed(report) = watcher.serve(SWEEP, true).unwrap() else { panic!("the sweep after the promotion passes") };
+        assert!(report.pushed == ["a.md"] && !report.read_only && report.unsent.is_empty(), "{report:?}");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"mine"[..]));
+        assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "and then it is settled");
         fs::remove_dir_all(&dir).ok();
     }
 
