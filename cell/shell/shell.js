@@ -1402,9 +1402,9 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
     // one that cannot be asked is not taken: a new chat is made
     if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
-      const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED });
-      // adding it wakes its computer (the platform's `joined`)
-      await api("PUT", `/api/f/${seg(chat.name)}/members/${seg(identity)}`, { role: "editor" });
+      // made with its agent in it, in one step: its row names its agent
+      // from the start, and its computer is told it joined (`joined`)
+      const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED, agent: identity });
       await load();
       name = chat.name;
     }
