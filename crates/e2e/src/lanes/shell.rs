@@ -7841,11 +7841,14 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     b.eval(page, &format!("({sure}.click(), true)"))?;
     let gone_row = b.until(page, &format!("!document.querySelector({})", js(&format!(".agent-setting[data-agent={}]", js(&agent)))), wait);
     let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
-    let after = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["agents"].as_array().map(Vec::len).unwrap_or(0);
+    // off its computer a moment after its list (agent-settings.js `liveOwn`)
+    let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().and_then(|r| r.body["computers"][0]["agents"].as_array().map(Vec::len)).unwrap_or(0);
+    let left = s.eventually(wait, || on_computer() + 1 == before);
+    let after = on_computer();
     let archived = own_row_of(api, session, &chat)["archived"] == true;
     s.ok(
         "Remove agent: offered for every agent but the main one, asked once more saying its chats go to History and its routines stop; then off its computer and the list, its own chat archived",
-        offered && rows[0].as_u64().zip(rows[1].as_u64()).is_some_and(|(all, offered)| all >= 2 && offered == all - 1) && asked && gone_row && gone && after + 1 == before && archived,
+        offered && rows[0].as_u64().zip(rows[1].as_u64()).is_some_and(|(all, offered)| all >= 2 && offered == all - 1) && asked && gone_row && gone && left && archived,
         json!({ "rows": rows, "computer": [before, after], "chat": own_row_of(api, session, &chat) }),
     );
     // in History, under Archived: its words still read, and Continue offered
