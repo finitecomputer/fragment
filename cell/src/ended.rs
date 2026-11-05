@@ -246,14 +246,17 @@ impl FragmentCell {
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
         let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
-        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
-        assert!(!repo.is_empty(), "a created fragment names its repo");
-        self.exec(
-            "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
+        // a life whose repo was not made yet (its template seeds after the
+        // create's answer, publish.rs `seeds_later`) records none
+        if let Some(repo) = &repo {
+            assert!(!repo.is_empty(), "a made repo has a name");
+            self.exec(
+                "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+                vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
         let ended = self.end(false)?;
-        assert_eq!(self.ended_repo_rows(incarnation)?, 1, "the ended life's repo is recorded beside it");
+        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it had one, is recorded beside it");
         Ok(ended)
     }
 
@@ -633,21 +636,25 @@ impl FragmentCell {
                 if b.agents.len() as u64 > limits::AGENTS_PER_OWNER_MAX {
                     return Err(CellError::invalid(format!("wipe/end names at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
                 }
+                // a life ends between the plane's steps, never inside one
+                // (fragment.rs `delete`): held until it has ended
+                let held = self.plane.lock().await;
                 let [created_at, owner, name] = self.metas([MetaKey::CreatedAt, MetaKey::Owner, MetaKey::Name])?;
-                let ended = match (created_at, owner) {
-                    (None, _) => false,
-                    (Some(_), Some(owner)) if owner == b.owner => {
-                        let ended = self.end_life_wiped()?;
-                        console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
-                        self.tell_ended(Some(&ended.owner)).await;
-                        if let Some(name) = &name {
-                            self.forget_invites(name).await;
-                        }
-                        true
-                    }
+                let ended_now = match (created_at, owner) {
+                    (None, _) => None,
+                    (Some(_), Some(owner)) if owner == b.owner => Some((self.end_life_wiped()?, owner)),
                     (Some(_), Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),
                     (Some(_), None) => return Err(missing(MetaKey::Owner)),
                 };
+                drop(held);
+                let ended = ended_now.is_some();
+                if let Some((ended, owner)) = ended_now {
+                    console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
+                    self.tell_ended(Some(&ended.owner)).await;
+                    if let Some(name) = &name {
+                        self.forget_invites(name).await;
+                    }
+                }
                 // the lists the wipe empties itself: tried once (just now, or
                 // by an earlier call or pass), never waited on
                 let forgot = self.forget_wiped_lists(&b.owner, &b.agents)?;

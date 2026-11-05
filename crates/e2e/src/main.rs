@@ -910,7 +910,7 @@ impl Suite {
     /// one commit, main moved at once), since a preview's git is real.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
         if !self.hosted() {
-            let sha = self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            let sha = self.fake.external_commit(&self.repo_of(created), "main", changes, "e2e commit");
             self.refresh(created);
             return sha;
         }
@@ -931,14 +931,27 @@ impl Suite {
     /// (`POST /api/f/{name}/deploy`), which installs the app at once.
     pub fn deploy(&self, created: &Value) -> String {
         if !self.hosted() {
-            let repo = created["repo"].as_str().expect("created.repo");
-            let tip = self.fake.branch(repo, "main").expect("main has a commit");
-            self.fake.set_branch(repo, "live", &tip);
+            let repo = self.repo_of(created);
+            let tip = self.fake.branch(&repo, "main").expect("main has a commit");
+            self.fake.set_branch(&repo, "live", &tip);
             self.refresh(created);
             return tip;
         }
         let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
+    }
+
+    /// The repo `created` names; a chat's, made after its create answers
+    /// (docs/api.md, Names: `""` until then), the one its storage token
+    /// names, which as a writer of the repo makes it first.
+    fn repo_of(&self, created: &Value) -> String {
+        if let Some(repo) = created["repo"].as_str().filter(|r| !r.is_empty()) {
+            return repo.to_string();
+        }
+        let name = created["name"].as_str().expect("created.name");
+        let owner = self.owners.borrow().get(name).cloned().unwrap_or_else(|| panic!("{name}'s owner is recorded by Suite::create or Suite::owned"));
+        let r = self.api().signed(&owner, "GET", &format!("/api/f/{name}/storage-token"), None).unwrap_or_else(|e| panic!("{name}'s storage token: {e:#}"));
+        r.body["repo"].as_str().filter(|r| !r.is_empty()).unwrap_or_else(|| panic!("{name}'s storage token names its repo: {r}")).to_string()
     }
 
     /// The owner's `refresh` after a move through the fake; one that fails

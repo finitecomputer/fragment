@@ -503,7 +503,15 @@ impl FragmentCell {
         self.ensure_pins(facts).await?;
         let facts = &*facts;
         let name = facts.name.as_str();
-        let live = facts.pin_live.as_deref().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first")))?;
+        // before its first deploy, a template that seeds after its create's
+        // answer runs from the release (plane.rs `install_pending`): its
+        // site is the release's, no commit of its own (`""`), whether or
+        // not its repo is made yet
+        let live = match facts.pin_live.as_deref() {
+            Some(live) => live,
+            None if self.meta(MetaKey::TemplatePending)?.is_some() && self.meta(MetaKey::Blessed)?.is_some() => "",
+            None => return Err(CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first"))),
+        };
         let public = facts.visibility == Visibility::Public;
         let headers = |ct: &str, cache: &str| -> CellResult<Headers> {
             let h = Headers::new();
@@ -692,7 +700,8 @@ impl FragmentCell {
             return with_etag(self.stream_blob(&sha, mime, range.as_deref()).await?);
         }
         if let Some(meta) = og {
-            if let Some(bytes) = self.cs()?.read(&facts.repo, live, &row.path, OG_MAX_BYTES as usize).await? {
+            let repo = facts.repo.as_deref().expect("a live row is a commit of a repo made");
+            if let Some(bytes) = self.cs()?.read(repo, live, &row.path, OG_MAX_BYTES as usize).await? {
                 let html = String::from_utf8_lossy(&bytes);
                 let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, name));
                 let page = site::inject_og(&html, name, &meta, &image);
