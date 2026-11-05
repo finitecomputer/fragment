@@ -3300,16 +3300,16 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         failed && in_settings["said"].as_str().is_some_and(|t| t.contains("It didn't restart") && t.contains("the credit is used up")) && in_settings["button"] == "Try again" && in_settings["update"] == false && in_settings["status"] == false,
         json!({ "band": b.eval(page, "document.getElementById('computer-notices').innerText")?, "settings": in_settings }),
     );
-    // Try again, the ask let through, its save and its start held (the
-    // levers: backups that hang a few seconds, then fail, so it goes on
-    // unsaved; a start whose guest is frozen, never heard, then started
-    // again): the band shows the step the computer reports where its
-    // buttons were, saving then starting, and settings too, never a stuck
-    // Restarting; a calm line once it has run 30 s; then, awake on the new
-    // start, the notice goes by itself, with no reload
+    // Try again, the ask let through, its start held (the lever's
+    // alive-check: its guest frozen, never heard, then started again; its
+    // save is the stub's second or so, said when a read catches it, and no
+    // lever holds it without failing it, which would leave its note for
+    // the checks after): the band shows the step the computer reports
+    // where its buttons were, and settings too, never a stuck Restarting;
+    // a calm line once it has run 30 s; then, awake on the new start, the
+    // notice goes by itself, with no reload
     let hold = std::time::Duration::from_secs(40);
     idle(s);
-    let hung = super::computers::lever_with(api, &id, json!({ "op": "hang-backups", "ms": 4_000 }))?;
     let held = super::computers::lever_with(api, &id, json!({ "op": "alive-check", "ms": hold.as_millis() as u64, "freeze": true }))?;
     let before = view()["generation"].as_u64().unwrap_or(0);
     b.eval(page, RESTART_STEPS)?;
@@ -3327,8 +3327,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let known = said.iter().all(|t| ["Restarting…", "Saving…", "Starting…", "Starting again…"].contains(&t.as_str()));
     let ordered = said.iter().position(|t| t == "Saving…").is_none_or(|saving| said.iter().position(|t| t == "Starting…").is_some_and(|starting| saving < starting));
     s.ok(
-        "Restart shows its progress where its buttons were, as the computer reports it: saving, then starting, in the band and in settings (its state too); past 30 s a calm line that a big restore can take a few minutes",
-        hung.status == 200 && held.status == 200 && starting && slow && known && ordered && said.iter().any(|t| t == "Starting…"),
+        "Restart shows its progress where its buttons were, as the computer reports it (saving, then starting), in the band and in settings (its state too); past 30 s a calm line that a big restore can take a few minutes",
+        held.status == 200 && starting && slow && known && ordered && said.iter().any(|t| t == "Starting…"),
         json!({ "steps": said, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
     );
     let restarted = s.eventually(hold + std::time::Duration::from_secs(90), || {
@@ -3337,7 +3337,6 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     });
     let settled = b.until(page, "document.getElementById('computer-notices').hidden && !!document.querySelector('#settings-page [data-action=restart-ask]') && !document.getElementById('settings-page').innerText.includes('Latest version')", wait);
     let stuck = b.eval(page, "document.body.innerText.includes('Restarting') || !!document.querySelector('.restart-status')")?;
-    super::computers::lever_with(api, &id, json!({ "op": "hang-backups", "ms": 0 }))?;
     let v = view();
     s.ok(
         "Restart in the notice takes it: awake on the new start, the notice goes by itself, with no reload; it runs the latest, nothing more is told, and nothing says Restarting",
