@@ -1875,8 +1875,10 @@ is hidden or at the person's next move, never while a chat says it is
 `busy` or the shell holds unsent work. A page of the last release that
 asks for one of its hashed files after a deploy is answered 404, as this
 release holds no such file: the page says "Still loading… Reload", and
-Reload loads this release's page. It never runs one release's script
-under the other's page. A chat keeps its composer's draft in
+Reload loads this release's page. Hashing keeps a page's own bundle its
+release's, never another's under its name; the platform's modules it
+imports (`__fragment.js`, `__markdown.js`) keep their names, so a page of
+the last release can run with this release's copies of them. A chat keeps its composer's draft in
 its own origin's storage as its person's (`{who, text, at}`), so a reload
 loses nothing typed.
 
