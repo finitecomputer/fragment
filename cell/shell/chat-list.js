@@ -383,7 +383,8 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       open.setAttribute("aria-current", active ? "page" : "false");
       const line = el("span", "chat-line");
       line.append(el("span", "label", m.title));
-      open.append(line, el("span", "chat-sub"));
+      // one line, as the chat it makes is with nothing said in it yet (`chatRow`)
+      open.append(line);
       row.append(open);
       return [row];
     };
