@@ -378,7 +378,9 @@ fragment verify my-thing --dir .            # full-content audit
   (`~` backups, `~$` locks, `.swp`), and sync's own `.conflict-` copies.
   One rule for both directions: such a file in the repo is never pulled,
   and never deleted for being absent from your folder. In a git repo,
-  `.gitignore`d files never upload.
+  `.gitignore`d files never upload, and one is never pulled over: where
+  the fragment has a file of that path, yours stays and theirs lands
+  beside it as a conflict copy (exit 3).
 - **Watching** (`--watch`): a save is one pass, and so is a burst of
   saves; the change feed's echo of your own commit, and the folder's
   echo of a pull, cost nothing. After 60 s of quiet a sweep compares the

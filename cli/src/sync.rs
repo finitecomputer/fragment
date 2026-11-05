@@ -847,7 +847,22 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
         for rf in listing.files.values() {
             let l = local.get(&rf.path);
             let s = state.files.get(&rf.path);
+            // what the scan did not take, at a path the fragment has: none,
+            // or something outside sync (`keep_unscanned`)
+            let occupied = match l {
+                None => place(dir, &rf.path)?.filter(|at| fs::symlink_metadata(at).is_ok()),
+                Some(_) => None,
+            };
             let fetch = match (l, s) {
+                (None, _) if occupied.is_some() => {
+                    let target = occupied.expect("matched above");
+                    keep_unscanned(
+                        ConflictCtx { storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id, read_only },
+                        &rf.path,
+                        &target,
+                    )?;
+                    false
+                }
                 // journal-absent but present locally, and content-different
                 // (the bootstrap pass adopted every match), in a pass that
                 // only reads: the folder's own bytes were never sent, so
@@ -1071,15 +1086,10 @@ fn record_conflicts(
             continue; // already recorded this pass
         }
         let rf_commit = ctx.listing.files.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let text = path.as_str();
-        let (stem, ext) = match text.rfind('.') {
-            Some(i) if !text[i..].contains('/') => (&text[..i], &text[i..]),
-            _ => (text, ""),
-        };
         // a path near the limit has no room for the copy's mark: then the
         // remote bytes stay in git history, and the report says so
-        let conflict_path = RepoPath::parse(&format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id));
+        let conflict_path = conflict_copy(path, ctx.writer_id);
         let git_bytes = ctx.storage.read_file(text, ctx.listing.rev());
         let remote_sha = git_bytes.as_ref().ok().map(|bytes| crate::blobs::content_sha(bytes));
         let same = match (&remote_sha, ctx.local.get(path)) {
@@ -1125,6 +1135,68 @@ fn record_conflicts(
         };
         ctx.state.files.insert(path.clone(), entry);
     }
+    Ok(())
+}
+
+/// Where the remote's bytes of `path` land beside the folder's own:
+/// `<stem>.conflict-<time>-<writer><ext>`, or why there is no room.
+fn conflict_copy(path: &RepoPath, writer_id: &str) -> Result<RepoPath, NotRepoPath> {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let text = path.as_str();
+    let (stem, ext) = match text.rfind('.') {
+        Some(i) if !text[i..].contains('/') => (&text[..i], &text[i..]),
+        _ => (text, ""),
+    };
+    RepoPath::parse(&format!("{stem}.conflict-{ts}-{writer_id}{ext}"))
+}
+
+/// Something the scan did not take sits where the fragment has a file: a
+/// file outside sync (its .gitignore's), or what is not a regular file.
+/// Pulled over, it was lost (nothing of it is in git), so it stays as it
+/// is and outside sync: no journal row, so it is never sent nor its
+/// absence a deletion. The remote's bytes land beside it once per version
+/// (a copy of the same bytes there already is not written again): a
+/// conflict, reported each pass while both are there. The same bytes on
+/// both sides are nothing to report.
+fn keep_unscanned(ctx: ConflictCtx<'_>, path: &RepoPath, target: &Path) -> Result<(), SyncError> {
+    if !ctx.recorded.insert(path.clone()) {
+        return Ok(());
+    }
+    ctx.state.files.remove(path);
+    let git = ctx.storage.read_file(path.as_str(), ctx.listing.rev())?;
+    let bytes = ctx.blobs.resolve(git).map_err(|e| SyncError::blob(path.as_str(), e))?;
+    if fs::read(target).is_ok_and(|here| here == bytes) {
+        return Ok(());
+    }
+    let copy = match conflict_copy(path, ctx.writer_id) {
+        Ok(copy) => copy,
+        Err(not) => {
+            ctx.report.conflicts.push(format!("{path} (a file outside sync is here, kept; remote copy not saved, its name {not}; it is in git history)"));
+            return Ok(());
+        }
+    };
+    let Some(beside) = place(ctx.dir, &copy)? else {
+        ctx.report.conflicts.push(format!("{path} (a file outside sync is here, kept; remote copy not saved: {})", through_link(&copy)));
+        return Ok(());
+    };
+    // a copy of these bytes beside it already: this version's was saved
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_string).unwrap_or_default();
+    let theirs = name(target);
+    let (stem, ext) = match theirs.rfind('.') {
+        Some(i) if i > 0 => (&theirs[..i], &theirs[i..]),
+        _ => (theirs.as_str(), ""),
+    };
+    let (prefix, suffix) = (format!("{stem}.conflict-"), format!("-{}{ext}", ctx.writer_id));
+    let saved = beside.parent().and_then(|at| fs::read_dir(at).ok()).is_some_and(|entries| {
+        entries.flatten().any(|e| {
+            let n = name(&e.path());
+            n.starts_with(&prefix) && n.ends_with(&suffix) && fs::read(e.path()).is_ok_and(|b| b == bytes)
+        })
+    });
+    if !saved {
+        atomic_write(&beside, &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+    }
+    ctx.report.conflicts.push(format!("{path} (a file outside sync is here, kept; remote copy beside it: {stem}.conflict-…{ext})"));
     Ok(())
 }
 
@@ -2372,6 +2444,79 @@ mod tests {
         mock.view_only("t--k3x9", false);
         let sent = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(sent.pushed == ["a.md"] && mock.file_at("t--k3x9", "main", "a.md").as_deref() == Some(&b"mine"[..]), "{sent:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A folder git keeps, ignoring `ignored` (the scan honors .gitignore
+    /// inside a git working tree).
+    fn git_folder(tag: &str, ignored: &str) -> PathBuf {
+        let dir = tmpdir(tag);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".gitignore"), format!("{ignored}\n")).unwrap();
+        dir
+    }
+
+    /// Goal: a file outside sync (.gitignore'd) where the fragment has one
+    /// is never pulled over, for a viewer or an editor, in a folder's first
+    /// pass or a later one: it stays as it is, theirs lands beside it once
+    /// per version, the pass reports a conflict, and the ignored file is
+    /// never sent. Method: a git folder ignoring a.md holds a draft of it;
+    /// the fragment has another a.md; a viewer's mirror, then an editor's
+    /// pull and mirror, then a new remote version.
+    #[test]
+    fn a_file_outside_sync_is_never_pulled_over() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"remote"), ("b.md", b"b")]);
+        mock.view_only("t--k3x9", true);
+        let c = client_for(&mock);
+        let dir = git_folder("outside-sync", "a.md");
+        fs::write(dir.join("a.md"), "my private draft").unwrap();
+        let copies = |dir: &Path| conflict_copies(dir);
+
+        let viewer = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "my private draft", "{viewer:?}");
+        assert!(viewer.pulled == ["b.md"] && viewer.conflicts.len() == 1 && viewer.unsent.is_empty() && viewer.exit_code() == 3, "{viewer:?}");
+        assert_eq!(copies(&dir), ["remote"]);
+        let again = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(again.conflicts.len() == 1 && again.pulled.is_empty(), "reported while both are there: {again:?}");
+        assert_eq!(copies(&dir), ["remote"], "one copy a version");
+
+        // its editor's pull and mirror keep it too, and never send it
+        mock.view_only("t--k3x9", false);
+        let pulled = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        let mirrored = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "my private draft");
+        assert!(pulled.conflicts.len() == 1 && mirrored.conflicts.len() == 1 && mirrored.pushed.is_empty() && mirrored.deleted_remote.is_empty(), "{pulled:?} {mirrored:?}");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"remote"[..]), "the ignored file is never sent, nor theirs deleted");
+        assert_eq!(mock.commit_pack_count(), 0);
+
+        // a new remote version lands beside it too
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"remote 2"))], "theirs");
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "my private draft");
+        assert!(copies(&dir).contains(&"remote 2".to_string()), "{:?}", copies(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: an editor's file, synced and then put outside sync (added to
+    /// .gitignore), is kept when the fragment's copy moves on, and the
+    /// fragment's is never deleted for it. Method: an editor syncs a.md,
+    /// ignores it and edits it; another writer changes it; mirror twice.
+    #[test]
+    fn an_editors_file_put_outside_sync_is_kept() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[("a.md", b"v1")]);
+        let c = client_for(&mock);
+        let dir = git_folder("editor-outside", "nothing.md");
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        fs::write(dir.join(".gitignore"), "a.md\n").unwrap();
+        fs::write(dir.join("a.md"), "mine, now private").unwrap();
+        mock.external_commit("t--k3x9", "main", &[("a.md", Some(b"v2"))], "theirs");
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.md")).unwrap(), "mine, now private", "{first:?}");
+        assert!(first.conflicts.len() == 1 && second.deleted_remote.is_empty() && second.pushed.is_empty(), "{first:?} {second:?}");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.md").as_deref(), Some(&b"v2"[..]));
         fs::remove_dir_all(&dir).ok();
     }
 }
