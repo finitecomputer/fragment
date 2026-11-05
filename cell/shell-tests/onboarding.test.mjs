@@ -103,6 +103,8 @@ function platform() {
     files: (name) => files.get(name),
     tasks: (name) => tasks.get(name),
     members: (name) => members.get(name),
+    refuseWake: (why) => { computer.phase = "asleep"; computer.why = why; },
+    allowWake: () => { computer.phase = "awake"; computer.why = null; },
     make,
     // what was asked to change since the last ask
     writes: () => writes.splice(0),
@@ -271,7 +273,7 @@ test("Add failing before its chat, from Settings, says so in Add; Add again fini
   assert.deepEqual(p.notices, []);
 });
 
-test("Try again on the same page finishes what failed", async () => {
+test("Try again on the same page finishes what failed, with one setup run", async () => {
   const world = platform();
   const p = page(world);
   await p.load();
@@ -281,9 +283,35 @@ test("Try again on the same page finishes what failed", async () => {
   assert.ok(chat && p.onboarding.setupFor(chat).error, "its chat says what failed");
   await assert.rejects(adding(p), /Another agent is being made/);
   p.onboarding.retrySetup(chat);
-  await p.onboarding.creatingAgent();
+  const running = p.onboarding.creatingAgent();
+  assert.strictEqual(p.onboarding.creatingAgent(), running);
+  await running;
   madeWhole(world);
 });
+
+for (const [stage, interrupt, states, pending] of [
+  ["writing", (world) => world.cut(at(/\/files$/, "POST")), ["failed", "todo", "todo"], true],
+  ["making", (world) => world.cut(at(/\/deploy$/, "POST")), ["failed", "todo", "todo"], true],
+  ["joining", (world) => world.cut(at(/\/members\/npub1wren$/, "PUT")), ["done", "failed", "todo"], true],
+  ["waiting_ready", (world) => world.refuseWake("No credit"), ["done", "done", "failed"], false],
+]) {
+  test(`a failed ${stage} stage keeps its progress and pending state, and resumes`, async () => {
+    const world = platform();
+    const p = page(world);
+    await p.load();
+    interrupt(world);
+    await adding(p);
+    const [chat, progress] = p.onboarding.setupState();
+    assert.deepEqual(progress.steps.map((step) => step.state), states);
+    assert.ok(progress.error);
+    assert.equal(p.onboarding.setupPending(), pending);
+    assert.deepEqual(p.onboarding.setupFor(chat), progress);
+    if (stage === "waiting_ready") world.allowWake();
+    p.onboarding.retrySetup(chat);
+    await p.onboarding.creatingAgent();
+    madeWhole(world);
+  });
+}
 
 // Made whole, its chat still quiet (its hello not answered yet): a page
 // opened then posts its hello again, the same record, and nothing else; a
