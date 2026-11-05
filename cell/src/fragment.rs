@@ -44,6 +44,7 @@
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /cap/search/upsert|delete|query|status  the app facet's `Search` capability (searchable.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
+//!   POST   /signin/visibility             a frame's redemption: who may read it now (auth.rs `anyone_reads`); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
@@ -452,6 +453,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more calls into its search index fail
     /// before they are sent (`fail-search-index`): the index out of reach.
     TestFailSearchIndex,
+    /// Test fleets only: how many more `/signin/visibility` reads fail
+    /// (`fail-signin-visibility`).
+    TestFailSigninVisibility,
     /// Test fleets only: the connector policy its doors ask in place of the
     /// deployment's (`connectors`), so a run turns one off and on again.
     TestConnectors,
@@ -531,6 +535,7 @@ impl MetaKey {
             MetaKey::TestFailCards => "test_fail_cards",
             MetaKey::TestMembersWhileShot => "test_members_while_shot",
             MetaKey::TestFailSearchIndex => "test_fail_search_index",
+            MetaKey::TestFailSigninVisibility => "test_fail_signin_visibility",
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
@@ -938,6 +943,14 @@ impl FragmentCell {
             }
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
+        }
+        if path == "/signin/visibility" {
+            // Only a frame's redemption sets the header; the router never passes it.
+            if req.headers().get(crate::auth::SIGNIN_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            self.test_countdown(MetaKey::TestFailSigninVisibility, "its visibility was not read")?;
+            return json_response(&crate::auth::SigninVisibility { visibility: self.facts()?.visibility });
         }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.

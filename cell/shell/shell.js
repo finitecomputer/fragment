@@ -173,11 +173,7 @@ const docked = () => shown(apps()).filter((f) => f.dock !== false);
 // A path segment: the API's ids keep their ":" (`computer:…`) as
 // sent, since the router matches segments as they are, not decoded.
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
-// One hop only for a fragment its list says is members' only (a frame without its cookie is refused: `refused`); public, link, or not known: the `check=frame` hop.
-const framed = (name, path = "/") => {
-  const members = byName(name)?.sharing?.visibility === "members";
-  return `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}${members ? "" : "&check=frame"}`;
-};
+const framed = (name, path = "/") => `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
 // A fragment's origin, as the cell names it on this page (its
 // `fragment-origin` meta, `{name}` where the name goes: the origin its
 // status's canonical URL names), with no request; `originOf` as a

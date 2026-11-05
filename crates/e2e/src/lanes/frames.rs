@@ -86,7 +86,7 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let (owner, owner_session) = person(api)?;
     let (guest, guest_session) = person(api)?;
-    let (stranger, _) = person(api)?;
+    let (stranger, stranger_session) = person(api)?;
     let (owner_id, guest_id) = (api.identity(&owner)?, api.identity(&guest)?);
     let own = made(api, &owner, &s.name("fown"), "blank", who("own"), "members")?;
     let shared = made(api, &owner, &s.name("fshared"), "blank", who("shared"), "members")?;
@@ -94,10 +94,22 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "sharing {shared}: {r}");
     let theirs = made(api, &stranger, &s.name("ftheirs"), "blank", who("theirs"), "members")?;
     let open = made(api, &stranger, &s.name("fopen"), "blank", who("open"), "public")?;
-    let own_open = made(api, &owner, &s.name("fownopen"), "blank", who("own open"), "public")?;
-    let names = Names { own: &own, shared: &shared, theirs: &theirs, open: &open, own_open: &own_open };
-    over_http(s, api, &owner_session, &names)?;
-    in_chrome(s, api, &names, (&owner_id, &owner_session), (&guest_id, &guest_session))
+    // the owner's app, members-only until the shell has listed it
+    let flipped = made(api, &owner, &s.name("fflip"), "blank", who("flipped"), "members")?;
+    // the owner's chat, shared with the guest (members-only, as a chat is made)
+    let chat = api.qualified(&owner, &s.name("fchat"))?;
+    let r = api.create_with(&owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making {chat}: {r}");
+    let r = api.share(&chat, &guest_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "sharing {chat}: {r}");
+    let names = Names { own: &own, shared: &shared, theirs: &theirs, open: &open, flipped: &flipped, chat: &chat };
+    over_http(s, api, (&owner_session, &guest_session, &stranger_session), &names)?;
+    let flip = || -> Result<()> {
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{flipped}/visibility"), Some(&json!({ "visibility": "public" })))?;
+        anyhow::ensure!(r.status == 200, "{flipped} made public: {r}");
+        Ok(())
+    };
+    in_chrome(s, api, &names, (&owner_id, &owner_session), (&guest_id, &guest_session), &flip)
 }
 
 struct Names<'a> {
@@ -105,11 +117,13 @@ struct Names<'a> {
     shared: &'a str,
     theirs: &'a str,
     open: &'a str,
-    /// the owner's own public app
-    own_open: &'a str,
+    /// the owner's app, members-only until made public under a shell's list
+    flipped: &'a str,
+    /// the owner's chat, shared with the guest
+    chat: &'a str,
 }
 
-fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Result<()> {
+fn over_http(s: &mut Suite, api: &Api, (owner_session, guest_session, stranger_session): (&str, &str, &str), n: &Names<'_>) -> Result<()> {
     let platform = api.base.clone();
     let session = format!("fragment_session={owner_session}");
     let mint_url = |name: &str| format!("{platform}/auth/frame?name={name}&return=/x");
@@ -166,18 +180,50 @@ fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Re
     );
     let again = as_browser(api, "GET", to, "iframe", "cross-site", "")?;
     s.ok("and it works once (401 again)", again.status == 401 && again.cookies().is_empty(), &again);
-    // a frame of a fragment that may admit anyone asks for the check hop
-    // (shell.js `framed`): its token carries it, and its redemption goes
-    // through that hop, its cookie set, before the page
-    let checked_mint = as_browser(api, "GET", format!("{}&check=frame", mint_url(n.own)), "iframe", "same-origin", &session)?;
-    let to_checked = checked_mint.header("location");
-    let through = as_browser(api, "GET", to_checked.clone(), "iframe", "cross-site", "")?;
+    // ---- one hop, or the check hop: the fragment's own visibility, asked
+    // as its token is redeemed, decides; nothing in a URL does
+    let minted_by = |name: &str, who: &str, extra: &str| -> Result<String> {
+        Ok(as_browser(api, "GET", format!("{}{extra}", mint_url(name)), "iframe", "same-origin", &format!("fragment_session={who}"))?.header("location"))
+    };
+    let redeem = |to: String| as_browser(api, "GET", to, "iframe", "cross-site", "");
+    let hop = |name: &str| api.site_url(name, "__signin?check=frame&return=%2Fx");
+    let mut timings = vec![];
+    // a hand-edited mint and redemption: the old hint, asked for on a members-only app
+    let edited = minted_by(n.own, owner_session, "&check=frame")?;
+    let straight = redeem(format!("{edited}&check=frame"))?;
+    timings.push(format!("members-only: {}", straight.header("server-timing")));
     s.ok(
-        "asked for the check hop, the mint's token carries it, and its redemption sets the frame cookie and goes through that hop before its page",
-        checked_mint.status == 302 && to_checked.ends_with("&check=frame") && through.status == 302
-            && through.header("location") == api.site_url(n.own, "__signin?check=frame&return=%2Fx") && !cookie_line(&through, "fragment_frame").is_empty(),
-        format!("{checked_mint} → {to_checked} / {through} → {}", through.header("location")),
+        "a hand-edited URL changes nothing: a mint asked with check=frame carries no mark, and a members-only app's redemption with one goes straight on to its page",
+        !edited.contains("check") && straight.status == 302 && straight.header("location") == api.site_url(n.own, "x") && !cookie_line(&straight, "fragment_frame").is_empty(),
+        format!("{edited} / {straight} → {}", straight.header("location")),
     );
+    // a public app (its owner's frame): the check hop, with nothing asked
+    let public = redeem(minted_by(n.open, stranger_session, "")?)?;
+    timings.push(format!("public: {}", public.header("server-timing")));
+    s.ok(
+        "a public app's redemption sets the frame cookie and goes through the check hop before its page, its URL asking nothing",
+        public.status == 302 && public.header("location") == hop(n.open) && !cookie_line(&public, "fragment_frame").is_empty(),
+        format!("{public} → {}", public.header("location")),
+    );
+    // a chat shared with someone else: members-only, one hop for its member too
+    let chat = redeem(minted_by(n.chat, guest_session, "")?)?;
+    timings.push(format!("shared chat: {}", chat.header("server-timing")));
+    s.ok(
+        "a members-only chat shared with someone: their frame's redemption goes straight on to its page, one hop, no mark in its URL",
+        chat.status == 302 && chat.header("location") == api.site_url(n.chat, "x"),
+        format!("{chat} → {}", chat.header("location")),
+    );
+    // its fragment's visibility not read: the check hop, never one on doubt
+    let r = super::ledger::lever(api, n.own, "fail-signin-visibility", json!({ "times": 1 }))?;
+    anyhow::ensure!(r.status == 200, "the fail-signin-visibility lever: {r}");
+    let unread = redeem(minted_by(n.own, owner_session, "")?)?;
+    let read = redeem(minted_by(n.own, owner_session, "")?)?;
+    s.ok(
+        "a members-only app whose visibility was not read (a test lever) takes the check hop; read again, one hop",
+        unread.status == 302 && unread.header("location") == hop(n.own) && read.status == 302 && read.header("location") == api.site_url(n.own, "x"),
+        format!("{unread} → {} / {read} → {}", unread.header("location"), read.header("location")),
+    );
+    println!("      (redemption Server-Timing: {})", timings.join("; "));
 
     // ---- the frame's cookie
     let value = line.split(';').next().unwrap_or("").to_string();
@@ -385,12 +431,14 @@ fn updating_platform_frames(s: &mut Suite, api: &Api, chrome: &mut Browser, shel
 /// 18.5 to 26.1 keeps none from a cross-site frame, partitioned or not):
 /// in a browser of its own, the shell's own window of the owner's app,
 /// the frame cookie its redemption set dropped as it reaches `landing`
-/// (`*` at its end: any query after). Valid: a members-only app's page
-/// refuses it as signed out, and a public app's check hop finds no cookie
-/// (its page would admit anyone), and either says so to the shell, which
-/// says this browser keeps a window's own sign-in from it, in the frame's
-/// place, and signs it in no more (no loop: no mint after).
-fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str, landing: &str) -> Result<()> {
+/// (`*` at its end: any query after), `then` done once the shell has
+/// listed the app, before it is opened. Valid: a members-only app's page
+/// refuses it as signed out, and an app made public under the shell's
+/// list (which said members-only) goes through the check hop, which finds
+/// no cookie (its page would admit anyone); either says so to the shell,
+/// which says this browser keeps a window's own sign-in from it, in the
+/// frame's place, and signs it in no more (no loop: no mint after).
+fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str, landing: &str, then: &dyn Fn() -> Result<()>) -> Result<()> {
     let wait = Duration::from_secs(20);
     // a browser of its own, as the lane's blocks third-party cookies: no
     // frame cookie of the owner's from before
@@ -408,6 +456,7 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str, landing: &
     chrome.hold(&shell, &[landing])?;
     let icon = format!("document.querySelector({})", serde_json::to_string(&format!("#apps [data-key=\"app:{own}\"]"))?);
     let up = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
+    then()?;
     chrome.eval(&shell, &format!("({icon}?.click(), true)"))?;
     let prefix = landing.trim_end_matches('*');
     let landed = s.eventually(wait, || chrome.held(&shell).is_ok_and(|h| h.iter().any(|u| u.starts_with(prefix))));
@@ -430,7 +479,7 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str, landing: &
     let shown = chrome.eval_in_frame(&shell, own, "({ href: location.href, text: document.body?.innerText?.slice(0, 200) })").unwrap_or_default();
     let heard = chrome.eval(&shell, "JSON.stringify(heard)").unwrap_or_default();
     s.ok(
-        &format!("a browser that keeps no cookie from the frame's sign-in ({}): the shell says this browser keeps a window's own sign-in from it, in its place, signing it in no more", if landing.ends_with('*') { "a public app: its check hop finds none" } else { "members' only: its page refuses it" }),
+        &format!("a browser that keeps no cookie from the frame's sign-in ({}): the shell says this browser keeps a window's own sign-in from it, in its place, signing it in no more", if landing.ends_with('*') { "an app made public under the shell's list: its check hop finds none" } else { "members' only: its page refuses it" }),
         up && landed && set.is_some() && dropped && told && blocked == "cookies" && more.is_empty(),
         json!({ "up": up, "landed": landed, "set": set.is_some(), "dropped": dropped, "told": told, "blocked": blocked, "more": more, "shown": shown, "heard": heard }),
     );
@@ -439,7 +488,7 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str, landing: &
     Ok(())
 }
 
-fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session): (&str, &str), (guest_id, guest_session): (&str, &str)) -> Result<()> {
+fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session): (&str, &str), (guest_id, guest_session): (&str, &str), flip: &dyn Fn() -> Result<()>) -> Result<()> {
     let wait = Duration::from_secs(20);
     let platform = api.base.clone();
     let Some(mut chrome) = safari_like(s)? else {
@@ -491,9 +540,9 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
         chrome.eval_in_frame(&shell, &host(n.own), &inner("nested")).unwrap_or_default(),
     );
 
-    // members' only: one hop, the page refuses; public: the check hop's note
-    dropped_cookie(s, api, n.own, owner_session, &api.site_url(n.own, ""))?;
-    dropped_cookie(s, api, n.own_open, owner_session, &format!("{}*", api.site_url(n.own_open, "__signin?check=frame")))?;
+    // members-only: one hop, the page refuses; made public under the shell's list: the check hop's note
+    dropped_cookie(s, api, n.own, owner_session, &api.site_url(n.own, ""), &|| Ok(()))?;
+    dropped_cookie(s, api, n.flipped, owner_session, &format!("{}*", api.site_url(n.flipped, "__signin?check=frame")), flip)?;
 
     // ---- a stranger's members-only fragment: a tab must ask first
     frame(&mut chrome, &shell, &mint(n.theirs))?;
