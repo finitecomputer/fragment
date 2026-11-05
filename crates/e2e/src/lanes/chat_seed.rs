@@ -161,5 +161,124 @@ pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded again" } }),
         format!("{deleted} {missing} {again} {st} {manifest}"),
     );
+
+    unfinished_seeds(s, api, &owner, &session)?;
+    Ok(())
+}
+
+/// The seed's boundaries once a chat's create answers before code.storage:
+/// its repo made and its first commit failed, its first commit in flight,
+/// and its deploy in flight when its life ends. Each is set up from the
+/// fake's side (its repos, its requests, its branches), so no request of
+/// the test's reaches the chat before the step it checks.
+fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let owner_id = api.identity(owner)?;
+    let repo_url = |s: &Suite, name: &str| s.fake.repo_url(&fragment_core::codestorage::repo_name("", name, &owner_id).unwrap_or_default());
+    let status = |name: &str| api.status(owner, name).map(|r| r.body).unwrap_or(Value::Null);
+    let poll_now = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })));
+    let events = |name: &str, kind: &str| -> Vec<i64> {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
+        r.map(|r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).filter_map(|e| e["id"].as_i64()).collect()).unwrap_or_default()
+    };
+    let chat = |s: &Suite, label: &str, title: &str| -> Result<String> {
+        let r = api.create_with(owner, json!({ "label": s.name(label), "template": "chat", "title": title }))?;
+        anyhow::ensure!(r.status == 200, "a chat: {r}");
+        s.owned(&r.body, owner);
+        Ok(r.body["name"].as_str().unwrap_or("").to_string())
+    };
+    let manifest_at = |s: &Suite, repo: &str| -> Value { s.fake.file_at(repo, "main", "fragment.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null) };
+
+    // ---- its repo made, its first commit failed (Alex, #1042: 1 and 3)
+    s.fake.fail_commit_packs(true);
+    let half = match chat(s, "seed-half", "Half") {
+        Ok(n) => n,
+        Err(e) => {
+            s.fake.fail_commit_packs(false);
+            return Err(e);
+        }
+    };
+    let failed = s.eventually(wait, || repo_url(s, &half).is_some_and(|url| s.fake.requests(&url, "POST commit-pack") >= 1));
+    let url = repo_url(s, &half).unwrap_or_default();
+    // then code.storage down altogether: the first request of the chat since
+    s.fake.fail_all(true);
+    let st = status(&half);
+    let cookie = format!("fragment_site={}", site_cookie(api, session, &half)?);
+    let page = api.page(&half, "", Some(&cookie))?;
+    let posted = api.signed(owner, "POST", &format!("/api/f/{half}/channels/chat"), Some(&json!({ "id": "h1", "body": { "text": "said with its repo made, its template not" } })))?;
+    s.fake.fail_all(false);
+    s.ok(
+        "its repo made and its first commit failed, then code.storage down: the chat still serves its template from the release, its status names its repo and no pins, and a message is posted",
+        failed && page.status == 200 && page.text.contains("id=\"chat-page\"") && st["repo"] == url.as_str() && st["pins"] == json!({ "main": null, "live": null }) && posted.status == 200,
+        format!("{st} / {} / {posted}", page.status),
+    );
+    // its writers, commits still refused: none goes ahead of its template
+    let token = api.signed(owner, "GET", &format!("/api/f/{half}/storage-token"), None)?;
+    let deploy = api.signed(owner, "POST", &format!("/api/f/{half}/deploy"), Some(&json!({})))?;
+    let written = json!({ "template": "chat", "meta": { "title": "Written" } });
+    let write = |key: &str| {
+        let text = format!("{}\n", serde_json::to_string_pretty(&written).expect("a manifest"));
+        api.signed(owner, "POST", &format!("/api/f/{half}/files"), Some(&json!({ "files": [{ "path": "fragment.json", "text": text }], "key": key })))
+    };
+    let early = write("half-early")?;
+    s.ok(
+        "its repo made, its template not landed: a storage token, a deploy and a manifest write each fail as code.storage fails its commits (502), none minted, deployed (no \"nothing to deploy\") or committed",
+        [&token, &deploy, &early].iter().all(|r| r.status == 502) && s.fake.branch(&url, "main").is_none() && events(&half, "storage-token.minted").is_empty(),
+        format!("{token} / {deploy} / {early}"),
+    );
+    // commits back: the first writer lands the template, then its own write on top
+    s.fake.fail_commit_packs(false);
+    let late = write("half-late")?;
+    let main_after = manifest_at(s, &url);
+    poll_now(&half)?;
+    let settled = s.eventually(wait, || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": half, "op": "alarm" }))).is_ok_and(|r| r.body["pollAt"].as_i64() > Some(crate::api::now_ms())));
+    let token = api.signed(owner, "GET", &format!("/api/f/{half}/storage-token"), None)?;
+    let (landed, minted) = (events(&half, "template"), events(&half, "storage-token.minted"));
+    s.ok(
+        "commits back, a manifest write lands its template first and itself on top, which no later pass overwrites; a storage token then is minted after its template",
+        late.status == 200 && main_after == written && settled && manifest_at(s, &url) == written
+            && landed.len() == 1 && token.status == 200 && minted.first().is_some_and(|m| landed[0] < *m),
+        format!("{late} / {main_after} / {} / {token} / {landed:?} {minted:?}", manifest_at(s, &url)),
+    );
+
+    // ---- a writer while its first commit is in flight, its repo made (Alex, #1042: 1)
+    s.fake.set_latency(SLOW);
+    let flight = chat(s, "seed-flight", "Flight")?;
+    // its seed read main in the repo it made: its commit is on its way
+    let committing = s.eventually(wait, || repo_url(s, &flight).is_some_and(|url| s.fake.requests(&url, "GET branch") >= 1));
+    let token = api.signed(owner, "GET", &format!("/api/f/{flight}/storage-token"), None)?;
+    s.fake.set_latency(Duration::ZERO);
+    let (landed, minted) = (events(&flight, "template"), events(&flight, "storage-token.minted"));
+    s.ok(
+        "a storage token asked once its repo is made and its first commit is in flight waits for its template: minted after it, on its one commit",
+        committing && token.status == 200 && matches!((landed.first(), minted.first()), (Some(l), Some(m)) if l < m)
+            && repo_url(s, &flight).is_some_and(|url| s.fake.paths(&url, "main") == ["fragment.json"]),
+        format!("{token} {landed:?} {minted:?}"),
+    );
+
+    // ---- its life ends while its deploy is in flight, the name made again (Alex, #1042: 2)
+    s.fake.set_latency(SLOW);
+    let label = s.name("seed-deploy-gone");
+    let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
+    let gone = first.body["name"].as_str().unwrap_or("").to_string();
+    // its deploy made live: the install from it is still on its way
+    let deploying = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.fake.branch(&url, "live").is_some()));
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{gone}"), None)?;
+    let again = api.create_with(owner, json!({ "name": gone, "template": "chat", "title": "Seeded after its deploy" }))?;
+    s.owned(&again.body, owner);
+    s.fake.set_latency(Duration::ZERO);
+    poll_now(&gone)?;
+    let healed = s.eventually(wait, || {
+        let st = status(&gone);
+        st["repo"].as_str().is_some_and(|r| !r.is_empty()) && st["pins"]["live"].is_string() && st["pins"]["main"] == st["pins"]["live"]
+    });
+    let st = status(&gone);
+    let manifest = manifest_at(s, st["repo"].as_str().unwrap_or(""));
+    s.ok(
+        "a chat deleted while its first deploy is in flight, the name made again: the old seed leaves the new life's template pending, and the new life's seed lands its own, its title on main",
+        first.status == 200 && deploying && deleted.status == 200 && again.status == 200 && healed
+            && manifest == json!({ "template": "chat", "meta": { "title": "Seeded after its deploy" } }) && events(&gone, "template").len() == 1,
+        format!("{deleted} {again} {st} {manifest}"),
+    );
     Ok(())
 }

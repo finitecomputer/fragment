@@ -136,6 +136,7 @@ impl FragmentCell {
             }
             (None, None) => return Err(CellError::host(format!("no template {which}"))),
         };
+        self.same_life(&life, "while its template's files were read")?;
         // a template that seeds after the create's answer (`seeds_later`)
         // makes its repo here, once: a later try finds it by its name
         if self.meta(MetaKey::Repo)?.is_none() {
@@ -143,9 +144,7 @@ impl FragmentCell {
             // its life ended while code.storage made the repo: the repo
             // stays, as a deleted life's does (the same owner making the
             // name again finds it), and this life's seed goes no further
-            if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
-                return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended while its repo was made")));
-            }
+            self.same_life(&life, "while its repo was made")?;
             self.set_meta(MetaKey::Repo, &repo)?;
             self.event("template.repo", &format!("{name}'s repo is made ({repo})"), json!({ "repo": repo }));
         }
@@ -154,10 +153,11 @@ impl FragmentCell {
             return Err(CellError::host(why));
         }
         // its life ended while its template was committed: no deploy
-        if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
-            return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended while its template was committed")));
-        }
+        self.same_life(&life, "while its template was committed")?;
         let live = self.go_live_in(&repo, &owner, &format!("deploy {name}")).await?;
+        // its life ended while it deployed (each step awaits code.storage):
+        // what is pending now is the next life's, its own seed's to land
+        self.same_life(&life, "while its template was deployed")?;
         // deployed is not installed: an install go_live left to the poll
         // keeps it pending, and the alarm's next seed installs it, from the
         // same commit and deploy (its agents' joins wait meanwhile)
@@ -168,6 +168,18 @@ impl FragmentCell {
         self.del_meta(MetaKey::TemplateTitle)?;
         self.del_meta(MetaKey::TemplatePending)?;
         Ok(true)
+    }
+
+    /// The life a seed began in, `life` (its `CreatedAt`), is still the
+    /// fragment's, or the seed goes no further (404): a delete, and the
+    /// name made again, between its awaits leaves the next life's pending
+    /// template, title and repo to that life's own seed. Asked after each
+    /// await, so what a seed writes or clears next is its own life's.
+    fn same_life(&self, life: &str, when: &str) -> CellResult<()> {
+        if self.meta(MetaKey::CreatedAt)?.as_deref() == Some(life) {
+            return Ok(());
+        }
+        Err(CellError::new(ErrorCode::NotFound, format!("{} ended {when}", self.name().unwrap_or_default())))
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,

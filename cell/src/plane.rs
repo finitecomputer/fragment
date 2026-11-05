@@ -241,16 +241,18 @@ impl FragmentCell {
         Ok(Cs::new(self.cfg.codestorage(), &self.env))
     }
 
-    /// Its repo, for a writer of it (a commit, a storage token's push): one
-    /// its create answered before making (publish.rs `seeds_later`) is made
-    /// here first, with its template's commit and deploy, by the same seed
-    /// the answer and the alarm run (one at a time: `seeding`), so a write
-    /// lands on top of its template, never under it.
+    /// Its repo, for a writer of it (a commit, a deploy, a storage token's
+    /// push): while its template is still to land, the same seed the
+    /// answer and the alarm run (one at a time: `seeding`) lands it first,
+    /// its repo, commit, deploy and install, so a write lands on top of
+    /// its template, never under it. Its repo alone is not enough: the
+    /// seed makes it before it commits (publish.rs `seeds_later`), and a
+    /// commit or deploy may have failed after. A seed that cannot land
+    /// fails the writer as code.storage failed it.
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
-        if let Some(repo) = self.meta(MetaKey::Repo)? {
-            return Ok(repo);
+        if self.meta(MetaKey::TemplatePending)?.is_some() {
+            self.seed().await?;
         }
-        self.seed().await?;
         self.must(MetaKey::Repo)
     }
 
@@ -771,9 +773,12 @@ impl FragmentCell {
     /// check that fails is not recorded, so the next request asks again.
     /// `facts` follows what moved.
     pub(crate) async fn ensure_pins(&self, facts: &mut Facts) -> CellResult<()> {
-        // no repo yet (publish.rs `seeds_later`): nothing to ask, and asked
-        // again once its seed has made one
-        if facts.pins_checked || facts.repo.is_none() {
+        // its template still to land: only its seed moves its pins (every
+        // writer waits for it: `repo_ready`), so nothing is asked of
+        // code.storage, whose outage then leaves a chat serving its
+        // template from the release (`install_pending`), repo made or not;
+        // asked once the seed has landed
+        if facts.pins_checked || facts.repo.is_none() || self.meta(MetaKey::TemplatePending)?.is_some() {
             return Ok(());
         }
         let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();

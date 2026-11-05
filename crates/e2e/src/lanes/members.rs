@@ -292,8 +292,10 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let joined = members.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == mine.as_str() && m["role"] == "editor" && m["kind"] == "agent"));
     let waited = crate::api::timing_parts(&r.header("server-timing"));
     s.ok(
-        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity, its list, its seed and its computer told",
-        r.status == 200 && row["agents"] == json!([mine]) && joined && ["identity", "list", "seed", "joined"].iter().all(|p| waited.iter().any(|w| w == p)),
+        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity, its install from the release and its list, its seed and its computer told after the answer",
+        r.status == 200 && row["agents"] == json!([mine]) && joined
+            && ["identity", "install", "list"].iter().all(|p| waited.iter().any(|w| w == p))
+            && !waited.iter().any(|w| w == "seed" || w == "joined"),
         json!({ "create": r.status, "row": row, "members": members.body, "waited": r.header("server-timing") }),
     );
     first_row_names_its_agent(s, api, &owner, &mine)?;

@@ -1301,18 +1301,24 @@ fn card_to_computer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys
 /// (images/bridge/src/runtime/claude.rs, `INSTALL_ASK`).
 /// `made_with_agent`'s checks, each skipped on a hosted run (its levers
 /// are the fakes' and the node's).
-const MADE_WITH_AGENT_CHECKS: [&str; 2] = [
-    "a chat made with its agent while its template cannot land is made, the agent an editor, and its computer is not told it joined: not at the answer, nor at the alarm's pass whose seed fails again",
-    "across a restart of every object its notice waits; the seed that lands its template, after the answer, tells its computer, which then follows the chat's channel",
+const MADE_WITH_AGENT_CHECKS: [&str; 4] = [
+    "an app made with its agent while its template cannot land (its seed the create's) is made, the agent an editor, and its computer is not told it joined: not at the answer, nor at the alarm's pass whose seed fails again",
+    "a chat made with its agent then runs its template from the release: its computer is told it joined after the answer, once, after its install, and follows the chat's channel, its first commit still not landed",
+    "across a restart of every object the app's notice waits; commits back, the alarm's seed that lands its template tells its computer, after it",
+    "and the chat's template lands, its computer told no more",
 ];
 
-/// A chat made with its agent in it (its create's `agent`, as the shell's
-/// New chat makes one) while its template cannot land (code.storage
-/// refusing commits): its agent's computer is told it joined only once
-/// the template is installed, by the seed that lands it after the
-/// answer, the alarm's, across a restart. Told before, it would find no
-/// channel to follow, take the notice as done, and look again only at its
-/// rediscovery, minutes off (images/bridge `limits.rs`).
+/// A fragment made with its agent in it (its create's `agent`, as the
+/// shell's New chat makes one) while code.storage refuses commits: its
+/// agent's computer is told it joined once the fragment's template is
+/// installed (runs_on.rs `joins_wait`), never before. Told before, it would
+/// find no channel to follow, take the notice as done, and look again only
+/// at its rediscovery, minutes off (images/bridge `limits.rs`). Both
+/// orders: an app's seed is its create's, and its template is installed
+/// only by the seed that lands it, the alarm's, across a restart; a chat
+/// runs its template from the release as its create answers (publish.rs
+/// `seeds_later`), and is told after the seed that follows the answer,
+/// whether that lands or not.
 fn made_with_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity: &str) -> Result<()> {
     if s.hosted() {
         for label in MADE_WITH_AGENT_CHECKS {
@@ -1320,50 +1326,74 @@ fn made_with_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity
         }
         return Ok(());
     }
-    let name = s.named(api, owner, "with-agent")?;
-    let events = |kind: &str| -> Vec<i64> {
+    let events = |name: &str, kind: &str| -> Vec<i64> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
         r.map(|r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).filter_map(|e| e["id"].as_i64()).collect()).unwrap_or_default()
     };
-    let told = || super::computers::told(api, owner, agent, &name);
-    let poll_now = || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })));
+    let told = |name: &str| super::computers::told(api, owner, agent, name);
+    let poll_now = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })));
+    let editor = |name: &str| {
+        api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)
+            .is_ok_and(|r| r.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == identity && m["role"] == "editor")))
+    };
+    let follows = |name: &str| {
+        api.signed(owner, "GET", &format!("/api/f/{name}/subscriptions"), None)
+            .ok()
+            .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
+    };
+    let (app, chat) = (s.named(api, owner, "with-agent-app")?, s.named(api, owner, "with-agent-chat")?);
     s.fake.fail_commit_packs(true);
-    let made = api.create_with(owner, json!({ "name": name, "template": "chat", "agent": identity }));
-    let made = match made {
+    let made = (|| -> Result<_> { Ok((api.create_with(owner, json!({ "name": app, "template": "todo", "agent": identity }))?, api.create_with(owner, json!({ "name": chat, "template": "chat", "agent": identity }))?)) })();
+    let (made_app, made_chat) = match made {
         Ok(r) => r,
         Err(e) => {
             s.fake.fail_commit_packs(false);
             return Err(e);
         }
     };
-    s.owned(&made.body, owner);
-    let members = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)?;
-    let editor = members.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == identity && m["role"] == "editor"));
-    let at_answer = (events("template.failed").len(), told().len(), events("agent.told").len());
-    poll_now()?;
-    let failed_again = s.eventually(Duration::from_secs(20), || events("template.failed").len() > at_answer.0);
-    let after_pass = (told().len(), events("agent.told").len());
+    s.owned(&made_app.body, owner);
+    s.owned(&made_chat.body, owner);
+
+    // the app: its create's seed failed, and nothing is installed
+    let at_answer = (events(&app, "template.failed").len(), told(&app).len(), events(&app, "agent.told").len());
+    poll_now(&app)?;
+    let failed_again = s.eventually(Duration::from_secs(20), || events(&app, "template.failed").len() > at_answer.0);
+    let after_pass = (told(&app).len(), events(&app, "agent.told").len());
     s.ok(
         MADE_WITH_AGENT_CHECKS[0],
-        made.status == 200 && editor && at_answer.0 >= 1 && (at_answer.1, at_answer.2) == (0, 0) && failed_again && after_pass == (0, 0),
-        json!({ "create": made.status, "members": members.body, "atAnswer": at_answer, "failedAgain": failed_again, "afterPass": after_pass }),
+        made_app.status == 200 && editor(&app) && at_answer.0 >= 1 && (at_answer.1, at_answer.2) == (0, 0) && failed_again && after_pass == (0, 0),
+        json!({ "create": made_app.status, "atAnswer": at_answer, "failedAgain": failed_again, "afterPass": after_pass }),
     );
-    s.reload()?;
-    s.fake.fail_commit_packs(false);
-    poll_now()?;
-    let heard = s.eventually(Duration::from_secs(30), || told().len() == 1);
-    // the notice went after its template's install (event ids rise)
-    let (landed, notified) = (events("template"), events("agent.told"));
-    let after_install = matches!((landed.first(), notified.first()), (Some(l), Some(n)) if n > l);
-    let followed = s.eventually(WAKE, || {
-        api.signed(owner, "GET", &format!("/api/f/{name}/subscriptions"), None)
-            .ok()
-            .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
-    });
+
+    // the chat: installed from the release at its making, told after its answer
+    let heard = s.eventually(Duration::from_secs(30), || told(&chat).len() == 1);
+    let followed = s.eventually(WAKE, || follows(&chat));
+    let (installed, notified) = (events(&chat, "code.installed"), events(&chat, "agent.told"));
+    let after_install = matches!((installed.first(), notified.first()), (Some(i), Some(n)) if n > i);
     s.ok(
         MADE_WITH_AGENT_CHECKS[1],
-        heard && told().len() == 1 && after_install && notified.len() == 1 && followed,
-        json!({ "told": told(), "template": landed, "agentTold": notified, "followed": followed }),
+        made_chat.status == 200 && editor(&chat) && heard && followed && after_install && notified.len() == 1 && told(&chat).len() == 1 && events(&chat, "template").is_empty(),
+        json!({ "create": made_chat.status, "told": told(&chat), "installed": installed, "agentTold": notified, "followed": followed, "template": events(&chat, "template") }),
+    );
+
+    // a restart of every object, then commits back
+    s.reload()?;
+    s.fake.fail_commit_packs(false);
+    poll_now(&app)?;
+    poll_now(&chat)?;
+    let heard = s.eventually(Duration::from_secs(30), || told(&app).len() == 1);
+    let (landed, notified) = (events(&app, "template"), events(&app, "agent.told"));
+    let after_landed = matches!((landed.first(), notified.first()), (Some(l), Some(n)) if n > l);
+    s.ok(
+        MADE_WITH_AGENT_CHECKS[2],
+        heard && told(&app).len() == 1 && after_landed && notified.len() == 1,
+        json!({ "told": told(&app), "template": landed, "agentTold": notified }),
+    );
+    let landed = s.eventually(Duration::from_secs(30), || !events(&chat, "template").is_empty());
+    s.ok(
+        MADE_WITH_AGENT_CHECKS[3],
+        landed && told(&chat).len() == 1 && events(&chat, "agent.told").len() == 1,
+        json!({ "told": told(&chat), "agentTold": events(&chat, "agent.told") }),
     );
     Ok(())
 }
