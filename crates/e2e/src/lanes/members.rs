@@ -67,7 +67,7 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a viewer cannot add members", r.status == 403, &r);
     let r = api.signed(&bob, "GET", &path("storage-token"), None)?;
     s.ok("a viewer cannot mint a storage token that writes (an older CLI, which asks for no other, is refused as before)", r.status == 403, &r);
-    the_repo_is_its_members(s, api, &owner, &bob, &name, &repo)?;
+    the_repo_is_its_members(s, api, &owner, &name, &repo)?;
     let r = api.signed(&owner, "PUT", &path(&format!("members/{}", bob.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     s.ok("the owner promotes by hex key", r.status == 200 && r.body["role"] == "editor", &r);
     let r = api.signed(&bob, "GET", &path("storage-token"), None)?;
@@ -795,11 +795,16 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
 /// writes; then, on each visibility, a signed-in non-member, the same with
 /// the share link, an agent acting for a non-member, and no one signed
 /// mint none; nor does a person who reads it only through an agent of
-/// theirs that is a member.
-fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, viewer: &Keys, name: &str, repo: &str) -> Result<()> {
+/// theirs that is a member. Its viewer and members leave after, so the
+/// lane's count of members stands (a member's new agent joins with them,
+/// decision 64, and leaves with them).
+fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, name: &str, repo: &str) -> Result<()> {
     use base64::Engine;
     let path = |rest: &str| format!("/api/f/{name}/{rest}");
     let read = path("storage-token?access=read");
+    let viewer = &api.person()?;
+    let r = api.share(name, &npub::encode(viewer.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "the repo's viewer, in: {r}");
     let r = api.signed(viewer, "GET", &read, None)?;
     let token = r.body["token"].as_str().unwrap_or("").to_string();
     let claims: Value = token
@@ -862,12 +867,17 @@ fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, viewer: &Keys
     anyhow::ensure!(r.status == 200, "a non-member's agent, in: {r}");
     let files = api.signed(&through, "GET", &path("files"), None)?;
     let token = api.signed(&through, "GET", &read, None)?;
-    // the lane goes on counting its members: this one leaves
+    // the lane goes on counting its members: these leave (the viewer with
+    // its agent, as one entity)
     let gone = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(their_agent.pubkey_hex()))), None)?;
+    let left = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(viewer.pubkey_hex()))), None)?;
+    let members = api.signed(owner, "GET", &path("members"), None)?;
     s.ok(
         "a person whose agent is a member reads its files, and mints no token (403): the repo is a membership's",
-        files.status == 200 && token.status == 403 && token.message().contains("agent's membership") && gone.status == 200,
-        format!("{files} {token} {gone}"),
+        files.status == 200 && token.status == 403 && token.message().contains("agent's membership"),
+        format!("{files} {token}"),
     );
+    let principals: Vec<&str> = members.body["members"].as_array().into_iter().flatten().filter_map(|m| m["principal"].as_str()).collect();
+    anyhow::ensure!(gone.status == 200 && left.status == 200 && principals.len() == 2, "the check's members left: {gone} {left} {principals:?}");
     Ok(())
 }
