@@ -6037,8 +6037,10 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
         Ok(open && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'New chat'); i?.click(); return !!i; })()")? == true)
     };
     let started = new_chat(b, &main_hero)?;
-    // (made: no row being made left, `newChat`'s one step before the platform has it)
-    let blank = b.until(page, "document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making')", wait);
+    // (made and open: no row being made left, nor its room, `newChat`'s
+    // one step before the platform has it; its row goes once the list has
+    // the chat, which may be before the chat opens)
+    let blank = b.until(page, "document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making') && !document.querySelector('#frames .making-standin') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden)", wait);
     let third = own_named(api, me.session, &format!("{own_chat}-3"))?;
     let empty = s.eventually(wait, || b.eval_in_frame(page, &third, "!!document.querySelector('#messages .empty h2') && !document.querySelector('#messages .msg')").ok() == Some(Value::Bool(true)));
     let _ = b.screenshot(page, &shots.join("desktop-new-chat.png"));
@@ -7979,7 +7981,7 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let menu = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
     let offered = strings(&b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?);
     let picked = menu && b.eval(page, "(() => { const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'New chat'); i?.click(); return !!i; })()")? == true;
-    let opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making')", wait);
+    let opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making') && !document.querySelector('#frames .making-standin') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden)", wait);
     let made = own_named(api, session, "reader-chat-2")?;
     let members = shell(api, session, "GET", &format!("/api/f/{made}/members"), None, &[])?;
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
