@@ -23,7 +23,7 @@
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
-//!   GET    /api/storage-token             editor
+//!   GET    /api/storage-token             editor; ?access=read: a member, viewer and up
 //!   POST   /api/refresh                   editor
 //!   GET    /api/files  /api/file?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
@@ -1113,7 +1113,10 @@ impl FragmentCell {
                 json_response(&self.bind_door(&caller, &body).await?)
             }
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
-            (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
+            (Method::Get, ["api", "storage-token"]) => {
+                let access = fragment_proto::StorageAccess::parse(query("access").as_deref()).map_err(CellError::invalid)?;
+                self.storage_token(&caller, access).await
+            }
             (Method::Post, ["api", "refresh"]) => {
                 // the ref its writer moved, or both (fragment_proto::Refresh)
                 let refs = fragment_proto::Refresh::refs_of(&req.bytes().await?).map_err(CellError::invalid)?;

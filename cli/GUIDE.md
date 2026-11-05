@@ -328,11 +328,12 @@ working copy: sync again to bring the new name into it before editing it.
 
 The repo is the truth; your folder is a working copy. Sync talks to
 code.storage directly with a short-lived, repo-scoped token the host
-mints (editors and up): one per command; a watcher keeps one for at most
-a minute, and mints again after that, before it expires, or when
-code.storage refuses it (the host checks the role when it mints, so an
-editor removed from the fragment stops syncing within a minute). No
-local `.git` is made.
+mints: one that writes for editors and up, one that only reads for any
+member (a pull asks for that one, whoever you are). It mints one per
+command; a watcher keeps one for at most a minute, and mints again after
+that, before it expires, or when code.storage refuses it (the host
+checks the role when it mints, so an editor removed from the fragment
+stops syncing within a minute). No local `.git` is made.
 
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)
@@ -353,27 +354,46 @@ fragment verify my-thing --dir .            # full-content audit
   always holds real files.
 - **Conflicts**: when both sides changed a file to different bytes,
   yours stays and the remote copy lands beside it as
-  `<path>.conflict-<time>-<writer>` (exit 3). Both stay in git history.
-  Both sides changed to the same bytes is no conflict.
+  `<path>.conflict-<time>-<writer>` (exit 3); an editor's next pass sends
+  yours. Both stay in git history. A copy never replaces a file: another
+  within the same second is `<time>-2`. Both sides changed to the same
+  bytes is no conflict.
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
+- **Viewers** sync read-only, and so does an agent acting for one (it
+  holds the lower of their role and its own). A mirror pulls and sends
+  nothing: what it would have sent stays in your folder, listed as not
+  sent (exit 5), and a file you deleted is pulled back. A file of yours
+  is never pulled over: each time the fragment's copy changes, or where
+  it has one your folder never synced, theirs lands beside yours as a
+  conflict copy; a remote deletion leaves yours. `--mode push` and
+  `deploy --dir` are an editor's. A token reads the repo's whole
+  history, so every member, a viewer too, can read anything ever
+  committed, including what was removed before they were added. A share
+  link and a public fragment's visitors get none: they read what is
+  served.
 - **What syncs**: everything but dot files and folders (`.fragment/`,
   `.git/`, `.obsidian/`, `.DS_Store`), the top-level `node_modules/` (one
   deeper down, as under `site/`, is served and syncs), editor droppings
   (`~` backups, `~$` locks, `.swp`), and sync's own `.conflict-` copies.
   One rule for both directions: such a file in the repo is never pulled,
   and never deleted for being absent from your folder. In a git repo,
-  `.gitignore`d files never upload.
+  `.gitignore`d files never upload, and one is never pulled over: where
+  the fragment has a file of that path, yours stays and theirs lands
+  beside it as a conflict copy (exit 3). A synced file you then ignore
+  (or replace with what is not a file) is no longer synced, listed once:
+  it stays as it is, and the fragment's copy is not deleted. Only a file
+  that is gone is a deletion.
 - **Watching** (`--watch`): a save is one pass, and so is a burst of
   saves; the change feed's echo of your own commit, and the folder's
   echo of a pull, cost nothing. After 60 s of quiet a sweep compares the
   folder with its journal and main with the last head it saw (one
   request), and passes only when either moved or the change feed is
   down.
-- **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped.
+- **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped, 5 changes not sent (you may only read it).
 
 ## The app
 
