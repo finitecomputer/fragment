@@ -114,6 +114,94 @@ fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, cha
     Ok(())
 }
 
+/// Counts a page's `__live` sockets from before its first script, each
+/// with what it heard (`type`, or `type:channel`), in `__lives`; and the
+/// first timer set for 11 s (the inline socket's deadline, the client's
+/// opening wait: templates/chat/site/index.html), in `__deadline`, to be
+/// run at once (`fn`), and whether it is still set (`live`).
+const LIVES_WATCH: &str = "(() => { if (window !== window.top) return; window.__lives = []; window.__deadline = null; \
+    const st = window.setTimeout, ct = window.clearTimeout; \
+    window.setTimeout = (fn, ms, ...a) => { const id = st(fn, ms, ...a); if (ms === 11000 && !window.__deadline) window.__deadline = { id, fn, live: true }; return id; }; \
+    window.clearTimeout = (id) => { if (window.__deadline?.id === id) window.__deadline.live = false; return ct(id); }; \
+    window.WebSocket = new Proxy(window.WebSocket, { construct(target, args) { const ws = new target(...args); \
+      if (String(args[0]).includes('/__live')) { const l = { ws, heard: [] }; window.__lives.push(l); \
+        ws.addEventListener('message', (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } l.heard.push(m.channel ? `${m.type}:${m.channel}` : m.type); }); } \
+      return ws; } }); })();";
+
+/// A chat's page asks for its live socket from its document's head
+/// (templates/chat/site/index.html), so the handshake overlaps its modules'
+/// waves, and the platform's client (`__fragment.js`) adopts it with what
+/// it heard meanwhile. Method: the page's `__fragment.js` held, unsent,
+/// until it is asked for and that socket has said hello, then let
+/// through. Valid: its socket heard its hello while the client was still
+/// held; the page then is ready on that same socket, its chat in, one
+/// socket dialled in all.
+fn early_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let page = chrome.open_with_script("about:blank", LIVES_WATCH)?;
+    chrome.hold(&page, &["*/__fragment.js"])?;
+    chrome.eval(&page, &format!("location.assign({}), true", serde_json::to_string(&api.site_url(chat, "__signin?return=/"))?))?;
+    // the hello may come before chat.js does, so before it asks for the client
+    let asked = s.eventually(wait, || chrome.held(&page).is_ok_and(|h| h.iter().any(|u| u.ends_with("/__fragment.js"))));
+    let heard = chrome.until(&page, "window.__lives?.length === 1 && window.__lives[0].heard.includes('hello')", wait);
+    let held = chrome.held(&page)?;
+    let before = chrome.eval(&page, "({ lives: window.__lives, ready: document.getElementById('say')?.dataset.ready ?? null })")?;
+    chrome.release(&page, false)?;
+    let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1' && window.__lives[0].heard.includes('subscribed:chat')", wait);
+    let after = chrome.eval(&page, "({ lives: window.__lives.length, heard: window.__lives[0].heard.slice(0, 6), ready: document.getElementById('say')?.dataset.ready ?? null, unclaimed: window.__fragmentLive !== undefined, deadline: window.__deadline?.live ?? null })")?;
+    s.ok(
+        "a chat's page dials its live socket before its modules come, and its client claims it, with the hello it heard meanwhile: ready on that one socket, its bounds ended (no deadline left to close it), no socket left to claim",
+        asked && heard && held.iter().any(|u| u.ends_with("/__fragment.js")) && before["ready"].is_null() && ready && after["lives"] == 1 && after["unclaimed"] == false && after["deadline"] == false,
+        json!({ "asked": asked, "heard": heard, "held": held, "before": before, "ready": ready, "after": after }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// The inline socket unclaimed (templates/chat/site/index.html) is
+/// bounded. Never claimed (the client's module never comes): at its
+/// deadline (run at once here, `__deadline`) it is closed and let go, no
+/// socket left to claim. Past its cap before the client comes (frames
+/// put to it here, more than it keeps): closed and let go at once, and the
+/// client, let through, dials a socket of its own and is ready on it,
+/// never on a cut-short replay.
+fn early_socket_bounds(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let url = serde_json::to_string(&api.site_url(chat, "__signin?return=/"))?;
+    // never claimed
+    let page = chrome.open_with_script("about:blank", LIVES_WATCH)?;
+    chrome.block(&page, &["*/__fragment.js"])?;
+    chrome.eval(&page, &format!("location.assign({url}), true"))?;
+    let heard = chrome.until(&page, "window.__lives?.length === 1 && window.__lives[0].heard.includes('hello') && window.__deadline?.live === true && window.__fragmentLive !== undefined", wait);
+    chrome.eval(&page, "(window.__deadline.fn(), true)")?;
+    let gone = chrome.until(&page, "window.__lives[0].ws.readyState === WebSocket.CLOSED && window.__fragmentLive === undefined", wait);
+    let lives = chrome.eval(&page, "window.__lives.length")?;
+    s.ok(
+        "a chat's page whose client never comes: its early socket, unclaimed past its deadline, is closed and let go, and nothing more is dialled",
+        heard && gone && lives == 1,
+        json!({ "heard": heard, "gone": gone, "lives": lives }),
+    );
+    chrome.close(page)?;
+    // past its cap before the client comes
+    let page = chrome.open_with_script("about:blank", LIVES_WATCH)?;
+    chrome.hold(&page, &["*/__fragment.js"])?;
+    chrome.eval(&page, &format!("location.assign({url}), true"))?;
+    let asked = s.eventually(wait, || chrome.held(&page).is_ok_and(|h| h.iter().any(|u| u.ends_with("/__fragment.js"))));
+    let heard = chrome.until(&page, "window.__lives?.length === 1 && window.__lives[0].heard.includes('hello') && window.__fragmentLive !== undefined", wait);
+    chrome.eval(&page, "(() => { const ws = window.__lives[0].ws; for (let i = 0; i < 300; i++) ws.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'presence', id: `p${i}`, data: null }) })); return true; })()")?;
+    let overflowed = chrome.until(&page, "window.__fragmentLive === undefined && window.__lives[0].ws.readyState >= WebSocket.CLOSING", wait);
+    chrome.release(&page, false)?;
+    let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1' && window.__lives.length === 2 && window.__lives[1].heard.includes('subscribed:chat')", wait);
+    let after = chrome.eval(&page, "({ lives: window.__lives.length, first: window.__lives[0].ws.readyState, second: window.__lives[1]?.ws.readyState ?? null })")?;
+    s.ok(
+        "past its cap before the client comes, the early socket is closed and let go at once, and the client dials a socket of its own and is ready on it",
+        asked && heard && overflowed && ready && after["lives"] == 2 && after["second"] == 1,
+        json!({ "asked": asked, "heard": heard, "overflowed": overflowed, "ready": ready, "after": after }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
 /// Watches a page from before its script runs: each composer placeholder
 /// it sets and each working line it draws (`__said`), and `__drawn` once
 /// its chat and work backlogs are in (each channel's last `subscribed`)
@@ -282,7 +370,7 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
 /// and a press records at once, with no card.
 fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
     let wait = Duration::from_secs(30);
-    let shell = chrome.open(&format!("{}/", api.base))?;
+    let shell = chrome.open_watched(&format!("{}/", api.base))?;
     chrome.viewport(&shell, 1280, 860, false)?;
     let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
@@ -294,6 +382,22 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> R
         s.ok("in the shell's frame, which names the chat's own origin, the chat may use the microphone, and its mic records at once", false, json!({ "framed": false, "allow": allow }));
         return chrome.close(shell);
     }
+    // its origin is the shell page's to know (its `fragment-origin` meta):
+    // the frame names it in its policy and navigates, no status read first
+    let asked: Vec<String> = chrome
+        .watched(&shell)?
+        .events
+        .iter()
+        .filter(|e| e["method"] == "Network.requestWillBeSent")
+        .filter_map(|e| e["params"]["request"]["url"].as_str().map(str::to_string))
+        .collect();
+    let navigated = asked.iter().position(|u| u.contains(&format!("/auth/frame?name={chat}")));
+    let read_first = navigated.is_some_and(|i| asked[..i].iter().any(|u| u.contains(&format!("/api/f/{chat}/status"))));
+    s.ok(
+        "the shell's frame names the chat's own origin in its policy and navigates at once: no read of the chat's status first",
+        allow == json!(format!("clipboard-write; microphone {}", api.site_origin(chat))) && navigated.is_some() && !read_first,
+        json!({ "allow": allow, "navigated": navigated, "read_first": read_first }),
+    );
     let frame = chrome.frame(chat)?;
     let told = chrome.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)")?;
     let mic = "document.getElementById('record')";
@@ -1120,6 +1224,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
+    early_socket(s, api, &mut chrome, &chat_name)?;
+    early_socket_bounds(s, api, &mut chrome, &chat_name)?;
     loads_idle(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
     preloaded_modules(s, api, &mut chrome, &chat_name)?;

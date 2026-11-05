@@ -87,3 +87,22 @@ fn the_chat_preloads_its_whole_module_graph() {
     assert!(graph.contains("./__markdown.js") && graph.len() > 8, "the chat's graph was read: {graph:?}");
     assert_eq!(listed, graph, "the chat's page preloads exactly the modules it runs");
 }
+
+/// Goal: the chat page's early socket, unclaimed, gives up when the
+/// client's own first dial would (`OPEN_WAIT_MS` and its first backoff,
+/// cell/client.mjs), never sooner. Method: the inline script's `WAIT`, and
+/// the client's two, read from their files. Valid: equal.
+#[test]
+fn the_early_socket_waits_as_the_client_does() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let number = |text: &str, after: &str| -> u64 {
+        let at = text.find(after).unwrap_or_else(|| panic!("{after:?} is there")) + after.len();
+        text[at..].chars().take_while(|c| c.is_ascii_digit() || *c == '_').filter(char::is_ascii_digit).collect::<String>().parse().expect("a number")
+    };
+    let page = read("templates/chat/site/index.html");
+    let client = read("cell/client.mjs");
+    let wait = number(&page, "const WAIT=");
+    let (open, backoff) = (number(&client, "const OPEN_WAIT_MS = "), number(&client, "let backoff = "));
+    assert_eq!(wait, open + backoff, "the early socket's deadline is the client's opening wait and its first backoff");
+}
