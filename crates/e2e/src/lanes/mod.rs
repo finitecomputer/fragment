@@ -43,6 +43,7 @@ mod ledger;
 mod limits;
 mod members;
 mod migrations;
+mod native;
 mod notes;
 mod orgs;
 mod plane;
@@ -79,6 +80,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    native::native,
     connections::connections,
     levers::levers,
     members::secrets,
@@ -194,7 +196,7 @@ pub const SHARDS: [&[&str]; 5] = [
         "auth", "create", "chat-seed", "reach", "share", "effects", "appfiles", "sessions-ui", "ai", "billing", "governance", "billing-page", "admin", "shell",
         "chat",
     ],
-    &["identities", "signin", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart"],
+    &["identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart"],
 ];
 
 /// Whether shard `k` (from 1) of the table runs the section `name`.
