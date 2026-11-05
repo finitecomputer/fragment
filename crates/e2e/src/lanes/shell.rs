@@ -5880,6 +5880,9 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
         )
     };
     let reader_key = format!("agent:{}", own_named(api, me.session, "reader")?);
+    // the Reader's chat archived just now is gone from the list first (else
+    // its New chat opens that blank chat again, as it should)
+    b.until(page, &format!("!document.querySelector({})", js(&format!("#chats [data-key=\"chat:{readers}\"]"))), wait);
     let before_open = open_chat(b, page);
     b.eval(page, &hold("POST", "/api/fragments$", Hold::Request))?;
     let picked = new_chat(b, &reader_hero)?;
