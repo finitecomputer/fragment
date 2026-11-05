@@ -23,6 +23,10 @@ use crate::{Need, Suite};
 /// request sent as the create answers lands inside the seed's first call.
 const SLOW: Duration = Duration::from_millis(800);
 
+/// code.storage's latency while a delete and the name made again land
+/// inside one call of a seed's deploy: each takes a few dozen ms here.
+const DEPLOY_SLOW: Duration = Duration::from_millis(1500);
+
 pub fn chat_seed(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("chat-seed", &[Need::Fakes, Need::Node, Need::Levers]) {
         return Ok(());
@@ -256,13 +260,20 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         format!("{token} {landed:?} {minted:?}"),
     );
 
-    // ---- its life ends while its deploy is in flight, the name made again (Alex, #1042: 2)
-    s.fake.set_latency(SLOW);
+    // ---- its life ends while its deploy's install is in flight, the name
+    // made again (Alex, #1042: 2): the install's read of live's
+    // fragment.json, after which nothing awaits before the seed would clear
+    // what is pending, in whichever life is the fragment's then
+    s.fake.set_latency(DEPLOY_SLOW);
     let label = s.name("seed-deploy-gone");
     let first = api.create_with(owner, json!({ "label": label, "template": "chat", "title": "Seeded" }))?;
     let gone = first.body["name"].as_str().unwrap_or("").to_string();
-    // its deploy made live: the install from it is still on its way
-    let deploying = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.fake.branch(&url, "live").is_some()));
+    // its deploy made live, and its pin read live's files: the install's
+    // read of its manifest is on its way
+    let live_made = s.eventually(wait, || repo_url(s, &gone).is_some_and(|url| s.fake.branch(&url, "live").is_some()));
+    let url = repo_url(s, &gone).unwrap_or_default();
+    let listed = s.fake.requests(&url, "GET files/metadata");
+    let deploying = live_made && s.eventually(wait, || s.fake.requests(&url, "GET files/metadata") > listed);
     let deleted = api.signed(owner, "DELETE", &format!("/api/f/{gone}"), None)?;
     let again = api.create_with(owner, json!({ "name": gone, "template": "chat", "title": "Seeded after its deploy" }))?;
     s.owned(&again.body, owner);
@@ -275,7 +286,7 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
     let st = status(&gone);
     let manifest = manifest_at(s, st["repo"].as_str().unwrap_or(""));
     s.ok(
-        "a chat deleted while its first deploy is in flight, the name made again: the old seed leaves the new life's template pending, and the new life's seed lands its own, its title on main",
+        "a chat deleted while its first deploy's install is in flight, the name made again: the old seed leaves the new life's template pending, and the new life's seed lands its own, its title on main",
         first.status == 200 && deploying && deleted.status == 200 && again.status == 200 && healed
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded after its deploy" } }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
