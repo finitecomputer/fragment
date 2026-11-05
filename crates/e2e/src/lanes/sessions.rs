@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 
 use crate::api::Api;
+use crate::browser::{Browser, Page};
 use crate::Suite;
 
 /// The old Finite's export's chats, as its export.py writes them: a chat,
@@ -163,6 +164,7 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
         b.eval_in_frame(&page, &name, "document.body.innerText.slice(0, 300)").unwrap_or_default(),
     );
     b.screenshot(&page, &shots.join("list.png"))?;
+    still_loading_in_frame(s, &mut b, &page, &name, &shots)?;
 
     // Continue: the shell asks with which agent (one here: "Continue"), and
     // makes a chat with it, its history first
@@ -224,6 +226,42 @@ pub fn sessions_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
     let beans = listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "chat" && f["title"] == "Beans").count();
     s.ok("Continue asked again offers the chat it made with that agent, and opens it, making none other", open && reopened && beans == 1, beans);
+    Ok(())
+}
+
+/// The archive's page whose bundle does not come, in the shell's frame (a
+/// tab of the last release asks for a `sessions.<hash>.js` this one lacks):
+/// after a while it says it is still loading, with a reload of its own
+/// page, in its frame. Valid: a page that loads never says it (its script
+/// takes it away). Its bundle refused and the frame loaded again: nothing
+/// for a while, then "Still loading… Reload", the link to the frame's own
+/// page; its Reload, the bundle let through, draws the list again.
+fn still_loading_in_frame(s: &mut Suite, b: &mut Browser, page: &Page, name: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let line = "document.getElementById('still-loading')";
+    let listed = format!("!{line} && !!document.querySelector('details.kind')");
+    let gone = b.eval_in_frame(page, name, &format!("!{line}"))?;
+    s.ok("the archive's page that loads never says it is still loading (its script took the line away)", gone == true, &gone);
+    let frame = b.frame(name)?;
+    b.block(&frame, &["*/sessions.*.js"])?;
+    b.eval(&frame, "(location.reload(), true)")?;
+    let styled = format!("!!{line} && getComputedStyle({line}).position === 'fixed'");
+    let quiet = b.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'hidden'"), wait);
+    let t0 = std::time::Instant::now();
+    let shown = quiet && b.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'visible'"), wait);
+    let after = t0.elapsed();
+    let seen = b.eval(&frame, &format!("({{ said: {line}?.textContent ?? null, link: {line}?.querySelector('a')?.href ?? null, here: location.href }})"))?;
+    let _ = b.screenshot(page, &shots.join("still-loading.png"));
+    s.ok(
+        "its bundle refused, the archive's frame says nothing for a while, then \"Still loading… Reload\", the link to its own page",
+        shown && after >= std::time::Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["link"] == seen["here"],
+        json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
+    );
+    b.block(&frame, &[])?;
+    b.eval(&frame, "(document.querySelector('#still-loading a')?.click(), true)")?;
+    let back = b.until(&frame, &listed, wait);
+    s.ok("its Reload, the bundle let through, draws the archive's list again", back, b.eval(&frame, "document.body.innerText.slice(0, 200)").unwrap_or_default());
+    b.detach(frame)?;
     Ok(())
 }
 
