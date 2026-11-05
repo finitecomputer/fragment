@@ -75,6 +75,13 @@ struct WorkingIndicatorTests {
         #expect(WorkingActivity(timeline).cards["work:2"]?.words == nil)
     }
 
+    @Test func narrowPathsKeepTheirFilenameAndShellPrefix() {
+        #expect(WorkingIndicator.middlePaths("ls ~/a/b/c/file.swift", room: 14) == "ls ~/…/file.swift")
+        #expect(WorkingIndicator.middlePaths("/data/work/another-agent/home/SOUL.md", room: 15).hasSuffix("/SOUL.md"))
+        #expect(WorkingIndicator.middlePaths("cargo check", room: 1) == "cargo check")
+        #expect(WorkingIndicator.middlePaths("~/README.md", room: 100) == "~/README.md")
+    }
+
     @Test func bounceKeepsTheWebsRestPeakAndStaggerAcrossCycles() {
         for dot in 0..<3 {
             let delay = Double(dot) * 0.13

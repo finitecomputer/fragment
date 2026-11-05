@@ -22,6 +22,14 @@ struct WorkingIndicator: View {
     @State private var expanded = false
     @State private var openSteps = Set<String>()
     @State private var advancedAt: Date?
+    @State private var fittedArguments: [String: String] = [:]
+    private struct ArgumentFit: Equatable {
+        let width: CGFloat
+        let args: String
+        let verb: String
+        let clock: String
+        let size: CGFloat
+    }
 
     init(timeline: Timeline, library: Library) {
         agents = timeline.turns.filter { $0.value.running }
@@ -67,7 +75,7 @@ struct WorkingIndicator: View {
         }
         // A newly created web activity node starts its CSS clocks at zero.
         .onChange(of: hints) { _, _ in began = Date() }
-        .onChange(of: cards.map(\.id)) { _, _ in began = Date(); expanded = false; openSteps = [] }
+        .onChange(of: cards.map(\.id)) { _, _ in began = Date(); expanded = false; openSteps = []; fittedArguments = [:] }
         .onChange(of: reduceMotion) { _, _ in began = Date(); advancedAt = nil }
         .onChange(of: cards.first?.steps) { old, new in
             began = Date()
@@ -194,22 +202,34 @@ struct WorkingIndicator: View {
     }
 
     private func toolLine(_ step: ToolStep, agent: String, now: Date, elapsed: TimeInterval, rolling: Bool, verticalPadding: Double = 3) -> some View {
+        let size = textSize
         let detailed = openSteps.contains(step.id) && !rolling
         let home = agents.first { $0.id.agent == agent }?.home ?? agent
         let args = step.args.replacingOccurrences(of: "/data/work/\(home)/home/", with: "~/")
             .replacingOccurrences(of: "/data/work/\(home)/", with: "work/")
             .replacingOccurrences(of: "/data/hermes/managed-skills/", with: "skills/")
+        let showsVerb = args.isEmpty || step.icon == "wrench" || step.failed || step.maybe
+        let clock = step.running && step.record.body["kind"].string == "turn.call" ? "· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - step.record.at) : ""
         let failure = Color(rgb: colorScheme == .dark ? 0xf3b3b3 : 0xa8324f)
         return VStack(alignment: .leading, spacing: 4) {
             Button { if !rolling { if detailed { openSteps.remove(step.id) } else { openSteps.insert(step.id) } } else { expanded = true } } label: {
                 HStack(spacing: 7) {
                     glyph(step.icon).accessibilityLabel(step.verb)
                     HStack(spacing: textSize * 0.3) {
-                        if args.isEmpty || step.icon == "wrench" || step.failed || step.maybe { shimmer(step.label, elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil) }
-                        if !args.isEmpty { shimmer(args, elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil).lineLimit(1).truncationMode(.tail) }
+                        if showsVerb { shimmer(step.label, elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil) }
+                        if !args.isEmpty { shimmer(fittedArguments[step.id] ?? args, elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil).lineLimit(1).truncationMode(.tail) }
                         if step.running && step.record.body["kind"].string == "turn.call" { Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - step.record.at)).foregroundStyle(.tertiary).monospacedDigit() }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: 20.15)
+                    .onGeometryChange(for: ArgumentFit.self) { geometry in
+                        ArgumentFit(width: geometry.size.width, args: args, verb: showsVerb ? step.label : "", clock: clock, size: size)
+                    } action: { fit in
+                        let font = UIFont.systemFont(ofSize: fit.size)
+                        let verb = fit.verb.isEmpty ? 0 : (fit.verb as NSString).size(withAttributes: [.font: font]).width + fit.size * 0.3
+                        let clock = fit.clock.isEmpty ? 0 : (fit.clock as NSString).size(withAttributes: [.font: UIFont.monospacedDigitSystemFont(ofSize: fit.size, weight: .regular)]).width + fit.size * 0.3
+                        let text = Self.fitPaths(fit.args, width: fit.width - 20 - verb - clock, font: font)
+                        if fittedArguments[step.id] != text { fittedArguments[step.id] = text }
+                    }
             }.buttonStyle(.plain).foregroundStyle(step.failed ? failure : step.running ? secondary : stepColor)
             if detailed {
                 VStack(alignment: .leading, spacing: 10) {
@@ -222,6 +242,35 @@ struct WorkingIndicator: View {
         .padding(.vertical, verticalPadding).padding(.leading, 16)
         .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.18)).frame(width: 1) }
         .padding(.leading, 9)
+    }
+
+    // chat.js middlePaths/fitStepArgs: shorten directories before applying
+    // the line's normal ellipsis, so a filename survives on a narrow phone.
+    // Geometry changes (and a clock changing width) fit once, not every tick.
+    private static let paths = try! NSRegularExpression(pattern: #"(^|[\s=("'`])((?:~/|/|work/|skills/)[^\s"'`<>]+)"#)
+    static func middlePaths(_ text: String, room: Int) -> String {
+        let result = NSMutableString(string: text)
+        for match in paths.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)).reversed() {
+            let range = match.range(at: 2)
+            let path = (text as NSString).substring(with: range) as NSString
+            let slash = path.range(of: "/", options: .backwards).location
+            guard path.length > room, slash > 0, slash != NSNotFound, path.length - slash + 2 < path.length else { continue }
+            let tail = path.substring(from: slash)
+            let head = path.range(of: "/").location + 1
+            result.replaceCharacters(in: range, with: path.substring(to: max(head, room - (tail as NSString).length - 1)) + "…" + tail)
+        }
+        return result as String
+    }
+    private static func fitPaths(_ text: String, width: CGFloat, font: UIFont) -> String {
+        guard width > 0, (text as NSString).size(withAttributes: [.font: font]).width > width else { return text }
+        var low = 1, high = (text as NSString).length
+        while low < high {
+            let room = (low + high + 1) / 2
+            let trial = middlePaths(text, room: room)
+            if (trial as NSString).size(withAttributes: [.font: font]).width <= width { low = room }
+            else { high = room - 1 }
+        }
+        return middlePaths(text, room: low)
     }
 
     private static func icons(_ steps: [ToolStep]) -> [String] {
