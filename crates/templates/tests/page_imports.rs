@@ -78,12 +78,13 @@ fn a_built_page_names_its_hashed_files() {
     let pages: Vec<(&str, &str)> = fragment_templates::BUILT.iter().copied().filter(|(_, p)| p.ends_with("index.html")).collect();
     assert_eq!(pages.len(), 4, "the shell's page and the chat's three: {pages:?}");
     for (at, _) in pages {
-        let (file, link, dir): (Box<dyn Fn(&str) -> Option<&'static fragment_templates::File>>, &str, String) = if at == "shell" {
-            (Box::new(fragment_templates::shell), "/__shell/", "cell/shell/".into())
+        // its release's files beside it, by name
+        let (files, prefix, link, dir) = if at == "shell" {
+            (fragment_templates::SHELL, "", "/__shell/", "cell/shell/".to_string())
         } else {
-            let t = fragment_templates::blessed::template(at).expect("a built template is blessed");
-            (Box::new(move |p: &str| t.file(&format!("site/{p}"))), "./", format!("templates/{at}/site/"))
+            (fragment_templates::blessed::template(at).expect("a built template is blessed").files, "site/", "./", format!("templates/{at}/site/"))
         };
+        let file = |name: &str| files.iter().find(|f| f.path.strip_prefix(prefix) == Some(name));
         let page = std::str::from_utf8(file("index.html").expect("its page").bytes).unwrap();
         let open = format!("\"{link}");
         let named: Vec<&str> = page.match_indices(&open).map(|(i, _)| &page[i + open.len()..]).map(|r| &r[..r.find('"').unwrap()]).collect();
