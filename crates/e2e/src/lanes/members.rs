@@ -294,8 +294,10 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let joined = members.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == mine.as_str() && m["role"] == "editor" && m["kind"] == "agent"));
     let waited = crate::api::timing_parts(&r.header("server-timing"));
     s.ok(
-        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity, its list, its seed and its computer told",
-        r.status == 200 && row["agents"] == json!([mine]) && joined && ["identity", "list", "seed", "joined"].iter().all(|p| waited.iter().any(|w| w == p)),
+        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity, its install from the release and its list, its seed and its computer told after the answer",
+        r.status == 200 && row["agents"] == json!([mine]) && joined
+            && ["identity", "install", "list"].iter().all(|p| waited.iter().any(|w| w == p))
+            && !waited.iter().any(|w| w == "seed" || w == "joined"),
         json!({ "create": r.status, "row": row, "members": members.body, "waited": r.header("server-timing") }),
     );
     first_row_names_its_agent(s, api, &owner, &mine)?;
@@ -880,16 +882,19 @@ fn first_row_names_its_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str
     s.fake.set_latency(Duration::from_millis(250));
     let (made, rows, before) = std::thread::scope(|scope| {
         let made = scope.spawn(|| api.create_with(owner, json!({ "name": name, "template": "chat", "title": "Held", "agent": agent })));
-        // each distinct row the list shows, and how many before the answer
+        // each distinct row the list shows, and how many while its seed
+        // runs (before its template landed): in the create, or after its
+        // answer (a chat's, publish.rs `seeds_later`)
         let (mut rows, mut before): (Vec<Value>, usize) = (vec![], 0);
         loop {
             let answered = made.is_finished();
+            let landed = template_landed(api, owner, &name);
             let row = row_of_named(api, owner, &name).unwrap_or_default();
             if !row.is_null() && rows.last() != Some(&row) {
                 rows.push(row);
-                before += usize::from(!answered);
+                before += usize::from(!landed);
             }
-            if (answered && template_landed(api, owner, &name)) || Instant::now() > deadline {
+            if (answered && landed) || Instant::now() > deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(40));
