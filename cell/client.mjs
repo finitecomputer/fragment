@@ -206,11 +206,28 @@ function wanted() {
   return subs.size > 0 || lives.size > 0 || presenceHandlers.size > 0 || presenceData !== null || helloWaiters.length > 0;
 }
 
+// A socket a page asked for before this client came (`__fragmentLive`, the
+// chat's inline script: its handshake overlaps the page's modules), claimed
+// once, with what it heard meanwhile: its claim ends the bounds it kept
+// while unclaimed (a deadline, a cap on what it holds), so they never close
+// this client's socket. Taken if it is this client's own URL and still
+// opening or open; else closed. One that gave up first (its deadline, its
+// cap, its close) is no longer there, and this client dials as before, from
+// its own cursor, never from a cut-short replay.
+function adopted(url) {
+  const early = globalThis.__fragmentLive?.claim?.();
+  if (!early) return null;
+  if (early.ws.url === url.href && early.ws.readyState <= WebSocket.OPEN) return early;
+  early.ws.close();
+  return null;
+}
+
 function connect() {
   if (socket || ended) return;
   const url = new URL("__live", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(url);
+  const early = adopted(url);
+  const ws = early ? early.ws : new WebSocket(url);
   socket = ws;
   const opening = setTimeout(() => ws.close(), OPEN_WAIT_MS + backoff);
   ws.onopen = () => {
@@ -280,6 +297,12 @@ function connect() {
     if (wanted()) setTimeout(connect, backoff * (0.5 + Math.random()));
     backoff = Math.min(backoff * 2, 30000);
   };
+  // an adopted socket: as it happened, its opening (if it has), then what
+  // it heard since
+  if (early) {
+    if (ws.readyState === WebSocket.OPEN) ws.onopen();
+    for (const event of early.heard) ws.onmessage(event);
+  }
 }
 
 // One run of a live query: over the socket when it is open, else over

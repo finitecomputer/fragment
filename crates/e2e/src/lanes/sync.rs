@@ -1,6 +1,6 @@
 //! Folder sync through the real CLI against the cell and code.storage:
 //! an exit code as a script reads it, continuous sync with the change
-//! feed, and the event log's tail. What one pass does (conflicts, a
+//! feed, a viewer's read-only sync, and the event log's tail. What one pass does (conflicts, a
 //! commit whose answer is lost, modes, verify, the mirror source, what
 //! syncs, the mass-deletion guard) is host-tested in cli/src/sync.rs
 //! against the same code.storage fake, and large files are the `blobs`
@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use fragment_core::npub;
 use serde_json::{json, Value};
 
 use crate::api::Api;
@@ -64,6 +65,40 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let landed = files.iter().all(|f| at(f) == Some(format!("new {f}").into_bytes())) && at("gone.md").is_none();
     let one = s.fake.requests(&repo, "POST commit-pack") - packs == 1;
     s.ok("a push of three changed files and one deletion lands as one commit", code(&out) == 0 && landed && one, String::from_utf8_lossy(&out.stderr));
+
+    // a viewer syncs read-only (its token only reads): its mirror pulls,
+    // sends nothing and keeps its edits, named, exiting 5; its push is an
+    // editor's, refused in the host's words
+    let (name, c) = create(s, "sync-viewer")?;
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    s.commit(&c, &[("doc.md", Some(b"theirs"))]);
+    let reader = s.dir("sync-viewer-home");
+    s.login(api, &reader);
+    let reader_keys = s.cli_keys(&reader).context("the viewer's CLI logged in")?;
+    let r = api.share(&name, &npub::encode(reader_keys.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the CLI's viewer: {r}");
+    let dir = s.dir("sync-viewer");
+    let pulled = s.cli(api, &reader, &["sync", &name, "--dir", &dir_of(&dir)]);
+    let packs = s.fake.requests(&repo, "POST commit-pack");
+    std::fs::write(dir.join("doc.md"), "mine")?;
+    std::fs::write(dir.join("new.md"), "new")?;
+    let held = s.cli(api, &reader, &["sync", &name, "--dir", &dir_of(&dir)]);
+    let pushed = s.cli(api, &reader, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "push"]);
+    let said = String::from_utf8_lossy(&held.stdout).to_string();
+    let refused = String::from_utf8_lossy(&pushed.stderr).to_string();
+    s.ok(
+        "a viewer's mirror pulls, sends nothing and keeps its edits, listed as not sent (exit 5); its push is refused as an editor's",
+        code(&pulled) == 0
+            && code(&held) == 5
+            && said.contains("NOT SENT (2)")
+            && std::fs::read_to_string(dir.join("doc.md")).is_ok_and(|t| t == "mine")
+            && dir.join("new.md").is_file()
+            && s.fake.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"theirs"[..])
+            && s.fake.requests(&repo, "POST commit-pack") == packs
+            && code(&pushed) != 0
+            && refused.contains("editor"),
+        json!({ "pulled": String::from_utf8_lossy(&pulled.stderr), "held": said, "pushed": refused }),
+    );
 
     // continuous: the change feed pulls a remote write; a local edit pushes
     let (name, c) = create(s, "sync-watch")?;

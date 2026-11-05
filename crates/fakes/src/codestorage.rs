@@ -148,6 +148,9 @@ struct State {
     /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
     #[serde(skip)]
     sabotage_after: u32,
+    /// Commit packs answer 503, landing nothing, while set (`fail_commit_packs`).
+    #[serde(skip)]
+    packs_failing: bool,
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
@@ -187,6 +190,11 @@ struct State {
     /// search upsert to that fragment (`land_before_upserts`), by its name.
     #[serde(skip)]
     ahead: BTreeMap<String, VecDeque<Ahead>>,
+    /// The fragments whose CLI caller the host routes hold a viewer
+    /// (`view_only`): a token that writes is refused them (403), one that
+    /// reads (`?access=read`) is theirs.
+    #[serde(skip)]
+    viewing: BTreeSet<String>,
 }
 
 struct Inner {
@@ -499,9 +507,20 @@ impl Inner {
                         name.to_string()
                     }
                 };
-                let token = self.mint(st, &url, &["git:read", "git:write"], self.token_ttl_s);
+                // as the platform: a token that writes is an editor's; one
+                // that reads (`?access=read`) any member's
+                let write = match req.query.get("access").map(String::as_str) {
+                    None => true,
+                    Some("read") => false,
+                    Some(other) => return Response::json(400, &json!({ "error": "invalid_request", "message": format!("access is read, not {other:?}") })),
+                };
+                if write && st.viewing.contains(name) {
+                    return Response::json(403, &json!({ "error": "forbidden", "message": "this needs the editor role" }));
+                }
+                let scopes: &[&str] = if write { &["git:read", "git:write"] } else { &["git:read"] };
+                let token = self.mint(st, &url, scopes, self.token_ttl_s);
                 // the host's whole answer (fragment_proto::StorageToken)
-                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000 }));
+                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000, "write": write }));
             }
             // the search write API (crate::search), for a fragment whose
             // search is on; another's is a host without it (404)
@@ -694,6 +713,9 @@ impl Inner {
 
     fn commit_pack(&self, st: &mut State, url: &str, req: &Request) -> Response {
         st.commit_packs += 1;
+        if st.packs_failing {
+            return problem(503, "commits are unavailable (the fake's commit outage lever)");
+        }
         if st.sabotage > 0 && st.sabotage_after > 0 {
             st.sabotage_after -= 1;
         } else if st.sabotage > 0 {
@@ -1186,6 +1208,24 @@ impl CodeStorage {
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// Every commit pack answers 503 and lands nothing while `on`: a
+    /// commit outage, its repos and reads as ever.
+    pub fn fail_commit_packs(&self, on: bool) {
+        self.with(|st| st.packs_failing = on);
+    }
+
+    /// The host routes hold the CLI's caller a viewer of `name` (true) or
+    /// its editor again (false).
+    pub fn view_only(&self, name: &str, viewing: bool) {
+        self.with(|st| {
+            if viewing {
+                st.viewing.insert(name.to_string());
+            } else {
+                st.viewing.remove(name);
+            }
+        });
     }
 
     /// `sabotage_commit_packs(n)`, from the commit pack after the next

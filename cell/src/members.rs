@@ -313,9 +313,17 @@ impl FragmentCell {
             if let Some(role) = row["role"].as_str().and_then(Role::parse) {
                 body["searched"] = json!(searched);
                 body["listed"] = json!(fragment_core::listed::for_role(&listed, role));
-                if let Ok(Some(face)) = self.meta(MetaKey::Face) {
-                    body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
-                    body["face"]["agents"] = json!(agents);
+                // none stored yet (no template, one not blessed, a release
+                // read at its making that failed, nothing installed): the
+                // face a list reads a row without one as, an untitled app,
+                // so its agents are in every row from the first
+                match self.meta(MetaKey::Face) {
+                    Ok(stored) => {
+                        let shown = stored.unwrap_or_else(|| face(FragmentKind::App, None, None, None));
+                        body["face"] = serde_json::from_str(&shown).unwrap_or(Value::Null);
+                        body["face"]["agents"] = json!(agents);
+                    }
+                    Err(e) => console_error!("{name}: its face did not read ({:?}): {}", e.code, e.message),
                 }
             }
             // the owner's row: the sharing now, which no later change undoes
@@ -547,12 +555,16 @@ impl FragmentCell {
     }
 
     /// `target`, its owner's own agent (`own_agent`), made an editor as
-    /// the fragment is made: as its owner's `PUT members/{agent}` adds it
-    /// (its list rows, its computer told it joined), in the create's step.
-    pub(crate) async fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
+    /// the fragment is made, in the create's turn: written with its
+    /// owner's row and before any await, so no list row of it (the
+    /// request's flush, `after_answer`'s, the alarm's) names no agent. Its
+    /// rows and its computer's notice are sent as its owner's `PUT
+    /// members/{agent}` sends them (`write_member`), the notice once its
+    /// template is in (`joins_wait`).
+    pub(crate) fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
         let owner = self.must(MetaKey::Owner)?;
         let actor = Actor { role: Some(Role::Owner), by: owner, for_owner: None };
-        self.put_member(&actor, target, SetRole { role: Role::Editor }, false, &mut crate::js::Laps::start()).await
+        self.write_member(&actor, target, SetRole { role: Role::Editor }, false)
     }
 
     /// A test hook (`ops::test_fragment`'s `member`): `who` made a member,
@@ -572,6 +584,19 @@ impl FragmentCell {
     /// them"): anyone else joins by their own yes to an invite, but for a
     /// test's `lever`.
     async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool, laps: &mut crate::js::Laps) -> CellResult<Member> {
+        let member = self.write_member(actor, target, body, lever)?;
+        // the agent's list holds this fragment before its computer is told
+        self.flush_index().await;
+        laps.lap("list");
+        self.flush_joined().await;
+        laps.lap("joined");
+        Ok(member)
+    }
+
+    /// [`Self::put_member`]'s writes, in one turn with no await: the
+    /// member's row, its list changes, and an agent's notice queued. Their
+    /// sends are the caller's (`put_member`, or a create's own).
+    fn write_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
@@ -641,11 +666,6 @@ impl FragmentCell {
                 self.agents_join(&target.id, &agents, body.role)?;
             }
         }
-        // the agent's list holds this fragment before its computer is told
-        self.flush_index().await;
-        laps.lap("list");
-        self.flush_joined().await;
-        laps.lap("joined");
         Ok(member)
     }
 

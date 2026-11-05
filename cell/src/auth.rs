@@ -74,7 +74,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::roundtrip::{self, Trip};
 use fragment_core::{cli_code, form, npub, site};
-use fragment_proto::ErrorCode;
+use fragment_proto::{ErrorCode, Visibility};
+use serde::{Deserialize, Serialize};
 use worker::*;
 
 use crate::ask_registry;
@@ -89,6 +90,14 @@ pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
 /// A frame's session cookie: partitioned, for the page that framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
+/// The header only a frame's redemption sets on its call to its
+/// fragment's `/signin/visibility` (`anyone_reads`); the router passes no
+/// client's of that name, so the fragment answers that route to nothing else.
+pub const SIGNIN_HEADER: &str = "x-fragment-signin";
+/// How long a frame's redemption waits on its fragment's visibility,
+/// asked beside the registry's Redeem, before it takes the check hop as
+/// if anyone may read it.
+const VISIBILITY_WAIT_MS: u64 = 2_000;
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
 /// `/cli`'s forms: a form token and a code, or what a person typed.
@@ -913,6 +922,20 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
         let sign_out = a(&format!("{base}__signout"), &format!("Sign out of {label}"));
         (format!("You don't have access to {label}"), format!("<p>Ask {ask} to share it with you.</p>{why}<p>{home} · {sign_out}</p>"))
     };
+    // A page refused as signed out in a frame says so to the page around
+    // it, the platform's alone (`{fragment: "signin-blocked", name, why:
+    // "refused"}`): every frame of the shell's comes signed in through its
+    // mint, so one refused there was sent here with its frame cookie, which
+    // the browser kept from it (shell.js says so, in its place). Only a
+    // members-only fragment's frame comes straight here (`fragment`): one
+    // whose page may admit anyone goes through the `check=frame` hop first.
+    let body = match framed && signed_out && !link_changed && !signing_in {
+        true => format!(
+            "{body}<script>parent.postMessage({{ fragment: \"signin-blocked\", name: {name:?}, why: \"refused\" }}, {platform:?})</script>",
+            platform = cfg.platform()
+        ),
+        false => body,
+    };
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -927,6 +950,41 @@ async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url) -> Cell
     }
 }
 
+/// `/signin/visibility`'s answer, the fragment's: who may read it now.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SigninVisibility {
+    pub visibility: Visibility,
+}
+
+/// Whether fragment `name`, asked now (`/signin/visibility`, asked once),
+/// may show its page to a framed request with no cookie: anything but
+/// members-only. Not known is yes: an error, a fragment of another release
+/// (`routed::send` refuses it, as an older fragment refuses this call
+/// before reading it), or no answer in `VISIBILITY_WAIT_MS`.
+async fn anyone_reads(env: &Env, name: &str) -> bool {
+    let asked = std::pin::pin!(async {
+        let mut resp = crate::routed::send(env, "FRAGMENT", name, crate::routed::internal_request("signin/visibility", "{}")?).await?;
+        match resp.status_code() {
+            200 => Ok(resp.json::<SigninVisibility>().await?.visibility),
+            status => Err(CellError::host(format!("its fragment answered {status}"))),
+        }
+    });
+    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(VISIBILITY_WAIT_MS)));
+    let why = match futures_util::future::select(asked, waited).await {
+        futures_util::future::Either::Left((Ok(visibility), _)) => return visibility != Visibility::Members,
+        futures_util::future::Either::Left((Err(e), _)) => e.message,
+        futures_util::future::Either::Right(_) => format!("no answer in {VISIBILITY_WAIT_MS} ms"),
+    };
+    console_error!("{}", serde_json::json!({ "event": "signin.visibility-unknown", "fragment": name, "message": why }));
+    true
+}
+
+/// `f`'s answer, and how long it took (ms), for `Laps::took`.
+async fn timed<F: std::future::Future>(f: F) -> (F::Output, i64) {
+    let at = crate::js::now_ms();
+    (f.await, crate::js::now_ms() - at)
+}
+
 /// Whether a path on a fragment's origin is sign-in's.
 pub fn is_fragment_route(rest: &str) -> bool {
     matches!(rest, "__signin" | "__signout")
@@ -936,9 +994,11 @@ pub fn is_fragment_route(rest: &str) -> bool {
 /// request's Fetch Metadata allows (`fetched`, the router's):
 ///
 /// - `__signin?token=` redeems in a frame only a frame redemption, into
-///   the frame cookie, then looks whether the browser kept it
-///   (`check=frame`); anywhere else, only a top-level one, into the site
-///   cookie;
+///   the frame cookie, and goes straight on to its page (a browser that
+///   kept the cookie from it is refused there as signed out, and the page
+///   says so to the shell: `refused`), or, for a fragment that may admit
+///   anyone (`anyone_reads`), through the `check=frame` hop first;
+///   anywhere else, only a top-level one, into the site cookie;
 /// - `__signin` without one starts at the platform from a navigation of
 ///   a page only: in a frame it answers `blocked`, and from an image, a
 ///   script, or a fetch it is refused;
@@ -953,10 +1013,28 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             if let Some(redeem) = query(url, "token") {
                 // what it waited on, for its client (`Server-Timing`)
                 let mut laps = crate::js::Laps::start();
-                let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed }).await?;
-                laps.lap("redeem");
+                let asked = calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed };
+                let redeeming = timed(ask_registry(env, &asked));
+                // a frame's asks its fragment who may read it, side by side
+                let ((redeemed, redeem_ms), anyone) = match fetched.framed {
+                    true => {
+                        let (redeemed, (anyone, ms)) = futures_util::future::join(redeeming, timed(anyone_reads(env, name))).await;
+                        laps.took("visibility", ms);
+                        (redeemed, anyone)
+                    }
+                    false => (redeeming.await, false),
+                };
+                laps.took("redeem", redeem_ms);
+                let redeemed = redeemed?;
                 let to = match fetched.framed {
-                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
+                    // One hop only where the fragment, asked now, admits no one without a cookie (members-only: a browser that kept it from the page is refused there, `refused`); anywhere else, or not known, the check hop first.
+                    true => {
+                        let cookie = frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url));
+                        match anyone {
+                            true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[cookie]),
+                            false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[cookie]),
+                        }
+                    }
                     false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
                 };
                 return Ok(laps.stamp(to?)?);

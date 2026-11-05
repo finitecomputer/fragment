@@ -31,7 +31,7 @@ use serde::Serialize;
 
 use crate::api::{Client, Code, CodedError};
 use crate::blobs::Blobs;
-use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN};
+use crate::codestorage::{Author, Change, CodeStorage, CsError, Wants, MAIN};
 
 #[derive(Subcommand)]
 pub enum SessionCmd {
@@ -449,7 +449,7 @@ struct Written {
 }
 
 fn write(c: &Client, name: &str, spool: &Spool) -> Result<Written> {
-    let storage = CodeStorage::connect(c, name)?;
+    let storage = CodeStorage::connect(c, name, Wants::Write)?;
     let blobs = Blobs::new(c, name);
     let author = Author::writer(&c.writer_id());
     let h = held(&storage, &blobs)?;
@@ -1155,7 +1155,7 @@ mod tests {
         let other = spooled(vec![newer()]);
         write(&c, NAME, &other).unwrap();
         search::sync(&c, NAME, &other);
-        let storage = CodeStorage::connect(&c, NAME).unwrap();
+        let storage = CodeStorage::connect(&c, NAME, Wants::Write).unwrap();
         let head = storage.branch_head(MAIN).unwrap().unwrap();
         let entry = spool.entries["hermes-a"].clone();
         let wrote = search::write_one(&c, NAME, &spool, &storage, &Blobs::new(&c, NAME), &head, "hermes-a", &entry, &read).unwrap();

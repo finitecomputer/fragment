@@ -505,9 +505,18 @@ partitioned cookie (`fragment_core::frames`):
   "signed-out"}` to the platform's origin alone.
 - The fragment redeems it only in a frame's navigation, as
   `fragment_frame` (`HttpOnly; Secure; SameSite=None; Partitioned`,
-  `__Host-` over https), then checks it was kept
-  (`__signin?check=frame&return=`): without it, a page that posts
-  `{fragment: "signin-blocked", name, why: "cookies"}` to its parent.
+  `__Host-` over https), and `302` to the page it was asked for, as it
+  was asked. A browser that kept the cookie from it is refused there as
+  signed out (401), and that page posts `{fragment: "signin-blocked",
+  name, why: "refused"}` to the platform's origin alone; the shell, whose
+  frames all come through the mint, says the browser keeps a window's own
+  sign-in from it (as `why: "cookies"`). That is so only where the page
+  admits no one without a cookie, so the redemption asks the fragment its
+  visibility as it redeems: unless it answers members-only (an error, a
+  release mismatch or no answer in 2 s counts as not), it `302`s to
+  `__signin?check=frame&return=` instead: with the cookie, on to the
+  page; without it, a page that posts `{fragment: "signin-blocked", name,
+  why: "cookies"}` to its parent. Nothing in a request's URL changes which.
 - `fragment_frame` counts only in frames and on the fragment's own page.
 
 ### Asking first
@@ -651,7 +660,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in its first list rows, its computer told it joined, as `PUT members/{agent}` adds one after; anyone else's is 403, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400). Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `repo`, `key`, `manifest`, `list` (without `agent`), `seed`, `agent` (its join, once its template is in) and `alarm` |
+| `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400). Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `repo`, `key`, `manifest`, `list`, `seed`, `joined` (with `agent`: its computer told) and `alarm` |
 | `GET /api/fragments` | any signer | → `{fragments: [ListedFragment {name, role, kind, title?, picture?, agentRole?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, pinned?, listed?}]}`. `kind` is `app`, `chat`, `agent`, `brain`, `skills` or `sessions` (a client reads an unknown one as `other`: `FragmentKind::Other`); `picture` an agent's face or an app's icon; `agentRole` an agent's role (An agent's name and picture); `agents` its agent members, the first added first, at most `LISTED_AGENTS_MAX`; `preview` (at most `LISTED_PREVIEW_MAX_BYTES`) and `previewAt`, a chat's newest message their search holds (Search); `unread`, a chat's messages after their last `seen`, at most `LISTED_UNREAD_MAX`, absent at 0; `sharing`, their own fragments' `{visibility, members, guests, invites}`; `archived: true`, `dock: false` and `pinned: true` their own choices; `listed`, what its members are doing (Listed records). An agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there for it and `owned: true` on that identity's own, without `listed` |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket: `{type: "hello"}`, then `{type: "changed"}` whenever their list changes, and `{type: "invited"}` whenever the invites waiting on them change. Frames name nothing: the page reads again with its own credential. A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `{archived: bool}` → `{name, archived}`: their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
@@ -678,7 +687,8 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
 | `POST /api/f/{name}/door` | its owner, in person (never an agent) | `{act: "link", agent}` → `{door, agent, relayed}`, or `{act: "unlink"}` → `{ok}` (An agent's doors). No connector, one the deployment does not allow, or an agent not the owner's, 403; another `act` 400 |
-| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S` |
+| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt, write: true}`: ES256, this repo, `git:read`+`git:write`, `STORAGE_TOKEN_TTL_S` |
+| `GET /api/f/{name}/storage-token?access=read` | a member, viewer and up | → the same with `write: false`: `git:read` alone. A token reads the repo's whole history, not only main's files, so membership decides either (`access::repo_role`): no visibility floor, share link or agent of theirs in lends one, and an agent acting for someone holds the lower of their membership and its cap (R17). A host before it named no `write` (its tokens all wrote), and a client that sends no `access` is refused as a viewer was before (403): an older CLI never holds a token it cannot push with. Another `access` 400 |
 | `POST /api/f/{name}/refresh` | editor | `{ref?: "main" \| "live"}`, the ref the writer moved (none, or no body: both; another ref 400) → `{ok, refs: {main: {pin, moved} \| {absent}, live: …}}`, the refs it read, once a moved live is installed. A writer to the repo asks this after its push; the platform follows its own moves, and a busy fragment's poll is the backstop (`FRAGMENT_POLL_INTERVAL_S`) |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main (at most `FILE_WRITES_MAX` files, 400; `API_FILES_WRITE_MAX_BYTES` decoded in a body of `BODY_MAX_BYTES`, 413; relative paths, no `.` or `..`). The same `key` from the same person answers the first commit again; a write of what main holds commits nothing. Main moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
@@ -1728,6 +1738,14 @@ between two changes to the fragment, one at a time per id (429
 - `me()` → the hello's `{id, principal, role, platform}`; `closed(fn)`,
   called with `{code, reason}` after 4003 or 4004, which end the socket.
   Otherwise it reconnects by itself with jittered backoff.
+- A page may dial its socket before the library comes, from an inline
+  script: `window.__fragmentLive = {claim}`, `claim()` answering `{ws,
+  heard}` (its own `__live`, the messages it heard) once and ending its
+  bounds, or `null` when it gave up: unclaimed, a page's script closes it
+  and lets it go past the library's opening wait, a cap on what it holds,
+  or its close. The first connect adopts a socket claimed, with what it
+  heard, if it is still opening or open, and closes it otherwise. The chat
+  template does.
 
 **The stylesheet** (`<link rel="stylesheet" href="./__fragment.css">`,
 `cell/fragment.css`) is for a page that links it; the platform adds it to

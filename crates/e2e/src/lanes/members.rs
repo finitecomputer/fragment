@@ -24,7 +24,8 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let (bob, carol, dave, erin) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let name = s.named(api, &owner, "members")?;
-    s.create(api, &owner, &name)?;
+    let made = s.create(api, &owner, &name)?;
+    let repo = made["repo"].as_str().unwrap_or("").to_string();
     let path = |rest: &str| format!("/api/f/{name}/{rest}");
     let npub_of = |k: &Keys| npub::encode(k.pubkey_hex());
 
@@ -65,7 +66,8 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&bob, "PUT", &path(&format!("members/{}", npub_of(&carol))), Some(&json!({ "role": "viewer" })))?;
     s.ok("a viewer cannot add members", r.status == 403, &r);
     let r = api.signed(&bob, "GET", &path("storage-token"), None)?;
-    s.ok("a viewer cannot mint a storage token", r.status == 403, &r);
+    s.ok("a viewer cannot mint a storage token that writes (an older CLI, which asks for no other, is refused as before)", r.status == 403, &r);
+    the_repo_is_its_members(s, api, &owner, &name, &repo)?;
     let r = api.signed(&owner, "PUT", &path(&format!("members/{}", bob.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     s.ok("the owner promotes by hex key", r.status == 200 && r.body["role"] == "editor", &r);
     let r = api.signed(&bob, "GET", &path("storage-token"), None)?;
@@ -292,9 +294,32 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let joined = members.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == mine.as_str() && m["role"] == "editor" && m["kind"] == "agent"));
     let waited = crate::api::timing_parts(&r.header("server-timing"));
     s.ok(
-        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity and its join",
-        r.status == 200 && row["agents"] == json!([mine]) && joined && ["identity", "agent"].iter().all(|p| waited.iter().any(|w| w == p)),
+        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity, its list, its seed and its computer told",
+        r.status == 200 && row["agents"] == json!([mine]) && joined && ["identity", "list", "seed", "joined"].iter().all(|p| waited.iter().any(|w| w == p)),
         json!({ "create": r.status, "row": row, "members": members.body, "waited": r.header("server-timing") }),
+    );
+    first_row_names_its_agent(s, api, &owner, &mine)?;
+    // one with no face at its making: no template, or one not blessed (whose
+    // release read gives none, as a read that fails does): its row names its
+    // agent all the same, as an untitled app's, from the create's answer
+    let faceless: Vec<Value> = [("members-faceless", None), ("members-faceless-todo", Some("todo"))]
+        .into_iter()
+        .map(|(label, template)| {
+            let name = s.named(api, &owner, label)?;
+            let mut body = json!({ "name": name, "agent": mine });
+            if let Some(t) = template {
+                body["template"] = json!(t);
+            }
+            let r = api.create_with(&owner, body)?;
+            anyhow::ensure!(r.status == 200, "made with its agent, {template:?}: {r}");
+            s.owned(&r.body, &owner);
+            Ok(json!({ "template": template, "create": r.status, "row": row_of_named(api, &owner, &name)? }))
+        })
+        .collect::<Result<_>>()?;
+    s.ok(
+        "made with its agent and no face yet (no template, or one not blessed): its owner's row names its agent from the create's answer, an app's",
+        faceless.iter().all(|f| f["create"] == 200 && f["row"]["agents"] == json!([mine]) && f["row"]["kind"] == "app"),
+        json!(faceless),
     );
     let again = api.create_with(&owner, json!({ "name": together, "template": "chat", "agent": mine }))?;
     let members = api.signed(&owner, "GET", &format!("/api/f/{together}/members"), None)?;
@@ -315,6 +340,20 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         "someone else's agent, or a person, named at the making is refused (403) and nothing is made: the name stays free",
         tried == [403, 403] && status == 404 && free.status == 200,
         json!({ "tried": tried, "status": status, "free": free.status }),
+    );
+    // a connector's only editor is its owner: its own agent at its making
+    // (an editor) is refused before anything is made, and asked again the same
+    let connector = s.named(api, &owner, "members-connector-agent")?;
+    let tried: Vec<u16> = (0..2).map(|_| api.create_with(&owner, json!({ "name": connector, "template": "telegram", "agent": mine })).map(|r| r.status)).collect::<Result<_>>()?;
+    let status = api.status(&owner, &connector)?.status;
+    let free = api.create_with(&owner, json!({ "name": connector, "template": "telegram" }))?;
+    s.owned(&free.body, &owner);
+    let members = api.signed(&owner, "GET", &format!("/api/f/{connector}/members"), None)?;
+    let alone = members.body["members"].as_array().is_some_and(|m| m.len() == 1);
+    s.ok(
+        "a connector made with its owner's agent is refused (400), the same again, and nothing is made: the name stays free, and made without it, its owner is its one member",
+        tried == [400, 400] && status == 404 && free.status == 200 && alone,
+        json!({ "tried": tried, "status": status, "free": free.status, "members": members.body }),
     );
 
     // who has access to what: the owner's view of all they own (GET /api/access)
@@ -823,8 +862,154 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+const FIRST_ROW: &str = "a chat made with its agent while its seed is held (code.storage slow): every row its owner's list shows of it, the first while the seed runs, names its agent";
+
+/// A chat made with its owner's own agent, its seed held (code.storage
+/// slow, as a preview's is): every row of it its owner's list shows, from
+/// the first, names the agent, until its template has landed, whether its
+/// seed runs in the create or after the answer. A row the create, its
+/// `after_answer` or its alarm sends goes out with the agent in it, or
+/// not at all: none names no agent.
+fn first_row_names_its_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str) -> Result<()> {
+    if s.hosted() {
+        s.skip(FIRST_ROW, "it holds the seed with the fakes' latency");
+        return Ok(());
+    }
+    let name = s.named(api, owner, "members-first-row")?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    s.fake.set_latency(Duration::from_millis(250));
+    let (made, rows, before) = std::thread::scope(|scope| {
+        let made = scope.spawn(|| api.create_with(owner, json!({ "name": name, "template": "chat", "title": "Held", "agent": agent })));
+        // each distinct row the list shows, and how many before the answer
+        let (mut rows, mut before): (Vec<Value>, usize) = (vec![], 0);
+        loop {
+            let answered = made.is_finished();
+            let row = row_of_named(api, owner, &name).unwrap_or_default();
+            if !row.is_null() && rows.last() != Some(&row) {
+                rows.push(row);
+                before += usize::from(!answered);
+            }
+            if (answered && template_landed(api, owner, &name)) || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        (made.join().expect("the create's thread"), rows, before)
+    });
+    s.fake.set_latency(Duration::ZERO);
+    let made = made?;
+    s.owned(&made.body, owner);
+    s.ok(
+        FIRST_ROW,
+        made.status == 200 && before > 0 && !rows.is_empty() && rows.iter().all(|r| r["agents"] == json!([agent])) && template_landed(api, owner, &name),
+        json!({ "create": made.status, "before": before, "rows": rows }),
+    );
+    Ok(())
+}
+
+/// Whether `name`'s template has landed (its `template` event).
+fn template_landed(api: &Api, owner: &Keys, name: &str) -> bool {
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
+    r.is_ok_and(|r| r.body["events"].as_array().into_iter().flatten().any(|e| e["kind"] == "template"))
+}
+
 /// `name`'s row in `owner`'s list, as it reads now.
 fn row_of_named(api: &Api, owner: &Keys, name: &str) -> Result<serde_json::Value> {
     let r = api.signed(owner, "GET", "/api/fragments", None)?;
     Ok(r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).cloned().unwrap_or_default())
+}
+
+/// Goal: a storage token reads the repo's whole history (decision of
+/// 2026-11-04: a viewer's reads it, history and all), so it is its
+/// members' alone, whatever the visibility. Method: a viewer mints one that
+/// only reads (`?access=read`), which code.storage reads with and refuses a
+/// commit; an agent acting for the viewer mints that one, and none that
+/// writes; then, on each visibility, a signed-in non-member, the same with
+/// the share link, an agent acting for a non-member, and no one signed
+/// mint none; nor does a person who reads it only through an agent of
+/// theirs that is a member. Its viewer and members leave after, so the
+/// lane's count of members stands (a member's new agent joins with them,
+/// decision 64, and leaves with them).
+fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, name: &str, repo: &str) -> Result<()> {
+    use base64::Engine;
+    let path = |rest: &str| format!("/api/f/{name}/{rest}");
+    let read = path("storage-token?access=read");
+    let viewer = &api.person()?;
+    let r = api.share(name, &npub::encode(viewer.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "the repo's viewer, in: {r}");
+    let r = api.signed(viewer, "GET", &read, None)?;
+    let token = r.body["token"].as_str().unwrap_or("").to_string();
+    let claims: Value = token
+        .split('.')
+        .nth(1)
+        .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    s.ok(
+        "a viewer mints a token that only reads (?access=read): this repo, git:read alone, write false",
+        r.status == 200 && r.body["write"] == false && r.body["repo"] == repo && claims["repo"] == repo && claims["scopes"] == json!(["git:read"]) && claims["sub"] == format!("reader:{}", api.identity(viewer)?),
+        json!({ "reply": r.body, "claims": claims }),
+    );
+    let http = reqwest::blocking::Client::new();
+    let branch = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
+    let commit = http.post(format!("{}/api/repos/{repo}/commit-pack", s.fake.url)).bearer_auth(&token).body("{}").send()?.status().as_u16();
+    s.ok("code.storage reads with it (a fresh repo: 404, no main) and refuses it a commit (403)", branch == 404 && commit == 403, json!({ "branch": branch, "commit": commit }));
+    let bad = api.signed(viewer, "GET", &path("storage-token?access=write"), None)?;
+    s.ok("another access is refused (400)", bad.status == 400, &bad);
+
+    let viewer_id = api.identity(viewer)?;
+    let (agent, _) = super::delegation::agent_of(api, viewer)?;
+    let reads = api.signed(&agent, "GET", &format!("{read}&for={viewer_id}"), None)?;
+    let writes = api.signed(&agent, "GET", &path(&format!("storage-token?for={viewer_id}")), None)?;
+    s.ok(
+        "an agent acting for the viewer mints the token that reads, and none that writes (R17: the lower of their roles)",
+        reads.status == 200 && reads.body["write"] == false && writes.status == 403,
+        format!("{reads} {writes}"),
+    );
+
+    let stranger = api.person()?;
+    let stranger_id = api.identity(&stranger)?;
+    let (strangers_agent, _) = super::delegation::agent_of(api, &stranger)?;
+    let mut seen = vec![];
+    for visibility in ["members", "link", "public"] {
+        let set = api.signed(owner, "PUT", &path("visibility"), Some(&json!({ "visibility": visibility })))?;
+        let link = api.status(owner, name)?.body["viewToken"].as_str().unwrap_or("").to_string();
+        let status = |r: Result<crate::api::Reply>| r.map(|r| r.status).unwrap_or(0);
+        seen.push(json!({
+            "visibility": visibility,
+            "set": set.status,
+            "signed": status(api.signed(&stranger, "GET", &read, None)),
+            "link": status(api.signed(&stranger, "GET", &format!("{read}&view={link}"), None)),
+            "agent": status(api.signed(&strangers_agent, "GET", &format!("{read}&for={stranger_id}"), None)),
+            "anonymous": status(api.unsigned("GET", &format!("{read}&view={link}"), None)),
+        }));
+    }
+    let back = api.signed(owner, "PUT", &path("visibility"), Some(&json!({ "visibility": "link" })))?;
+    s.ok(
+        "on every visibility (members, link, public), a signed-in non-member, the same with the share link, and an agent acting for one mint no token (403), nor does anyone unsigned (401)",
+        back.status == 200 && seen.iter().all(|v| v["set"] == 200 && v["signed"] == 403 && v["link"] == 403 && v["agent"] == 403 && v["anonymous"] == 401),
+        json!(seen),
+    );
+
+    // a person whose agent is a member reads the fragment as a viewer
+    // (FIN-11), but its repo is a membership's: theirs is none
+    let through = api.person()?;
+    let (their_agent, _) = super::delegation::agent_of(api, &through)?;
+    let r = api.share(name, &npub::encode(their_agent.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "a non-member's agent, in: {r}");
+    let files = api.signed(&through, "GET", &path("files"), None)?;
+    let token = api.signed(&through, "GET", &read, None)?;
+    // the lane goes on counting its members: these leave (the viewer with
+    // its agent, as one entity)
+    let gone = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(their_agent.pubkey_hex()))), None)?;
+    let left = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(viewer.pubkey_hex()))), None)?;
+    let members = api.signed(owner, "GET", &path("members"), None)?;
+    s.ok(
+        "a person whose agent is a member reads its files, and mints no token (403): the repo is a membership's",
+        files.status == 200 && token.status == 403 && token.message().contains("agent's membership"),
+        format!("{files} {token}"),
+    );
+    let principals: Vec<&str> = members.body["members"].as_array().into_iter().flatten().filter_map(|m| m["principal"].as_str()).collect();
+    anyhow::ensure!(gone.status == 200 && left.status == 200 && principals.len() == 2, "the check's members left: {gone} {left} {principals:?}");
+    Ok(())
 }

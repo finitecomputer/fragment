@@ -486,11 +486,12 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "aged": ms, "invites": aged })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "members-while-shot" | "fail-search-index")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "lose-video-answers" | "fail-cards" | "members-while-shot" | "fail-search-index" | "fail-signin-visibility")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
                     "members-while-shot" => MetaKey::TestMembersWhileShot,
                     "fail-search-index" => MetaKey::TestFailSearchIndex,
+                    "fail-signin-visibility" => MetaKey::TestFailSigninVisibility,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,

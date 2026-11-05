@@ -915,6 +915,18 @@ impl Browser {
         Ok(self.held.get(&page.session).into_iter().flatten().map(|(_, url)| url.clone()).collect())
     }
 
+    /// A cookie of `cookies`' (its name, domain, path, and partition key,
+    /// if it has one) deleted, as a browser that keeps none drops it.
+    pub fn delete_cookie(&mut self, page: &Page, cookie: &Value) -> Result<()> {
+        let mut params = json!({ "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"] });
+        // (an object in newer Chrome's protocol, a site's string in older)
+        if !cookie["partitionKey"].is_null() {
+            params["partitionKey"] = cookie["partitionKey"].clone();
+        }
+        self.send("Network.deleteCookies", params, Some(&page.session))?;
+        Ok(())
+    }
+
     /// Every held request sent on, or (`fail`) failed as a dropped
     /// connection fails one; none held from now on.
     pub fn release(&mut self, page: &Page, fail: bool) -> Result<()> {
