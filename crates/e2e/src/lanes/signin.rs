@@ -37,7 +37,7 @@ pub(super) fn who(api: &Api, session: &str) -> Result<Value> {
 
 /// The shell's page, which `/` and `/settings` are for everyone.
 fn is_shell(r: &Reply) -> bool {
-    r.status == 200 && r.text.contains("/__shell/shell.js")
+    r.status == 200 && r.text.contains(&format!("/__shell/{}", super::shell::shell_bundle()))
 }
 
 /// `/settings` is the shell's page for everyone, as `/` is: its script
@@ -514,7 +514,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("home is the shell", is_shell(&home), &home);
     let settings = with_session(api, "GET", "/settings", &chooser)?;
     let theirs = from_shell(api, &chooser, "GET", "/api/fragments", None, &api.base, "same-origin")?;
-    let script = api.unsigned("GET", "/__shell/settings.js", None)?;
+    // Settings' words, in the shell's bundle (settings.js in it)
+    let script = api.unsigned("GET", &format!("/__shell/{}", super::shell::shell_bundle()), None)?;
     s.ok(
         "their settings are the shell's: it knows who they are, that they have no fragments yet, and hands a coding agent this platform's llms.txt (the install folded beside it)",
         is_shell(&settings)
@@ -775,10 +776,11 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the confirmation tells you to return to the terminal", added_page.text.contains("You can return to your terminal."), &added_page);
     // every platform page refuses frames; its redirects need not (a
     // redirect shows nothing)
+    let bundle = format!("/__shell/{}", super::shell::shell_bundle());
     let pages = [
-        ("the shell's settings", "/__shell/shell.js", with_session(api, "GET", "/settings", &paul)?),
-        ("the shell, for someone new", "/__shell/shell.js", with_session(api, "GET", "/", &newcomer)?),
-        ("the shell, signed out", "/__shell/shell.js", api.unsigned("GET", "/", None)?),
+        ("the shell's settings", bundle.as_str(), with_session(api, "GET", "/settings", &paul)?),
+        ("the shell, for someone new", bundle.as_str(), with_session(api, "GET", "/", &newcomer)?),
+        ("the shell, signed out", bundle.as_str(), api.unsigned("GET", "/", None)?),
         ("the sign-out button", "Sign out", with_session(api, "GET", "/auth/logout", &paul)?),
         ("the CLI code page", "name=\"code\"", with_session(api, "GET", "/cli", &paul)?),
         ("a CLI key to confirm", "Add this key", confirm),

@@ -14,6 +14,14 @@
 // no shell: `ALL` is the templates a person or an agent scaffolds, and
 // `SHELL` is empty, so neither is an input of the CLI's build.
 //
+// With `bundle` (which `platform` turns on), the pages `PAGES` names are built (bundle.rs), not held
+// as written: the shell's and the chat, Telegram and Session Archive pages,
+// their scripts bundled and every script and stylesheet of their own named
+// by its hash. Each built
+// file is a file of its template or the shell like any other, from OUT_DIR;
+// the shell's sources its bundle holds are no file of the release (nothing
+// asks for them), while a template's stay at their names.
+//
 // A template may hold another's files through a symlink (the chat's
 // agent.png is the agent's, and so is the shell's): one asset, and
 // embedded, its bytes are in a binary once. A symlink in a template that
@@ -24,6 +32,15 @@ use std::{env, fs, path::Path, path::PathBuf};
 use sha2::{Digest, Sha256};
 
 include!("src/blessed_names.rs");
+
+#[cfg(feature = "bundle")]
+mod bundle;
+
+/// The pages the release builds (bundle.rs), each where it sits: the
+/// shell's (`shell`, cell/shell/), or a blessed template's site/, and how
+/// it names a file beside it.
+#[cfg(feature = "bundle")]
+const PAGES: &[(&str, &str)] = &[("chat", "./"), ("sessions", "./"), ("shell", "/__shell/"), ("telegram", "./")];
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -94,15 +111,39 @@ fn main() {
     names.sort();
     let mut statics = Statics { ids: BTreeMap::new() };
     let mut src = String::new();
+    let out_dir = fs::canonicalize(env::var("OUT_DIR").unwrap()).expect("OUT_DIR");
+    // the files a page's build made or named anew (bundle.rs): where, and
+    // path; and the shell's sources its bundle holds, which the release
+    // does not (none without `bundle`, which builds no page)
+    #[allow(unused_mut)]
+    let mut built: Vec<(String, String)> = Vec::new();
+    #[allow(unused_mut)]
+    let mut shell_bundled: Vec<String> = Vec::new();
+    #[cfg(feature = "bundle")]
+    let esbuild = bundle::Esbuild::installed(&repo);
+    #[cfg(feature = "bundle")]
+    let page = |at: &str, dir: PathBuf| {
+        let &(_, link) = PAGES.iter().find(|(p, _)| *p == at)?;
+        Some(bundle::build(&esbuild, &bundle::Page { dir, link }, &repo, &out_dir.join("web").join(at)))
+    };
     for name in &names {
         let mut files = Vec::new();
         collect(&tdir.join(name), &tdir.join(name), &mut files);
+        // its page built (bundle.rs), in place of its own; its sources stay
+        #[cfg(feature = "bundle")]
+        if let Some(made) = page(name, tdir.join(name).join("site")) {
+            files.retain(|(rel, _)| rel != "site/index.html");
+            for b in made.files {
+                built.push((name.clone(), format!("site/{}", b.rel)));
+                files.push((format!("site/{}", b.rel), b.path));
+            }
+        }
         files.sort();
         let mut release = Sha256::new();
         let mut entries = Vec::new();
         for (rel, path) in files {
             let real = fs::canonicalize(&path).unwrap_or_else(|e| panic!("templates/{name}/{rel}: {e}"));
-            assert!(real.starts_with(&tdir), "templates/{name}/{rel} is a symlink out of templates/");
+            assert!(real.starts_with(&tdir) || real.starts_with(&out_dir), "templates/{name}/{rel} is a symlink out of templates/");
             let bytes = fs::read(&real).unwrap_or_else(|e| panic!("templates/{name}/{rel}: {e}"));
             // which release of the template a fragment runs (blessed.rs `release`)
             release.update(rel.as_bytes());
@@ -139,16 +180,48 @@ fn main() {
         collect(&shell, &shell, &mut files);
         // its sources are files too: the shell has no src/ to skip
         assert!(!shell.join("src").exists(), "cell/shell/src would be skipped");
+        // its page built (bundle.rs), in place of its own: shell.js
+        // bundled, its stylesheets by their hash, and the sources the
+        // bundle holds no file of the release
+        #[cfg(feature = "bundle")]
+        {
+            let made = page("shell", shell.clone()).expect("the shell's page is built");
+            files.retain(|(rel, path)| {
+                let held = made.inputs.contains(&fs::canonicalize(path).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}")));
+                if held {
+                    shell_bundled.push(rel.clone());
+                }
+                rel != "index.html" && !held
+            });
+            for b in made.files {
+                built.push(("shell".into(), b.rel.clone()));
+                files.push((b.rel, b.path));
+            }
+        }
         files.sort();
         src.push_str("pub static SHELL: &[File] = &[\n");
         for (rel, path) in files {
             let real = fs::canonicalize(&path).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
-            assert!(real.starts_with(&repo), "cell/shell/{rel} is a symlink out of the repo");
+            assert!(real.starts_with(&repo) || real.starts_with(&out_dir), "cell/shell/{rel} is a symlink out of the repo");
             let bytes = fs::read(&real).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}"));
             src.push_str(&format!("    {},\n", entry(&rel, &bytes, statics.id(real), embed)));
         }
         src.push_str("];\n");
     }
+    built.sort();
+    shell_bundled.sort();
+    src.push_str("/// The files a page's build made or named anew (build.rs, bundle.rs): where (`shell`, or a template), and path.\n");
+    src.push_str("pub static BUILT: &[(&str, &str)] = &[\n");
+    for (at, rel) in &built {
+        src.push_str(&format!("    ({at:?}, {rel:?}),\n"));
+    }
+    src.push_str("];\n");
+    src.push_str("/// The files of cell/shell/ its page's bundle holds, which the release does not.\n");
+    src.push_str("pub static SHELL_BUNDLED: &[&str] = &[\n");
+    for rel in &shell_bundled {
+        src.push_str(&format!("    {rel:?},\n"));
+    }
+    src.push_str("];\n");
     for (name, path) in &docs {
         let bytes = fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let file = path.file_name().expect("a doc is a file").to_string_lossy().to_string();

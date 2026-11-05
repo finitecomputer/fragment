@@ -32,7 +32,10 @@ the shell links to), `chat.css`, `agent.png` (the agents' avatar) and `agent-col
 agent's colour, by its identity), each the agent template's own,
 linked. Every URL in it is
 relative, so it works on a fragment's own host, under `/f/<name>/`, and
-served from the platform's release.
+served from the platform's release. The release serves the page built
+(crates/templates/bundle.rs): its scripts as one bundle and its
+stylesheet, each named by its hash and kept for good, with the bundle's
+source map beside it.
 
 To talk with an agent here, add it as an editor (the platform tells its
 computer, which follows the chat at once), or @mention it in the page,

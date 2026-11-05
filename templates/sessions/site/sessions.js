@@ -207,6 +207,8 @@ async function reader(page, key) {
 }
 
 function main() {
+  // it came: its own states say the rest (index.html)
+  document.getElementById("still-loading")?.remove();
   const key = new URLSearchParams(location.search).get("s");
   window.addEventListener("message", (e) => {
     if (e.data?.fragment !== "theme") return;

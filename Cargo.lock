@@ -694,8 +694,10 @@ name = "fragment-templates"
 version = "0.1.0"
 dependencies = [
  "fragment-core",
+ "fragment-devstack",
  "fragment-proto",
  "hex",
+ "serde_json",
  "sha2",
 ]
 
