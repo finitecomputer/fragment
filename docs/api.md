@@ -499,7 +499,8 @@ partitioned cookie (`fragment_core::frames`):
   (`Sec-Fetch-Site: same-origin`); anything else is 403.
 - Where `/auth/fragment` would redeem at once, it answers a frame
   redemption (single-use, 60 s, its embedder the platform's origin) and
-  `302` to the fragment's `__signin?token=` (`no-store`, `no-referrer`).
+  `302` to the fragment's `__signin?token=` (`no-store`, `no-referrer`),
+  with `&check=frame` when it was asked with `&check=frame`.
   Otherwise a note in the frame ("Open X in a tab", or "Sign in"), which
   posts `{fragment: "signin-blocked", name, why: "consent" |
   "signed-out"}` to the platform's origin alone.
@@ -510,9 +511,13 @@ partitioned cookie (`fragment_core::frames`):
   signed out (401), and that page posts `{fragment: "signin-blocked",
   name, why: "refused"}` to the platform's origin alone; the shell, whose
   frames all come through the mint, says the browser keeps a window's own
-  sign-in from it (as `why: "cookies"`). `__signin?check=frame&return=`,
-  the check's hop before, still answers: without the cookie, a page that
-  posts `{fragment: "signin-blocked", name, why: "cookies"}` to its parent.
+  sign-in from it (as `why: "cookies"`). A fragment whose page admits
+  anyone would show such a browser its anonymous page, so the shell asks
+  the mint with `&check=frame` for every fragment its list does not say is
+  members-only (`sharing.visibility`; missing or unknown counts as not),
+  and that redemption `302`s to `__signin?check=frame&return=` instead:
+  with the cookie, on to the page; without it, a page that posts
+  `{fragment: "signin-blocked", name, why: "cookies"}` to its parent.
 - `fragment_frame` counts only in frames and on the fragment's own page.
 
 ### Asking first

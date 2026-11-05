@@ -434,7 +434,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                 let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}{}", enc(&back), address_query(cfg, url)));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
                 match mint_for(env, url, Minter::Session(&token), &name, &back, None, false).await? {
-                    Minting::Redeem(redeem) => to_signin(env, cfg, url, &name, &redeem).await,
+                    Minting::Redeem(redeem) => to_signin(env, cfg, url, &name, &redeem, false).await,
                     Minting::Ask(who, email) => consent_page(&token, &who, email.as_deref(), &name, &back, &address_query(cfg, url)),
                     Minting::SignedOut => signed_out(),
                 }
@@ -447,7 +447,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                 };
                 let given = calls::Mint { token: Some(session), key: None, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None };
                 let minted = ask_registry(env, &given).await?;
-                Ok(to_signin(env, cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?).await?.with_status(303))
+                Ok(to_signin(env, cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?, false).await?.with_status(303))
             }
             (Method::Get, ["auth", "frame"]) => frame(&req, env, cfg, url).await,
             // a CLI's new key asks for the code its person types: signed by
@@ -616,7 +616,9 @@ fn address_query(cfg: &Config, url: &Url) -> String {
     label.filter(|label| fragment_core::address::valid(label, cfg.host_label_suffix())).map(|label| format!("&address={label}")).unwrap_or_default()
 }
 
-async fn to_signin(env: &Env, cfg: &Config, url: &Url, name: &str, redeem: &str) -> CellResult<Response> {
+/// `check`: a frame's redemption asked to look whether the browser kept
+/// its cookie before its page (`__signin?…&check=frame`).
+async fn to_signin(env: &Env, cfg: &Config, url: &Url, name: &str, redeem: &str, check: bool) -> CellResult<Response> {
     let base = match query(url, "address") {
         Some(label) => {
             if !fragment_core::address::valid(&label, cfg.host_label_suffix()) {
@@ -630,7 +632,8 @@ async fn to_signin(env: &Env, cfg: &Config, url: &Url, name: &str, redeem: &str)
         }
         None => cfg.canonical(url, name),
     };
-    redirect(&format!("{base}__signin?token={redeem}"), &[])
+    let check = if check { "&check=frame" } else { "" };
+    redirect(&format!("{base}__signin?token={redeem}{check}"), &[])
 }
 
 /// `POST /api/f/{name}/session`'s body: `{returnTo?, consent?}`.
@@ -753,7 +756,9 @@ async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return frame_note(&platform, &name, &back, Unsigned::SignedOut) };
     match mint_for(env, url, Minter::Session(&token), &name, &back, Some(&platform), false).await? {
         Minting::Redeem(redeem) => {
-            let mut resp = to_signin(env, cfg, url, &name, &redeem).await?;
+            // a fragment that may admit anyone asks its sign-in to look for the cookie first (shell.js `framed`)
+            let check = query(url, "check").as_deref() == Some("frame");
+            let mut resp = to_signin(env, cfg, url, &name, &redeem, check).await?;
             // the platform's page, by its path, is nothing the fragment hears
             resp.headers_mut().set("referrer-policy", "no-referrer")?;
             Ok(resp)
@@ -951,8 +956,10 @@ pub fn is_fragment_route(rest: &str) -> bool {
 /// - `__signin?token=` redeems in a frame only a frame redemption, into
 ///   the frame cookie, and goes straight on to its page (a browser that
 ///   kept the cookie from it is refused there as signed out, and the page
-///   says so to the shell: `refused`; `check=frame`, the hop before, still
-///   answers); anywhere else, only a top-level one, into the site cookie;
+///   says so to the shell: `refused`), or, asked `check=frame` (a
+///   fragment that may admit anyone, whose page would not refuse it),
+///   through that hop first; anywhere else, only a top-level one, into the
+///   site cookie;
 /// - `__signin` without one starts at the platform from a navigation of
 ///   a page only: in a frame it answers `blocked`, and from an image, a
 ///   script, or a fetch it is refused;
@@ -972,9 +979,17 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                 let to = match fetched.framed {
                     // straight to its page, as it was asked for: a browser
                     // that kept the frame's cookie from it is refused there as
-                    // signed out, which the page says to the shell (`refused`),
-                    // where a `check=frame` hop of its own once looked
-                    true => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
+                    // signed out, which the page says to the shell
+                    // (`refused`); a fragment that may admit anyone (asked
+                    // with `check=frame`, shell.js `framed`) would show it
+                    // its anonymous page, so it goes through that hop first
+                    true => {
+                        let cookie = frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url));
+                        match query(url, "check").as_deref() == Some("frame") {
+                            true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[cookie]),
+                            false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[cookie]),
+                        }
+                    }
                     false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
                 };
                 return Ok(laps.stamp(to?)?);

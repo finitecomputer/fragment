@@ -173,7 +173,11 @@ const docked = () => shown(apps()).filter((f) => f.dock !== false);
 // A path segment: the API's ids keep their ":" (`computer:…`) as
 // sent, since the router matches segments as they are, not decoded.
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
-const framed = (name, path = "/") => `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
+// One hop only for a fragment its list says is members' only (a frame without its cookie is refused: `refused`); public, link, or not known: the `check=frame` hop.
+const framed = (name, path = "/") => {
+  const members = byName(name)?.sharing?.visibility === "members";
+  return `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}${members ? "" : "&check=frame"}`;
+};
 // An agent's face: its colour, by its identity (agent-color.js, the one
 // its own page and its chats' pages choose by), and its picture (its agent
 // fragment's avatar.png, as the person's list last said: an address on this
