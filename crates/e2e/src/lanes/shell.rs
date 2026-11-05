@@ -5779,9 +5779,13 @@ fn making_states(
             .map(|l| l.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
             .unwrap_or_default()
     };
-    let archive = |name: &str| -> Result<()> {
+    // archived, and gone from the shell's list (else New chat opens that
+    // blank chat again, as it should)
+    let archive = |b: &mut Browser, name: &str| -> Result<()> {
         let r = shell(api, me.session, "PUT", &format!("/api/fragments/{name}/archived"), Some(&json!({ "archived": true })), &[])?;
         anyhow::ensure!(r.status == 200, "{name} archived: {r}");
+        let row = format!("#chats [data-key={}]", js(&format!("chat:{name}")));
+        anyhow::ensure!(b.until(page, &format!("!document.querySelector({})", js(&row)), wait), "{name} gone from the list");
         Ok(())
     };
     let making_shown = "!!document.querySelector('#chats .chat-row.making.active') && !!document.querySelector('#frames .making-standin') && document.getElementById('chat-title').textContent === 'New chat'";
@@ -5817,8 +5821,8 @@ fn making_states(
             && active == json!([format!("chat:{mine}")]) && room == json!(true) && opened,
         json!({ "mine": mine, "other": other, "keys": keys, "active": active, "room": room, "opened": opened }),
     );
-    archive(&mine)?;
-    archive(&other)?;
+    archive(b, &mine)?;
+    archive(b, &other)?;
 
     // ---- another chat opened meanwhile, then refused
     click_chat(b, page, &first_chat)?;
@@ -5866,7 +5870,7 @@ fn making_states(
         picked && made_shown && moved && landed && !made.is_empty() && listed && still == json!(true),
         json!({ "made": made, "path": b.eval(page, "location.pathname")? }),
     );
-    archive(&made)?;
+    archive(b, &made)?;
 
     // ---- started from Settings, then refused
     b.eval(page, &hold("POST", "/api/fragments$", Hold::Request))?;
@@ -5910,7 +5914,7 @@ fn making_states(
             && !asked.as_array().is_some_and(|a| a.iter().any(|u| u.as_str().is_some_and(|u| u.contains(first_chat.as_str())))) && kept == 2 && cleared,
         json!({ "asked": asked, "kept": kept, "made": made }),
     );
-    archive(&made)?;
+    archive(b, &made)?;
     click_chat(b, page, reader_chat)?;
     b.until(page, &format!("{shown} === {}", js(reader_chat)), wait);
     Ok(())
