@@ -109,7 +109,29 @@ impl FragmentCell {
         if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
             return Ok(Wrote::Commit(r["sha"].as_str().unwrap_or("").to_string()));
         }
-        let repo = self.must(MetaKey::Repo)?;
+        // a write before its template's first commit makes the repo and
+        // lands that commit first (plane.rs `repo_ready`)
+        let repo = self.repo_ready().await?;
+        self.commit_in(&repo, key, writes, expect, message, principal, depth).await
+    }
+
+    /// [`Self::commit`] to `repo`, made: the template's seed's own
+    /// (publish.rs `seed`), which makes the repo it commits to.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn commit_in(
+        &self,
+        repo: &str,
+        key: &str,
+        writes: &[FileWrite],
+        expect: &BTreeMap<String, Option<String>>,
+        message: &str,
+        principal: &str,
+        depth: u32,
+    ) -> CellResult<Wrote> {
+        if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
+            return Ok(Wrote::Commit(r["sha"].as_str().unwrap_or("").to_string()));
+        }
+        let repo = repo.to_string();
         let cs = self.cs()?;
         let (author, email) = author(principal);
         for _ in 0..WRITE_ATTEMPTS {

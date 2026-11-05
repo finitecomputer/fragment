@@ -988,6 +988,8 @@ pub struct Created {
     pub visibility: Visibility,
     pub view_token: String,
     pub inbox_token: String,
+    /// Its code.storage repo: `""` while not made yet (a chat's, made
+    /// after the create answers: docs/api.md, Names).
     pub repo: String,
     pub canonical: String,
 }
@@ -1050,6 +1052,8 @@ pub struct FragmentStatus {
     /// The caller's role.
     pub role: Role,
     pub visibility: Visibility,
+    /// Its code.storage repo: `""` while not made yet (a chat's, made
+    /// after the create answers: docs/api.md, Names).
     pub repo: String,
     pub pins: Pins,
     pub counts: Counts,

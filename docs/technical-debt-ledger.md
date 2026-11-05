@@ -5,6 +5,21 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A chat wiped while its seed runs can keep its template's repo
+
+- **Shortcut:** a chat's create answers before its repo is made
+  (`publish::seeds_later`); its seed makes the repo right after. A life
+  that ends while that seed waits on code.storage records no repo for its
+  wipe (none was made when it ended), and the seed, seeing the life gone,
+  stops and keeps what it made, as a delete keeps a repo
+  (`publish.rs` `seed`). A wipe in that second leaves the repo holding
+  the chat's first `fragment.json` (its template and title), or nothing.
+- **Risk:** one chat's title outlives its owner's wipe at code.storage,
+  when the wipe lands within about a second of that chat's making.
+- **Delete when:** a wipe deletes its person's repos by their name
+  (`codestorage::repo_name`, the owner's digest), not only those its
+  fragments' lives recorded.
+
 ## A computer's disk is 20 GB, priced as 12
 
 - **Shortcut:** every computer starts with Containers' most disk, 20 GB

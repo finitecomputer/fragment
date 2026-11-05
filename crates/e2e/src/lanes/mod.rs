@@ -12,6 +12,7 @@ mod blobs;
 mod bot_mode;
 mod brain;
 mod chat;
+mod chat_seed;
 mod author;
 mod billing;
 mod checkout;
@@ -73,6 +74,7 @@ type Lane = fn(&mut Suite, &Api) -> Result<()>;
 const LANES: &[Lane] = &[
     control::auth,
     control::create,
+    chat_seed::chat_seed,
     control::lockdown,
     keys::keys,
     members::members,
@@ -191,7 +193,7 @@ pub const SHARDS: [&[&str]; 5] = [
         "sync", "migrations", "capability-cost",
     ],
     &[
-        "auth", "create", "reach", "share", "effects", "appfiles", "sessions-ui", "ai", "billing", "governance", "billing-page", "admin", "shell",
+        "auth", "create", "chat-seed", "reach", "share", "effects", "appfiles", "sessions-ui", "ai", "billing", "governance", "billing-page", "admin", "shell",
         "chat",
     ],
     &["identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart"],
