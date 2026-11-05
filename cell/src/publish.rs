@@ -19,6 +19,43 @@ use crate::js;
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
 
+/// The blessed templates whose fragment is answered before its repo is
+/// made: the create answers once its claim and its facts are written, the
+/// fragment runs its template from the release meanwhile
+/// (`install_pending`), and its repo and first commit come right after the
+/// answer (`after_answer`'s seed), else at the alarm's next pass. Only the
+/// chat for now (Paul, 2026-11-04: what a person waits on): each other
+/// template has readers of its repo of its own (a computer syncing its
+/// agent, a brain's sync), to be measured and tested before it joins.
+const SEEDS_LATER: [&str; 1] = ["chat"];
+
+/// Whether a create of `template` answers before its repo is made
+/// (`SEEDS_LATER`): a blessed template's, whose content the release serves.
+pub(crate) fn seeds_later(template: &str) -> bool {
+    let later = SEEDS_LATER.contains(&template);
+    assert!(!later || blessed::template(template).is_some(), "only a blessed template runs from the release before its repo: {template}");
+    later
+}
+
+/// The name of the repo of `fragment`, made by `owner`: derived here
+/// alone, from both, so a name another identity makes later never finds
+/// it.
+pub(crate) fn repo_name(cfg: &crate::config::Config, fragment: &str, owner: &str) -> CellResult<String> {
+    fragment_core::codestorage::repo_name(&cfg.codestorage().repo_prefix, fragment, owner)
+        .ok_or_else(|| CellError::invalid("a fragment's name is <label>--<suffix>, and its owner an identity"))
+}
+
+/// A blessed template's `fragment.json` as its seed commits it: the
+/// template named, and its title. What runs before the commit lands
+/// (`install_pending`) is read from these same bytes.
+pub(crate) fn blessed_manifest_bytes(which: &str, title: Option<&str>) -> Vec<u8> {
+    let mut manifest = json!({ "template": which });
+    if let Some(title) = title {
+        manifest["meta"] = json!({ "title": title });
+    }
+    serde_json::to_vec_pretty(&manifest).expect("a manifest serializes")
+}
+
 /// A template a fragment can start from (`fragment_templates::CATALOG`):
 /// its files are copied into the fragment's repo.
 pub(crate) fn template(name: &str) -> Option<&'static Template> {
@@ -87,25 +124,40 @@ impl FragmentCell {
         let _seeding = self.seeding.lock().await;
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(false) };
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
-        let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
+        let life = self.must(MetaKey::CreatedAt)?;
+        let key = format!("template:{life}");
         let title = self.meta(MetaKey::TemplateTitle)?;
         let files = match (template(&which), blessed::template(&which)) {
             (Some(t), _) => stamped(&self.env, t, &name, title.as_deref()).await?,
             // a blessed template is named, not copied: the release serves it
             (None, Some(_)) => {
-                let mut manifest = json!({ "template": which });
-                if let Some(title) = title {
-                    manifest["meta"] = json!({ "title": title });
-                }
-                let bytes = serde_json::to_vec_pretty(&manifest).expect("a manifest serializes");
+                let bytes = blessed_manifest_bytes(&which, title.as_deref());
                 vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
             }
             (None, None) => return Err(CellError::host(format!("no template {which}"))),
         };
-        if let Wrote::Conflict(why) = self.commit(&key, &files, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
+        self.same_life(&life, "while its template's files were read")?;
+        // a template that seeds after the create's answer (`seeds_later`)
+        // makes its repo here, once: a later try finds it by its name
+        if self.meta(MetaKey::Repo)?.is_none() {
+            let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, &name, &owner)?).await?;
+            // its life ended while code.storage made the repo: the repo
+            // stays, as a deleted life's does (the same owner making the
+            // name again finds it), and this life's seed goes no further
+            self.same_life(&life, "while its repo was made")?;
+            self.set_meta(MetaKey::Repo, &repo)?;
+            self.event("template.repo", &format!("{name}'s repo is made ({repo})"), json!({ "repo": repo }));
+        }
+        let repo = self.must(MetaKey::Repo)?;
+        if let Wrote::Conflict(why) = self.commit_in(&repo, &key, &files, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
             return Err(CellError::host(why));
         }
-        let live = self.go_live(&owner, &format!("deploy {name}")).await?;
+        // its life ended while its template was committed: no deploy
+        self.same_life(&life, "while its template was committed")?;
+        let live = self.go_live_in(&repo, &owner, &format!("deploy {name}")).await?;
+        // its life ended while it deployed (each step awaits code.storage):
+        // what is pending now is the next life's, its own seed's to land
+        self.same_life(&life, "while its template was deployed")?;
         // deployed is not installed: an install go_live left to the poll
         // keeps it pending, and the alarm's next seed installs it, from the
         // same commit and deploy (its agents' joins wait meanwhile)
@@ -118,12 +170,31 @@ impl FragmentCell {
         Ok(true)
     }
 
+    /// The life a seed began in, `life` (its `CreatedAt`), is still the
+    /// fragment's, or the seed goes no further (404): a delete, and the
+    /// name made again, between its awaits leaves the next life's pending
+    /// template, title and repo to that life's own seed. Asked after each
+    /// await, so what a seed writes or clears next is its own life's.
+    fn same_life(&self, life: &str, when: &str) -> CellResult<()> {
+        if self.meta(MetaKey::CreatedAt)?.as_deref() == Some(life) {
+            return Ok(());
+        }
+        Err(CellError::new(ErrorCode::NotFound, format!("{} ended {when}", self.name().unwrap_or_default())))
+    }
+
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,
     /// later ones fast-forward it (after a rollback, restore commits and a
     /// merge: `Cs::promote_live`), each guarded against a `live` that moved
     /// meanwhile. Answers the new tip.
     pub(crate) async fn go_live(&self, principal: &str, message: &str) -> CellResult<String> {
-        let repo = self.must(MetaKey::Repo)?;
+        // (a deploy before its template's first commit lands that first: `repo_ready`)
+        let repo = self.repo_ready().await?;
+        self.go_live_in(&repo, principal, message).await
+    }
+
+    /// [`Self::go_live`] in `repo`, made: the template's seed's own.
+    async fn go_live_in(&self, repo: &str, principal: &str, message: &str) -> CellResult<String> {
+        let repo = repo.to_string();
         let cs = self.cs()?;
         let main = cs.branch_head(&repo, "main").await?.ok_or_else(|| CellError::invalid("nothing to deploy: main has no commits"))?;
         let (author, email) = crate::files::author(principal);
