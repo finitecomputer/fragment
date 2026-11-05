@@ -862,10 +862,12 @@ fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, viewer: &Keys
     anyhow::ensure!(r.status == 200, "a non-member's agent, in: {r}");
     let files = api.signed(&through, "GET", &path("files"), None)?;
     let token = api.signed(&through, "GET", &read, None)?;
+    // the lane goes on counting its members: this one leaves
+    let gone = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(their_agent.pubkey_hex()))), None)?;
     s.ok(
         "a person whose agent is a member reads its files, and mints no token (403): the repo is a membership's",
-        files.status == 200 && token.status == 403 && token.message().contains("agent's membership"),
-        format!("{files} {token}"),
+        files.status == 200 && token.status == 403 && token.message().contains("agent's membership") && gone.status == 200,
+        format!("{files} {token} {gone}"),
     );
     Ok(())
 }
