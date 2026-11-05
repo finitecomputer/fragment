@@ -433,7 +433,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                 let (name, back) = fragment_asked(url)?;
                 let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}{}", enc(&back), address_query(cfg, url)));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
-                match mint_for(env, url, &token, &name, &back, None).await? {
+                match mint_for(env, url, Minter::Session(&token), &name, &back, None, false).await? {
                     Minting::Redeem(redeem) => to_signin(env, cfg, url, &name, &redeem).await,
                     Minting::Ask(who, email) => consent_page(&token, &who, email.as_deref(), &name, &back, &address_query(cfg, url)),
                     Minting::SignedOut => signed_out(),
@@ -445,7 +445,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                     Ok(posted) => posted,
                     Err(page) => return Ok(page),
                 };
-                let given = calls::Mint { token: session, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None };
+                let given = calls::Mint { token: Some(session), key: None, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None };
                 let minted = ask_registry(env, &given).await?;
                 Ok(to_signin(env, cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?).await?.with_status(303))
             }
@@ -633,25 +633,78 @@ async fn to_signin(env: &Env, cfg: &Config, url: &Url, name: &str, redeem: &str)
     redirect(&format!("{base}__signin?token={redeem}"), &[])
 }
 
-/// What a platform session may sign a browser in to a fragment with.
+/// `POST /api/f/{name}/session`'s body: `{returnTo?, consent?}`.
+const KEY_SESSION_MAX_BYTES: usize = 4096;
+
+/// `POST /api/f/{name}/session`: a person's approved key (a native app's,
+/// which holds no browser session) opens a fragment's pages in a web view
+/// of its own, as `/auth/fragment` decides for a browser (`mint_for`): a
+/// fragment of theirs, shared with them, or one they said yes to answers a
+/// one-use URL of its `__signin`; any other answers that they are asked
+/// first (`consentRequired`), until they ask again with `consent: true`, the
+/// yes the page's form gives. Only that fragment's cookie ever enters the
+/// web view: never the key, nor a platform session.
+pub(crate) async fn key_session(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Asked {
+        #[serde(default)]
+        consent: bool,
+        return_to: Option<String>,
+    }
+    if !fragment_proto::valid_fragment_name(name) {
+        return Err(CellError::invalid("name a fragment: <label>--<suffix>"));
+    }
+    let bytes = crate::read_body(&mut req, KEY_SESSION_MAX_BYTES).await?;
+    let key = crate::authenticate(&req, url, fragment_nip98::Payload::Read(&bytes))?;
+    let asked: Asked = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    let back = site::return_path(asked.return_to.as_deref());
+    if asked.return_to.as_deref().is_some_and(|raw| raw != back) {
+        return Err(CellError::invalid("returnTo is a path on the fragment's own origin"));
+    }
+    let canonical = cfg.canonical(url, name);
+    crate::json_response::json_response(&match mint_for(env, url, Minter::Key(&key), name, &back, None, asked.consent).await? {
+        Minting::Redeem(redeem) => serde_json::json!({ "consentRequired": false, "url": format!("{canonical}__signin?token={redeem}") }),
+        Minting::Ask(_, email) => serde_json::json!({ "consentRequired": true, "canonical": canonical, "email": email }),
+        Minting::SignedOut => return Err(CellError::new(ErrorCode::Unauthenticated, "this key is no one's, or was revoked: pair the app again")),
+    })
+}
+
+/// Whom a redemption is minted from (`mint_for`).
+#[derive(Clone, Copy)]
+enum Minter<'a> {
+    /// A browser's platform session: its cookie's token.
+    Session(&'a str),
+    /// A person's approved key, whose signature the router checked
+    /// (`key_session`).
+    Key(&'a str),
+}
+
+/// What a platform session, or a person's key, may sign a browser in to a
+/// fragment with.
 enum Minting {
     /// A single-use redemption for its `__signin`.
     Redeem(String),
     /// Nothing yet: the fragment is not the person's, nor shared with them,
     /// and they have not said yes to it (whom to ask, and their email).
     Ask(Signed, Option<String>),
-    /// The platform session ended, or never began.
+    /// The platform session ended, or never began (the key is no one's).
     SignedOut,
 }
 
-/// A redemption of the platform session `token` for `name` (a frame's,
-/// bound to `embedder`, when it names one), when the person may be known
-/// there: they said yes to it before, or are in it. The registry checks
-/// the session is live as it mints, and mints only for a fragment the
-/// person said yes to unless the fragment knows them already.
-async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, embedder: Option<&str>) -> CellResult<Minting> {
-    let mint = |consent| calls::Mint { token: token.to_string(), fragment: name.to_string(), return_to: back.to_string(), consent, embedder: embedder.map(str::to_string) };
-    let minted = match ask_registry(env, &mint(Consent::Remembered)).await {
+/// A redemption for `name`, from a platform session or a person's key
+/// (`by`; a frame's, bound to `embedder`, when it names one), when the
+/// person may be known there: they said yes to it before, or now (`given`),
+/// or are in it. The registry checks the session is live, or the key its
+/// person's, as it mints, and mints only for a fragment the person said yes
+/// to unless the fragment knows them already.
+async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, embedder: Option<&str>, given: bool) -> CellResult<Minting> {
+    let (token, key) = match by {
+        Minter::Session(token) => (Some(token.to_string()), None),
+        Minter::Key(key) => (None, Some(key.to_string())),
+    };
+    let mint = |consent| calls::Mint { token: token.clone(), key: key.clone(), fragment: name.to_string(), return_to: back.to_string(), consent, embedder: embedder.map(str::to_string) };
+    let minted = match ask_registry(env, &mint(if given { Consent::Given } else { Consent::Remembered })).await {
         Err(e) if e.code == ErrorCode::Unauthenticated => return Ok(Minting::SignedOut),
         minted => minted?,
     };
@@ -660,7 +713,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
     }
     // silent on their own fragments and those shared with them, which know
     // them already (docs/api.md, Asking first)
-    let who = Signed::new(minted.identity, None);
+    let who = Signed::new(minted.identity, key.clone());
     match share::ask(env, url, name, &who, Method::Get, "/api/status", None).await {
         Ok(_) => {
             let minted = ask_registry(env, &mint(Consent::Member)).await?;
@@ -698,7 +751,7 @@ async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<
     }
     let (name, back) = fragment_asked(url)?;
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return frame_note(&platform, &name, &back, Unsigned::SignedOut) };
-    match mint_for(env, url, &token, &name, &back, Some(&platform)).await? {
+    match mint_for(env, url, Minter::Session(&token), &name, &back, Some(&platform), false).await? {
         Minting::Redeem(redeem) => {
             let mut resp = to_signin(env, cfg, url, &name, &redeem).await?;
             // the platform's page, by its path, is nothing the fragment hears

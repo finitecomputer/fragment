@@ -28,6 +28,15 @@
 //! ("Continue to X as you?") is remembered (`consents`) until they sign
 //! out of it there.
 //!
+//! A person's approved key (an iPhone's) has no browser, so no platform
+//! session: it signs `POST /api/f/{name}/session` for a top-level
+//! redemption (`mint`), minted from a parent session of the key's own
+//! (`key_parent`: `sessions.device_key`, one a key, made on its first mint
+//! and again once it expires). That parent's token is never kept, so it is no bearer
+//! session; it only lends its lifetime, and its key, to the site sessions
+//! redeemed from it, each of which lives only while that key is still its
+//! person's: revoking the key ends them, and its unspent redemptions.
+//!
 //! Every sign-in table is bounded: a pending sign-in, and a CLI's code, is
 //! kept through the fleet's next `FRAGMENT_SIGNINS_PENDING_MAX` starts of
 //! its kind (default
@@ -165,6 +174,10 @@ struct SessionRow {
     embedder: Option<String>,
     /// The parent's hash when the parent is live too.
     parent_live: Option<String>,
+    /// A live parent's key, when it is a key's (`key_parent`), and that key
+    /// again when it is still its person's.
+    parent_key: Option<String>,
+    key_live: Option<String>,
     kind: Option<IdentityKind>,
     owner: Option<String>,
     held: Option<fragment_proto::Role>,
@@ -388,9 +401,10 @@ impl RegistryCell {
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (a person's sign-ins: `subjects_of`)
         const Q: &str = concat!(
-            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, ",
+            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, p.device_key AS parent_key, k.key AS key_live, i.kind, i.owner, i.held, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY signed_in_at DESC LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
+            "LEFT JOIN keys k ON k.key = p.device_key AND k.identity = s.identity AND k.revoked_at IS NULL ",
             "LEFT JOIN identities i ON i.id = s.identity ",
             "WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?"
         );
@@ -403,8 +417,9 @@ impl RegistryCell {
         if row.fragment.as_deref() != fragment || row.embedder.is_some() != frame {
             return Err(not_signed_in());
         }
-        // a site session lives only while the platform session it came from does
-        if row.parent.is_some() && row.parent_live.is_none() {
+        // a site session lives only while the platform session it came from
+        // does, and one from a key's only while that key is still its person's
+        if (row.parent.is_some() && row.parent_live.is_none()) || (row.parent_key.is_some() && row.key_live.is_none()) {
             return Err(not_signed_in());
         }
         let identity = joined_identity(row.identity, row.kind, row.owner, row.held, "a session")?;
@@ -690,7 +705,14 @@ impl RegistryCell {
         if b.embedder.as_deref().is_some_and(|e| !fragment_core::frames::is_origin(e)) {
             return Err(CellError::invalid("a frame redemption's embedder is an origin (scheme://host[:port])"));
         }
-        let Live { hash, session, .. } = self.live_session(&b.token, None, false)?;
+        let (hash, session) = match (b.token.as_deref(), b.key.as_deref(), b.embedder.is_some()) {
+            (Some(token), None, _) => {
+                let Live { hash, session } = self.live_session(token, None, false)?;
+                (hash, session)
+            }
+            (None, Some(key), false) => self.key_parent(key).await?,
+            _ => return Err(CellError::invalid("a mint names a platform session or a key, and a key's is top-level")),
+        };
         let (identity, email) = (session.identity, session.email);
         let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
         match b.consent {
@@ -714,6 +736,38 @@ impl RegistryCell {
         }
         let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref()).await?;
         Ok(Minted { redeem: Some(redeem), identity, email })
+    }
+
+    /// A person's approved key's own parent session (`mint`), made here when
+    /// it has none live: its hash, and whom it names. Its token is never
+    /// kept (no one can present it), and its row names the key, so what is
+    /// redeemed from it lives only while the key is its person's
+    /// (`live_session`, `redeem`). A key that is no one's, or was revoked,
+    /// is 401 (`by`); an agent's 403: an agent has no browser to sign in.
+    async fn key_parent(&self, key: &str) -> CellResult<(String, LiveSession)> {
+        let identity = self.by(&By::Key(key.to_string()))?;
+        if identity.kind != IdentityKind::Person {
+            return Err(CellError::new(ErrorCode::Forbidden, "only a person's key signs in to a fragment's pages"));
+        }
+        let now = js::now_ms();
+        // an expired parent (its site sessions expired with it) makes way
+        // for a new one: one a key (`sessions_device_key`)
+        self.exec("DELETE FROM sessions WHERE device_key = ? AND expires_at <= ?", vec![key.into(), SqlStorageValue::Integer(now)])?;
+        let hash = match self.row::<IdRow>("SELECT hash AS id FROM sessions WHERE device_key = ?", vec![key.into()])? {
+            Some(parent) => parent.id,
+            None => {
+                let expires_at = now + SESSION_TTL_MS;
+                self.sweep_by(expires_at).await?;
+                let hash = sha(&fresh_token());
+                self.exec(
+                    "INSERT INTO sessions (hash, identity, device_key, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                    vec![hash.as_str().into(), identity.id.as_str().into(), key.into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(expires_at)],
+                )?;
+                hash
+            }
+        };
+        let email = self.email_of(&identity.id)?;
+        Ok((hash, LiveSession { identity, email, embedder: None }))
     }
 
     async fn new_redemption(&self, session: &str, fragment: &str, return_to: &str, embedder: Option<&str>) -> CellResult<String> {
@@ -762,9 +816,13 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::Unauthenticated, "this sign-in link is for a frame of the page that asked for it, or for a page of its own: sign in again"));
         }
         let parent = row.session.as_str();
+        // a key's parent (`key_parent`) only while the key is its person's
         let p = self
             .row::<ParentRow>(
-                "SELECT identity, expires_at FROM sessions WHERE hash = ? AND fragment IS NULL AND revoked_at IS NULL AND expires_at > ?",
+                concat!(
+                    "SELECT s.identity, s.expires_at FROM sessions s LEFT JOIN keys k ON k.key = s.device_key AND k.identity = s.identity AND k.revoked_at IS NULL ",
+                    "WHERE s.hash = ? AND s.fragment IS NULL AND s.revoked_at IS NULL AND s.expires_at > ? AND (s.device_key IS NULL OR k.key IS NOT NULL)"
+                ),
                 vec![parent.into(), SqlStorageValue::Integer(js::now_ms())],
             )?
             .ok_or_else(refused)?;

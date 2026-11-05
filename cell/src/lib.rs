@@ -1398,6 +1398,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let rest = rest.to_vec();
             identities(req, env, ctx, &url, &rest).await
         }
+        // a person's approved key opens a fragment's pages (auth.rs): the
+        // platform's sign-in, not the fragment's, which has no such route
+        (Method::Post, ["api", "f", name, "session"]) => auth::key_session(req, env, cfg, &url, name).await,
         // A blob's bytes stream through: the router never holds them. The
         // signature covers the URL, which names the bytes' hash; the
         // fragment checks the hash as they arrive. A payload tag may name

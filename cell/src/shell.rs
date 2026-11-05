@@ -72,8 +72,11 @@ pub async fn fragment_sheet_asset(req: &Request, env: &Env) -> CellResult<Respon
     asset(req, env, "sheet.css").await?.ok_or_else(|| CellError::host("the shell publishes sheet.css"))
 }
 
+/// Whether the request's `If-None-Match` names `tag`, by the weak
+/// comparison it uses (RFC 9110 13.1.2): Cloudflare weakens the tag of an
+/// answer it compresses (`W/"s-…"`), and the browser sends it back so.
 fn not_modified(req: &Request, tag: &str) -> Result<bool> {
-    Ok(req.headers().get("if-none-match")?.is_some_and(|v| v.split(',').any(|t| t.trim() == tag)))
+    Ok(req.headers().get("if-none-match")?.is_some_and(|v| fragment_core::site::not_modified(&v, tag)))
 }
 
 /// One of the shell's pages, its file in the release.
