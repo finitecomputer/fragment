@@ -864,7 +864,7 @@ fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, viewer: &Keys
     let token = api.signed(&through, "GET", &read, None)?;
     s.ok(
         "a person whose agent is a member reads its files, and mints no token (403): the repo is a membership's",
-        files.status == 200 && token.status == 403,
+        files.status == 200 && token.status == 403 && token.message().contains("agent's membership"),
         format!("{files} {token}"),
     );
     Ok(())

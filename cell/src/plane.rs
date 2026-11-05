@@ -817,10 +817,13 @@ impl FragmentCell {
     pub(crate) async fn storage_token(&self, caller: &Caller, asked: StorageAccess) -> CellResult<Response> {
         let write = asked == StorageAccess::Write;
         let needs = if write { Role::Editor } else { Role::Viewer };
-        // whoever may not have the role at all is refused as anywhere (401, 403)
+        // whoever may not have the role at all is refused as anywhere (401,
+        // 403); a share link counts for nothing here, and a public
+        // fragment's floor is below a viewer's
         self.require(caller, false, needs)?;
+        // the rest read as a viewer through an agent of theirs that is a member
         if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
-            return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone (viewer and up): not a share link's, nor a public fragment's visitor's"));
+            return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
         }
         if write {
             // its token writes the repo: a deploy's first step
