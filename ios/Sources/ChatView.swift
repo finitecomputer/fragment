@@ -312,7 +312,14 @@ struct MessageView: View {
                     HStack(spacing: 7) {
                         AgentAvatar(agent: agent, size: 22)
                         Text(agent?.displayTitle ?? "Agent").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                        if streaming { ProgressView().controlSize(.mini).accessibilityLabel("Replying") }
+                        // drawn by SwiftUI, never a UIKit spinner: a platform view
+                        // in the lazy stack's rows was in each layout pass of a
+                        // stuck one (100% CPU) seen while scrolling up mid-reply
+                        if streaming {
+                            Image(systemName: "ellipsis").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .symbolEffect(.variableColor.iterative, options: .repeating)
+                                .accessibilityLabel("Replying")
+                        }
                     }
                 }
                 if isYou {
