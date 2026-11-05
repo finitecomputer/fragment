@@ -199,6 +199,10 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             ("site/index.html", Some(b"<!doctype html><html><head></head><body>front</body></html>")),
             ("site/docs/index.html", Some(b"<p>docs</p>")),
             ("site/app.3f9a1c2e.js", Some(b"console.log(1)")),
+            // Vite's and esbuild's names for their output, and a look-alike
+            ("site/assets/index-Ikq0sZO3.js", Some(b"console.log(2)")),
+            ("site/assets/index-S4M26L7U.js", Some(b"console.log(3)")),
+            ("site/assets/my-component.js", Some(b"console.log(4)")),
             ("site/style.css", Some(b"body{color:red}")),
             ("notes/a.md", Some(b"alpha")),
             ("site/logo.svg", Some(SCRIPTED_SVG)),
@@ -278,6 +282,16 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the preview image is served", r.status == 200 && r.header("content-type") == "image/svg+xml", &r);
     let r = api.page(&name, "app.3f9a1c2e.js", Some(&cookie))?;
     s.ok("hashed assets are immutable (privately, here)", r.header("cache-control") == "private, max-age=31536000, immutable", r.header("cache-control"));
+    // Vite's and esbuild's names too (FIN-391); a name that only looks like
+    // one is revalidated
+    let caching = |path: &str| api.page(&name, path, Some(&cookie)).map(|r| (r.status, r.header("cache-control")));
+    let (vite, esbuild, plain) = (caching("assets/index-Ikq0sZO3.js")?, caching("assets/index-S4M26L7U.js")?, caching("assets/my-component.js")?);
+    let pinned = |(status, cache): &(u16, String)| *status == 200 && cache == "private, max-age=31536000, immutable";
+    s.ok(
+        "Vite's and esbuild's hashed names are immutable too; my-component.js, no hash, is revalidated",
+        pinned(&vite) && pinned(&esbuild) && plain == (200, "private, no-cache".to_string()),
+        json!({ "vite": vite, "esbuild": esbuild, "plain": plain }),
+    );
     let r = api.page(&name, "nope.html", Some(&cookie))?;
     s.ok("a missing page is 404", r.status == 404, &r);
     let r = api.call(Call { method: "HEAD", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
