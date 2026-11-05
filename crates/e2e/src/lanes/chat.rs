@@ -370,7 +370,7 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
 /// and a press records at once, with no card.
 fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
     let wait = Duration::from_secs(30);
-    let shell = chrome.open(&format!("{}/", api.base))?;
+    let shell = chrome.open_watched(&format!("{}/", api.base))?;
     chrome.viewport(&shell, 1280, 860, false)?;
     let row = format!("#chats [data-key={}] .chat-open", js(&format!("chat:{chat}")));
     let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
@@ -382,6 +382,22 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> R
         s.ok("in the shell's frame, which names the chat's own origin, the chat may use the microphone, and its mic records at once", false, json!({ "framed": false, "allow": allow }));
         return chrome.close(shell);
     }
+    // its origin is the shell page's to know (its `fragment-origin` meta):
+    // the frame names it in its policy and navigates, no status read first
+    let asked: Vec<String> = chrome
+        .watched(&shell)?
+        .events
+        .iter()
+        .filter(|e| e["method"] == "Network.requestWillBeSent")
+        .filter_map(|e| e["params"]["request"]["url"].as_str().map(str::to_string))
+        .collect();
+    let navigated = asked.iter().position(|u| u.contains(&format!("/auth/frame?name={chat}")));
+    let read_first = navigated.is_some_and(|i| asked[..i].iter().any(|u| u.contains(&format!("/api/f/{chat}/status"))));
+    s.ok(
+        "the shell's frame names the chat's own origin in its policy and navigates at once: no read of the chat's status first",
+        allow == json!(format!("clipboard-write; microphone {}", api.site_origin(chat))) && navigated.is_some() && !read_first,
+        json!({ "allow": allow, "navigated": navigated, "read_first": read_first }),
+    );
     let frame = chrome.frame(chat)?;
     let told = chrome.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)")?;
     let mic = "document.getElementById('record')";
