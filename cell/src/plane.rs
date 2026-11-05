@@ -32,6 +32,11 @@ use crate::fragment::{json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 use fragment_core::gather::Gathered;
 
+/// A test fleet's `hold-install` (ops.rs) holds a pending install at most
+/// this many polls of `TEST_HOLD_INSTALL_POLL_MS` (a minute).
+const TEST_HOLD_INSTALL_POLLS: u32 = 3_000;
+const TEST_HOLD_INSTALL_POLL_MS: u64 = 20;
+
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
 /// Tree rows per insert statement.
@@ -442,13 +447,30 @@ impl FragmentCell {
     /// same `fragment.json` its seed commits (`blessed_manifest_bytes`),
     /// with no commit (`""`, as the code's sha and the status's repo say).
     /// The seed's own install, from live, replaces it.
+    ///
+    /// Callers hold `self.plane`, as every install's do: an end of its life
+    /// waits for it, and a seed's install from live (under the same lock)
+    /// comes wholly before or after it. One that came before stands: this
+    /// installs nothing over live.
     pub(crate) async fn install_pending(&self) -> CellResult<()> {
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
-        assert!(self.pin("live")?.is_none(), "a template is installed pending only before its first commit");
+        if self.pin("live")?.is_some() {
+            return Ok(());
+        }
         let title = self.meta(MetaKey::TemplateTitle)?;
         let bytes = crate::publish::blessed_manifest_bytes(&which, title.as_deref());
         let manifest = manifest::parse(&bytes).map_err(|e| CellError::host(format!("the {which} template's own fragment.json: {e}")))?;
         assert_eq!(manifest.template.as_deref(), Some(which.as_str()), "a pending template's manifest names it");
+        // test fleets: `hold-install` holds it here, its manifest read and
+        // its release's reads and writes still to come (bounded)
+        for _ in 0..TEST_HOLD_INSTALL_POLLS {
+            if !(self.cfg.test_hooks && self.test_hold_install.get().0) {
+                break;
+            }
+            self.test_hold_install.set((true, true));
+            worker::Delay::from(std::time::Duration::from_millis(TEST_HOLD_INSTALL_POLL_MS)).await;
+        }
+        self.test_hold_install.set((self.test_hold_install.get().0, false));
         self.install(manifest, None, "").await
     }
 

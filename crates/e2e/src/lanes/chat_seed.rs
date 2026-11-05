@@ -305,5 +305,84 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded after its deploy" } }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
     );
+    pending_install_held(s, api, owner)
+}
+
+/// A chat's create installs its template from the release (plane.rs
+/// `install_pending`) holding the plane's lock, as every install does
+/// (Codex, #1042 at cd21e345). Its install held where its release's reads
+/// are (`hold-install`): a delete, and the name made again as an app,
+/// waits for it, never landing its own life to have the chat's install
+/// written over it; and a writer's seed, its install from live, comes after
+/// it, never overwritten by it. Each sequence's other side is let run for
+/// `LOCKED` before the hold is let go: with the lock it cannot finish.
+fn pending_install_held(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<()> {
+    const LOCKED: Duration = Duration::from_secs(5);
+    let wait = Duration::from_secs(30);
+    let lever = |name: &str, on: Option<bool>| -> Value {
+        let mut body = json!({ "fragment": name, "op": "hold-install" });
+        if let Some(on) = on {
+            body["on"] = json!(on);
+        }
+        api.unsigned("POST", "/api/test/fragment", Some(&body)).map(|r| r.body).unwrap_or(Value::Null)
+    };
+    let status = |name: &str| api.status(owner, name).map(|r| r.body).unwrap_or(Value::Null);
+    let events = |name: &str, kind: &str| -> usize {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
+        r.map(|r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).count()).unwrap_or(0)
+    };
+
+    // ---- held, its life deleted and the name made again as an app
+    let gone = s.named(api, owner, "seed-install-gone")?;
+    lever(&gone, Some(true));
+    let (made, others, ran, held) = std::thread::scope(|scope| {
+        let made = scope.spawn(|| api.create_with(owner, json!({ "name": gone, "template": "chat", "title": "Held install" })));
+        let held = s.eventually(wait, || lever(&gone, None)["waiting"] == true);
+        let others = scope.spawn(|| -> Result<(u16, u16)> {
+            let deleted = api.signed(owner, "DELETE", &format!("/api/f/{gone}"), None)?.status;
+            let again = api.create_with(owner, json!({ "name": gone, "template": "todo" }))?.status;
+            Ok((deleted, again))
+        });
+        // with the lock, the delete waits for the install: they cannot end
+        let ran = s.eventually(LOCKED, || others.is_finished());
+        lever(&gone, Some(false));
+        (made.join().expect("the create's thread"), others.join().expect("the delete's thread"), ran, held)
+    });
+    let made = made?;
+    let (deleted, again) = others?;
+    if again == 200 {
+        s.owned(&json!({ "name": gone }), owner);
+    }
+    let landed = s.eventually(wait, || events(&gone, "template") >= 1);
+    let st = status(&gone);
+    s.ok(
+        "a chat's create, its install from the release held, the name deleted and made again as an app: the delete waits for the install, the app's life lands its own template, and nothing of the chat is installed in it",
+        held && !ran && made.status == 200 && deleted == 200 && again == 200 && landed
+            && st["code"]["id"].as_str().is_some_and(|id| !id.starts_with("blessed:")) && st["code"]["sha"] == st["pins"]["live"] && st["kind"] == "app",
+        format!("held {held} ran {ran} create {} delete {deleted} again {again} landed {landed} {st}", made.status),
+    );
+
+    // ---- held, a writer's seed beside it
+    let beside = s.named(api, owner, "seed-install-beside")?;
+    lever(&beside, Some(true));
+    let (made, token, ran, held) = std::thread::scope(|scope| {
+        let made = scope.spawn(|| api.create_with(owner, json!({ "name": beside, "template": "chat", "title": "Held beside" })));
+        let held = s.eventually(wait, || lever(&beside, None)["waiting"] == true);
+        let token = scope.spawn(|| api.signed(owner, "GET", &format!("/api/f/{beside}/storage-token"), None));
+        // with the lock, the seed's commit and install wait for it
+        let ran = s.eventually(LOCKED, || token.is_finished());
+        lever(&beside, Some(false));
+        (made.join().expect("the create's thread"), token.join().expect("the token's thread"), ran, held)
+    });
+    let made = made?;
+    s.owned(&made.body, owner);
+    let token = token?;
+    let st = status(&beside);
+    s.ok(
+        "a chat's create, its install from the release held, a writer's seed beside it: the seed waits, then installs live over it, never under it (its code is live's)",
+        held && !ran && made.status == 200 && token.status == 200
+            && st["pins"]["live"].is_string() && st["code"]["sha"] == st["pins"]["live"] && st["code"]["id"].as_str().is_some_and(|id| id.starts_with("blessed:chat@")),
+        format!("held {held} ran {ran} create {} {token} {st}", made.status),
+    );
     Ok(())
 }

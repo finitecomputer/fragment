@@ -128,6 +128,11 @@ pub struct FragmentCell {
     /// A create answered before its template's repo was made
     /// (publish.rs `seeds_later`): `after_answer` seeds it.
     pub(crate) seed_soon: Cell<bool>,
+    /// A test fleet's `hold-install` lever (ops.rs): whether a pending
+    /// install waits (plane.rs `install_pending`), and whether one is
+    /// waiting now. In memory: a life's end, which remakes its storage,
+    /// leaves it as the test set it.
+    pub(crate) test_hold_install: Cell<(bool, bool)>,
     /// Serializes `launch_queued`: two at once would each start a queued
     /// run's Workflow and say so.
     pub(crate) launching: futures_util::lock::Mutex<()>,
@@ -166,6 +171,7 @@ impl DurableObject for FragmentCell {
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
             seed_soon: Cell::new(false),
+            test_hold_install: Cell::new((false, false)),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
             schema,
@@ -1400,7 +1406,18 @@ impl FragmentCell {
         // one that seeds after the answer runs its template from the
         // release meanwhile; failing that, its seed's install does
         if later {
-            if let Err(e) = self.install_pending().await {
+            // under the plane's lock, as every install is (plane.rs
+            // `install_pending`): a delete waits for it, and a writer's seed
+            // installs live wholly before or after it; asked again under the
+            // lock, this life is still the fragment's
+            let installed = {
+                let _held = self.plane.lock().await;
+                if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(created_at.as_str()) {
+                    return Err(CellError::new(ErrorCode::NotFound, format!("{} ended while it was made", body.name)));
+                }
+                self.install_pending().await
+            };
+            if let Err(e) = installed {
                 self.event("template.failed", &format!("its template did not install from the release: {}", e.message), json!({ "code": e.code }));
             }
             laps.lap("install");
