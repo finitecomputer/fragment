@@ -66,7 +66,8 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 
 /// Where runtime code is: what ships or runs for people.
-pub const RUNTIME: [(&str, &str); 8] = [
+pub const RUNTIME: [(&str, &str); 9] = [
+    ("ios/", "the native iOS client (its Tests and UITests are tests)"),
     ("cell/", "the Worker: its Rust, entry.mjs and the platform's JavaScript, and the shell"),
     ("templates/", "the templates' apps, sites and skills, which fragments and computers run"),
     ("images/", "the computer images: the bridge, Hermes' boot, plugins and hooks, the screen pages"),
@@ -92,7 +93,9 @@ pub const NOT_RUNTIME: [(&str, &str); 9] = [
 
 /// What runs a string as script, each with what it does: the name a failure
 /// reports, and an `ALLOWED` entry names.
-pub const REFUSED: [(&str, &str); 17] = [
+pub const REFUSED: [(&str, &str); 19] = [
+    ("evaluateJavaScript", "WKWebView: runs a JavaScript string in a page"),
+    ("callAsyncJavaScript", "WKWebView: runs a JavaScript function body from a string"),
     ("Runtime.evaluate", "DevTools: runs a string as script in a page"),
     ("callFunctionOn", "DevTools' Runtime.callFunctionOn: runs a function's source in a page"),
     ("compileScript", "DevTools' Runtime.compileScript: compiles a string as script, for Runtime.runScript"),
@@ -131,6 +134,8 @@ const CARDS: &str = "cell/src/card.rs";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Rust,
+    /// Swift: its strings' text as literals, each interpolation's code as code (`lex_swift`).
+    Swift,
     JavaScript,
     /// a page: its inline scripts, as JavaScript
     Html,
@@ -143,6 +148,7 @@ pub fn lang(path: &str) -> Option<Lang> {
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rsplit_once('.').map(|(_, ext)| ext) {
         Some("rs") => Some(Lang::Rust),
+        Some("swift") => Some(Lang::Swift),
         Some("js" | "mjs" | "cjs") => Some(Lang::JavaScript),
         Some("html") => Some(Lang::Html),
         Some("py" | "sh") => Some(Lang::Hash),
@@ -201,7 +207,7 @@ pub fn select(paths: impl Iterator<Item = String>) -> Result<Vec<(String, Lang)>
     let mut found = vec![];
     for path in paths {
         let runtime = RUNTIME.iter().any(|(dir, _)| path.starts_with(dir));
-        let test = path.split('/').any(|c| c == "tests");
+        let test = path.split('/').any(|c| matches!(c, "tests" | "Tests" | "UITests"));
         let Some(lang) = lang(&path).filter(|_| runtime && !test && !crate::js_syntax::vendored(&path)) else { continue };
         found.push((path, lang));
         ensure!(found.len() <= FILES_MAX, "more than {FILES_MAX} runtime files to read: is node_modules or target no longer ignored?");
@@ -236,6 +242,14 @@ pub fn hits(file: &File) -> Vec<Hit> {
             let parts = lex_hash(b);
             devtools(b, &parts, &mut at);
             drivers(b, &parts, &mut at);
+        }
+        Lang::Swift => {
+            let parts = lex_swift(b);
+            devtools(b, &parts, &mut at);
+            drivers(b, &parts, &mut at);
+            for word in ["evaluateJavaScript", "callAsyncJavaScript"] {
+                at.extend(words(b, &parts, word, code).filter(|&i| call_args(b, &parts, i + word.len()).is_some()).map(|i| (i, word)));
+            }
         }
         Lang::Rust => {
             let parts = lex_rust(b);
@@ -660,6 +674,91 @@ fn lex_rust(b: &[u8]) -> Vec<Part> {
     parts
 }
 
+/// Swift: `//` comments and nested `/* */`; strings (`"…"`, multiline
+/// `"""…"""`, raw `#"…"#` with any number of `#`) as literals, but the code
+/// of each interpolation in one (`\(…)`, `\#(…)` in a raw string with one
+/// `#`) as code, its own strings and interpolations read the same way. No
+/// `'` quotes anything in Swift. A regular expression literal is read as
+/// code: a name in one is found, never missed.
+fn lex_swift(b: &[u8]) -> Vec<Part> {
+    let mut parts = vec![Part::Code; b.len()];
+    // each string an interpolation is open in: its `#`s, whether it is
+    // multiline, and the paren depth its `(` opened at (its `)` closes it)
+    let mut open: Vec<(usize, bool, usize)> = vec![];
+    let mut depth = 0usize;
+    let mut i = 0;
+    // bounded: each pass moves `i` forward
+    while i < b.len() {
+        let (c, next) = (b[i], b.get(i + 1).copied());
+        let start = i;
+        if c == b')' && open.last().is_some_and(|&(_, _, d)| d == depth) {
+            let (hashes, multiline, _) = open.pop().expect("an interpolation is open");
+            parts[i] = Part::Literal;
+            i = swift_text(b, i + 1, hashes, multiline, &mut parts, &mut open, depth);
+        } else if c == b'/' && next == Some(b'/') {
+            i = line_end(b, i);
+            mark(&mut parts, start..i, Part::Comment);
+        } else if c == b'/' && next == Some(b'*') {
+            i = block_end(b, i, true);
+            mark(&mut parts, start..i, Part::Comment);
+        } else if c == b'"' || c == b'#' {
+            let hashes = b[i..].iter().take_while(|&&c| c == b'#').count();
+            if b.get(i + hashes) != Some(&b'"') {
+                // a directive (`#if`, `#available`) or a raw identifier's `#`
+                i += hashes.max(1);
+                continue;
+            }
+            let multiline = b[i + hashes..].starts_with(b"\"\"\"");
+            let body = i + hashes + if multiline { 3 } else { 1 };
+            mark(&mut parts, start..body.min(b.len()), Part::Literal);
+            i = swift_text(b, body, hashes, multiline, &mut parts, &mut open, depth);
+        } else {
+            match c {
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    parts
+}
+
+/// A Swift string's text from `i`, marked as literal: to past its closing
+/// quote (and `#`s), or past the `(` of an interpolation, which is pushed on
+/// `open` (at paren `depth`). A single-line string unclosed at its line's
+/// end ends there.
+fn swift_text(b: &[u8], mut i: usize, hashes: usize, multiline: bool, parts: &mut [Part], open: &mut Vec<(usize, bool, usize)>, depth: usize) -> usize {
+    let quote: &[u8] = if multiline { b"\"\"\"" } else { b"\"" };
+    // bounded: each pass moves `i` forward
+    while i < b.len() {
+        let rest = &b[i..];
+        let hashed = |at: usize| rest.len() >= at + hashes && rest[at..at + hashes].iter().all(|&c| c == b'#');
+        if rest[0] == b'\\' && hashed(1) {
+            let after = 1 + hashes;
+            if rest.get(after) == Some(&b'(') {
+                mark(parts, i..i + after + 1, Part::Literal);
+                open.push((hashes, multiline, depth));
+                return i + after + 1;
+            }
+            // an escape: what it escapes is text too
+            let end = (i + after + 1).min(b.len());
+            mark(parts, i..end, Part::Literal);
+            i = end;
+        } else if rest.starts_with(quote) && hashed(quote.len()) {
+            let end = i + quote.len() + hashes;
+            mark(parts, i..end, Part::Literal);
+            return end;
+        } else if rest[0] == b'\n' && !multiline {
+            return i;
+        } else {
+            parts[i] = Part::Literal;
+            i += 1;
+        }
+    }
+    i
+}
+
 /// A literal a word at its start prefixes, ending where it does: `r"…"`,
 /// `r#"…"#`, `b"…"`, `br"…"`, `c"…"`, `cr"…"`, `b'…'`; `None` for a word
 /// (`r#type` is a raw identifier).
@@ -793,13 +892,37 @@ mod tests {
         hits(&file(path, text)).into_iter().map(|h| (h.line, h.name)).collect()
     }
 
+    #[test]
+    fn swift_comments_and_data_do_not_evaluate_a_page() {
+        assert!(found("ios/Sources/Web.swift", "// web.evaluateJavaScript(source)\nlet label = \"evaluateJavaScript\"\nweb.load(request)\n").is_empty());
+        // text, however quoted: a raw string's `\(` is no interpolation, and
+        // an interpolation's own strings are text
+        for text in [
+            "let a = #\"\\(web.evaluateJavaScript(source))\"#\n",
+            "let b = \"\\(label(\"evaluateJavaScript(x)\"))\"\n",
+            "let c = \"\"\"\n  web.callAsyncJavaScript(source)\n  \"\"\"\n",
+            "let d = ##\"say \"#\\#(web.evaluateJavaScript(x))\"# then\"##\n",
+            "/* outer /* web.evaluateJavaScript(x) */ still a comment */\n",
+        ] {
+            assert!(found("ios/Sources/Web.swift", text).is_empty(), "{text}");
+        }
+    }
+
     /// Goal: a planted use in each category fails the check, named by its
     /// file, line and name, in each language it can be written in. Method:
     /// each beside clean code, alone and in a check of both.
     #[test]
     fn a_planted_eval_fails_the_check_naming_its_line() {
         let clean = file("cell/clean.mjs", "export const ok = 1;\n");
-        let planted: [(&str, &str, usize, &str); 38] = [
+        let planted: [(&str, &str, usize, &str); 45] = [
+            ("ios/Sources/Web.swift", "// Native page scripts are not evaluated.\nweb.evaluateJavaScript(source)\n", 2, "evaluateJavaScript"),
+            ("ios/Sources/Async.swift", "try await web.callAsyncJavaScript(source, arguments: [:], in: nil, contentWorld: .page)\n", 1, "callAsyncJavaScript"),
+            // inside an interpolation, a string's code is code
+            ("ios/Sources/Said.swift", "let said = \"result: \\(try await web.evaluateJavaScript(source))\"\n", 1, "evaluateJavaScript"),
+            ("ios/Sources/Raw.swift", "let said = #\"a \"quote\" \\#(try await web.callAsyncJavaScript(source, arguments: [:], in: nil, contentWorld: .page))\"#\n", 1, "callAsyncJavaScript"),
+            ("ios/Sources/Lines.swift", "let said = \"\"\"\n  page:\n  \\(try await web.evaluateJavaScript(source))\n  \"\"\"\n", 3, "evaluateJavaScript"),
+            ("ios/Sources/Nested.swift", "let said = \"\\(f(\"\\(web.evaluateJavaScript(js))\"))\"\n", 1, "evaluateJavaScript"),
+            ("ios/Sources/After.swift", "let said = \"\\(g(\")\"))\"; web.callAsyncJavaScript(js)\n", 1, "callAsyncJavaScript"),
             // DevTools, as a method on the wire and as a client's call
             ("cell/src/card.rs", "async fn f() {\n    cdp.call(\"Runtime.evaluate\", json!({ \"expression\": js }), deadline).await?;\n}\n", 2, "Runtime.evaluate"),
             ("crates/core/src/a.rs", "const M: &str = \"Runtime.callFunctionOn\";\n", 1, "callFunctionOn"),
@@ -920,6 +1043,9 @@ mod tests {
             "templates/todo/site/index.html",
             "images/hermes/Dockerfile",
             "images/hermes/preload.py",
+            "ios/Sources/FragmentWebSheet.swift",
+            "ios/Tests/DeviceIdentityTests.swift",
+            "ios/UITests/FragmentUITests.swift",
             "images/bridge/tests/docker.rs",
             "cli/tests/mcp.rs",
             "crates/core/src/lib.rs",
@@ -938,6 +1064,7 @@ mod tests {
                 ("templates/todo/site/index.html", Lang::Html),
                 ("images/hermes/Dockerfile", Lang::Hash),
                 ("images/hermes/preload.py", Lang::Hash),
+                ("ios/Sources/FragmentWebSheet.swift", Lang::Swift),
                 ("crates/core/src/lib.rs", Lang::Rust),
             ]
         );
