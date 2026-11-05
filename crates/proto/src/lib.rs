@@ -1744,8 +1744,9 @@ impl Refresh {
     }
 }
 
-/// `GET /api/f/<name>/storage-token` (editor and up): a code.storage JWT
-/// scoped to this fragment's repo, `git:read` + `git:write`.
+/// `GET /api/f/<name>/storage-token` (an editor and up: `git:read` +
+/// `git:write`), or with `?access=read` (a member, viewer and up:
+/// `git:read` alone): a code.storage JWT scoped to this fragment's repo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageToken {
@@ -1753,6 +1754,35 @@ pub struct StorageToken {
     pub repo: String,
     pub api: String,
     pub expires_at: i64,
+    /// Whether it writes (`git:write`). A host before `?access=read`
+    /// named none, and minted only writers' tokens.
+    #[serde(default = "StorageToken::writes")]
+    pub write: bool,
+}
+
+impl StorageToken {
+    fn writes() -> bool {
+        true
+    }
+}
+
+/// What a storage token is asked for: `?access=read` asks for one that
+/// only reads; none, for one that writes too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageAccess {
+    Write,
+    Read,
+}
+
+impl StorageAccess {
+    /// The query's `access`: none or `read`.
+    pub fn parse(access: Option<&str>) -> Result<StorageAccess, String> {
+        match access {
+            None => Ok(StorageAccess::Write),
+            Some("read") => Ok(StorageAccess::Read),
+            Some(other) => Err(format!("access is read, or left out for a token that writes too, not {other:?}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2291,6 +2321,21 @@ pub mod wipe;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a storage token says whether it writes, add-only. Method: a
+    /// host before `?access=read` names no `write` (it minted writers'
+    /// alone), a read token says false; `access` is read or left out.
+    #[test]
+    fn a_storage_token_says_whether_it_writes() {
+        let older: StorageToken = serde_json::from_str(r#"{"token":"t","repo":"r","api":"https://a","expiresAt":1}"#).unwrap();
+        assert!(older.write, "a host that names none minted a writer's");
+        let read: StorageToken = serde_json::from_str(r#"{"token":"t","repo":"r","api":"https://a","expiresAt":1,"write":false}"#).unwrap();
+        assert!(!read.write);
+        assert_eq!(serde_json::to_value(&read).unwrap()["write"], false);
+        assert_eq!(StorageAccess::parse(None), Ok(StorageAccess::Write));
+        assert_eq!(StorageAccess::parse(Some("read")), Ok(StorageAccess::Read));
+        assert!(StorageAccess::parse(Some("write")).is_err() && StorageAccess::parse(Some("")).is_err());
+    }
 
     /// Goal: a refresh reads again the ref its writer names, and an older
     /// writer's body (`{}`, none, or not JSON: the route read no body

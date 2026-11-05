@@ -24,7 +24,8 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let (bob, carol, dave, erin) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let name = s.named(api, &owner, "members")?;
-    s.create(api, &owner, &name)?;
+    let made = s.create(api, &owner, &name)?;
+    let repo = made["repo"].as_str().unwrap_or("").to_string();
     let path = |rest: &str| format!("/api/f/{name}/{rest}");
     let npub_of = |k: &Keys| npub::encode(k.pubkey_hex());
 
@@ -65,7 +66,8 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&bob, "PUT", &path(&format!("members/{}", npub_of(&carol))), Some(&json!({ "role": "viewer" })))?;
     s.ok("a viewer cannot add members", r.status == 403, &r);
     let r = api.signed(&bob, "GET", &path("storage-token"), None)?;
-    s.ok("a viewer cannot mint a storage token", r.status == 403, &r);
+    s.ok("a viewer cannot mint a storage token that writes (an older CLI, which asks for no other, is refused as before)", r.status == 403, &r);
+    the_repo_is_its_members(s, api, &owner, &name, &repo)?;
     let r = api.signed(&owner, "PUT", &path(&format!("members/{}", bob.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     s.ok("the owner promotes by hex key", r.status == 200 && r.body["role"] == "editor", &r);
     let r = api.signed(&bob, "GET", &path("storage-token"), None)?;
@@ -917,4 +919,99 @@ fn template_landed(api: &Api, owner: &Keys, name: &str) -> bool {
 fn row_of_named(api: &Api, owner: &Keys, name: &str) -> Result<serde_json::Value> {
     let r = api.signed(owner, "GET", "/api/fragments", None)?;
     Ok(r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).cloned().unwrap_or_default())
+}
+
+/// Goal: a storage token reads the repo's whole history (decision of
+/// 2026-11-04: a viewer's reads it, history and all), so it is its
+/// members' alone, whatever the visibility. Method: a viewer mints one that
+/// only reads (`?access=read`), which code.storage reads with and refuses a
+/// commit; an agent acting for the viewer mints that one, and none that
+/// writes; then, on each visibility, a signed-in non-member, the same with
+/// the share link, an agent acting for a non-member, and no one signed
+/// mint none; nor does a person who reads it only through an agent of
+/// theirs that is a member. Its viewer and members leave after, so the
+/// lane's count of members stands (a member's new agent joins with them,
+/// decision 64, and leaves with them).
+fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, name: &str, repo: &str) -> Result<()> {
+    use base64::Engine;
+    let path = |rest: &str| format!("/api/f/{name}/{rest}");
+    let read = path("storage-token?access=read");
+    let viewer = &api.person()?;
+    let r = api.share(name, &npub::encode(viewer.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "the repo's viewer, in: {r}");
+    let r = api.signed(viewer, "GET", &read, None)?;
+    let token = r.body["token"].as_str().unwrap_or("").to_string();
+    let claims: Value = token
+        .split('.')
+        .nth(1)
+        .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    s.ok(
+        "a viewer mints a token that only reads (?access=read): this repo, git:read alone, write false",
+        r.status == 200 && r.body["write"] == false && r.body["repo"] == repo && claims["repo"] == repo && claims["scopes"] == json!(["git:read"]) && claims["sub"] == format!("reader:{}", api.identity(viewer)?),
+        json!({ "reply": r.body, "claims": claims }),
+    );
+    let http = reqwest::blocking::Client::new();
+    let branch = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
+    let commit = http.post(format!("{}/api/repos/{repo}/commit-pack", s.fake.url)).bearer_auth(&token).body("{}").send()?.status().as_u16();
+    s.ok("code.storage reads with it (a fresh repo: 404, no main) and refuses it a commit (403)", branch == 404 && commit == 403, json!({ "branch": branch, "commit": commit }));
+    let bad = api.signed(viewer, "GET", &path("storage-token?access=write"), None)?;
+    s.ok("another access is refused (400)", bad.status == 400, &bad);
+
+    let viewer_id = api.identity(viewer)?;
+    let (agent, _) = super::delegation::agent_of(api, viewer)?;
+    let reads = api.signed(&agent, "GET", &format!("{read}&for={viewer_id}"), None)?;
+    let writes = api.signed(&agent, "GET", &path(&format!("storage-token?for={viewer_id}")), None)?;
+    s.ok(
+        "an agent acting for the viewer mints the token that reads, and none that writes (R17: the lower of their roles)",
+        reads.status == 200 && reads.body["write"] == false && writes.status == 403,
+        format!("{reads} {writes}"),
+    );
+
+    let stranger = api.person()?;
+    let stranger_id = api.identity(&stranger)?;
+    let (strangers_agent, _) = super::delegation::agent_of(api, &stranger)?;
+    let mut seen = vec![];
+    for visibility in ["members", "link", "public"] {
+        let set = api.signed(owner, "PUT", &path("visibility"), Some(&json!({ "visibility": visibility })))?;
+        let link = api.status(owner, name)?.body["viewToken"].as_str().unwrap_or("").to_string();
+        let status = |r: Result<crate::api::Reply>| r.map(|r| r.status).unwrap_or(0);
+        seen.push(json!({
+            "visibility": visibility,
+            "set": set.status,
+            "signed": status(api.signed(&stranger, "GET", &read, None)),
+            "link": status(api.signed(&stranger, "GET", &format!("{read}&view={link}"), None)),
+            "agent": status(api.signed(&strangers_agent, "GET", &format!("{read}&for={stranger_id}"), None)),
+            "anonymous": status(api.unsigned("GET", &format!("{read}&view={link}"), None)),
+        }));
+    }
+    let back = api.signed(owner, "PUT", &path("visibility"), Some(&json!({ "visibility": "link" })))?;
+    s.ok(
+        "on every visibility (members, link, public), a signed-in non-member, the same with the share link, and an agent acting for one mint no token (403), nor does anyone unsigned (401)",
+        back.status == 200 && seen.iter().all(|v| v["set"] == 200 && v["signed"] == 403 && v["link"] == 403 && v["agent"] == 403 && v["anonymous"] == 401),
+        json!(seen),
+    );
+
+    // a person whose agent is a member reads the fragment as a viewer
+    // (FIN-11), but its repo is a membership's: theirs is none
+    let through = api.person()?;
+    let (their_agent, _) = super::delegation::agent_of(api, &through)?;
+    let r = api.share(name, &npub::encode(their_agent.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "a non-member's agent, in: {r}");
+    let files = api.signed(&through, "GET", &path("files"), None)?;
+    let token = api.signed(&through, "GET", &read, None)?;
+    // the lane goes on counting its members: these leave (the viewer with
+    // its agent, as one entity)
+    let gone = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(their_agent.pubkey_hex()))), None)?;
+    let left = api.signed(owner, "DELETE", &path(&format!("members/{}", npub::encode(viewer.pubkey_hex()))), None)?;
+    let members = api.signed(owner, "GET", &path("members"), None)?;
+    s.ok(
+        "a person whose agent is a member reads its files, and mints no token (403): the repo is a membership's",
+        files.status == 200 && token.status == 403 && token.message().contains("agent's membership"),
+        format!("{files} {token}"),
+    );
+    let principals: Vec<&str> = members.body["members"].as_array().into_iter().flatten().filter_map(|m| m["principal"].as_str()).collect();
+    anyhow::ensure!(gone.status == 200 && left.status == 200 && principals.len() == 2, "the check's members left: {gone} {left} {principals:?}");
+    Ok(())
 }
