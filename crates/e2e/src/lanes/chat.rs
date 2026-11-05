@@ -214,11 +214,10 @@ const LOAD_WATCH: &str = "(() => { if (window !== window.top) return; window.__s
       if (m.type !== 'subscribed' || m.more || done.has(m.channel)) return; done.add(m.channel); \
       if (done.has('chat') && done.has('work')) requestAnimationFrame(() => requestAnimationFrame(() => { window.__drawn = true; })); }); return ws; } }); })();";
 
-/// The chat's page as its release holds it: built, naming its bundle by
-/// its hash (crates/templates/bundle.rs).
-fn chat_page() -> String {
-    let page = fragment_templates::blessed::template("chat").and_then(|t| t.file("site/index.html")).expect("the chat's page");
-    String::from_utf8(page.bytes.to_vec()).expect("a page is text")
+/// The chat's bundle (`chat.<hash>.js`), which its built page runs and
+/// names (crates/templates/bundle.rs).
+fn chat_bundle() -> &'static str {
+    fragment_templates::BUILT.iter().find_map(|(at, p)| (*at == "chat").then(|| p.strip_prefix("site/")).flatten().filter(|p| p.starts_with("chat.") && p.ends_with(".js"))).expect("the chat's page is built")
 }
 
 /// An idle chat's page says nothing of a turn running as it loads. Its
@@ -621,8 +620,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let member_session = api.sign_in(&Api::email_of(&member))?;
     let owner_site = format!("fragment_site={}", site_cookie(api, &owner_session, &chat_name)?);
     let member_site = format!("fragment_site={}", site_cookie(api, &member_session, &chat_name)?);
-    let served = s.eventually(Duration::from_secs(20), || api.page(&chat_name, "", Some(&owner_site)).is_ok_and(|r| r.status == 200 && r.text == chat_page()));
-    s.ok("the chat serves the template's page", served, "");
+    let served = s.eventually(Duration::from_secs(20), || api.page(&chat_name, "", Some(&owner_site)).is_ok_and(|r| r.status == 200 && r.text.contains(&format!("\"./{}\"", chat_bundle()))));
+    s.ok("the chat serves the template's page, built: it runs its bundle", served, "");
     let label = fragment_proto::split_fragment_name(&agent_name).map_or("", |(l, _)| l).to_string();
     let r = api.page(&chat_name, &format!("__people?id={identity}"), Some(&owner_site))?;
     let profile = &r.body["profiles"][identity.as_str()];
