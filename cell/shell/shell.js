@@ -35,6 +35,7 @@ import { createThreads } from "./threads.js";
 import { KIND } from "./frame-messages.js";
 import { answerTo } from "./computer-answer.js";
 import { standIns } from "./frame-standin.js";
+import * as making from "./making.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -874,7 +875,8 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ask
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
     offers: (agent, what) => offers(agent, what) },
-  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making },
+  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,
+    onScreen: () => making.shownChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
@@ -932,15 +934,25 @@ const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = crea
   agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
 });
 
-// Each time the middle column is given a view (a chat, settings): a
-// launch's late answer changes the screen only if none was given since
-// (launcher.js).
+// Each time the middle column is given a view (a chat, settings, Apps,
+// History, a chat being made): a launch's late answer changes the screen
+// only if none was given since (launcher.js), and a chat being made shown
+// there is away from then on (making.js `left`), its room hidden.
 let views = 0;
+let makingRoom = null;
+function newView() {
+  views++;
+  state.making = making.left(state.making);
+  if (state.making?.phase === "away" && makingRoom) {
+    makingRoom.remove();
+    makingRoom = null;
+  }
+}
 // `path`: the page of it to show (the session archive's list, or one of
 // its conversations: session-archive.js), its frame sent there.
 function openChat(name, push = true, path = null) {
   if (!byName(name)) return;
-  views++;
+  newView();
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
@@ -1403,12 +1415,15 @@ let starting = false;
 // 2026-11-04: "we don't need to lean on optimistic UI yet", this alone): a
 // chat its agent's New chat is making, at once under that agent, open in
 // the middle column (its empty room's stand-in, frame-standin.js) and
-// titled, until the create answers; then the chat made opens in its place.
-// One the platform refused goes, and what was open before comes back.
-function showMaking(identity) {
-  const before = state.current;
-  state.making = { agent: identity, title: UNTITLED };
+// titled, until the create answers. Its states and their moves are
+// making.js's; what each move shows is here.
+function showMaking(identity, name) {
+  const before = { page: state.page, current: state.current };
+  newView();
+  at("/");
+  state.making = making.start({ agent: identity, name, title: UNTITLED, before });
   state.page = null;
+  hideNotice();
   $("layout").classList.remove("settings-view");
   $("settings-page").hidden = true;
   leaveApps();
@@ -1418,56 +1433,91 @@ function showMaking(identity) {
     frame.hidden = true;
     standins.sync(frame);
   }
-  const room = el("div", "frame-standin making-standin");
-  room.setAttribute("aria-hidden", "true");
-  room.append(el("span", "standin-wait"), el("div", "standin-composer"));
-  $("frames").append(room);
+  makingRoom = el("div", "frame-standin making-standin");
+  makingRoom.setAttribute("aria-hidden", "true");
+  makingRoom.append(el("span", "standin-wait"), el("div", "standin-composer"));
+  $("frames").append(makingRoom);
   renderHeading();
   renderChats();
   leaveSidebar();
-  return { before, room };
 }
-function endMaking(shown) {
+// Its create answered (`made` or `refused`): it is no more, and the screen
+// moves as making.js `settled` says. True when its chat opened.
+function settleMaking(outcome) {
+  const m = state.making;
+  const then = making.settled(m, outcome);
   state.making = null;
-  shown.room.remove();
+  makingRoom?.remove();
+  makingRoom = null;
+  if (then === "open" && byName(m.name)) {
+    openChat(m.name);
+    return true;
+  }
+  if (then === "restore") restoreView(m.before);
+  else {
+    renderHeading();
+    renderChats();
+  }
+  return false;
 }
+// The view a chat being made was started from, back in its place, its
+// address with it (in place of the chat's `/` it was given)
+function restoreView({ page, current }) {
+  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY }[page] ?? "/";
+  if (location.pathname !== path) history.replaceState(null, "", path);
+  if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
+  else if (page === "Apps") openApps(false);
+  else if (page === "History") openHistory(false);
+  else if (byName(current)) openChat(current, false);
+  else {
+    renderHeading();
+    renderChats();
+  }
+}
+// A name drawn that someone holds already is drawn again, as the platform
+// draws a label's (cell/src/lib.rs NAME_DRAWS)
+const NAME_DRAWS = 3;
 // `open: false` makes it (or finds the blank one) without opening it: the
 // launcher opens it itself, as it posts its first message.
 async function newChat(identity, { quiet = false, open = true } = {}) {
   const agent = state.agents.get(identity);
   if (!agent || starting) return;
   starting = true;
-  let shown = null;
   try {
     let name = blank(identity)?.name;
     // one that cannot be asked is not taken: a new chat is made
     if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
-      shown = open ? showMaking(identity) : null;
+      // named here, before it is made, so its row is known as it
+      // whichever comes first, the list's read or the create's answer
+      const label = chatLabel(agent.fragment);
+      name = making.drawName(label);
+      if (open) showMaking(identity, name);
       // made with its agent in it, in one step: its row names its agent
       // from the start, and its computer is told it joined (`joined`)
-      const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED, agent: identity });
+      for (let draw = 1; ; draw++) {
+        try {
+          await api("POST", "/api/fragments", { name, template: "chat", title: UNTITLED, agent: identity });
+          break;
+        } catch (e) {
+          if (e.status !== 409 || draw >= NAME_DRAWS) throw e;
+          name = making.drawName(label);
+          state.making = making.renamed(state.making, name);
+        }
+      }
       await load();
-      name = chat.name;
     }
     if (!open) return name;
-    if (shown) endMaking(shown);
-    shown = null;
-    openChat(name);
-    leaveSidebar();
+    if (!state.making) {
+      openChat(name);
+      leaveSidebar();
+    } else if (settleMaking("made")) leaveSidebar();
     return name;
   } catch (e) {
-    // refused, or its list not read: nothing of it is left shown, and
-    // what was open before is again (a chat made whose list read failed
-    // comes with the list's next read)
-    if (shown) {
-      endMaking(shown);
-      if (byName(shown.before)) openChat(shown.before, false);
-      else {
-        renderHeading();
-        renderChats();
-      }
-    }
+    // refused, or its list not read: nothing of it is left shown, and the
+    // view it was started from is back if it was still shown (a chat made
+    // whose list read failed comes with the list's next read)
+    if (state.making) settleMaking("refused");
     if (quiet) throw e;
     notice("The chat was not made", e.message);
   } finally {
@@ -1676,6 +1726,7 @@ const appsPage = createAppsPage($("apps-page"), {
 });
 function openApps(push = true) {
   if (push) at(APPS);
+  if (state.page !== "Apps") newView();
   hideNotice();
   state.page = "Apps";
   $("layout").classList.add("settings-view");
@@ -1707,7 +1758,7 @@ const historyPage = createHistoryPage($("history-page"), {
 });
 function openHistory(push = true) {
   if (push) at(HISTORY);
-  if (state.page !== "History") views++;
+  if (state.page !== "History") newView();
   hideNotice();
   state.page = "History";
   $("layout").classList.add("settings-view");
@@ -1734,7 +1785,7 @@ const settings = createSettings({
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },
   navigation: { at, path: SETTINGS, isOpen: () => state.page === "Settings",
     enter: () => {
-      if (state.page !== "Settings") views++;
+      if (state.page !== "Settings") newView();
       state.page = "Settings";
       $("layout").classList.add("settings-view");
       $("frames").hidden = true;
