@@ -172,7 +172,8 @@ pub async fn legal_page(req: &Request, env: &Env, name: &str) -> CellResult<Resp
 }
 
 /// `GET /__shell/<file>`: one of the files it publishes
-/// (`fragment_templates::shell_published`), or `None`. Asked for by its
+/// (`fragment_templates::shell_published`), or `None`. Named by its hash
+/// (its page's build's, crates/templates/bundle.rs) or asked for by its
 /// version (`?v=`, `versioned`), it is kept for good; by its name alone, or
 /// by a version this release does not hold (a page of the last one's), it
 /// is revalidated each time.
@@ -181,8 +182,7 @@ pub async fn asset(req: &Request, env: &Env, name: &str) -> CellResult<Option<Re
     let h = Headers::new();
     h.set("content-type", mime)?;
     h.set("x-content-type-options", "nosniff")?;
-    // a built file's name is its bytes' hash (crates/templates/bundle.rs)
-    let pinned = fragment_templates::shell_built(name) || req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
+    let pinned = fragment_core::site::hashed(name) || req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
     Ok(Some(revalidated(req, env, f, h, if pinned { PINNED } else { "no-cache" }).await?))
 }
 

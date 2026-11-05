@@ -1834,7 +1834,7 @@ is what other parties rely on.
 | `GET /about`, `/privacy`, `/terms` | static pages, for anyone |
 | `GET /admin` | the operators' page (Operators: the admin) |
 | `GET /share/<name>` | the share sheet (Sharing) |
-| `GET /__shell/<file>` | the shell's files; asked for by version (`?v=<hash>`) `immutable`, else revalidated |
+| `GET /__shell/<file>` | the shell's files. Its page's script and stylesheets are named by their hash (`shell.<hash>.js`, with its source map) and `immutable`; its script is one bundle, so its modules have no address of their own. The rest keep their names: asked for by version (`?v=<hash>`) `immutable`, else revalidated |
 
 **The shell's session.** A request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
@@ -1862,7 +1862,11 @@ name="fragment-release">`, `FRAGMENT_DEPLOY_ID`, and
 the platform's host names its own (`x-fragment-deploy`). Once an answer
 names another, the page reloads where it was, its frames with it, while it
 is hidden or at the person's next move, never while a chat says it is
-`busy` or the shell holds unsent work. A chat keeps its composer's draft in
+`busy` or the shell holds unsent work. A page of the last release that
+asks for one of its hashed files after a deploy is answered 404, as this
+release holds no such file: the page says "Still loading… Reload", and
+Reload loads this release's page. It never runs one release's script
+under the other's page. A chat keeps its composer's draft in
 its own origin's storage as its person's (`{who, text, at}`), so a reload
 loses nothing typed.
 

@@ -55,44 +55,71 @@ fn every_module_a_page_imports_is_its_own() {
     assert!(checked > 20, "the pages' imports were read ({checked})");
 }
 
-/// The `href`s of a page's `<link rel="modulepreload">`s.
+/// A built name's own (`chat.3f9a2c1b4d5e.js` → `chat.js`): its hash out.
 #[cfg(feature = "embed")]
-fn preloads(page: &str) -> Vec<&str> {
-    let open = "<link rel=\"modulepreload\" href=\"";
-    page.match_indices(open).map(|(at, _)| &page[at + open.len()..]).map(|rest| &rest[..rest.find('"').unwrap_or(0)]).collect()
+fn unhashed(name: &str) -> String {
+    name.split('.').filter(|p| !(p.len() == 12 && p.bytes().all(|b| b.is_ascii_hexdigit()))).collect::<Vec<_>>().join(".")
 }
 
 /// Goal: a built page (crates/templates/bundle.rs) comes in one wave and
-/// is kept: it names its bundle and stylesheets by their hash, each a file
-/// its release holds, and preloads its bundle and the platform's modules
-/// the bundle imports (their names fixed), nothing else; its bundle names
-/// its map, whose sources are repo paths. Invalid: a page that names a
-/// source module, or a file the release lacks.
+/// is kept for good, and is otherwise its page as written (the chat's
+/// early socket, the shell's metas). Method: each page build.rs builds,
+/// from its release. Valid: each script and stylesheet of its own it
+/// names is named by its hash (`site::hashed`, kept for good) and held by
+/// its release; it preloads its bundles and the platform's modules they
+/// import, nothing else; each bundle names its map, held too, whose
+/// sources are repo paths; its hashes and preloads taken out, it is its
+/// page as the repo holds it. Invalid: a page naming a source module, or
+/// a file its release lacks.
 #[cfg(feature = "embed")]
 #[test]
 fn a_built_page_names_its_hashed_files() {
-    let chat = fragment_templates::blessed::template("chat").expect("chat is blessed");
-    let page = std::str::from_utf8(chat.file("site/index.html").unwrap().bytes).unwrap();
-    let preloaded = preloads(page);
-    assert_eq!(preloaded.len(), 3, "the bundle and the two platform modules: {preloaded:?}");
-    let bundle = preloaded[0].trim_start_matches("./");
-    assert!(bundle.starts_with("chat.") && bundle.ends_with(".js") && bundle != "chat.js", "{bundle}");
-    assert_eq!(&preloaded[1..], ["./__fragment.js", "./__markdown.js"]);
-    assert!(page.contains(&format!("from \"./{bundle}\"")) && !page.contains("\"./chat.js\""), "the page runs its bundle");
-    let js = std::str::from_utf8(chat.file(&format!("site/{bundle}")).expect("the release holds the bundle").bytes).unwrap();
-    let map = js.rsplit("//# sourceMappingURL=").next().unwrap().trim();
-    let map = chat.file(&format!("site/{map}")).expect("and its map");
-    let sources: serde_json::Value = serde_json::from_slice(map.bytes).unwrap();
-    assert!(sources["sources"].as_array().unwrap().iter().all(|s| s.as_str().unwrap().starts_with("templates/")), "{}", sources["sources"]);
-    let css = page.split("<link rel=\"stylesheet\" href=\"./").nth(1).map(|r| &r[..r.find('"').unwrap()]);
-    assert!(css.is_some_and(|c| c != "chat.css" && chat.file(&format!("site/{c}")).is_some()), "its stylesheet by its hash: {css:?}");
-    let shell = std::str::from_utf8(fragment_templates::shell("index.html").unwrap().bytes).unwrap();
-    for name in ["shell.js", "shell.css", "platform-pages.css"] {
-        assert!(!shell.contains(&format!("/__shell/{name}\"")), "the shell's page names {name} by its hash");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pages: Vec<(&str, &str)> = fragment_templates::BUILT.iter().copied().filter(|(_, p)| p.ends_with("index.html")).collect();
+    assert_eq!(pages.len(), 4, "the shell's page and the chat's three: {pages:?}");
+    for (at, _) in pages {
+        let (file, link, dir): (Box<dyn Fn(&str) -> Option<&'static fragment_templates::File>>, &str, String) = if at == "shell" {
+            (Box::new(fragment_templates::shell), "/__shell/", "cell/shell/".into())
+        } else {
+            let t = fragment_templates::blessed::template(at).expect("a built template is blessed");
+            (Box::new(move |p: &str| t.file(&format!("site/{p}"))), "./", format!("templates/{at}/site/"))
+        };
+        let page = std::str::from_utf8(file("index.html").expect("its page").bytes).unwrap();
+        let open = format!("\"{link}");
+        let named: Vec<&str> = page.match_indices(&open).map(|(i, _)| &page[i + open.len()..]).map(|r| &r[..r.find('"').unwrap()]).collect();
+        let mut own: Vec<&str> = Vec::new();
+        for n in named.iter().copied().filter(|n| !n.starts_with("__") && (n.ends_with(".js") || n.ends_with(".css"))) {
+            if !own.contains(&n) {
+                own.push(n);
+            }
+        }
+        assert!(own.iter().any(|n| n.ends_with(".js")), "{at}: its page runs a bundle");
+        for name in &own {
+            assert!(fragment_core::site::hashed(name) && file(name).is_some(), "{at}: names {name}, which is no hashed file of its release");
+        }
+        let preload = format!("  <link rel=\"modulepreload\" href=\"{link}");
+        let preloads: Vec<&str> = page.lines().filter_map(|l| l.strip_prefix(&preload)).map(|r| &r[..r.find('"').unwrap()]).collect();
+        let bundles: Vec<&str> = own.iter().copied().filter(|n| n.ends_with(".js")).collect();
+        assert_eq!(preloads.iter().filter(|p| !p.starts_with("__")).copied().collect::<Vec<_>>(), bundles, "{at}: preloads its bundles");
+        let mut scripts = String::new();
+        for bundle in &bundles {
+            let js = std::str::from_utf8(file(bundle).unwrap().bytes).unwrap();
+            scripts.push_str(js);
+            let map = js.trim_end().rsplit("//# sourceMappingURL=").next().unwrap();
+            let map: serde_json::Value = serde_json::from_slice(file(map).unwrap_or_else(|| panic!("{at}: {bundle}'s map {map}")).bytes).unwrap();
+            let sources = map["sources"].as_array().unwrap();
+            assert!(!sources.is_empty() && sources.iter().all(|s| s.as_str().is_some_and(|s| root.join(s).is_file())), "{at}: {bundle}'s sources: {sources:?}");
+        }
+        for platform in preloads.iter().filter(|p| p.starts_with("__")) {
+            assert!(scripts.contains(&format!("\"./{platform}\"")), "{at}: preloads {platform}, which no bundle imports");
+        }
+        let mut written = page.lines().filter(|l| !l.starts_with(&preload)).map(|l| format!("{l}\n")).collect::<String>();
+        for name in &own {
+            written = written.replace(&format!("{open}{name}\""), &format!("{open}{}\"", unhashed(name)));
+        }
+        let source = std::fs::read_to_string(root.join(&dir).join("index.html")).unwrap();
+        assert_eq!(written, source, "{at}: its built page is its page, but for its hashes and preloads");
     }
-    let shell_bundle = preloads(shell)[0].trim_start_matches("/__shell/");
-    assert!(fragment_templates::shell_built(shell_bundle) && fragment_templates::shell_published(shell_bundle).is_some(), "{shell_bundle}");
-    assert!(!fragment_templates::shell_built("shell.js") && !fragment_templates::shell_built("index.html"));
 }
 
 /// Goal: the chat page's early socket, unclaimed, gives up when the

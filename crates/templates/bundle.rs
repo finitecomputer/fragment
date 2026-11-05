@@ -1,9 +1,10 @@
-// The pages the release builds rather than serves as written: the shell's
-// (cell/shell/index.html), and the blessed chat's and the two that run the
-// chat's modules, the Telegram connector's and the Session Archive's
-// (templates/{chat,telegram,sessions}/site/index.html). Each of a page's
-// scripts is bundled by esbuild into one minified module with its source
-// map beside it, and every file the page links of its own is named by its
+// The pages the release builds rather than serves as written (build.rs
+// `PAGES`): the shell's (cell/shell/index.html), and the blessed chat's and
+// the two that run the chat's modules, the Telegram connector's and the
+// Session Archive's (templates/{chat,telegram,sessions}/site/index.html).
+// Nothing here is any one page's: each script a page names of its own is
+// bundled by esbuild into one minified module with its source map beside
+// it, and each script and stylesheet it names is named by its
 // bytes' hash (`chat.3f9a2c1b4d5e.js`), so a browser keeps it for good and
 // never asks again: a hashed name is immutable (crates/core/src/site.rs
 // `cache_control`, cell/src/shell.rs `asset`). The page is rewritten to
@@ -31,20 +32,16 @@ use std::{env, fs};
 
 use sha2::{Digest, Sha256};
 
-/// A page the build makes.
+/// A page the build makes: its scripts and stylesheets are the files of
+/// its own it names, each as `"{link}<name>.js"` or `"{link}<name>.css"`
+/// (a module it imports or loads, a stylesheet it links), read from the
+/// page, so a page is built by naming it alone (build.rs `PAGES`). The
+/// platform's modules (`__*`) are not its own: they keep their names.
 pub struct Page {
-    /// Where its files sit (cell/shell, templates/chat/site).
+    /// Where it and its files sit (cell/shell, templates/chat/site).
     pub dir: PathBuf,
     /// How the page names a file beside it (`/__shell/`, `./`).
     pub link: &'static str,
-    /// Its scripts, each bundled; the page names each once, as
-    /// `{link}{entry}"`. No two may hold the same module: each bundle has
-    /// its own copy, and the page would run two.
-    pub entries: &'static [&'static str],
-    /// Its stylesheets, as written but named by their hash; the page names
-    /// each once, as `{link}{style}"`. Their own names stay (other pages
-    /// link them).
-    pub styles: &'static [&'static str],
 }
 
 /// A file a page's build made, or names anew: its path beside the page,
@@ -58,8 +55,8 @@ pub struct Built {
 pub struct Made {
     /// Its page, bundles and maps, and its stylesheets' hashed names.
     pub files: Vec<Built>,
-    /// Each entry, and its bundle's name.
-    pub bundles: Vec<(String, String)>,
+    /// Each script it names, and its bundle's name.
+    bundles: Vec<(String, String)>,
     /// Every source its bundles hold, by its real path.
     pub inputs: BTreeSet<PathBuf>,
 }
@@ -135,34 +132,60 @@ fn repo_sources(map: &[u8], at: &Path, repo: &Path) -> Vec<u8> {
     serde_json::to_vec(&map).expect("a source map serializes")
 }
 
-/// `text` with `from` replaced by `to`, where `from` is in it exactly once.
-fn replace_once(text: &str, from: &str, to: &str, what: &str) -> String {
-    assert_eq!(text.matches(from).count(), 1, "{what} names {from:?} once");
-    text.replacen(from, to, 1)
+/// The files of its own `page` names, each once, in the order it first
+/// names them: `"{link}<name>"`, a name of no folder ending in `.js` or
+/// `.css`, not the platform's (`__*`).
+fn own_files(text: &str, link: &str) -> (Vec<String>, Vec<String>) {
+    let open = format!("\"{link}");
+    let (mut scripts, mut styles) = (Vec::new(), Vec::new());
+    for (at, _) in text.match_indices(&open) {
+        let rest = &text[at + open.len()..];
+        let Some(name) = rest.find('"').map(|end| &rest[..end]) else { continue };
+        if name.starts_with("__") || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) {
+            continue;
+        }
+        let list = if name.ends_with(".js") {
+            &mut scripts
+        } else if name.ends_with(".css") {
+            &mut styles
+        } else {
+            continue;
+        };
+        if !list.iter().any(|n| n == name) {
+            list.push(name.to_string());
+        }
+    }
+    (scripts, styles)
 }
 
-/// Builds `page` into `out`: its bundles and their maps, its stylesheets by
-/// their hashed names (their bytes as written), and its page naming them.
+/// Builds `page` into `out`: a bundle and its map for each script it
+/// names, its stylesheets by their hashed names (their bytes as written),
+/// and its page naming them.
 pub fn build(esbuild: &Esbuild, page: &Page, repo: &Path, out: &Path) -> Made {
+    let html = page.dir.join("index.html");
+    let what = html.display().to_string();
+    let mut text = fs::read_to_string(&html).unwrap_or_else(|e| panic!("{what}: {e}"));
+    let (entries, styles) = own_files(&text, page.link);
+    assert!(!entries.is_empty(), "{what} names no script of its own to bundle");
     let _ = fs::remove_dir_all(out);
     fs::create_dir_all(out).expect("the build's directory");
     let meta_path = out.join("meta.json");
     let status = Command::new(&esbuild.bin)
         .current_dir(repo)
-        .args(page.entries.iter().map(|e| page.dir.join(e)))
+        .args(entries.iter().map(|e| page.dir.join(e)))
         .args(["--bundle", "--format=esm", "--minify", "--sourcemap=external", "--charset=utf8", "--log-level=warning", "--external:./__*", "--entry-names=[name]"])
-        .arg(format!("--outdir={}", out.display()))
+        .arg(format!("--outdir={}", out.join("raw").display()))
         .arg(format!("--metafile={}", meta_path.display()))
         .status()
         .unwrap_or_else(|e| panic!("run {}: {e}", esbuild.bin.display()));
-    assert!(status.success(), "esbuild, {}'s scripts: {status}", page.dir.display());
+    assert!(status.success(), "esbuild, {what}'s scripts: {status}");
     let meta: serde_json::Value = serde_json::from_slice(&fs::read(&meta_path).expect("esbuild's metafile")).expect("its metafile is JSON");
     let mut made = Made { files: vec![], bundles: vec![], inputs: BTreeSet::new() };
     let mut externals = BTreeSet::new();
     let mut weight = 0;
-    for entry in page.entries {
+    for entry in &entries {
         let stem = entry.strip_suffix(".js").expect("an entry is a .js file");
-        let raw = out.join(format!("{stem}.js"));
+        let raw = out.join("raw").join(format!("{stem}.js"));
         let raw_real = fs::canonicalize(&raw).expect("esbuild's bundle");
         let (_, output) = meta["outputs"]
             .as_object()
@@ -172,13 +195,13 @@ pub fn build(esbuild: &Esbuild, page: &Page, repo: &Path, out: &Path) -> Made {
             .unwrap_or_else(|| panic!("esbuild's metafile names {entry}'s bundle"));
         let inputs: BTreeSet<PathBuf> = output["inputs"].as_object().expect("a bundle's inputs").keys().map(|p| real(repo, p)).collect();
         if let Some(shared) = made.inputs.intersection(&inputs).next() {
-            panic!("{}'s scripts both hold {}: each bundle would run its own copy (one entry, importing both, runs one)", page.dir.display(), shared.display());
+            panic!("{what}'s scripts both hold {}: each bundle would run its own copy (one entry, importing both, runs one)", shared.display());
         }
         made.inputs.extend(inputs);
         for import in output["imports"].as_array().into_iter().flatten().filter(|i| i["external"] == true) {
             externals.insert(import["path"].as_str().expect("an import names its path").to_string());
         }
-        let map = repo_sources(&fs::read(out.join(format!("{stem}.js.map"))).expect("esbuild's map"), out, repo);
+        let map = repo_sources(&fs::read(out.join("raw").join(format!("{stem}.js.map"))).expect("esbuild's map"), &out.join("raw"), repo);
         let map_name = hashed_name(&format!("{entry}.map"), &map);
         let mut js = fs::read_to_string(&raw).expect("esbuild's bundle");
         js.push_str(&format!("//# sourceMappingURL={map_name}\n"));
@@ -191,19 +214,18 @@ pub fn build(esbuild: &Esbuild, page: &Page, repo: &Path, out: &Path) -> Made {
         }
         made.bundles.push((entry.to_string(), js_name));
     }
-    assert!(weight <= PAGE_BUNDLES_MAX_BYTES, "{}'s bundles are {weight} bytes, past {PAGE_BUNDLES_MAX_BYTES}", page.dir.display());
+    let _ = fs::remove_dir_all(out.join("raw"));
+    assert!(weight <= PAGE_BUNDLES_MAX_BYTES, "{what}'s bundles are {weight} bytes, past {PAGE_BUNDLES_MAX_BYTES}");
     assert!(externals.iter().all(|e| e.starts_with("./__") && !e[2..].contains('/')), "a bundle imports nothing of its own outside it: {externals:?}");
-    let html = page.dir.join("index.html");
-    let what = html.display().to_string();
-    let mut text = fs::read_to_string(&html).unwrap_or_else(|e| panic!("{what}: {e}"));
-    for (entry, bundle) in &made.bundles {
-        text = replace_once(&text, &format!("{}{entry}\"", page.link), &format!("{}{bundle}\"", page.link), &what);
-    }
-    for style in page.styles {
+    let mut renamed: Vec<(String, String)> = made.bundles.clone();
+    for style in &styles {
         let source = page.dir.join(style);
         let name = hashed_name(style, &fs::read(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display())));
-        text = replace_once(&text, &format!("{}{style}\"", page.link), &format!("{}{name}\"", page.link), &what);
-        made.files.push(Built { rel: name, path: source });
+        made.files.push(Built { rel: name.clone(), path: source });
+        renamed.push((style.clone(), name));
+    }
+    for (from, to) in &renamed {
+        text = text.replace(&format!("\"{}{from}\"", page.link), &format!("\"{}{to}\"", page.link));
     }
     // its bundles first, then the platform's modules they import, all asked at once
     let preloads: String = made
@@ -213,7 +235,8 @@ pub fn build(esbuild: &Esbuild, page: &Page, repo: &Path, out: &Path) -> Made {
         .chain(externals.iter().map(|e| e.trim_start_matches("./").to_string()))
         .map(|name| format!("  <link rel=\"modulepreload\" href=\"{}{name}\">\n", page.link))
         .collect();
-    text = replace_once(&text, "</head>", &format!("{preloads}</head>"), &what);
+    assert_eq!(text.matches("</head>").count(), 1, "{what} has one head");
+    text = text.replacen("</head>", &format!("{preloads}</head>"), 1);
     let page_out = out.join("index.html");
     fs::write(&page_out, text).expect("write the built page");
     made.files.push(Built { rel: "index.html".into(), path: page_out });

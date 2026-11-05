@@ -135,66 +135,33 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>, origin: &str
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
 const SHELL_PUBLISHED: &[(&str, &str)] = &[
-    ("activity.js", "text/javascript; charset=utf-8"),
     // the operators' admin page (`/admin`)
     ("admin.css", "text/css; charset=utf-8"),
     ("admin.js", "text/javascript; charset=utf-8"),
-    // an agent's colour: the agent template's, linked (templates/agent/site)
-    ("agent-color.js", "text/javascript; charset=utf-8"),
-    ("agent-identity.js", "text/javascript; charset=utf-8"),
-    // what each agent's runtime offers beyond its chats (shell.js)
-    ("agent-runtimes.js", "text/javascript; charset=utf-8"),
-    ("agent-settings.js", "text/javascript; charset=utf-8"),
     // every agent's image, tinted to its colour (shell.css; CREDITS.md)
     ("agent.png", "image/png"),
     // a chat's alerts: the service worker the shell registers for each
     // chat whose alerts are on (shell.js, "a chat's alerts")
     ("alerts-sw.js", "text/javascript; charset=utf-8"),
-    // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
-    ("app-icon.js", "text/javascript; charset=utf-8"),
     // the app's icon (the manifest's; iOS's home screen takes only a PNG of it): the mark,
     // white, on a dark square, inside a maskable icon's safe zone
     ("app-icon.svg", "image/svg+xml"),
     ("apple-touch-icon.png", "image/png"),
-    // the Apps page: each app's dock, card, icon and who has access
-    ("apps-page.js", "text/javascript; charset=utf-8"),
-    // Settings' Billing: a seat, credit, an org (docs/billing.md)
-    ("billing.js", "text/javascript; charset=utf-8"),
-    ("chat-list.js", "text/javascript; charset=utf-8"),
-    // who may hand a card's answer to its agent's computer
-    ("computer-answer.js", "text/javascript; charset=utf-8"),
-    ("computer.js", "text/javascript; charset=utf-8"),
-    ("connections.js", "text/javascript; charset=utf-8"),
-    ("continue.js", "text/javascript; charset=utf-8"),
-    ("exports.js", "text/javascript; charset=utf-8"),
     // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
     ("finite-logo.svg", "image/svg+xml"),
-    ("fragment-title.js", "text/javascript; charset=utf-8"),
-    // the messages between the shell and the pages it frames: the chat template's, linked (templates/chat/site)
-    ("frame-messages.js", "text/javascript; charset=utf-8"),
-    // a chat's stand-in while its page comes: its room and composer, never a blank frame
-    ("frame-standin.js", "text/javascript; charset=utf-8"),
     // Funnel Sans (vendor/funnel-sans-OFL.txt): the platform's pages' type,
     // which the shell loads too
     ("funnel-sans-400.ttf", "font/ttf"),
     ("funnel-sans-500.ttf", "font/ttf"),
     ("funnel-sans-600.ttf", "font/ttf"),
     ("funnel-sans-700.ttf", "font/ttf"),
-    // the History page: every chat they have had, and its search
-    ("history-page.js", "text/javascript; charset=utf-8"),
     // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
     // it): Finite's mark full-bleed, black, or white in a dark scheme
     ("icon.svg", "image/svg+xml"),
-    // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
-    ("icons.js", "text/javascript; charset=utf-8"),
-    // the launcher: ⌘K, to start a chat or find one again
-    ("launcher.js", "text/javascript; charset=utf-8"),
-    ("layout.js", "text/javascript; charset=utf-8"),
     // the look of Finite's about page, privacy policy and terms (`/about`,
     // `/privacy`, `/terms`): a sheet of paper, its edges bowed by paper-edge.svg
     ("legal.css", "text/css; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
-    ("onboarding.js", "text/javascript; charset=utf-8"),
     ("paper-edge.svg", "image/svg+xml"),
     // the platform's pages' look: their first run's card, and its
     // pointer-following rim
@@ -202,22 +169,9 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     ("platform-landscape.jpg", "image/jpeg"),
     ("platform-pages.css", "text/css; charset=utf-8"),
     ("platform-pages.js", "text/javascript; charset=utf-8"),
-    // the Session Archive under the chats (templates/sessions/README.md)
-    ("session-archive.js", "text/javascript; charset=utf-8"),
-    ("session-refresh.js", "text/javascript; charset=utf-8"),
-    // an imported conversation's words said for a person (History, the launcher's Knowledge)
-    ("session-text.js", "text/javascript; charset=utf-8"),
-    ("settings.js", "text/javascript; charset=utf-8"),
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
-    ("shell.css", "text/css; charset=utf-8"),
-    ("shell.js", "text/javascript; charset=utf-8"),
-    // delegation threads: a line each over the chat an agent asked from
-    ("threads.js", "text/javascript; charset=utf-8"),
-    ("tooltips.js", "text/javascript; charset=utf-8"),
-    ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
-    ("viewer.js", "text/javascript; charset=utf-8"),
     // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
     ("wallpaper-dark.jpg", "image/jpeg"),
     ("wallpaper.jpg", "image/jpeg"),
@@ -380,11 +334,13 @@ pub(crate) mod tests {
         check("cli/SKILL.md", &SKILL_MD, &std::fs::read(repo().join("cli/SKILL.md")).unwrap());
         check("cli/GUIDE.md", &GUIDE_MD, &std::fs::read(repo().join("cli/GUIDE.md")).unwrap());
         check("crates/core/src/export_readme.md", &EXPORT_README, &std::fs::read(repo().join("crates/core/src/export_readme.md")).unwrap());
-        assert!(shell("index.html").is_some() && shell("shell.js").is_some() && shell("nope.js").is_none());
+        assert!(shell("index.html").is_some() && shell("sheet.css").is_some() && shell("nope.js").is_none());
         let count = |dir: &str| walkdir(&repo().join(dir));
-        // its built files are named anew, its page in place of its own
+        // its built files are named anew, its page in place of its own,
+        // and the sources its bundle holds are not
         let made = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").count();
-        assert_eq!(SHELL.len(), count("cell/shell") + made, "every file of the shell is indexed");
+        assert!(SHELL_BUNDLED.contains(&"shell.js") && SHELL_BUNDLED.iter().all(|f| shell(f).is_none()), "{SHELL_BUNDLED:?}");
+        assert_eq!(SHELL.len(), count("cell/shell") + made - SHELL_BUNDLED.len(), "every file of the shell is indexed");
     }
 
     /// Goal: the agent docs name no host of their own: a deployment's
@@ -426,6 +382,13 @@ pub(crate) mod tests {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
+        // kept for good by the one rule, by name (fragment_core::site::hashed):
+        // each file its page's build named, and none it holds as written
+        // (its name names other bytes once a release changes it)
+        let built: Vec<&str> = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").map(|(_, p)| *p).collect();
+        assert!(built.len() >= 4 && built.iter().all(|n| fragment_core::site::hashed(n) && shell_built(n) && shell_published(n).is_some()), "{built:?}");
+        assert!(SHELL_PUBLISHED.iter().all(|(n, _)| !fragment_core::site::hashed(n) && !shell_built(n)));
+        assert!(!shell_built("index.html") && !shell_built("shell.js") && shell_published("shell.js").is_none());
     }
 
     /// Goal: the shell's page names the release that answered it, and when
