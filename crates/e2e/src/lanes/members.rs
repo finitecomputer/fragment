@@ -882,16 +882,19 @@ fn first_row_names_its_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str
     s.fake.set_latency(Duration::from_millis(250));
     let (made, rows, before) = std::thread::scope(|scope| {
         let made = scope.spawn(|| api.create_with(owner, json!({ "name": name, "template": "chat", "title": "Held", "agent": agent })));
-        // each distinct row the list shows, and how many before the answer
+        // each distinct row the list shows, and how many while its seed
+        // runs (before its template landed): in the create, or after its
+        // answer (a chat's, publish.rs `seeds_later`)
         let (mut rows, mut before): (Vec<Value>, usize) = (vec![], 0);
         loop {
             let answered = made.is_finished();
+            let landed = template_landed(api, owner, &name);
             let row = row_of_named(api, owner, &name).unwrap_or_default();
             if !row.is_null() && rows.last() != Some(&row) {
                 rows.push(row);
-                before += usize::from(!answered);
+                before += usize::from(!landed);
             }
-            if (answered && template_landed(api, owner, &name)) || Instant::now() > deadline {
+            if (answered && landed) || Instant::now() > deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(40));
