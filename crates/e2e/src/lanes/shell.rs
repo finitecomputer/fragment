@@ -7524,7 +7524,8 @@ fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &P
         &host,
         &format!("(() => {{ const m = [...document.querySelectorAll('.msg.agent')].filter((m) => m.innerText.includes({})).pop(); const o = m?.querySelector('.open-beside'); o?.click(); return !!o; }})()", js(&link)),
     )?;
-    let src = js(&format!("/auth/frame?name={app}&return=%2F%3Ffrom%3Dchat"));
+    // a link-shared app: through the check hop (shell.js `framed`), to the same clean page
+    let src = js(&format!("/auth/frame?name={app}&return=%2F%3Ffrom%3Dchat&check=frame"));
     let opened = b.until(page, &format!("{pane}?.querySelector('iframe')?.dataset.src === {src} && document.getElementById('layout').classList.contains('right-open')"), wait);
     let landed = s.eventually(wait, || b.eval_in_frame(page, app, "location.search").ok() == Some(json!("?from=chat")));
     let _ = b.screenshot(page, &shots.join("desktop-open-beside.png"));
