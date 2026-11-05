@@ -5823,7 +5823,7 @@ fn making_states(
         Ok(())
     };
     let making_shown = "!!document.querySelector('#chats .chat-row.making.active') && !!document.querySelector('#frames .making-standin') && document.getElementById('chat-title').textContent === 'New chat'";
-    let said_refused = "(document.getElementById('notice')?.innerText ?? '').includes('The chat was not made')";
+    let said_refused = "(document.getElementById('action-notices')?.innerText ?? '').includes('The chat was not made')";
 
     // ---- its answer held after the platform made it; the list reads it
     // first, and another device makes a chat with the Reader meanwhile
@@ -6129,13 +6129,23 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     let making = b.until(page, "!!document.querySelector('#chats .chat-row.making')", wait);
     b.eval(page, "(window.__held.release('refuse'), true)")?;
     let undone = b.until(page, &format!("!document.querySelector('#chats .making') && !document.querySelector('#frames .making-standin') && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(&open_before)), wait);
-    let said = b.eval(page, "document.getElementById('notice')?.innerText ?? ''")?;
+    let said = b.eval(page, "document.getElementById('action-notices')?.innerText ?? ''")?;
+    // said in the band over the chat, apart from its messages: above its
+    // frame, nothing of the band over it, and the page-wide notice unused
+    let apart = b.eval(
+        page,
+        "(() => { const band = document.getElementById('action-notices'); const f = [...document.querySelectorAll('#frames iframe')].find((x) => !x.hidden); if (band.hidden || !f) return false; \
+         const r = band.getBoundingClientRect(); return r.height > 0 && r.bottom <= f.getBoundingClientRect().top + 0.5 && document.getElementById('notice').hidden; })()",
+    )?;
     let rows_after = b.eval(page, "document.querySelectorAll('#chats .chat-row').length")?;
+    let _ = b.screenshot(page, &shots.join("desktop-new-chat-refused.png"));
+    b.eval(page, "(document.querySelector('#action-notices button')?.click(), true)")?;
+    let dismissed = b.until(page, "document.getElementById('action-notices').hidden", wait);
     b.eval(page, "(window.__held.restore(), true)")?;
     s.ok(
-        "refused, the row being made goes, the chat open before is open again, and the platform's words are said: no row left",
-        picked && making && undone && said.as_str().is_some_and(|t| t.contains("The chat was not made") && t.contains("refused for the test")) && rows_after == rows_before,
-        json!({ "undone": undone, "said": said, "rows": [rows_before, rows_after] }),
+        "refused, the row being made goes, the chat open before is open again, and the platform's words are said in the band over it, apart from its messages, until dismissed: no row left",
+        picked && making && undone && said.as_str().is_some_and(|t| t.contains("The chat was not made") && t.contains("refused for the test")) && apart == json!(true) && dismissed && rows_after == rows_before,
+        json!({ "undone": undone, "said": said, "apart": apart, "dismissed": dismissed, "rows": [rows_before, rows_after] }),
     );
     // The chat being made is one state (making.js): its room shown, or away
     // once another view is given, until its create answers.

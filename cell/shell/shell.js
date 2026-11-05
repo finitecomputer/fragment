@@ -255,6 +255,29 @@ function notice(title, text, action = null) {
   return ++noticeGen;
 }
 
+// What one of the person's own actions came to when it failed (a New chat
+// refused): `title` and the platform's `words`, a row of the band over the
+// chat (#action-notices, the computer notices' look), never drawn over its
+// messages; gone when dismissed, or when another view is given (`newView`).
+function said(title, words) {
+  const box = $("action-notices");
+  const copy = el("div", "notice-copy");
+  copy.append(el("strong", null, title), ...(words ? [el("p", null, words)] : []));
+  const dismiss = el("button", null, "Dismiss");
+  dismiss.type = "button";
+  dismiss.onclick = unsaid;
+  const actions = el("div", "notice-actions");
+  actions.append(dismiss);
+  const row = el("div", "computer-notice");
+  row.append(copy, actions);
+  box.replaceChildren(row);
+  box.hidden = false;
+}
+function unsaid() {
+  $("action-notices").replaceChildren();
+  $("action-notices").hidden = true;
+}
+
 // ---- layout: sidebar | chat | viewer ----
 const layout = createLayout({
   grid: $("layout"),
@@ -942,6 +965,7 @@ let views = 0;
 let makingRoom = null;
 function newView() {
   views++;
+  unsaid();
   state.making = making.left(state.making);
   if (state.making?.phase === "away" && makingRoom) {
     makingRoom.remove();
@@ -1419,6 +1443,8 @@ let starting = false;
 // making.js's; what each move shows is here.
 function showMaking(identity, name) {
   const before = { page: state.page, current: state.current };
+  // its agent's menu (or the launcher's) gone before its room shows
+  closeMenu(true);
   newView();
   at("/");
   state.making = making.start({ agent: identity, name, title: UNTITLED, before });
@@ -1519,7 +1545,7 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
     // whose list read failed comes with the list's next read)
     if (state.making) settleMaking("refused");
     if (quiet) throw e;
-    notice("The chat was not made", e.message);
+    said("The chat was not made", e.message);
   } finally {
     starting = false;
   }
@@ -1630,7 +1656,7 @@ async function composeApp(text) {
   try {
     name = await promptChat();
   } catch (e) {
-    return notice("The chat was not made", e.message);
+    return said("The chat was not made", e.message);
   }
   if (!name) return notice("No agent yet", "Ask for an app once your agent is in your chat.");
   viewer.close("prompts");
