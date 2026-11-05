@@ -353,8 +353,10 @@ fragment verify my-thing --dir .            # full-content audit
   always holds real files.
 - **Conflicts**: when both sides changed a file to different bytes,
   yours stays and the remote copy lands beside it as
-  `<path>.conflict-<time>-<writer>` (exit 3). Both stay in git history.
-  Both sides changed to the same bytes is no conflict.
+  `<path>.conflict-<time>-<writer>` (exit 3); an editor's next pass sends
+  yours. Both stay in git history. A copy never replaces a file: another
+  within the same second is `<time>-2`. Both sides changed to the same
+  bytes is no conflict.
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
@@ -380,7 +382,10 @@ fragment verify my-thing --dir .            # full-content audit
   and never deleted for being absent from your folder. In a git repo,
   `.gitignore`d files never upload, and one is never pulled over: where
   the fragment has a file of that path, yours stays and theirs lands
-  beside it as a conflict copy (exit 3).
+  beside it as a conflict copy (exit 3). A synced file you then ignore
+  (or replace with what is not a file) is no longer synced, listed once:
+  it stays as it is, and the fragment's copy is not deleted. Only a file
+  that is gone is a deletion.
 - **Watching** (`--watch`): a save is one pass, and so is a burst of
   saves; the change feed's echo of your own commit, and the folder's
   echo of a pull, cost nothing. After 60 s of quiet a sweep compares the

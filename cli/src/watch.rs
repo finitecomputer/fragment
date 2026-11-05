@@ -227,10 +227,11 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
             Ok(served) => {
                 err_backoff = 1;
                 if let Served::Passed(report) = served {
-                    if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() || !report.unsent.is_empty() {
+                    if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() || !report.unsent.is_empty() || !report.outside_sync.is_empty() {
                         let at = now_utc();
                         let unsent = if report.unsent.is_empty() { String::new() } else { format!(" not sent {} (you may only read it)", report.unsent.len()) };
-                        println!("{at} pushed {} pulled {} deleted {} conflicts {}{unsent}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
+                        let outside = if report.outside_sync.is_empty() { String::new() } else { format!(" no longer synced {} (kept here)", report.outside_sync.len()) };
+                        println!("{at} pushed {} pulled {} deleted {} conflicts {}{unsent}{outside}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
                     }
                 }
             }
