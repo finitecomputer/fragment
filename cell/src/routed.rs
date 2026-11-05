@@ -204,6 +204,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::meter::METER_HEADER, "1")))
     } else if path == "invites/claim" || path == "invites/decline" || path == "members/agent" {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
+    } else if path == "signin/visibility" {
+        Ok(Some((crate::auth::SIGNIN_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("test/") || path.starts_with("index/") {

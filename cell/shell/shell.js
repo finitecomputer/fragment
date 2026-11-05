@@ -331,14 +331,22 @@ const BLOCKED = {
   "signed-out": (t) => [`Sign in to see ${t}`, "You're signed out.", "Sign in", "_top"],
 };
 const blockedNote = (frame) => (frame.previousElementSibling?.classList.contains("frame-note") ? frame.previousElementSibling : null);
-addEventListener("message", (event) => {
+// A fragment's frame is sent signed in, through the mint (`framed`): its
+// page refused as signed out there (`why: "refused"`, auth.rs `refused`,
+// from the fragment's own origin) came with a frame cookie its browser
+// kept from it.
+const minted = (frame) => frame.dataset.src?.startsWith("/auth/frame?") ?? false;
+addEventListener("message", async (event) => {
   const d = event.data;
-  if (d?.fragment !== KIND.signinBlocked || !Object.hasOwn(BLOCKED, d.why)) return;
+  if (d?.fragment !== KIND.signinBlocked) return;
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
   if (!frame || frame.dataset.fragment !== d.name) return;
-  const [title, text, go, target] = BLOCKED[d.why](titleOf(d.name));
-  const href = d.why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
-  frame.dataset.blocked = d.why;
+  const refused = d.why === "refused" && minted(frame) && event.origin === (await originOf(d.name).catch(() => null));
+  const why = refused ? "cookies" : d.why;
+  if (!Object.hasOwn(BLOCKED, why)) return;
+  const [title, text, go, target] = BLOCKED[why](titleOf(d.name));
+  const href = why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
+  frame.dataset.blocked = why;
   // no chat's page is in it: it holds nothing, and is busy with nothing
   refresh.resetFrame(frame);
   const allow = el("a", "allow", go);
