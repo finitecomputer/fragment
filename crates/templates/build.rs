@@ -14,6 +14,13 @@
 // no shell: `ALL` is the templates a person or an agent scaffolds, and
 // `SHELL` is empty, so neither is an input of the CLI's build.
 //
+// With `platform`, four pages are built (bundle.rs), not held as written:
+// the shell's and the chat, Telegram and Session Archive pages, their
+// scripts bundled and every file they link named by its hash. Each built
+// file is a file of its template or the shell like any other, from OUT_DIR;
+// the shell's sources its bundle holds are no file of the release (nothing
+// asks for them), while a template's stay at their names.
+//
 // A template may hold another's files through a symlink (the chat's
 // agent.png is the agent's, and so is the shell's): one asset, and
 // embedded, its bytes are in a binary once. A symlink in a template that
@@ -25,7 +32,17 @@ use sha2::{Digest, Sha256};
 
 include!("src/blessed_names.rs");
 
+#[cfg(feature = "platform")]
 mod bundle;
+
+/// The pages built (bundle.rs), each template's: its scripts, each bundled,
+/// and its stylesheets, named by their hash.
+#[cfg(feature = "platform")]
+const TEMPLATE_PAGES: [(&str, &[&str], &[&str]); 3] = [
+    ("chat", &["chat.js"], &["chat.css"]),
+    ("sessions", &["sessions.js"], &["chat.css", "sessions.css"]),
+    ("telegram", &["chat.js", "telegram.js"], &["chat.css", "telegram.css"]),
+];
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -97,18 +114,31 @@ fn main() {
     let mut statics = Statics { ids: BTreeMap::new() };
     let mut src = String::new();
     let out_dir = fs::canonicalize(env::var("OUT_DIR").unwrap()).expect("OUT_DIR");
-    // the files a page's build made or named anew (bundle.rs): where, and path
+    // the files a page's build made or named anew (bundle.rs): where, and
+    // path; each entry's bundle: where, entry and path; and the shell's
+    // sources its bundle holds, which the release does not
+    // (none without `platform`, which builds no page)
+    #[allow(unused_mut)]
     let mut built: Vec<(String, String)> = Vec::new();
+    #[allow(unused_mut)]
+    let mut bundles: Vec<(String, String, String)> = Vec::new();
+    #[allow(unused_mut)]
+    let mut shell_bundled: Vec<String> = Vec::new();
+    #[cfg(feature = "platform")]
+    let esbuild = bundle::Esbuild::installed(&repo);
     for name in &names {
         let mut files = Vec::new();
         collect(&tdir.join(name), &tdir.join(name), &mut files);
-        // the blessed chat's page is built (bundle.rs): its page, its
-        // bundle and map, and its stylesheet by its hash
-        if name == "chat" {
-            let page = bundle::Page { dir: tdir.join("chat/site"), link: "./", entry: "chat.js", styles: &["chat.css"] };
-            let made = bundle::build(&page, &repo, &out_dir.join("web/chat"));
+        // its page built (bundle.rs), in place of its own; its sources stay
+        #[cfg(feature = "platform")]
+        if let Some(&(_, entries, styles)) = TEMPLATE_PAGES.iter().find(|(t, _, _)| *t == name.as_str()) {
+            let page = bundle::Page { dir: tdir.join(name).join("site"), link: "./", entries, styles };
+            let made = bundle::build(&esbuild, &page, &repo, &out_dir.join("web").join(name));
             files.retain(|(rel, _)| rel != "site/index.html");
-            for b in made {
+            for (entry, b) in made.bundles {
+                bundles.push((name.clone(), entry, format!("site/{b}")));
+            }
+            for b in made.files {
                 built.push((name.clone(), format!("site/{}", b.rel)));
                 files.push((format!("site/{}", b.rel), b.path));
             }
@@ -155,13 +185,27 @@ fn main() {
         collect(&shell, &shell, &mut files);
         // its sources are files too: the shell has no src/ to skip
         assert!(!shell.join("src").exists(), "cell/shell/src would be skipped");
-        // its page is built (bundle.rs): shell.js bundled, its stylesheets by their hash
-        let page = bundle::Page { dir: shell.clone(), link: "/__shell/", entry: "shell.js", styles: &["platform-pages.css", "shell.css"] };
-        let made = bundle::build(&page, &repo, &out_dir.join("web/shell"));
-        files.retain(|(rel, _)| rel != "index.html");
-        for b in made {
-            built.push(("shell".into(), b.rel.clone()));
-            files.push((b.rel, b.path));
+        // its page built (bundle.rs), in place of its own: shell.js
+        // bundled, its stylesheets by their hash, and the sources the
+        // bundle holds no file of the release
+        #[cfg(feature = "platform")]
+        {
+            let page = bundle::Page { dir: shell.clone(), link: "/__shell/", entries: &["shell.js"], styles: &["platform-pages.css", "shell.css"] };
+            let made = bundle::build(&esbuild, &page, &repo, &out_dir.join("web/shell"));
+            files.retain(|(rel, path)| {
+                let held = made.inputs.contains(&fs::canonicalize(path).unwrap_or_else(|e| panic!("cell/shell/{rel}: {e}")));
+                if held {
+                    shell_bundled.push(rel.clone());
+                }
+                rel != "index.html" && !held
+            });
+            for (entry, b) in made.bundles {
+                bundles.push(("shell".into(), entry, b));
+            }
+            for b in made.files {
+                built.push(("shell".into(), b.rel.clone()));
+                files.push((b.rel, b.path));
+            }
         }
         files.sort();
         src.push_str("pub static SHELL: &[File] = &[\n");
@@ -173,10 +217,25 @@ fn main() {
         }
         src.push_str("];\n");
     }
+    built.sort();
+    bundles.sort();
+    shell_bundled.sort();
     src.push_str("/// The files a page's build made or named anew (build.rs, bundle.rs): where (`shell`, or a template), and path.\n");
     src.push_str("pub static BUILT: &[(&str, &str)] = &[\n");
     for (at, rel) in &built {
         src.push_str(&format!("    ({at:?}, {rel:?}),\n"));
+    }
+    src.push_str("];\n");
+    src.push_str("/// Each built page's bundles: where, the script it bundles, and its path.\n");
+    src.push_str("pub static BUNDLES: &[(&str, &str, &str)] = &[\n");
+    for (at, entry, path) in &bundles {
+        src.push_str(&format!("    ({at:?}, {entry:?}, {path:?}),\n"));
+    }
+    src.push_str("];\n");
+    src.push_str("/// The files of cell/shell/ its page's bundle holds, which the release does not.\n");
+    src.push_str("pub static SHELL_BUNDLED: &[&str] = &[\n");
+    for rel in &shell_bundled {
+        src.push_str(&format!("    {rel:?},\n"));
     }
     src.push_str("];\n");
     for (name, path) in &docs {
