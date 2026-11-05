@@ -65,8 +65,12 @@ struct WorkingIndicator: View {
                 }
             }
         }
+        // A newly created web activity node starts its CSS clocks at zero.
+        .onChange(of: hints) { _, _ in began = Date() }
+        .onChange(of: cards.map(\.id)) { _, _ in began = Date(); expanded = false; openSteps = [] }
         .onChange(of: reduceMotion) { _, _ in began = Date(); advancedAt = nil }
         .onChange(of: cards.first?.steps) { old, new in
+            began = Date()
             if (new?.count ?? 0) > (old?.count ?? 0) { advancedAt = Date() }
         }
     }
