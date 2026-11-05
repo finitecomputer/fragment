@@ -5763,8 +5763,8 @@ fn making_states(
     b: &mut Browser,
     page: &Page,
     me: &Person,
-    reader_chat: &str,
-    reader_hero: &str,
+    // the Reader's own chat, and its hero's selector
+    (reader_chat, reader_hero): (&str, &str),
     new_chat: &dyn Fn(&mut Browser, &str) -> Result<bool>,
 ) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -6100,7 +6100,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     );
     // The chat being made is one state (making.js): its room shown, or away
     // once another view is given, until its create answers.
-    making_states(s, api, b, page, me, reader_chat, &reader_hero, &new_chat)?;
+    making_states(s, api, b, page, me, (reader_chat, &reader_hero), &new_chat)?;
     // a chat with none of their agents in it is under none of them (never the first's)
     let alone = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "no-agent-talk", "template": "chat", "title": "No agent yet" })), &[])?;
     anyhow::ensure!(alone.status == 200, "a chat with no agent: {alone}");
