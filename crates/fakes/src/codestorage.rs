@@ -161,6 +161,9 @@ struct State {
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
+    /// Every request answers 503 while set (`fail_all`: the whole service down).
+    #[serde(skip)]
+    all_failing: bool,
     /// Reads of this one path answer 503 while set (`fail_file_read`).
     #[serde(skip)]
     read_failing: Option<String>,
@@ -487,6 +490,9 @@ impl Inner {
         }
         let mut st = self.state.lock().expect("fake state lock");
         *st.requests.entry((bearer_subject(req), repo_of(req), route_key(req))).or_default() += 1;
+        if st.all_failing {
+            return problem(503, "code.storage is unavailable (the fake's outage lever)");
+        }
         let resp = self.route(&mut st, req);
         if req.method != "GET" && req.method != "HEAD" {
             self.persist(&st);
@@ -1192,6 +1198,12 @@ impl CodeStorage {
     /// real service travels (zero: at once, the default).
     pub fn set_latency(&self, latency: std::time::Duration) {
         self.inner.latency_ms.store(latency.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Every request answers 503 while `on`: the whole service down, as an
+    /// outage leaves it (no repo made, read, or written).
+    pub fn fail_all(&self, on: bool) {
+        self.with(|st| st.all_failing = on);
     }
 
     /// File reads answer 503 until this is cleared.
