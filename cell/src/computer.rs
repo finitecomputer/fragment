@@ -840,6 +840,8 @@ impl ComputerCell {
     /// waits (`STARTS_OWED_MAX` of them at most); an alarm leaves it to the
     /// alarm its events asked for, an invocation of its own, since an alarm
     /// ends at `ALARM_WALL_MS` and its sleep's steps took most of this one.
+    /// An owner's restart leaves its start to the alarm too, so it answers
+    /// the same on every path (`restart`).
     async fn drive_with(&self, first: Option<Event>, asked: bool) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
@@ -1076,21 +1078,27 @@ impl ComputerCell {
     /// `/data`. A restart starts a container, so the ledger is asked first,
     /// as for a wake, whatever runs now: at zero credit it is refused, and
     /// what runs runs on (decision 27).
+    ///
+    /// It answers once the restart is under way: its save done or failed and
+    /// its stop ended, the start after it owed (`Lifecycle::starting`). That
+    /// start is its alarm's, never this request's (`drive_with`, not asked),
+    /// so the answer says `starting` on every path, the stub's and a real
+    /// image's alike (FIN-399: the alarm the owed start asks for raced this
+    /// request to make it, so it answered `awake` or `starting` by timing).
+    /// Its owner's page follows the phase from there to awake.
     async fn restart(&self, asked: u64) -> CellResult<()> {
         let life = self.lifecycle()?;
         if !life.restarts(asked) {
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": asked, "made": "already", "generation": life.generation() }));
             return Ok(());
         }
-        if matches!(life.phase, Phase::Starting { .. }) {
-            // the start under way is the restart's
-            self.drive(Event::Restart { generation: asked }).await?;
-            return Ok(());
+        if !matches!(life.phase, Phase::Starting { .. }) {
+            // the start under way is the restart's, asked of no ledger again
+            self.may_start(json!("restart")).await?;
+            self.update_saves(|s| s.restart_fresh())?;
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
         }
-        self.may_start(json!("restart")).await?;
-        self.update_saves(|s| s.restart_fresh())?;
-        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
-        self.drive(Event::Restart { generation: asked }).await?;
+        self.drive_with(Some(Event::Restart { generation: asked }), false).await?;
         Ok(())
     }
 
@@ -1992,6 +2000,8 @@ impl ComputerCell {
         let id = self.must(MetaKey::Id)?;
         let life = self.lifecycle()?;
         let (phase, why) = match &life.phase {
+            // a start owed and due is told as starting (`Lifecycle::starting`)
+            Phase::Asleep if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
             Phase::Asleep => (ComputerPhase::Asleep, None),
             Phase::Starting { .. } => (ComputerPhase::Starting, None),
             Phase::Awake { .. } => (ComputerPhase::Awake, None),

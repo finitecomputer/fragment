@@ -86,6 +86,22 @@ pub(super) fn notice(v: &Value, kind: &str) -> Value {
     v["notices"].as_array().and_then(|l| l.iter().find(|n| n["kind"] == kind).cloned()).unwrap_or(Value::Null)
 }
 
+/// Its owner's restart of start `asked` (docs/api.md): the answer, once the
+/// restart is under way (`starting`, its start owed to its alarm, whatever
+/// it restarted), and its view, read until it is awake on a newer start or
+/// won't wake, within `within`: whether it got there, and the last view
+/// read. FIN-399: a restart answered `awake` or `starting` by timing.
+pub(super) fn restart_followed(s: &Suite, api: &Api, owner: &crate::Keys, id: &str, asked: u64, within: Duration) -> Result<(crate::api::Reply, Value, bool)> {
+    let r = api.patient(within + Duration::from_secs(60)).signed(owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": asked })))?;
+    let mut last = Value::Null;
+    let done = r.status == 200
+        && s.eventually(within, || {
+            last = api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|v| v.body).unwrap_or(Value::Null);
+            last["generation"].as_u64().is_some_and(|g| g > asked) && (last["phase"] == "awake" || last["phase"] == "wont_wake")
+        });
+    Ok((r, last, done))
+}
+
 /// A computer's phase, as its owner reads it.
 pub(super) fn phase(api: &Api, owner: &crate::Keys, id: &str) -> String {
     api.signed(owner, "GET", &format!("/api/computers/{id}"), None).ok().and_then(|r| r.body["phase"].as_str().map(str::to_string)).unwrap_or_default()
@@ -587,7 +603,7 @@ fn keepalive_across_a_reload(s: &mut Suite, api: &Api, owner: &crate::Keys, id: 
 const RECOVERY_CHECKS: [&str; 12] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
-    "its owner's restart, its save failing too: it starts again at once, from its last save",
+    "its owner's restart, its save failing too: it answers starting, and comes up again from its last save",
     "the same restart asked again (the same start named) restarts nothing more",
     "its owner is told what the restart went back to: which save, and when it was taken",
     "seen, it is told no more; seen again, the same; a notice never told is refused",
@@ -657,12 +673,12 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     // told
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
     let restarted_at = crate::api::now_ms();
-    let r = restart()?;
-    let restored = r.body["restored"].clone();
+    let (r, v, up) = restart_followed(s, api, c.owner, c.id, g, c.wake)?;
+    let restored = v["restored"].clone();
     s.ok(
         RECOVERY_CHECKS[2],
-        r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
-        &r,
+        r.status == 200 && r.body["phase"] == "starting" && up && v["phase"] == "awake" && v["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
+        json!({ "restart": r.body, "view": v }),
     );
     let again = restart()?;
     s.ok(RECOVERY_CHECKS[3], again.status == 200 && again.body["generation"].as_u64() == Some(g + 1) && again.body["restored"] == restored, &again);
@@ -772,16 +788,20 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let asleep = r.body["generation"].as_u64().unwrap_or(0);
-    let woke = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
+    let (pressed, woke, up) = restart_followed(s, api, c.owner, c.id, asleep, c.wake)?;
     s.ok(
         RECOVERY_CHECKS[9],
         r.body["phase"] == "asleep"
-            && woke.body["phase"] == "awake"
-            && woke.body["generation"].as_u64() == Some(asleep + 1)
-            && woke.body["restored"]["from"] == "backup"
-            && woke.body["restored"]["rollback"] == false
-            && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
-        format!("{r} / {woke}"),
+            && pressed.status == 200
+            && pressed.body["phase"] == "starting"
+            && pressed.body["generation"].as_u64() == Some(asleep)
+            && up
+            && woke["phase"] == "awake"
+            && woke["generation"].as_u64() == Some(asleep + 1)
+            && woke["restored"]["from"] == "backup"
+            && woke["restored"]["rollback"] == false
+            && woke["notices"].as_array().is_none_or(|l| l.is_empty()),
+        format!("{r} / {pressed} / {woke}"),
     );
     // a life on which nothing is done: its owner's sleep saves it once its
     // guest settled (a start after a rollback first ends what its save left
@@ -795,7 +815,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
     let life = woke.body["generation"].as_u64().unwrap_or(0);
     let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
-    let quiet = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": life })))?;
+    let (pressed, quiet, up) = restart_followed(s, api, c.owner, c.id, life, c.wake)?;
     let never_told = api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })))?;
     lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
     s.ok(
@@ -803,13 +823,15 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
         slept.body["phase"] == "asleep"
             && woke.body["restored"]["save"] == kept["id"]
             && failing.status == 200
-            && quiet.status == 200
-            && quiet.body["generation"].as_u64() == Some(life + 1)
-            && quiet.body["restored"]["rollback"] == true
-            && quiet.body["restored"]["save"] == kept["id"]
-            && notice(&quiet.body, "went_back").is_null()
+            && pressed.status == 200
+            && pressed.body["phase"] == "starting"
+            && up
+            && quiet["generation"].as_u64() == Some(life + 1)
+            && quiet["restored"]["rollback"] == true
+            && quiet["restored"]["save"] == kept["id"]
+            && notice(&quiet, "went_back").is_null()
             && never_told.status == 400,
-        format!("{woke} / {quiet} / {never_told}"),
+        format!("{woke} / {pressed} / {quiet} / {never_told}"),
     );
     Ok(3)
 }
@@ -1608,10 +1630,15 @@ fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str
     // a restart of its computer (Paul, 2026-10-20: the loop an agent started
     // in it died at the next one) touches no schedule: they are its fragment's
     let generation = api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None)?.body["generation"].as_u64().unwrap_or(0);
-    let r = api.patient(c.wake + Duration::from_secs(60)).signed(c.owner, "POST", &format!("/api/computers/{}/restart", c.id), Some(&json!({ "generation": generation })))?;
-    // it answers once its start is up (a real Hermes on a preview answered
-    // `starting` while its container's exit report made that start)
-    s.ok("its computer restarts, and its routine is kept as it was", r.status == 200 && r.body["phase"] == "awake" && list(api) == vec![first.clone()], json!({ "restart": r.body, "schedules": list(api) }));
+    // it answers once the restart is under way, `starting`, and is awake
+    // again within its wake's bound (FIN-399: a real Hermes on a preview
+    // answered `starting` while the stub answered `awake`)
+    let (r, v, up) = restart_followed(s, api, c.owner, c.id, generation, c.wake + Duration::from_secs(60))?;
+    s.ok(
+        "its computer restarts, and its routine is kept as it was",
+        r.status == 200 && r.body["phase"] == "starting" && up && v["phase"] == "awake" && v["generation"].as_u64() == Some(generation + 1) && list(api) == vec![first.clone()],
+        json!({ "restart": r.body, "view": v, "schedules": list(api) }),
+    );
 
     // asleep, due: its record on tasks wakes the computer, and the agent does it in the chat
     let (slept, last) = put_to_sleep(s, api, c.owner, c.id);
@@ -2301,11 +2328,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         std::thread::sleep(QUEUE_DRAIN);
         let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
         let generation = view()["generation"].as_u64().unwrap_or(0);
-        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": generation })))?;
+        let (r, v, up) = restart_followed(s, api, &owner, &id, generation, wake)?;
         s.ok(
             PINS[7],
-            r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(generation + 1) && r.body["version"] == latest.as_str() && r.body["latest"] == latest.as_str() && notice(&r.body, "update").is_null() && version() == "2",
-            json!({ "served": version(), "view": r.body }),
+            r.status == 200
+                && r.body["phase"] == "starting"
+                && up
+                && v["phase"] == "awake"
+                && v["generation"].as_u64() == Some(generation + 1)
+                && v["version"] == latest.as_str()
+                && v["latest"] == latest.as_str()
+                && notice(&v, "update").is_null()
+                && version() == "2",
+            json!({ "served": version(), "restart": r.body, "view": v }),
         );
         say(30, "after the upgrade")?;
         replies_so_far += 1;
