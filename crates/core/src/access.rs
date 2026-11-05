@@ -160,6 +160,18 @@ pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
     effective_role(Visibility::Members, standing, Purpose::Act)
 }
 
+/// The role a caller holds over a fragment's repo (a storage token: its
+/// whole git history, not only main's files), from memberships alone,
+/// whatever the fragment's visibility: no floor, no share link, and no
+/// agent of theirs that is a member lends it. A public fragment's visitor,
+/// a link holder, and a person whose agent is in read its files through
+/// the platform, never its git. An agent acting for someone (decision
+/// R17) holds the lower of their membership and its cap, itself from
+/// memberships, and at most its hold.
+pub fn repo_role(standing: Standing) -> Option<Role> {
+    effective_role(Visibility::Members, Standing { link: false, owns_member_agent: false, ..standing }, Purpose::Read)
+}
+
 /// What a control request needs beyond a role (`reserved`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reserved {
@@ -421,6 +433,35 @@ mod tests {
         assert_eq!(r(V::Public, st(None, false, false)), Some(Public));
         assert_eq!(r(V::Public, st(None, true, false)), Some(Viewer));
         assert_eq!(r(V::Public, st(Some(Editor), false, false)), Some(Editor));
+    }
+
+    /// Goal: a fragment's repo (its history, through a storage token) is
+    /// its members' alone, on every visibility. Method: each standing that
+    /// reads a fragment without being in it (a signed-in visitor of a
+    /// public one, a link holder, a person whose agent is in, an agent
+    /// acting for any of them) holds no repo role where it holds a viewer's
+    /// or a public role; a member holds theirs; an agent acting for a
+    /// member holds the lower of theirs and its cap, at most its hold.
+    #[test]
+    fn the_repo_is_its_members_whatever_its_visibility() {
+        // what a visibility floor gives (a link holder reads as a viewer, a
+        // visitor of a public one as public), the repo never does
+        assert_eq!(effective_role(V::Link, st(None, true, true), Purpose::Read), Some(Viewer));
+        assert_eq!(effective_role(V::Public, st(None, false, true), Purpose::Read), Some(Public));
+        assert_eq!(repo_role(st(None, false, true)), None, "a signed-in non-member, on any visibility");
+        assert_eq!(repo_role(st(None, true, true)), None, "a link holder");
+        assert_eq!(repo_role(st(None, true, false)), None, "a link holder not signed in");
+        assert_eq!(repo_role(owner_of_agent()), None, "a person whose agent is in");
+        assert_eq!(repo_role(acting(None, Some(Viewer), Some(Editor))), None, "an agent acting for a non-member, its own and its owner's roles notwithstanding");
+        assert_eq!(repo_role(Standing { link: true, ..acting(None, Some(Viewer), Some(Editor)) }), None, "nor with a link");
+        assert_eq!(repo_role(Standing { owns_member_agent: true, ..acting(None, None, Some(Viewer)) }), None, "nor for a person whose agent is in");
+        for role in [Viewer, Editor, Owner] {
+            assert_eq!(repo_role(st(Some(role), false, true)), Some(role), "a member holds their own role");
+        }
+        assert_eq!(repo_role(acting(Some(Viewer), None, Some(Viewer))), Some(Viewer), "an agent acting for its viewer owner: viewer");
+        assert_eq!(repo_role(acting(Some(Owner), None, Some(Owner))), Some(Editor), "for its owner who owns it: at most editor");
+        assert_eq!(repo_role(acting(Some(Editor), None, None)), None, "for an editor, with neither it nor its owner in: nothing (R17's cap)");
+        assert_eq!(repo_role(Standing { held: Some(Viewer), ..acting(Some(Editor), None, Some(Editor)) }), Some(Viewer), "held at viewer: viewer");
     }
 
     #[test]

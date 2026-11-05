@@ -18,7 +18,7 @@ use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{face, manifest, npub, site};
 use fragment_proto::{
     limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
-    TriggerDecl, TriggerOn,
+    StorageAccess, TriggerDecl, TriggerOn,
 };
 use fragment_templates::{blessed, File};
 use serde::Deserialize;
@@ -809,20 +809,40 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "refs": refs }))
     }
 
-    pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
-        self.require(caller, false, Role::Editor)?;
-        // its token writes the repo: a deploy's first step
-        self.writable().await?;
+    /// `GET /api/storage-token`: a token that writes the repo (an editor
+    /// and up), or with `?access=read` one that only reads it (viewer and
+    /// up). Either reads the repo's whole history, not only main's files,
+    /// so it is decided by membership (`access::repo_role`): a visibility
+    /// floor, a share link, or an agent of theirs that is in lends none.
+    pub(crate) async fn storage_token(&self, caller: &Caller, asked: StorageAccess) -> CellResult<Response> {
+        let write = asked == StorageAccess::Write;
+        let needs = if write { Role::Editor } else { Role::Viewer };
+        // whoever may not have the role at all is refused as anywhere (401,
+        // 403); a share link counts for nothing here, and a public
+        // fragment's floor is below a viewer's
+        self.require(caller, false, needs)?;
+        // the rest read as a viewer through an agent of theirs that is a member
+        if !fragment_core::access::repo_role(self.standing(caller, false)?).is_some_and(|r| r >= needs) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a storage token reads the repo's whole history, so it is its members' alone: reading it through your agent's membership lends none"));
+        }
+        if write {
+            // its token writes the repo: a deploy's first step
+            self.writable().await?;
+        }
 
         let who = self.caller_id(caller)?;
         let repo = self.must(MetaKey::Repo)?;
-        let token = self.cs()?.storage_token(&repo, who).await?;
+        let token = self.cs()?.storage_token(&repo, who, write).await?;
+        let scopes = if write { "git:read+git:write" } else { "git:read" };
         self.event(
             "storage-token.minted",
-            &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
-            json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
+            &format!("{} → repo {repo}, {scopes}, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
+            json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at, "write": write }),
         );
-        self.may_lag().await?;
+        if write {
+            // its holder may push when they like, and not refresh after
+            self.may_lag().await?;
+        }
         json_response(&token)
     }
 

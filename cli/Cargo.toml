@@ -48,3 +48,6 @@ fragment-fakes = { path = "../crates/fakes" }
 # a port bound and never listened on (api.rs's tests: a host never reached),
 # which std's TcpListener cannot hold; already in the lock, through tokio
 socket2 = "=0.6.5"
+# a FIFO's write end opened without waiting (sync.rs's tests: a pass that
+# must never read a pipe is freed if it does); already in the lock
+libc = "=0.2.189"
