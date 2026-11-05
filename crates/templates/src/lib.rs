@@ -94,18 +94,40 @@ pub const RELEASE_BLANK: &str = "{{release}}";
 #[cfg(feature = "platform")]
 pub const DEPLOYED_BLANK: &str = "{{deployed}}";
 
-/// The shell's page (`index.html`'s text) as `release` answers it, deployed
-/// at `deployed`: each blank filled once. `release` is a release's id
-/// (`fragment_core::release::valid`), which an attribute holds as it is,
-/// as it does digits.
+/// Its third blank (`<meta name="fragment-origin">`): a fragment's own
+/// origin with `ORIGIN_NAME` where its name goes (the cell's
+/// `Config::origin`), so the shell knows a chat's origin with no request:
+/// its frame's policy names it before the frame navigates (shell.js).
 #[cfg(feature = "platform")]
-pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
+pub const ORIGIN_BLANK: &str = "{{fragment-origin}}";
+
+/// Where a fragment's name goes in the origin `ORIGIN_BLANK` is filled with.
+#[cfg(feature = "platform")]
+pub const ORIGIN_NAME: &str = "{name}";
+
+/// Whether `origin` is one `ORIGIN_BLANK` may hold: a scheme, a host and a
+/// port at most, the name's place once, and nothing an attribute ends at.
+#[cfg(feature = "platform")]
+fn origin_fits(origin: &str) -> bool {
+    origin.matches(ORIGIN_NAME).count() == 1
+        && (origin.starts_with("https://") || origin.starts_with("http://"))
+        && origin.bytes().all(|b| b.is_ascii_alphanumeric() || b"{}:/.-".contains(&b))
+}
+
+/// The shell's page (`index.html`'s text) as `release` answers it, deployed
+/// at `deployed`, its fragments at `origin` (`ORIGIN_NAME` in it): each
+/// blank filled once. `release` is a release's id
+/// (`fragment_core::release::valid`), which an attribute holds as it is,
+/// as it does digits and an origin.
+#[cfg(feature = "platform")]
+pub fn shell_page(text: &str, release: &str, deployed: Option<u64>, origin: &str) -> String {
     assert!(
-        fragment_core::release::valid(release) && text.matches(RELEASE_BLANK).count() == 1 && text.matches(DEPLOYED_BLANK).count() == 1,
+        fragment_core::release::valid(release) && [RELEASE_BLANK, DEPLOYED_BLANK, ORIGIN_BLANK].iter().all(|b| text.matches(b).count() == 1),
         "the shell's page has each of its blanks once, for a release's id"
     );
+    assert!(origin_fits(origin), "a fragment's origin, its name's place once: {origin:?}");
     let deployed = deployed.map(|d| d.to_string()).unwrap_or_default();
-    text.replacen(RELEASE_BLANK, release, 1).replacen(DEPLOYED_BLANK, &deployed, 1)
+    text.replacen(RELEASE_BLANK, release, 1).replacen(DEPLOYED_BLANK, &deployed, 1).replacen(ORIGIN_BLANK, origin, 1)
 }
 
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
@@ -417,19 +439,27 @@ pub(crate) mod tests {
         let page = std::fs::read_to_string(repo().join("cell/shell/index.html")).unwrap();
         assert!(page.contains(&format!(r#"<meta name="fragment-release" content="{RELEASE_BLANK}">"#)), "its meta holds the blank");
         assert!(page.contains(&format!(r#"<meta name="fragment-release-deployed" content="{DEPLOYED_BLANK}">"#)), "and its time's");
-        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400", Some(1_792_615_843));
+        assert!(page.contains(&format!(r#"<meta name="fragment-origin" content="{ORIGIN_BLANK}">"#)), "and its fragments' origin's");
+        let origin = "https://{name}--preview.finite.build";
+        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400", Some(1_792_615_843), origin);
         assert!(filled.contains(r#"<meta name="fragment-release" content="bc8b87e7a1b2-dirty-1760918400">"#) && !filled.contains(RELEASE_BLANK));
         assert!(filled.contains(r#"<meta name="fragment-release-deployed" content="1792615843">"#) && !filled.contains(DEPLOYED_BLANK));
-        let blanks = RELEASE_BLANK.len() + DEPLOYED_BLANK.len();
-        assert_eq!(filled.len(), page.len() - blanks + "bc8b87e7a1b2-dirty-1760918400".len() + "1792615843".len(), "nothing else changes");
-        assert!(shell_page(&page, "dev", None).contains(r#"<meta name="fragment-release-deployed" content="">"#), "no time: empty");
+        assert!(filled.contains(r#"<meta name="fragment-origin" content="https://{name}--preview.finite.build">"#) && !filled.contains(ORIGIN_BLANK));
+        let blanks = RELEASE_BLANK.len() + DEPLOYED_BLANK.len() + ORIGIN_BLANK.len();
+        assert_eq!(filled.len(), page.len() - blanks + "bc8b87e7a1b2-dirty-1760918400".len() + "1792615843".len() + origin.len(), "nothing else changes");
+        assert!(shell_page(&page, "dev", None, origin).contains(r#"<meta name="fragment-release-deployed" content="">"#), "no time: empty");
+        assert!(shell_page(&page, "dev", None, "http://{name}.localhost:8790").contains(r#"content="http://{name}.localhost:8790""#), "a dev node's, its port");
         for bad in [r#"x" onload="y"#, "a b", ""] {
-            assert!(std::panic::catch_unwind(|| shell_page(&page, bad, None)).is_err(), "{bad:?}");
+            assert!(std::panic::catch_unwind(|| shell_page(&page, bad, None, origin)).is_err(), "{bad:?}");
         }
-        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev", None)).is_err(), "no blank");
-        assert!(std::panic::catch_unwind(|| shell_page(RELEASE_BLANK, "dev", None)).is_err(), "no time's blank");
-        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}{DEPLOYED_BLANK}"), "dev", None)).is_err(), "two");
-        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}{DEPLOYED_BLANK}"), "dev", None)).is_err(), "two times");
+        for bad in ["https://preview.finite.build", r#"https://{name}" onload="y"#, "javascript:{name}", "https://{name}.{name}.x"] {
+            assert!(std::panic::catch_unwind(|| shell_page(&page, "dev", None, bad)).is_err(), "{bad:?}");
+        }
+        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev", None, origin)).is_err(), "no blank");
+        assert!(std::panic::catch_unwind(|| shell_page(RELEASE_BLANK, "dev", None, origin)).is_err(), "no time's blank");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}{DEPLOYED_BLANK}{ORIGIN_BLANK}"), "dev", None, origin)).is_err(), "two");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}{DEPLOYED_BLANK}{ORIGIN_BLANK}"), "dev", None, origin)).is_err(), "two times");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}"), "dev", None, origin)).is_err(), "no origin's blank");
     }
 
     fn walkdir(dir: &std::path::Path) -> usize {

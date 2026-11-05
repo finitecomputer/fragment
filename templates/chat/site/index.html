@@ -8,6 +8,21 @@
        stylesheet comes (the fonts' is another site's): never white while
        a woken chat loads (chat.css's --bg-chat) -->
   <style>html{background:#181818;color-scheme:dark}@media (prefers-color-scheme:light){html{background:#ebe9e5;color-scheme:light}}</style>
+  <!-- its live socket, asked before anything else comes: its handshake
+       overlaps the page's modules, and the platform's client
+       (`__fragment.js`) claims it, with what it heard meanwhile. Unclaimed,
+       it is bounded: closed and let go after the client's own opening
+       wait (WAIT: OPEN_WAIT_MS and its first backoff, cell/client.mjs),
+       past EVENTS frames or BYTES of them, or once it closes; then the
+       client dials as it would have (crates/templates/tests/page_imports.rs
+       keeps WAIT the client's) -->
+  <script>(()=>{try{const WAIT=11000,EVENTS=256,BYTES=262144;const u=new URL("__live",document.baseURI);u.protocol=u.protocol==="https:"?"wss:":"ws:";const ws=new WebSocket(u),heard=[];let bytes=0;
+const drop=()=>{ws.removeEventListener("message",keep);ws.removeEventListener("close",drop);clearTimeout(timer);heard.length=0;if(window.__fragmentLive===live)delete window.__fragmentLive;};
+const give=()=>{drop();ws.close();};
+const keep=(e)=>{bytes+=String(e.data).length;heard.push(e);if(heard.length>EVENTS||bytes>BYTES)give();};
+const timer=setTimeout(give,WAIT);
+const live={claim(){if(window.__fragmentLive!==live)return null;const got={ws,heard:heard.slice()};drop();return got;}};
+ws.addEventListener("message",keep);ws.addEventListener("close",drop);window.__fragmentLive=live;}catch{}})();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
