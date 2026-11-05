@@ -1255,6 +1255,12 @@ impl FragmentCell {
                 return Err(CellError::invalid(format!("a title is 1 to {} characters", limits::TITLE_MAX_CHARS)));
             }
         }
+        // a connector's only editor is its owner (doors.rs `connector_role`):
+        // its agent at its making, an editor, is refused before anything is
+        let connector = body.template.as_deref().is_some_and(|t| blessed::CONNECTORS.contains(&t));
+        if connector && body.agent.is_some() {
+            return Err(CellError::invalid("a connector has no editor but its owner: make it without its agent, then add the agent as a viewer"));
+        }
         let cs_cfg = self.cfg.codestorage();
         // its repo made after the answer, by its template's seed (publish.rs)
         let later = body.template.as_deref().is_some_and(crate::publish::seeds_later);
@@ -1272,6 +1278,16 @@ impl FragmentCell {
         let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
+            // its maker's own agent, if it names one: asked before anything
+            // is written, so one that is not theirs makes nothing
+            let agent = match &body.agent {
+                Some(who) => {
+                    let target = self.own_agent(who, &owner).await?;
+                    laps.lap("identity");
+                    Some(target)
+                }
+                None => None,
+            };
             let repo = match later {
                 true => None,
                 false => {
@@ -1282,9 +1298,28 @@ impl FragmentCell {
             };
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             laps.lap("key");
-            Ok::<_, CellError>((repo, pubkey, sealed))
+            // a blessed template's face is known now: the owner's list says
+            // it is a chat or an agent from the start, not once it installs
+            // (a read of the release that fails leaves it to the install,
+            // which sets it from the same manifest)
+            let face = match body.template.as_deref() {
+                Some(t) => {
+                    let face = match crate::assets::blessed_manifest(&self.env, t).await {
+                        Ok(Ok(m)) => Some(crate::members::face(m.kind(), body.title.as_deref().map(str::trim).or(m.title()), m.role(), None)),
+                        _ => None,
+                    };
+                    laps.lap("manifest");
+                    face
+                }
+                None => None,
+            };
+            Ok::<_, CellError>((agent, repo, pubkey, sealed, face))
         };
-        let (repo, fragment_pub, sealed) = match made.await {
+        // every await of its making is above: what follows is written in
+        // one turn, its owner's row and its agent's together, so no list
+        // row (this request's, `after_answer`'s, the alarm's) goes out
+        // before either is in
+        let (agent, repo, fragment_pub, sealed, face) = match made.await {
             Ok(r) => r,
             Err(e) => {
                 self.del_meta(MetaKey::Name)?;
@@ -1335,40 +1370,49 @@ impl FragmentCell {
             if let Some(title) = &body.title {
                 self.set_meta(MetaKey::TemplateTitle, title.trim())?;
             }
-            // a blessed template's face is known now: the owner's list says
-            // it is a chat or an agent from the start, not once it installs
-            // (a read of the release that fails leaves it to the install,
-            // which sets it from the same manifest)
-            if let Ok(Ok(m)) = crate::assets::blessed_manifest(&self.env, t).await {
-                let title = body.title.as_deref().map(str::trim).or(m.title());
-                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, m.role(), None))?;
-            }
-            laps.lap("manifest");
-            // one that seeds after the answer runs its template from the
-            // release meanwhile; failing that, its seed's install does
-            if later {
-                if let Err(e) = self.install_pending().await {
-                    self.event("template.failed", &format!("its template did not install from the release: {}", e.message), json!({ "code": e.code }));
-                }
-                laps.lap("install");
-            }
+        }
+        if let Some(face) = &face {
+            self.set_meta(MetaKey::Face, face)?;
         }
         self.index_change(&owner, Some(Role::Owner))?;
+        // its agent, an editor in the same turn as its owner (members.rs
+        // `join_own_agent`), before the install below awaits: every list
+        // row of it names that agent
+        if let Some(target) = &agent {
+            self.join_own_agent(target)?;
+        }
+        // one that seeds after the answer runs its template from the
+        // release meanwhile; failing that, its seed's install does
+        if later {
+            if let Err(e) = self.install_pending().await {
+                self.event("template.failed", &format!("its template did not install from the release: {}", e.message), json!({ "code": e.code }));
+            }
+            laps.lap("install");
+        }
         let shown = repo.as_deref().unwrap_or("made after this answer");
         self.event("create", &format!("fragment {} created by {owner} (repo {shown})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         laps.lap("list");
         if later {
-            // its repo and first commit right after the answer (`after_answer`),
-            // else at the alarm's next pass (its pending template keeps it busy)
+            // its repo and first commit right after the answer
+            // (`after_answer`), else at the alarm's next pass (its pending
+            // template keeps it busy); its agent's computer is told then
             self.seed_soon.set(true);
             self.later();
         } else {
-            // a template that did not land is retried by the alarm
+            // a template that did not land is retried by the alarm; whichever
+            // seed lands it tells its agents they joined (runs_on.rs `joins_wait`)
             if let Err(e) = self.seed().await {
                 self.event("template.failed", &e.message, json!({ "code": e.code }));
             }
             laps.lap("seed");
+            // its agent's computer told it joined (an outbox the alarm
+            // retries), as after a `PUT members/{agent}`: while its template
+            // is still to land, none is told, and the seed that lands it tells it
+            if agent.is_some() {
+                self.flush_joined().await;
+                laps.lap("joined");
+            }
         }
         self.schedule().await?;
         laps.lap("alarm");
@@ -1499,10 +1543,12 @@ impl FragmentCell {
         }
         self.flush_search().await;
         self.search_forget_due().await;
-        self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
+        // after its seed: an agent's notice waits until its template is in
+        // (runs_on.rs `joins_wait`)
+        self.flush_joined().await;
         self.drain_deliveries().await;
         if let Err(e) = self.flush_meters(false).await {
             self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
@@ -1610,6 +1656,11 @@ impl FragmentCell {
                 self.event("template.failed", &e.message, json!({ "code": e.code }));
             }
             laps.lap("seed");
+            // then its agent's computer is told it joined: a seed that
+            // landed told it; one that failed leaves the chat running from
+            // the release, its channels there to follow (runs_on.rs `joins_wait`)
+            self.flush_joined().await;
+            laps.lap("joined");
         }
         if searched || listed || seeded || drained.queued + drained.woken + launched > 0 {
             laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "seeded": seeded, "queued": drained.queued, "woken": drained.woken, "launched": launched }));

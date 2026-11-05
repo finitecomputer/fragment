@@ -279,6 +279,59 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "first": first, "second": second }),
     );
 
+    // a chat made with its owner's own agent in it (its create's `agent`):
+    // one step, the agent an editor, named in its owner's first list row
+    // (the shell's New chat, which filed it under another agent while a
+    // second call added it)
+    let (_, mine) = api.own_agent(&owner)?;
+    let together = s.named(api, &owner, "members-together")?;
+    let r = api.create_with(&owner, json!({ "name": together, "template": "chat", "title": "Together", "agent": mine }))?;
+    s.owned(&r.body, &owner);
+    let row = row_of_named(api, &owner, &together)?;
+    let members = api.signed(&owner, "GET", &format!("/api/f/{together}/members"), None)?;
+    let joined = members.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == mine.as_str() && m["role"] == "editor" && m["kind"] == "agent"));
+    let waited = crate::api::timing_parts(&r.header("server-timing"));
+    s.ok(
+        "a chat made with its owner's own agent: the agent an editor in the same step, named in its owner's list row as the create answers, its waits the agent's identity, its list, its seed and its computer told",
+        r.status == 200 && row["agents"] == json!([mine]) && joined && ["identity", "list", "seed", "joined"].iter().all(|p| waited.iter().any(|w| w == p)),
+        json!({ "create": r.status, "row": row, "members": members.body, "waited": r.header("server-timing") }),
+    );
+    first_row_names_its_agent(s, api, &owner, &mine)?;
+    let again = api.create_with(&owner, json!({ "name": together, "template": "chat", "agent": mine }))?;
+    let members = api.signed(&owner, "GET", &format!("/api/f/{together}/members"), None)?;
+    let once = members.body["members"].as_array().map(|m| m.iter().filter(|m| m["principal"] == mine.as_str()).count());
+    s.ok("made again, the same name is 409, its agent in it once", again.status == 409 && once == Some(1), json!({ "again": again.status, "members": members.body }));
+    // anyone else's agent, or a person: refused before anything is made
+    let stranger = api.person()?;
+    let (_, theirs) = api.own_agent(&stranger)?;
+    let unmade = s.named(api, &owner, "members-not-theirs")?;
+    let tried: Vec<u16> = [theirs.clone(), api.identity(&stranger)?]
+        .iter()
+        .map(|who| api.create_with(&owner, json!({ "name": unmade, "template": "chat", "agent": who })).map(|r| r.status))
+        .collect::<Result<_>>()?;
+    let status = api.status(&owner, &unmade)?.status;
+    let free = api.create_with(&owner, json!({ "name": unmade }))?;
+    s.owned(&free.body, &owner);
+    s.ok(
+        "someone else's agent, or a person, named at the making is refused (403) and nothing is made: the name stays free",
+        tried == [403, 403] && status == 404 && free.status == 200,
+        json!({ "tried": tried, "status": status, "free": free.status }),
+    );
+    // a connector's only editor is its owner: its own agent at its making
+    // (an editor) is refused before anything is made, and asked again the same
+    let connector = s.named(api, &owner, "members-connector-agent")?;
+    let tried: Vec<u16> = (0..2).map(|_| api.create_with(&owner, json!({ "name": connector, "template": "telegram", "agent": mine })).map(|r| r.status)).collect::<Result<_>>()?;
+    let status = api.status(&owner, &connector)?.status;
+    let free = api.create_with(&owner, json!({ "name": connector, "template": "telegram" }))?;
+    s.owned(&free.body, &owner);
+    let members = api.signed(&owner, "GET", &format!("/api/f/{connector}/members"), None)?;
+    let alone = members.body["members"].as_array().is_some_and(|m| m.len() == 1);
+    s.ok(
+        "a connector made with its owner's agent is refused (400), the same again, and nothing is made: the name stays free, and made without it, its owner is its one member",
+        tried == [400, 400] && status == 404 && free.status == 200 && alone,
+        json!({ "tried": tried, "status": status, "free": free.status, "members": members.body }),
+    );
+
     // who has access to what: the owner's view of all they own (GET /api/access)
     let mine = s.named(api, &owner, "members-alone")?;
     s.create(api, &owner, &mine)?;
@@ -783,4 +836,61 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let after = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("and changes no secret (no secret.set event)", r.status != 200 && after.text.matches("secret.set").count() == set_count, &r);
     Ok(())
+}
+
+const FIRST_ROW: &str = "a chat made with its agent while its seed is held (code.storage slow): every row its owner's list shows of it, the first while the seed runs, names its agent";
+
+/// A chat made with its owner's own agent, its seed held (code.storage
+/// slow, as a preview's is): every row of it its owner's list shows, from
+/// the first, names the agent, until its template has landed, whether its
+/// seed runs in the create or after the answer. A row the create, its
+/// `after_answer` or its alarm sends goes out with the agent in it, or
+/// not at all: none names no agent.
+fn first_row_names_its_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str) -> Result<()> {
+    if s.hosted() {
+        s.skip(FIRST_ROW, "it holds the seed with the fakes' latency");
+        return Ok(());
+    }
+    let name = s.named(api, owner, "members-first-row")?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    s.fake.set_latency(Duration::from_millis(250));
+    let (made, rows, before) = std::thread::scope(|scope| {
+        let made = scope.spawn(|| api.create_with(owner, json!({ "name": name, "template": "chat", "title": "Held", "agent": agent })));
+        // each distinct row the list shows, and how many before the answer
+        let (mut rows, mut before): (Vec<Value>, usize) = (vec![], 0);
+        loop {
+            let answered = made.is_finished();
+            let row = row_of_named(api, owner, &name).unwrap_or_default();
+            if !row.is_null() && rows.last() != Some(&row) {
+                rows.push(row);
+                before += usize::from(!answered);
+            }
+            if (answered && template_landed(api, owner, &name)) || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        (made.join().expect("the create's thread"), rows, before)
+    });
+    s.fake.set_latency(Duration::ZERO);
+    let made = made?;
+    s.owned(&made.body, owner);
+    s.ok(
+        FIRST_ROW,
+        made.status == 200 && before > 0 && !rows.is_empty() && rows.iter().all(|r| r["agents"] == json!([agent])) && template_landed(api, owner, &name),
+        json!({ "create": made.status, "before": before, "rows": rows }),
+    );
+    Ok(())
+}
+
+/// Whether `name`'s template has landed (its `template` event).
+fn template_landed(api: &Api, owner: &Keys, name: &str) -> bool {
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
+    r.is_ok_and(|r| r.body["events"].as_array().into_iter().flatten().any(|e| e["kind"] == "template"))
+}
+
+/// `name`'s row in `owner`'s list, as it reads now.
+fn row_of_named(api: &Api, owner: &Keys, name: &str) -> Result<serde_json::Value> {
+    let r = api.signed(owner, "GET", "/api/fragments", None)?;
+    Ok(r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name)).cloned().unwrap_or_default())
 }

@@ -148,6 +148,9 @@ struct State {
     /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
     #[serde(skip)]
     sabotage_after: u32,
+    /// Commit packs answer 503, landing nothing, while set (`fail_commit_packs`).
+    #[serde(skip)]
+    packs_failing: bool,
     /// Per repo url: commit packs still to land with their answer dropped.
     #[serde(skip)]
     unanswered: BTreeMap<String, u32>,
@@ -700,6 +703,9 @@ impl Inner {
 
     fn commit_pack(&self, st: &mut State, url: &str, req: &Request) -> Response {
         st.commit_packs += 1;
+        if st.packs_failing {
+            return problem(503, "commits are unavailable (the fake's commit outage lever)");
+        }
         if st.sabotage > 0 && st.sabotage_after > 0 {
             st.sabotage_after -= 1;
         } else if st.sabotage > 0 {
@@ -1198,6 +1204,12 @@ impl CodeStorage {
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// Every commit pack answers 503 and lands nothing while `on`: a
+    /// commit outage, its repos and reads as ever.
+    pub fn fail_commit_packs(&self, on: bool) {
+        self.with(|st| st.packs_failing = on);
     }
 
     /// `sabotage_commit_packs(n)`, from the commit pack after the next

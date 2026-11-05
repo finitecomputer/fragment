@@ -282,6 +282,28 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let r = search(api, &stranger, &name, json!({ "q": "inverter" }))?;
     let anon = api.browser_op(&name, "search", "q", json!({ "q": "inverter" }), None)?;
     s.ok("a stranger may not (403), nor anyone without the link (401)", r.status == 403 && anon.status == 401, format!("{r} | {anon}"));
+    // a viewer reads it through the CLI, as the guide's parent refresh
+    // reads a child: its main pin, then a page whole, signed and sent to
+    // the platform (a brain's own address serves no platform API)
+    let reader = s.dir("brain-viewer-home");
+    s.login(api, &reader);
+    let reader_keys = s.cli_keys(&reader).context("the viewer's CLI logged in")?;
+    let r = api.share(&name, &npub::encode(reader_keys.pubkey_hex()), "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the CLI's viewer: {r}");
+    let pin = s.cli_json(api, &reader, &["status", &name, "--json"]).map(|d| d["pins"]["main"].clone()).unwrap_or_default();
+    let read = s.cli(api, &reader, &["read", &name, SOLAR]);
+    let read_json = s.cli_json(api, &reader, &["read", &name, SOLAR, "--json"]).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let missing = s.cli(api, &reader, &["read", &name, "garden/wiki/none.md"]);
+    s.ok(
+        "a viewer's CLI reads a brain's main pin (fragment status) and a page whole (fragment read; --json its text), and a missing page is refused",
+        pin.as_str().is_some_and(|p| !p.is_empty())
+            && read.status.success()
+            && read.stdout == PAGE.as_bytes()
+            && read_json["path"] == SOLAR
+            && read_json["text"] == PAGE
+            && !missing.status.success(),
+        json!({ "pin": pin, "read": String::from_utf8_lossy(&read.stderr), "json": read_json, "missing": String::from_utf8_lossy(&missing.stderr) }),
+    );
     // a viewer may start the index's job, which costs nothing with nothing to do: no full pass is theirs
     let writes = index(api, &keys, &name)["writes"].clone();
     let r = api.op(&viewer, &name, "reindex", "r", json!({ "full": true }))?;

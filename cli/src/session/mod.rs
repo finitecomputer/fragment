@@ -310,6 +310,7 @@ fn archive(c: &Client) -> Result<(String, bool)> {
         visibility: None,
         template: Some(session::TEMPLATE.to_string()),
         title: Some(session::TITLE.to_string()),
+        agent: None,
     };
     let made: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
     Ok((made.name, true))

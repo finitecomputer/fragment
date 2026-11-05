@@ -108,9 +108,21 @@ impl FragmentCell {
     /// when that was the create's, it answered before its template was
     /// live (a skills fragment listing none of the release). Under the
     /// lock the second finds the template landed, and does nothing.
+    ///
+    /// Landed is installed: the agents that joined meanwhile are told then
+    /// (runs_on.rs `joins_wait`), by whichever seed lands it, the create's
+    /// or a later one.
     pub(crate) async fn seed(&self) -> CellResult<()> {
+        if self.seed_locked().await? {
+            self.flush_joined().await;
+        }
+        Ok(())
+    }
+
+    /// [`Self::seed`] under its lock: whether this one landed it.
+    async fn seed_locked(&self) -> CellResult<bool> {
         let _seeding = self.seeding.lock().await;
-        let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
+        let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(false) };
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let life = self.must(MetaKey::CreatedAt)?;
         let key = format!("template:{life}");
@@ -145,10 +157,17 @@ impl FragmentCell {
         if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
             return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended while its template was committed")));
         }
-        self.go_live_in(&repo, &owner, &format!("deploy {name}")).await?;
+        let live = self.go_live_in(&repo, &owner, &format!("deploy {name}")).await?;
+        // deployed is not installed: an install go_live left to the poll
+        // keeps it pending, and the alarm's next seed installs it, from the
+        // same commit and deploy (its agents' joins wait meanwhile)
+        if self.meta(MetaKey::LiveReadAt)?.as_deref() != Some(live.as_str()) {
+            return Err(CellError::host(format!("{name}'s {which} template is deployed (live {live}) but not installed yet")));
+        }
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
         self.del_meta(MetaKey::TemplateTitle)?;
-        self.del_meta(MetaKey::TemplatePending)
+        self.del_meta(MetaKey::TemplatePending)?;
+        Ok(true)
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,

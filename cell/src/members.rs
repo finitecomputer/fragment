@@ -535,6 +535,30 @@ impl FragmentCell {
         Ok(laps.stamp(json_response(&member)?)?)
     }
 
+    /// `who`, one of `owner`'s own agents, or why not (403): what a create
+    /// that names its agent asks before it makes anything (fragment.rs
+    /// `create`), as `put_member` would refuse anyone else's.
+    pub(crate) async fn own_agent(&self, who: &str, owner: &str) -> CellResult<Identity> {
+        let target = self.named(who).await?;
+        if target.kind != IdentityKind::Agent || target.owner.as_deref() != Some(owner) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a fragment's agent at its making is one of its maker's own: anyone else's joins with its owner, invited once it is made"));
+        }
+        Ok(target)
+    }
+
+    /// `target`, its owner's own agent (`own_agent`), made an editor as
+    /// the fragment is made, in the create's turn: written with its
+    /// owner's row and before any await, so no list row of it (the
+    /// request's flush, `after_answer`'s, the alarm's) names no agent. Its
+    /// rows and its computer's notice are sent as its owner's `PUT
+    /// members/{agent}` sends them (`write_member`), the notice once its
+    /// template is in (`joins_wait`).
+    pub(crate) fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
+        let owner = self.must(MetaKey::Owner)?;
+        let actor = Actor { role: Some(Role::Owner), by: owner, for_owner: None };
+        self.write_member(&actor, target, SetRole { role: Role::Editor }, false)
+    }
+
     /// A test hook (`ops::test_fragment`'s `member`): `who` made a member,
     /// or their role changed, as its owner would, with no one's yes, so the
     /// e2e shares with people without mailing each an invite to accept.
@@ -552,6 +576,19 @@ impl FragmentCell {
     /// them"): anyone else joins by their own yes to an invite, but for a
     /// test's `lever`.
     async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool, laps: &mut crate::js::Laps) -> CellResult<Member> {
+        let member = self.write_member(actor, target, body, lever)?;
+        // the agent's list holds this fragment before its computer is told
+        self.flush_index().await;
+        laps.lap("list");
+        self.flush_joined().await;
+        laps.lap("joined");
+        Ok(member)
+    }
+
+    /// [`Self::put_member`]'s writes, in one turn with no await: the
+    /// member's row, its list changes, and an agent's notice queued. Their
+    /// sends are the caller's (`put_member`, or a create's own).
+    fn write_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
@@ -621,11 +658,6 @@ impl FragmentCell {
                 self.agents_join(&target.id, &agents, body.role)?;
             }
         }
-        // the agent's list holds this fragment before its computer is told
-        self.flush_index().await;
-        laps.lap("list");
-        self.flush_joined().await;
-        laps.lap("joined");
         Ok(member)
     }
 
