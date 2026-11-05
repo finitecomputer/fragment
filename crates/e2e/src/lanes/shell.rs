@@ -5900,9 +5900,8 @@ fn making_states(
     let answered = s.eventually(agent_wait, || replies(api, me.session, &first_chat, &first_id, said) == 1);
     let badge = b.until(page, &format!("{}?.querySelector('.unread')?.textContent === '2'", row_of(&first_chat)), wait);
     b.eval(page, "(window.__held.release(), true)")?;
-    let made: Vec<String> = names().into_iter().filter(|n| !before.contains(n)).collect();
-    let made = made.first().cloned().unwrap_or_default();
-    let opened = b.until(page, &format!("{shown} === {} && !document.querySelector('#frames .making-standin')", js(&made)), wait);
+    let opened = b.until(page, &format!("!document.querySelector('#frames .making-standin') && !document.querySelector('#chats .making') && !!{shown} && {shown} !== {}", js(&first_chat)), wait);
+    let made = open_chat(b, page);
     let asked = b.eval(page, "window.__seenAsked")?;
     let kept = unread_of(api, me.session, &first_chat);
     b.eval(page, "(window.__held.restore(), true)")?;
@@ -5910,7 +5909,7 @@ fn making_states(
     let cleared = s.eventually(wait, || unread_of(api, me.session, &first_chat) == 0);
     s.ok(
         "a message to the chat a new chat's room covers: that chat is not marked seen (no PUT …/seen, its 2 unread counted and badged) until it is opened",
-        none_before && picked && made_shown && r.status == 200 && answered && badge && opened
+        none_before && picked && made_shown && r.status == 200 && answered && badge && opened && !before.contains(&made)
             && !asked.as_array().is_some_and(|a| a.iter().any(|u| u.as_str().is_some_and(|u| u.contains(first_chat.as_str())))) && kept == 2 && cleared,
         json!({ "asked": asked, "kept": kept, "made": made }),
     );
