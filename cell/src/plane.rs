@@ -28,7 +28,7 @@ use worker::*;
 
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, missing, Caller, Facts, FragmentCell, MetaKey};
+use crate::fragment::{json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 use fragment_core::gather::Gathered;
 
@@ -241,6 +241,19 @@ impl FragmentCell {
         Ok(Cs::new(self.cfg.codestorage(), &self.env))
     }
 
+    /// Its repo, for a writer of it (a commit, a storage token's push): one
+    /// its create answered before making (publish.rs `seeds_later`) is made
+    /// here first, with its template's commit and deploy, by the same seed
+    /// the answer and the alarm run (one at a time: `seeding`), so a write
+    /// lands on top of its template, never under it.
+    pub(crate) async fn repo_ready(&self) -> CellResult<String> {
+        if let Some(repo) = self.meta(MetaKey::Repo)? {
+            return Ok(repo);
+        }
+        self.seed().await?;
+        self.must(MetaKey::Repo)
+    }
+
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
         self.meta(MetaKey::pin(which))
     }
@@ -257,7 +270,12 @@ impl FragmentCell {
     /// (main) or the code (live) follow. Callers hold `self.plane`.
     async fn refresh_pin(&self, which: &str) -> CellResult<PinMove> {
         let [repo, from] = self.metas([MetaKey::Repo, MetaKey::pin(which)])?;
-        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
+        // no repo yet (its template seeds after its create's answer,
+        // publish.rs `seeds_later`): no branch, so nothing pinned moved
+        let Some(repo) = repo else {
+            assert!(from.is_none(), "a pin is a commit of a repo made");
+            return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
+        };
         let cs = self.cs()?;
         let Some(to) = cs.branch_head(&repo, which).await? else {
             if from.is_none() {
@@ -390,7 +408,6 @@ impl FragmentCell {
     /// that changes it is a fresh worker, as a new commit is. Its own repo
     /// carries no code: a live commit with any is refused, saying to fork.
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
-        let repo = self.must(MetaKey::Repo)?;
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
             clear_installed(&self.sql())?;
@@ -402,6 +419,7 @@ impl FragmentCell {
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
             return Ok(());
         };
+        let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         let manifest = match self.tree_row("live", "fragment.json")? {
             None => manifest::Manifest::default(),
@@ -413,6 +431,28 @@ impl FragmentCell {
                 }
             }
         };
+        self.install(manifest, Some((&cs, repo.as_str())), sha).await
+    }
+
+    /// A fragment whose template seeds after its create's answer
+    /// (publish.rs `seeds_later`) runs that template from the release
+    /// until its first commit lands: installed as live's will be, from the
+    /// same `fragment.json` its seed commits (`blessed_manifest_bytes`),
+    /// with no commit (`""`, as the code's sha and the status's repo say).
+    /// The seed's own install, from live, replaces it.
+    pub(crate) async fn install_pending(&self) -> CellResult<()> {
+        let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
+        assert!(self.pin("live")?.is_none(), "a template is installed pending only before its first commit");
+        let title = self.meta(MetaKey::TemplateTitle)?;
+        let bytes = crate::publish::blessed_manifest_bytes(&which, title.as_deref());
+        let manifest = manifest::parse(&bytes).map_err(|e| CellError::host(format!("the {which} template's own fragment.json: {e}")))?;
+        assert_eq!(manifest.template.as_deref(), Some(which.as_str()), "a pending template's manifest names it");
+        self.install(manifest, None, "").await
+    }
+
+    /// Installs `manifest`'s app, read at `sha` of `repo` (`None`: a
+    /// blessed template before its repo, `install_pending`).
+    async fn install(&self, manifest: manifest::Manifest, repo: Option<(&Cs<'_>, &str)>, sha: &str) -> CellResult<()> {
         // a blessed template's fragment runs the release's manifest, with its own face
         let blessed = manifest.template.clone();
         let manifest = match &blessed {
@@ -447,15 +487,19 @@ impl FragmentCell {
         let (source, modules, loader_id) = match code {
             None => (None, BTreeMap::new(), String::new()),
             Some(Code::Release(c)) => (Some(c.source), c.modules, c.id),
-            Some(Code::Live) => match self.read_live_code(&cs, &repo, sha).await? {
-                Ok((source, modules, id)) => (Some(source), modules, id),
-                Err(why) => return self.code_refused(sha, &why),
-            },
+            Some(Code::Live) => {
+                let (cs, repo) = repo.expect("code of its own is a commit's: a pending install is a blessed template's");
+                match self.read_live_code(cs, repo, sha).await? {
+                    Ok((source, modules, id)) => (Some(source), modules, id),
+                    Err(why) => return self.code_refused(sha, &why),
+                }
+            }
         };
         // an agent's picture, checked as a write of it is (docs/api.md, "An
         // agent's name and picture"): a live commit with one that is not is refused
-        let picture = match manifest.kind() {
-            FragmentKind::Agent => match self.read_picture(&cs, &repo, sha).await? {
+        // (none before its first commit: a pending install's)
+        let picture = match (manifest.kind(), repo) {
+            (FragmentKind::Agent, Some((cs, repo))) => match self.read_picture(cs, repo, sha).await? {
                 Ok(p) => p,
                 Err(why) => return self.code_refused(sha, &why),
             },
@@ -656,8 +700,12 @@ impl FragmentCell {
             if !self.blessed_stale()? {
                 return Ok(());
             }
-            let live = self.meta(MetaKey::PinLive)?;
-            self.install_code(live.as_deref()).await?;
+            match self.meta(MetaKey::PinLive)? {
+                Some(live) => self.install_code(Some(&live)).await?,
+                // before its first commit (publish.rs `seeds_later`): its template from the release again
+                None if self.meta(MetaKey::TemplatePending)?.is_some() => self.install_pending().await?,
+                None => self.install_code(None).await?,
+            }
             self.search_fence()?;
             self.listed_fence()?;
         }
@@ -723,7 +771,9 @@ impl FragmentCell {
     /// check that fails is not recorded, so the next request asks again.
     /// `facts` follows what moved.
     pub(crate) async fn ensure_pins(&self, facts: &mut Facts) -> CellResult<()> {
-        if facts.pins_checked {
+        // no repo yet (publish.rs `seeds_later`): nothing to ask, and asked
+        // again once its seed has made one
+        if facts.pins_checked || facts.repo.is_none() {
             return Ok(());
         }
         let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();
@@ -815,7 +865,9 @@ impl FragmentCell {
         self.writable().await?;
 
         let who = self.caller_id(caller)?;
-        let repo = self.must(MetaKey::Repo)?;
+        // a repo not made yet is made first, its template committed
+        // (publish.rs `seeds_later`): the token's holder pushes on top of it
+        let repo = self.repo_ready().await?;
         let token = self.cs()?.storage_token(&repo, who).await?;
         self.event(
             "storage-token.minted",
@@ -909,7 +961,8 @@ impl FragmentCell {
     /// Streams a file's bytes from git at a pin.
     pub(crate) async fn stream_git(&self, facts: &Facts, which: &str, path: &str) -> CellResult<Response> {
         let pin = facts.pin(which).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no {which} pin yet")))?;
-        let upstream = self.cs()?.stream(&facts.repo, pin, path).await?;
+        let repo = facts.repo.as_deref().expect("a pin is a commit of a repo made");
+        let upstream = self.cs()?.stream(repo, pin, path).await?;
         let headers = Headers::new();
         headers.set("content-type", site::mime_for_path(path))?;
         headers.set("x-fragment-ref", pin)?;
@@ -1031,5 +1084,6 @@ impl FragmentCell {
 }
 
 fn short(sha: Option<&str>) -> String {
-    sha.map(|s| s.chars().take(12).collect()).unwrap_or_else(|| "(none)".into())
+    // (`""`: a template's install before its first commit, `install_pending`)
+    sha.filter(|s| !s.is_empty()).map(|s| s.chars().take(12).collect()).unwrap_or_else(|| "(none)".into())
 }

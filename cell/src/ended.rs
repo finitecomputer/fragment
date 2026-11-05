@@ -246,14 +246,17 @@ impl FragmentCell {
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
         let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;
-        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
-        assert!(!repo.is_empty(), "a created fragment names its repo");
-        self.exec(
-            "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
-            vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
+        // a life whose repo was not made yet (its template seeds after the
+        // create's answer, publish.rs `seeds_later`) records none
+        if let Some(repo) = &repo {
+            assert!(!repo.is_empty(), "a made repo has a name");
+            self.exec(
+                "INSERT INTO ended_repos (incarnation, repo, next_at) VALUES (?, ?, ?) ON CONFLICT (incarnation) DO NOTHING",
+                vec![SqlStorageValue::Integer(incarnation), repo.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
         let ended = self.end(false)?;
-        assert_eq!(self.ended_repo_rows(incarnation)?, 1, "the ended life's repo is recorded beside it");
+        assert_eq!(self.ended_repo_rows(incarnation)?, u64::from(repo.is_some()), "the ended life's repo, if it had one, is recorded beside it");
         Ok(ended)
     }
 

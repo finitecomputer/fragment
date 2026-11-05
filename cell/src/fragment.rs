@@ -124,6 +124,9 @@ pub struct FragmentCell {
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
+    /// A create answered before its template's repo was made
+    /// (publish.rs `seeds_later`): `after_answer` seeds it.
+    pub(crate) seed_soon: Cell<bool>,
     /// Serializes `launch_queued`: two at once would each start a queued
     /// run's Workflow and say so.
     pub(crate) launching: futures_util::lock::Mutex<()>,
@@ -161,6 +164,7 @@ impl DurableObject for FragmentCell {
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
+            seed_soon: Cell::new(false),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
             schema,
@@ -566,7 +570,9 @@ pub(crate) struct Facts {
     pub name: String,
     pub visibility: Visibility,
     pub view_token: String,
-    pub repo: String,
+    /// Its repo at code.storage: `None` until its template's seed makes
+    /// it, when its create answered first (publish.rs `seeds_later`).
+    pub repo: Option<String>,
     pub pin_main: Option<String>,
     pub pin_live: Option<String>,
     /// Whether a request has asked code.storage for the pins yet.
@@ -741,7 +747,7 @@ impl FragmentCell {
             name: name.ok_or_else(|| missing(MetaKey::Name))?,
             visibility: Visibility::parse(&visibility).ok_or_else(|| CellError::host(format!("stored visibility {visibility:?}")))?,
             view_token: view_token.ok_or_else(|| missing(MetaKey::ViewToken))?,
-            repo: repo.ok_or_else(|| missing(MetaKey::Repo))?,
+            repo,
             pin_main,
             pin_live,
             pins_checked: pins_checked_at.is_some(),
@@ -1250,6 +1256,8 @@ impl FragmentCell {
             }
         }
         let cs_cfg = self.cfg.codestorage();
+        // its repo made after the answer, by its template's seed (publish.rs)
+        let later = body.template.as_deref().is_some_and(crate::publish::seeds_later);
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
         // A claim left by a create that crashed mid-flight expires.
@@ -1264,12 +1272,14 @@ impl FragmentCell {
         let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
-            // the one place a repo's name is derived: its owner's, so a
-            // name another identity makes later never finds it
-            let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
-                .ok_or_else(|| CellError::invalid("a fragment's name is <label>--<suffix>, and its owner an identity"))?;
-            let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
-            laps.lap("repo");
+            let repo = match later {
+                true => None,
+                false => {
+                    let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &owner)?).await?;
+                    laps.lap("repo");
+                    Some(repo)
+                }
+            };
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             laps.lap("key");
             Ok::<_, CellError>((repo, pubkey, sealed))
@@ -1288,6 +1298,9 @@ impl FragmentCell {
         let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
+        if let Some(repo) = &repo {
+            self.set_meta(MetaKey::Repo, repo)?;
+        }
         for (k, v) in [
             (MetaKey::Owner, owner.as_str()),
             (MetaKey::Npub, fragment_npub.as_str()),
@@ -1295,7 +1308,6 @@ impl FragmentCell {
             (MetaKey::Visibility, visibility.as_str()),
             (MetaKey::ViewToken, view_token.as_str()),
             (MetaKey::InboxToken, inbox_token.as_str()),
-            (MetaKey::Repo, repo.as_str()),
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
             (MetaKey::AppFacet, format!("{}@{created_at}", js::APP_FACET).as_str()),
@@ -1332,16 +1344,32 @@ impl FragmentCell {
                 self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title, m.role(), None))?;
             }
             laps.lap("manifest");
+            // one that seeds after the answer runs its template from the
+            // release meanwhile; failing that, its seed's install does
+            if later {
+                if let Err(e) = self.install_pending().await {
+                    self.event("template.failed", &format!("its template did not install from the release: {}", e.message), json!({ "code": e.code }));
+                }
+                laps.lap("install");
+            }
         }
         self.index_change(&owner, Some(Role::Owner))?;
-        self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
+        let shown = repo.as_deref().unwrap_or("made after this answer");
+        self.event("create", &format!("fragment {} created by {owner} (repo {shown})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         laps.lap("list");
-        // a template that did not land is retried by the alarm
-        if let Err(e) = self.seed().await {
-            self.event("template.failed", &e.message, json!({ "code": e.code }));
+        if later {
+            // its repo and first commit right after the answer (`after_answer`),
+            // else at the alarm's next pass (its pending template keeps it busy)
+            self.seed_soon.set(true);
+            self.later();
+        } else {
+            // a template that did not land is retried by the alarm
+            if let Err(e) = self.seed().await {
+                self.event("template.failed", &e.message, json!({ "code": e.code }));
+            }
+            laps.lap("seed");
         }
-        laps.lap("seed");
         self.schedule().await?;
         laps.lap("alarm");
         let created = json_response(&Created {
@@ -1351,7 +1379,8 @@ impl FragmentCell {
             visibility,
             view_token,
             inbox_token,
-            repo,
+            // empty until its seed makes it (publish.rs `seeds_later`)
+            repo: repo.unwrap_or_default(),
             canonical: self.cfg.canonical(&caller.url, &body.name),
         })?;
         Ok(laps.stamp(created)?)
@@ -1388,7 +1417,8 @@ impl FragmentCell {
             owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,
             visibility: facts.visibility,
-            repo: facts.repo,
+            // empty until its repo is made (publish.rs `seeds_later`)
+            repo: facts.repo.unwrap_or_default(),
             pins: Pins { main: facts.pin_main, live: facts.pin_live },
             counts: Counts {
                 files: self.count("SELECT COUNT(*) AS n FROM tree WHERE ref = 'main'")?,
@@ -1571,8 +1601,18 @@ impl FragmentCell {
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || listed || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        // a create that answered before its template's repo was made
+        // (publish.rs `seeds_later`): made now; failing that, the alarm's
+        // pass tries again (a pending template keeps the fragment busy)
+        let seeded = self.seed_soon.replace(false);
+        if seeded {
+            if let Err(e) = self.seed().await {
+                self.event("template.failed", &e.message, json!({ "code": e.code }));
+            }
+            laps.lap("seed");
+        }
+        if searched || listed || seeded || drained.queued + drained.woken + launched > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "seeded": seeded, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
         }
     }
 
