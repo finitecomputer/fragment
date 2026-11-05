@@ -87,7 +87,8 @@ export class App extends DurableObject {
     const paired = this.get("paired");
     const p = this.get("pairing");
     const pairing = p && Date.now() <= p.expires ? { link: p.link, expires: p.expires, candidate: p.candidate ? { user: p.candidate.user, name: p.candidate.name } : null } : null;
-    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing };
+    const lifecycle = !bot ? "disconnected" : paired ? "paired" : pairing ? "pairing" : "connected";
+    return { lifecycle, bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing };
   }
 
   async connect({ platform, api = TELEGRAM } = {}, job) {

@@ -85,7 +85,7 @@ export async function setup(root) {
     const [state, door, members] = await Promise.all([fragment.call("state"), platformJson("./__door"), platformJson("./__members")]);
     if (state.error && !error) error = state.error;
     // 1: the bot
-    if (!state.bot) {
+    if (state.lifecycle === "disconnected") {
       const input = el("input");
       input.type = "password";
       input.autocomplete = "off";
@@ -107,7 +107,7 @@ export async function setup(root) {
       return say(head("Connect Telegram"), el("p", "", "Make a bot with @BotFather, then paste its token."), row);
     }
     // 2: the account, paired and confirmed here
-    if (!state.paired) {
+    if (state.lifecycle !== "paired") {
       const p = state.pairing;
       if (p?.candidate) {
         const row = el("div", "telegram-row");
