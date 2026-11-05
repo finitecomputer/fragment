@@ -5854,7 +5854,7 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     // from that empty chat of their main agent's, the Reader's New chat: a
     // chat with the Reader, never that one (a blank chat is its own agent's)
     let picked = new_chat(b, &reader_hero)?;
-    let moved = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment !== {}", js(&third)), wait);
+    let moved = b.until(page, &format!("document.getElementById('chat-title').textContent === 'New chat' && !document.querySelector('#chats .making') && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(&third)), wait);
     let readers = open_chat(b, page);
     let members = shell(api, me.session, "GET", &format!("/api/f/{readers}/members"), None, &[])?;
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
