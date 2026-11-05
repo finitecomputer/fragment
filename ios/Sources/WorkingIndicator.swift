@@ -175,7 +175,7 @@ struct WorkingIndicator: View {
                     } else {
                         HStack(spacing: -6) {
                             ForEach(Self.icons(card.steps), id: \.self) { icon in
-                                glyph(icon, size: 11).frame(width: 20, height: 20)
+                                glyph(icon, size: 11).foregroundStyle(secondary).frame(width: 20, height: 20)
                                     .background(Color(rgb: colorScheme == .dark ? 0x262625 : 0xf0eee9), in: Circle())
                                     .overlay(Circle().strokeBorder(FragmentStyle.background, lineWidth: 1.5))
                             }
@@ -217,7 +217,7 @@ struct WorkingIndicator: View {
                     glyph(step.icon).accessibilityLabel(step.verb)
                     HStack(spacing: textSize * 0.3) {
                         if showsVerb { shimmer(step.label, elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil) }
-                        if !args.isEmpty { shimmer(fittedArguments[step.id] ?? args, elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil).lineLimit(1).truncationMode(.tail) }
+                        if !args.isEmpty { shimmer(fittedArguments[step.id] ?? Self.singleLine(args), elapsed: elapsed, active: step.running && !step.failed, tone: step.failed ? failure : nil).lineLimit(1).truncationMode(.tail) }
                         if step.running && step.record.body["kind"].string == "turn.call" { Text("· " + Self.duration(Int64(now.timeIntervalSince1970 * 1000) - step.record.at)).foregroundStyle(.tertiary).monospacedDigit() }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: 20.15)
@@ -227,21 +227,38 @@ struct WorkingIndicator: View {
                         let font = UIFont.systemFont(ofSize: fit.size)
                         let verb = fit.verb.isEmpty ? 0 : (fit.verb as NSString).size(withAttributes: [.font: font]).width + fit.size * 0.3
                         let clock = fit.clock.isEmpty ? 0 : (fit.clock as NSString).size(withAttributes: [.font: UIFont.monospacedDigitSystemFont(ofSize: fit.size, weight: .regular)]).width + fit.size * 0.3
-                        let text = Self.fitPaths(fit.args, width: fit.width - 20 - verb - clock, font: font)
+                        let text = Self.fitPaths(Self.singleLine(fit.args), width: fit.width - 20 - verb - clock, font: font)
                         if fittedArguments[step.id] != text { fittedArguments[step.id] = text }
                     }
             }.buttonStyle(.plain).foregroundStyle(step.failed ? failure : step.running ? secondary : stepColor)
             if detailed {
                 VStack(alignment: .leading, spacing: 10) {
-                    if !args.isEmpty { Text(args) }
-                    if let result = step.record.body["excerpt"].string, !result.isEmpty { Text(result) }
-                }.font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading).background(FragmentStyle.bubble, in: RoundedRectangle(cornerRadius: 8))
+                    if !args.isEmpty { detailText(args, tone: secondary) }
+                    if let result = step.record.body["excerpt"].string, !result.isEmpty { detailText(result, tone: Color(rgb: colorScheme == .dark ? 0x706d69 : 0x918a82)) }
+                }.padding(.vertical, 10).padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(rgb: colorScheme == .dark ? 0x2b2b2b : 0xece8df), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.leading, 20).padding(.bottom, 6)
             }
         }
-        .padding(.vertical, verticalPadding).padding(.leading, 16)
-        .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.18)).frame(width: 1) }
+        .padding(.vertical, verticalPadding).padding(.leading, 17)
+        .overlay(alignment: .leading) { Rectangle().fill(Color(rgb: colorScheme == .dark ? 0xffffff : 0x141414).opacity(colorScheme == .dark ? 0.16 : 0.18)).frame(width: 1) }
         .padding(.leading, 9)
+    }
+
+    private func detailText(_ text: String, tone: Color) -> some View {
+        let leading = max(0, 19.2 - UIFont.monospacedSystemFont(ofSize: 12, weight: .regular).lineHeight)
+        let words = Text(text).font(.system(size: 12, design: .monospaced)).lineSpacing(leading)
+            .fixedSize(horizontal: false, vertical: true).padding(.vertical, leading / 2)
+        // Measure the words at their natural height, capped like the web's
+        // pre, then scroll in that space. A short result must not stretch.
+        return words.hidden().accessibilityHidden(true)
+            .frame(maxWidth: .infinity, maxHeight: 240, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
+            .overlay(alignment: .topLeading) {
+                ScrollView { words.frame(maxWidth: .infinity, alignment: .leading) }
+                    .scrollBounceBehavior(.basedOnSize)
+            }.clipped().foregroundStyle(tone).textSelection(.enabled)
     }
 
     // chat.js middlePaths/fitStepArgs: shorten directories before applying
@@ -260,6 +277,12 @@ struct WorkingIndicator: View {
             result.replaceCharacters(in: range, with: path.substring(to: max(head, room - (tail as NSString).length - 1)) + "…" + tail)
         }
         return result as String
+    }
+    // CSS white-space: nowrap collapses command newlines in the list;
+    // the expanded detail still shows the original formatting.
+    static func singleLine(_ text: String) -> String {
+        text.replacingOccurrences(of: #"[\t\n\f\r ]+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: " "))
     }
     private static func fitPaths(_ text: String, width: CGFloat, font: UIFont) -> String {
         guard width > 0, (text as NSString).size(withAttributes: [.font: font]).width > width else { return text }

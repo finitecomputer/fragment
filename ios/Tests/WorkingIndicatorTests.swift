@@ -36,6 +36,24 @@ struct WorkingIndicatorTests {
         #expect(WorkingActivity(timeline).cards[first.id]?.until == 6000)
     }
 
+    @Test func completedCallsCountFromTheTurnStartAndDoNotEndAnEarlierCard() throws {
+        var timeline = Timeline()
+        for (seq, body) in [
+            (1, #"{"kind":"turn.start","turn":"timed"}"#),
+            (2, #"{"kind":"turn.call","turn":"timed","response":"r1","tool_call_id":"c1","tool":"terminal","category":"shell","args":"first"}"#),
+            (3, #"{"kind":"turn.step","turn":"timed","step":1,"response":"r1","tool_call_id":"c1","tool":"terminal","category":"shell","args":"first","ok":true,"status":"completed"}"#),
+            (4, #"{"kind":"turn.call","turn":"timed","response":"r2","tool_call_id":"c2","tool":"terminal","category":"shell","args":"second"}"#),
+            (5, #"{"kind":"turn.step","turn":"timed","step":2,"response":"r2","tool_call_id":"c2","tool":"terminal","category":"shell","args":"second","ok":true,"status":"completed"}"#),
+            (6, #"{"kind":"turn.end","turn":"timed","outcome":"idle"}"#)
+        ] { timeline.insert(try work(Int64(seq), body)) }
+        timeline.insert(.init(channel: "chat", seq: 1, at: 4500, principal: "npub1preview", kind: "message", body: .object(["turn": .string("timed"), "text": .string("Next tool")])))
+        let activity = WorkingActivity(timeline)
+        #expect(activity.cards["work:3"]?.since == 1000)
+        #expect(activity.cards["work:3"]?.until == 4500)
+        #expect(activity.cards["work:5"]?.since == 5000)
+        #expect(activity.cards["work:5"]?.until == 6000)
+    }
+
     @Test func asksResumeAfterTheAskersWordsAndAnExpiredCardCanShowWork() throws {
         var timeline = Timeline()
         timeline.insert(try work(1, #"{"kind":"turn.start","turn":"asked","asker":"npub1person"}"#))
@@ -76,6 +94,7 @@ struct WorkingIndicatorTests {
     }
 
     @Test func narrowPathsKeepTheirFilenameAndShellPrefix() {
+        #expect(WorkingIndicator.singleLine("cat > make.py <<'EOF'\nimport math\n\tfrom PIL import Image") == "cat > make.py <<'EOF' import math from PIL import Image")
         #expect(WorkingIndicator.middlePaths("ls ~/a/b/c/file.swift", room: 14) == "ls ~/…/file.swift")
         #expect(WorkingIndicator.middlePaths("/data/work/another-agent/home/SOUL.md", room: 15).hasSuffix("/SOUL.md"))
         #expect(WorkingIndicator.middlePaths("cargo check", room: 1) == "cargo check")

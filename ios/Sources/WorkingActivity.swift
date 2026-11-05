@@ -168,15 +168,26 @@ struct WorkingActivity: Equatable {
             let key = card.turn
             let own = work[key] ?? []
             let last = card.steps.last!.record
-            let subsequent = records.filter {
-                $0.principal == key.agent && $0.turn == key.id && ($0.at > last.at || ($0.channel == "work" && $0.at == last.at && $0.seq > last.seq))
-            }.first
-            let runs = ready && timeline.turns[key]?.running == true && (card.steps.contains { $0.running } || subsequent == nil)
-            if !runs { card.until = subsequent?.at ?? own.last?.at ?? last.at }
+            // chat.js cardEnd ignores call announcements: their results,
+            // replies, prompts/notices and the turn's end delimit a card.
+            let subsequent = records.first {
+                guard $0.principal == key.agent && $0.turn == key.id else { return false }
+                if $0.isMessage { return $0.at > last.at }
+                return $0.channel == "work" && ["turn.step", "turn.prompt", "turn.notice"].contains($0.body["kind"].string ?? "")
+                    && ($0.at > last.at || ($0.at == last.at && $0.seq > last.seq))
+            }
+            let runs = ready && timeline.turns[key]?.running == true
+                && (last.seq == own.last?.seq || (last.body["kind"].string == "turn.call" && !card.steps.last!.maybe))
+            if !runs {
+                let end = own.last { $0.body["kind"].string == "turn.end" }?.at
+                card.until = [subsequent?.at, end].compactMap { $0 }.min() ?? own.last?.at ?? last.at
+            }
             if runs, !card.steps.contains(where: { $0.running }), let index = card.steps.indices.last,
                card.steps[index].record.body["status"].string == nil, !card.steps[index].failed { card.steps[index].running = true }
-            let firstStep = own.first { ["turn.step", "turn.call"].contains($0.body["kind"].string ?? "") }
-            if card.steps.contains(where: { $0.record.id == firstStep?.id }) { card.since = starts[key] ?? card.since }
+            // A matched call is absent from the rendered steps. The first
+            // result still counts from turn.start, as the web does.
+            let first = (own.filter { $0.body["kind"].string == "turn.step" }.map(\.at) + card.steps.map { $0.record.at }).min()
+            if card.steps.first?.record.at == first { card.since = starts[key] ?? card.since }
             cards[id] = card
         }
         let liveCards = Set(cards.values.filter(\.running).map(\.turn))
