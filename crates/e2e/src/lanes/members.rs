@@ -300,15 +300,16 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     // one with no face at its making: no template, or one not blessed (whose
     // release read gives none, as a read that fails does): its row names its
     // agent all the same, as an untitled app's, from the create's answer
-    let faceless: Vec<Value> = [None, Some("todo")]
+    let faceless: Vec<Value> = [("members-faceless", None), ("members-faceless-todo", Some("todo"))]
         .into_iter()
-        .map(|template| {
-            let name = s.named(api, &owner, "members-faceless")?;
+        .map(|(label, template)| {
+            let name = s.named(api, &owner, label)?;
             let mut body = json!({ "name": name, "agent": mine });
             if let Some(t) = template {
                 body["template"] = json!(t);
             }
             let r = api.create_with(&owner, body)?;
+            anyhow::ensure!(r.status == 200, "made with its agent, {template:?}: {r}");
             s.owned(&r.body, &owner);
             Ok(json!({ "template": template, "create": r.status, "row": row_of_named(api, &owner, &name)? }))
         })
