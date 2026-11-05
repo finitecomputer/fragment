@@ -9,7 +9,7 @@ export function diskSaid(n) {
   return `Your computer is almost full (${size(n.free)} left). Delete files you don't need, or ask an agent to tidy up.`;
 }
 
-export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, reopenSettings, openScreen, markOffer, reads, load }) {
+export function createComputer({ api, el, seg, named, section, line, actionLine, computer, agents, computerFailed, support, setupPending, made, computerIs, openScreen, markOffer, reads, load }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
   // asking for a wake as the person arrives or focuses a chat hides the
@@ -84,7 +84,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // buttons, painted again as the computer changes (`paintSettings`); its
   // buttons only when the restart's step changed, so a Restart now asked
   // stays until pressed or cancelled.
-  const shown = { state: null, asks: null, painted: null };
+  const shown = { section: null, state: null, asks: null, said: null, painted: null };
   // a button with its icon before its words; `words`, the span its words
   // are in (a named one: renderNames rewrites only its text)
   const iconed = (name, words, cls = "quiet") => {
@@ -198,14 +198,20 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     paintSettings();
   }
   // The restart, done: awake on a newer start, or a newer start that won't
-  // (its notice then says so, with Try again); settings read again.
+  // (its notice then says so, with Try again). Settings' Computer, shown,
+  // is drawn again in place (its version, the latest), under its heading,
+  // which settings' links name: nothing else read again, nothing moved.
   // A failed ask is forgotten once the computer restarted all the same
   // (another tab's press).
   function followed() {
     const c = computer();
     if (!restart || !c || !(c.generation > restart.asked) || !(restart.failed || ["awake", "wont_wake"].includes(c.phase))) return;
     restart = null;
-    reopenSettings().catch(() => {});
+    const old = shown.section;
+    if (!old?.isConnected) return;
+    const fresh = computerSection(c);
+    old.replaceChildren(old.querySelector(":scope > h2"), ...[...fresh.children].slice(1));
+    shown.section = old;
   }
   // Try again: the list and the computer read again (`load`, which goes on
   // with what the failure put off). The list's read failing too, the line
@@ -329,10 +335,16 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // more before it cuts what its agents are doing
     if (c) {
       const asks = el("span", "settings-actions");
-      shown.asks = asks;
+      const restartRow = row("Restart", "Saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops.", asks);
+      // why its ask failed, under its words (never beside its button, which
+      // would squeeze them)
+      const said = el("p", "form-error");
+      restartRow.querySelector(".settings-info").append(said);
+      Object.assign(shown, { asks, said });
       paintAsks(asks);
-      computer.append(row("Restart", "Saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops.", asks));
+      computer.append(restartRow);
     }
+    shown.section = computer;
     return computer;
   }
   function stateLine(c) {
@@ -353,6 +365,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   function paintAsks(asks) {
     const step = restartSaid();
     shown.painted = step;
+    shown.said.textContent = restart?.failed ? `It didn't restart: ${restart.failed}` : "";
+    shown.said.hidden = !restart?.failed;
     if (restart && !restart.failed) {
       const status = el("span", "restart-status", step);
       status.setAttribute("role", "status");
@@ -367,11 +381,10 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       sure.onclick = () => restartComputer();
       const cancel = el("button", "quiet", "Cancel");
       cancel.type = "button";
-      cancel.onclick = () => asks.replaceChildren(...said, go);
+      cancel.onclick = () => asks.replaceChildren(go);
       asks.replaceChildren(cancel, sure);
     };
-    const said = restart ? [el("p", "form-error", `It didn't restart: ${restart.failed}`)] : [];
-    asks.replaceChildren(...said, go);
+    asks.replaceChildren(go);
   }
   return { computerOf, prewake, renderComputer, restartComputer, computerSection, dispose: () => document.removeEventListener("visibilitychange", prewake) };
 }
