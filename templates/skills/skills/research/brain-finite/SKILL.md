@@ -112,9 +112,10 @@ revision file and synthesis pages citing child pages and revisions. Read
 children as a viewer, write the parent as editor, and refresh explicitly.
 Check each child's main pin (`fragment status <child>`) before and after
 reading its pages (`fragment read <child> <path>`); retry if it moved.
-Publish outputs and their revision record together, in one sync of the
-parent, updating stable paths; after restart, reconcile from the parent's
-files before writing again.
+Publish outputs and their revision record together, in one write that
+lands whole or not at all (`fragment write <parent> --dir <folder>
+<path>...`), never a sync, updating stable paths; after restart, reconcile
+from the parent's files (`fragment read`) before writing again.
 
 Synthesis publishes to the parent's audience. Create with
 `--visibility members`; keep that audience inside every child's, including

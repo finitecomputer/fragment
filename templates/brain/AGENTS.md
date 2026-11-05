@@ -153,11 +153,11 @@ editor access to the parent. Read and write through the fragment CLI,
 which signs each request and sends it to the platform; a brain's own
 address serves its pages, not the platform's API.
 
-1. Sync the parent (fragment sync <parent> --dir <folder>), then read its
-   source list, incorporated file and existing outputs, even after a
-   restart. Reconcile current child state against them; an unsynced copy
-   or a missed notification is no authority. Never acquire editor access
-   just to sync a child.
+1. Read the parent's source list, incorporated file and existing outputs
+   from the fragment (fragment read <parent> <path>), even after a
+   restart. Reconcile current child state against them; a local working
+   copy or a missed notification is no authority. Never acquire editor
+   access just to sync a child.
 2. Read each child's main pin (fragment status <child>, its pins.main),
    its selected files (fragment read <child> <path>), then its pin
    again. Require successful reads and equal nonempty pins; otherwise
@@ -167,8 +167,12 @@ address serves its pages, not the platform's API.
 3. Synthesize into stable output paths, citing each child page and its
    verified revision. Update existing pages, index and log rather than
    appending duplicate summaries. Publish outputs and incorporated.json
-   together in one sync of the parent, which is one commit. On an
-   uncertain result, sync again and reread the parent before retrying. An
+   together in one write, which lands whole or not at all: put them in a
+   folder at their paths and run fragment write <parent> --dir <folder>
+   <path>... (at most 16 files / 1 MiB); split larger work into
+   independently consistent writes. Never sync the parent for this: a
+   sync sends what does not conflict and holds back what does. On an
+   uncertain write result, reread the parent before retrying. An
    unchanged source revision with matching outputs needs no new write.
 4. Reconcile removals too: a deleted source page withdraws its dependent
    claims. If a child becomes unreadable, mark dependent pages stale or

@@ -430,18 +430,25 @@ enum Cmd {
         /// The repo path, relative (`garden/wiki/launch.md`)
         path: String,
     },
-    /// Write one text file to main through the platform (no folder, no git):
-    /// what an agent on a computer uses. `fragment deploy` puts it live.
+    /// Write text files to main through the platform (no folder synced, no
+    /// git): one from --text or --from, or several from --dir in one commit
+    /// that lands whole or not at all. What an agent on a computer uses.
+    /// `fragment deploy` puts it live.
     Write {
         name: String,
-        /// The repo path, relative (`site/index.html`, `garden/raw/note.md`)
-        path: String,
+        /// The repo paths, relative (`site/index.html`, `garden/raw/note.md`):
+        /// one with --text or --from, at most 16 with --dir
+        #[arg(required = true)]
+        paths: Vec<String>,
         /// Its text from a file, or `-` for stdin
-        #[arg(long, conflicts_with = "text")]
+        #[arg(long, conflicts_with_all = ["text", "dir"])]
         from: Option<PathBuf>,
         /// Its text
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dir")]
         text: Option<String>,
+        /// Several files in one commit: each path's file under this folder
+        #[arg(long)]
+        dir: Option<PathBuf>,
         /// The commit's message
         #[arg(long)]
         message: Option<String>,
@@ -1859,27 +1866,63 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Write { name, path, from, text, message } => {
-            let text = match (from, text) {
-                (Some(f), None) if f.as_os_str() == "-" => {
-                    let mut t = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).context("reading stdin (a file is text)")?;
-                    t
+        Cmd::Write { name, paths, from, text, dir, message } => {
+            // the files API's own caps (docs/api.md), refused before they are sent
+            let (max, most) = (fragment_proto::limits::API_FILES_WRITE_MAX_BYTES, fragment_proto::limits::FILE_WRITES_MAX);
+            let files: Vec<(String, String)> = match &dir {
+                Some(dir) => {
+                    if paths.len() > most {
+                        return Err(usage(format!("one write is at most {most} files; split it into writes that each stand alone")));
+                    }
+                    let mut files = Vec::with_capacity(paths.len());
+                    for path in &paths {
+                        // a repo path, so its file is under the folder
+                        let at = fragment_proto::RepoPath::parse(path).map_err(|not| usage(not.to_string()))?;
+                        let file = dir.join(at.as_str());
+                        let text = std::fs::read_to_string(&file).with_context(|| format!("reading {} (a file written this way is text; sync a folder for others)", file.display()))?;
+                        files.push((path.clone(), text));
+                    }
+                    files
                 }
-                (Some(f), None) => std::fs::read_to_string(&f).with_context(|| format!("reading {} (a file written this way is text; sync a folder for others)", f.display()))?,
-                (None, Some(t)) => t,
-                _ => return Err(usage("name the file's text: --text TEXT, or --from FILE (- for stdin)")),
+                None => {
+                    let [path] = paths.as_slice() else {
+                        return Err(usage("--text and --from write one file: name one path, or several with --dir"));
+                    };
+                    let text = match (from, text) {
+                        (Some(f), None) if f.as_os_str() == "-" => {
+                            let mut t = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).context("reading stdin (a file is text)")?;
+                            t
+                        }
+                        (Some(f), None) => std::fs::read_to_string(&f).with_context(|| format!("reading {} (a file written this way is text; sync a folder for others)", f.display()))?,
+                        (None, Some(t)) => t,
+                        _ => return Err(usage("name the file's text: --text TEXT, or --from FILE (- for stdin), or several files with --dir")),
+                    };
+                    if text.len() > max {
+                        return Err(usage(format!("a file written this way is at most {} KiB; sync a folder for larger ones", max / 1024)));
+                    }
+                    vec![(path.clone(), text)]
+                }
             };
-            // the files API's own cap (docs/api.md), refused before it is sent
-            let max = fragment_proto::limits::API_FILES_WRITE_MAX_BYTES;
-            if text.len() > max {
-                return Err(usage(format!("a file written this way is at most {} KiB; sync a folder for larger ones", max / 1024)));
+            let total: usize = files.iter().map(|(_, text)| text.len()).sum();
+            if total > max {
+                return Err(usage(format!("one write is at most {} KiB in all; split it into writes that each stand alone", max / 1024)));
             }
-            let msg = message.unwrap_or_else(|| format!("write {path}"));
-            let r = c.post_json(&format!("/api/f/{name}/files"), &json!({ "files": [{ "path": path, "text": text }], "message": msg }))?;
+            let msg = message.unwrap_or_else(|| match files.as_slice() {
+                [(path, _)] => format!("write {path}"),
+                _ => format!("write {} files", files.len()),
+            });
+            let body: Vec<Value> = files.iter().map(|(path, text)| json!({ "path": path, "text": text })).collect();
+            let r = c.post_json(&format!("/api/f/{name}/files"), &json!({ "files": body, "message": msg }))?;
             let v: Value = c.call_as(r)?;
-            json_exit(j, &json!({ "path": path, "commit": v["commit"] }));
-            println!("wrote {path} to main ({}); `fragment deploy {name}` puts it live", v["commit"].as_str().map(|c| &c[..8.min(c.len())]).unwrap_or("?"));
+            let short = v["commit"].as_str().map(|c| &c[..8.min(c.len())]).unwrap_or("?").to_string();
+            if dir.is_some() {
+                json_exit(j, &json!({ "paths": paths, "commit": v["commit"] }));
+                println!("wrote {} files to main in one commit ({short}); `fragment deploy {name}` puts it live", files.len());
+            } else {
+                json_exit(j, &json!({ "path": paths[0], "commit": v["commit"] }));
+                println!("wrote {} to main ({short}); `fragment deploy {name}` puts it live", paths[0]);
+            }
         }
         Cmd::Deploy { name, dir, note } => {
             let deployed = deploy(&c, &name, dir.as_deref(), note.as_deref())?;
@@ -3024,6 +3067,19 @@ mod tests {
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value"]));
         assert!(parses(&["fragment", "inbox", "x--k3x9", "--payload", "{}"]));
         assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
+    }
+
+    /// Goal: a write is one file's text, or several files from a folder in
+    /// one commit, never both. Method: the command lines clap takes and
+    /// refuses.
+    #[test]
+    fn a_write_is_one_files_text_or_several_from_a_folder() {
+        let parses = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).is_ok();
+        assert!(parses(&["fragment", "write", "x--k3x9", "a.md", "--text", "t"]));
+        assert!(parses(&["fragment", "write", "x--k3x9", "a.md", "b.json", "--dir", "out"]));
+        assert!(!parses(&["fragment", "write", "x--k3x9", "a.md", "--text", "t", "--dir", "out"]), "--text names no folder");
+        assert!(!parses(&["fragment", "write", "x--k3x9", "a.md", "--from", "f", "--dir", "out"]), "--from names no folder");
+        assert!(!parses(&["fragment", "write", "x--k3x9", "--dir", "out"]), "a write names its paths");
     }
 
     /// Goal: GUIDE.md's command reference is the CLI's, not a copy that

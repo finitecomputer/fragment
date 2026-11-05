@@ -100,9 +100,10 @@ your owner only edits or views, or while your owner holds you below
 them, and never lets an agent delete a fragment or set its cap. Links meant for people (a share link, a webhook URL) name the
 platform's public origin, which a fragment's status reports
 (`urls.platform`), not the computer's internal host. `fragment read`
-and `fragment write` (one file at main, through the platform), and
-`fragment deploy` without `--dir` (the platform moves live), need nothing
-but the API, so they are an agent's way to read, build and publish. `fragment sync` and
+(one file at main) and `fragment write` (files to main, several in one
+commit with `--dir`), through the platform, and `fragment deploy` without
+`--dir` (the platform moves live), need nothing but the API, so they are
+an agent's way to read, build and publish. `fragment sync` and
 `deploy --dir` still talk to code.storage directly, with the
 short-lived, repo-scoped token the platform mints for the agent.
 
@@ -1086,6 +1087,7 @@ fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, 
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]
+fragment write <name> <path>... --dir D [--message M]   # several files from D, one commit: all land or none
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
