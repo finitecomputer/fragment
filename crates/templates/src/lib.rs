@@ -161,8 +161,6 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
     // the look of Finite's about page, privacy policy and terms (`/about`,
     // `/privacy`, `/terms`): a sheet of paper, its edges bowed by paper-edge.svg
     ("legal.css", "text/css; charset=utf-8"),
-    // the chat a New chat is making: its one state and its moves
-    ("making.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
     ("paper-edge.svg", "image/svg+xml"),
     // the platform's pages' look: their first run's card, and its
