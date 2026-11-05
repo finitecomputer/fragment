@@ -313,9 +313,17 @@ impl FragmentCell {
             if let Some(role) = row["role"].as_str().and_then(Role::parse) {
                 body["searched"] = json!(searched);
                 body["listed"] = json!(fragment_core::listed::for_role(&listed, role));
-                if let Ok(Some(face)) = self.meta(MetaKey::Face) {
-                    body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
-                    body["face"]["agents"] = json!(agents);
+                // none stored yet (no template, one not blessed, a release
+                // read at its making that failed, nothing installed): the
+                // face a list reads a row without one as, an untitled app,
+                // so its agents are in every row from the first
+                match self.meta(MetaKey::Face) {
+                    Ok(stored) => {
+                        let shown = stored.unwrap_or_else(|| face(FragmentKind::App, None, None, None));
+                        body["face"] = serde_json::from_str(&shown).unwrap_or(Value::Null);
+                        body["face"]["agents"] = json!(agents);
+                    }
+                    Err(e) => console_error!("{name}: its face did not read ({:?}): {}", e.code, e.message),
                 }
             }
             // the owner's row: the sharing now, which no later change undoes
