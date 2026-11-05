@@ -120,9 +120,9 @@ export const MESSAGES = Object.freeze({
   },
   signinBlocked: {
     kind: "signin-blocked",
-    from: "a fragment's `__signin`, or `/auth/frame`'s note → the parent",
+    from: "a fragment's `__signin`, or a page of it refused in a frame as signed out (`why: \"refused\"`), or `/auth/frame`'s note → the parent",
     fields: "{name, why?}",
-    says: "The frame could not sign in, and why (docs/api.md, Frame sessions): the shell says so in its place.",
+    says: "The frame could not sign in, and why (docs/api.md, Frame sessions): the shell says so in its place; a minted frame refused says its browser kept its cookie from it.",
   },
   // ---- the computer's ports, Settings' and the desktop's ----
   screen: {

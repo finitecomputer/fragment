@@ -1031,6 +1031,7 @@ fn to_create(name: &str) -> fragment_proto::CreateFragment {
         visibility: None,
         template: None,
         title: None,
+        agent: None,
     }
 }
 
