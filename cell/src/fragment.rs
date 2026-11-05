@@ -1344,21 +1344,26 @@ impl FragmentCell {
             laps.lap("manifest");
         }
         self.index_change(&owner, Some(Role::Owner))?;
-        // its agent, an editor in the same step: its owner's first list row
-        // names it (not a chat with no agent yet), and its computer is told
-        // it joined (that notice is the outbox's, tried again if it fails)
-        if let Some(target) = &agent {
-            self.join_own_agent(target).await?;
-            laps.lap("agent");
-        }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
-        self.flush_index().await;
-        laps.lap("list");
+        // one made with its agent sends its owner's first list row with
+        // that agent in it (`join_own_agent`, after its template), never a
+        // row naming no agent first
+        if agent.is_none() {
+            self.flush_index().await;
+            laps.lap("list");
+        }
         // a template that did not land is retried by the alarm
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         laps.lap("seed");
+        // its agent, an editor in the same step, once its template is in:
+        // its computer, told it joined (an outbox the alarm retries), finds
+        // the chat's channels to follow, as after a `PUT members/{agent}`
+        if let Some(target) = &agent {
+            self.join_own_agent(target).await?;
+            laps.lap("agent");
+        }
         self.schedule().await?;
         laps.lap("alarm");
         let created = json_response(&Created {
