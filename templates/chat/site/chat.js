@@ -54,6 +54,7 @@ import { controlledBy, controllerOf, running as ran } from "./control.js";
 import { icon } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
+import { OutgoingPosts } from "./outgoing.js";
 import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
@@ -395,42 +396,29 @@ export function mount(root) {
     toggled: new Map(), // a step card's key -> true, once someone opened it whole
     openSteps: new Set(), // turn:step, a step someone opened to its arguments and result
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title, picture }]
-    failed: new Map(), // post id -> the message and its transport error
-    sending: new Map(), // post id -> a message of this page's the platform has not answered yet
+    outgoing: new OutgoingPosts(), // post id -> one message and its sending/failed/retrying/posted status
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
   };
   const sendReducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const outgoingOrigins = new Map(); // post id -> the composer's place as it was sent: its bubble's one entrance
-  const sentIds = new Map(); // seq -> the post id of this page's that made it
   const messageFlights = new Map(); // post id -> its entrance's end
   // A message or command of this page's, as posted: sending until the
   // platform answers with its record (or the socket brings it first),
   // failed if it does not. Never shown as sent before then.
-  const outgoing = (id, body, extra) => ({
-    id, body, seq: `${extra.error ? "failed" : "sending"}:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal,
+  const outgoing = (id, body, status, error = null) => ({
+    id, body, status, error, seq: `${status}:${id}`, at: Date.now(), n: Number.MAX_SAFE_INTEGER, principal: state.me?.principal,
     text: body.kind === "command" ? (typeof body.args === "string" ? body.args : "") : body.text ?? "", command: body.kind === "command" ? body.command : null,
     to: Array.isArray(body.to) ? body.to : [], replyTo: Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null,
-    attachments: attachmentsOf(body), ...extra,
+    attachments: attachmentsOf(body),
   });
   fragment.observePosts(({ channel, id, body, status, record, error }) => {
     if (channel !== "chat" || !body || body.kind && body.kind !== "message" && body.kind !== "command") return;
-    const message = body.kind !== "command";
-    if (status === "posting") {
-      const failed = state.failed.get(id);
-      if (failed) failed.retrying = true;
-      else state.sending.set(id, outgoing(id, body, { sending: true }));
-    } else if (status === "failed") {
-      state.sending.delete(id);
-      outgoingOrigins.delete(id);
-      // a command's failure is said in the composer's banner, its words put back
-      if (message) state.failed.set(id, outgoing(id, body, { error: error.message, retrying: false }));
-    } else {
-      state.sending.delete(id);
-      sentIds.set(record.seq, id);
-      const retried = state.failed.delete(id);
+    const result = state.outgoing.transition(id, status, { message: outgoing(id, body, status === "failed" ? "failed" : "sending", error?.message), record, error: error?.message });
+    if (result.post?.status === "failed") outgoingOrigins.delete(id);
+    if (status === "posted") {
       onChat(record);
-      if (retried) {
+      if (result.retried) {
         $("banner").hidden = true;
         expectTurn(record, body.to ?? [], body.text ?? "");
       }
@@ -728,14 +716,13 @@ export function mount(root) {
     if (state.seen.has(record.seq)) return;
     state.seen.add(record.seq);
     remember("chat", record);
-    // the socket may bring a post's record before its answer does: the same body ends its sending
-    if (!historical && record.principal === state.me?.principal && !sentIds.has(record.seq)) {
-      const said = JSON.stringify(record.body);
-      for (const [id, m] of state.sending) {
-        if (JSON.stringify(m.body) !== said) continue;
-        state.sending.delete(id);
-        sentIds.set(record.seq, id);
-        break;
+    // The socket may bring a post's record before its answer does. Either
+    // path completes the same post; the later one cannot change it again.
+    if (!historical && record.principal === state.me?.principal && !state.outgoing.postId(record.seq)) {
+      const result = state.outgoing.record(record);
+      if (result.retried) {
+        $("banner").hidden = true;
+        expectTurn(record, result.post.body.to ?? [], result.post.body.text ?? "");
       }
     }
     let body = record.body;
@@ -761,7 +748,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
+      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: state.outgoing.postId(record.seq) });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -780,7 +767,7 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: state.outgoing.postId(record.seq), relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -957,8 +944,10 @@ export function mount(root) {
       if (running(t) && !state.drafts.has(t.key) && !waiting(t) && !(open.get(t.key) && !waitsOnWords(t))) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
-    for (const m of state.sending.values()) items.push({ at: m.at, n: m.n, type: "message", m });
-    for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
+    for (const m of state.outgoing.values()) {
+      // A command's failure is said in the composer's banner, its words put back.
+      if (m.status !== "posted" && !(m.command && m.status === "failed")) items.push({ at: m.at, n: m.n, type: "message", m });
+    }
     items.sort((a, b) => a.at - b.at || a.n - b.n);
     const out = [];
     for (const it of items) {
@@ -1281,7 +1270,7 @@ export function mount(root) {
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(speaker(quoted)).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? ""].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(speaker(quoted)).name}` : m.replyTo ?? "", m.error ?? "", m.status ?? "", m.post ?? "", m.via ?? ""].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
@@ -1290,7 +1279,7 @@ export function mount(root) {
   /// one that is not asking them something (its last word before the
   /// message a reply of its own: the message is likely its answer).
   function queued(m) {
-    if (m.command || m.error || m.sending) return false;
+    if (m.command || m.error || (m.status === "sending")) return false;
     const turns = [...state.turns.values()];
     if (turns.some((t) => t.cause?.channel === "chat" && t.cause?.seq === m.seq)) return false;
     const named = chatAgents().filter((a) => mentions(m.text).includes(handleOf(a)));
@@ -1353,10 +1342,10 @@ export function mount(root) {
   }
 
   function userMessage(m, w, mine, quoted, waits) {
-    const wrap = el("div", `msg user ${mine ? "mine" : "other"}${m.sending ? " sending" : ""}`);
+    const wrap = el("div", `msg user ${mine ? "mine" : "other"}${(m.status === "sending") ? " sending" : ""}`);
     wrap.dataset.seq = m.seq;
     // this page's post: the same id while it sends and once it is sent
-    const post = m.sending ? m.id : m.post;
+    const post = (m.status === "sending") ? m.id : m.post;
     if (post) wrap.dataset.post = post;
     if (!mine) wrap.append(byline(m.principal, w));
     if (m.replyTo) wrap.append(quoteNode(m, quoted));
@@ -1374,7 +1363,7 @@ export function mount(root) {
       wrap.append(bubble);
     }
     const actions = el("div", "actions");
-    if (canPost() && !m.error && !m.sending) actions.append(replyButton(m));
+    if (canPost() && !m.error && !(m.status === "sending")) actions.append(replyButton(m));
     if (waits) {
       // its agent answers it after the turn it is in now
       const label = el("span", "queued");
@@ -1385,14 +1374,14 @@ export function mount(root) {
     // said elsewhere (through its agent's door), and relayed here
     if (m.via) actions.append(el("span", "via", `via ${m.via}`));
     // sent once the platform has its record: until then it says so, no time
-    actions.append(m.sending ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));
+    actions.append((m.status === "sending") ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));
     wrap.append(actions);
     if (m.error) {
       const error = el("div", "message-error");
       error.setAttribute("role", "status");
-      const retry = el("button", "message-retry", m.retrying ? "Retrying…" : "Retry");
+      const retry = el("button", "message-retry", (m.status === "retrying") ? "Retrying…" : "Retry");
       retry.type = "button";
-      retry.disabled = m.retrying;
+      retry.disabled = (m.status === "retrying");
       retry.onclick = async () => {
         try { await fragment.post("chat", m.body, { id: m.id }); }
         catch { /* the post observer updates this message's error */ }
@@ -2218,7 +2207,8 @@ export function mount(root) {
   // if it becomes so. ----
   function tellBusy() {
     const answerTyped = [...state.typed].some(([card, text]) => text.trim() && !state.answering.has(card));
-    const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
+    const postBusy = [...state.outgoing.values()].some((m) => m.status === "sending" || m.status === "retrying" || (m.status === "failed" && !m.command));
+    const busy = attachments.length > 0 || !!recording || sending || postBusy || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
     if (!framed || !state.me || busy === busyTold) return;
     busyTold = busy;
     window.parent.postMessage({ fragment: KIND.busy, busy }, state.me.platform);

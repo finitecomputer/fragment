@@ -18,7 +18,8 @@ serves the rest. `fragment.json` declares them (`kind: "chat"`):
 docs/chat-records.md is the contract its page and code read and write.
 The page is `site/`: `index.html`,
 `chat.js` (the chat, its voice memos, `/` commands, Reply, Steer
-and "Notify me"), `control.js` (whose a turn is to stop, command and
+and "Notify me"), `outgoing.js` (each outgoing message's explicit status and
+transitions, including its socket record racing its HTTP answer), `control.js` (whose a turn is to stop, command and
 answer: its asker's, or for a routine's or an answer's, its agent's
 owner's), `markdown.js`
 (agents' text as DOM, never as markup: the platform's renderer,
