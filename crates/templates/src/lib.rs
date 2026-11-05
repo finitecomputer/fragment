@@ -178,29 +178,22 @@ const SHELL_PUBLISHED: &[(&str, &str)] = &[
 ];
 
 /// A file the shell publishes, by its name, and its content type: one it
-/// holds as written (`SHELL_PUBLISHED`), or one its page's build named by
-/// its hash (`shell_built`).
+/// holds as written (`SHELL_PUBLISHED`), or one it holds at a hashed name
+/// (fragment_core::site::hashed), which only its page's build makes
+/// (bundle.rs; a test): its scripts, their maps and its stylesheets.
 #[cfg(feature = "platform")]
 pub fn shell_published(name: &str) -> Option<(&'static File, &'static str)> {
-    if shell_built(name) {
-        let content_type = match name.rsplit('.').next() {
-            Some("js") => "text/javascript; charset=utf-8",
-            Some("css") => "text/css; charset=utf-8",
-            Some("map") => "application/json",
-            _ => unreachable!("the shell's page builds scripts, maps and stylesheets"),
+    if fragment_core::site::hashed(name) {
+        let content_type = match name.rsplit('.').next()? {
+            "js" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "map" => "application/json",
+            _ => return None,
         };
-        return Some((shell(name).expect("every file the shell's build made is indexed"), content_type));
+        return Some((shell(name)?, content_type));
     }
     let (_, content_type) = SHELL_PUBLISHED.iter().find(|(n, _)| *n == name)?;
     Some((shell(name).expect("every file the shell publishes is indexed (a test)"), content_type))
-}
-
-/// Whether `name` is a file the shell's page's build named by its hash
-/// (bundle.rs): its bytes are its name's, so a browser keeps it for good
-/// (cell/src/shell.rs `asset`). Its page is built too, and served as a page.
-#[cfg(feature = "platform")]
-pub fn shell_built(name: &str) -> bool {
-    name != "index.html" && BUILT.iter().any(|&(at, path)| at == "shell" && path == name)
 }
 
 /// Whether `path` of `at` (`shell`, or a template) is a file a page's build
@@ -385,10 +378,11 @@ pub(crate) mod tests {
         // kept for good by the one rule, by name (fragment_core::site::hashed):
         // each file its page's build named, and none it holds as written
         // (its name names other bytes once a release changes it)
-        let built: Vec<&str> = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").map(|(_, p)| *p).collect();
-        assert!(built.len() >= 4 && built.iter().all(|n| fragment_core::site::hashed(n) && shell_built(n) && shell_published(n).is_some()), "{built:?}");
-        assert!(SHELL_PUBLISHED.iter().all(|(n, _)| !fragment_core::site::hashed(n) && !shell_built(n)));
-        assert!(!shell_built("index.html") && !shell_built("shell.js") && shell_published("shell.js").is_none());
+        let made: Vec<&str> = BUILT.iter().filter(|(at, p)| *at == "shell" && *p != "index.html").map(|(_, p)| *p).collect();
+        assert!(made.len() >= 4 && made.iter().all(|n| fragment_core::site::hashed(n) && shell_published(n).is_some()), "{made:?}");
+        let hashed: Vec<&str> = SHELL.iter().map(|f| f.path).filter(|p| fragment_core::site::hashed(p)).collect();
+        assert_eq!(hashed, made, "a hashed name in the shell is its build's alone");
+        assert!(shell_published("index.html").is_none() && shell_published("shell.js").is_none());
     }
 
     /// Goal: the shell's page names the release that answered it, and when
