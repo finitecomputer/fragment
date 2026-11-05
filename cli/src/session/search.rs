@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use super::{said_id, Spool};
 use crate::api::{encode_q, Client};
 use crate::blobs::Blobs;
-use crate::codestorage::CodeStorage;
+use crate::codestorage::{CodeStorage, Wants};
 
 /// Sources one listing asks for (the API's most).
 const PAGE: usize = SOURCES_PAGE_MAX;
@@ -276,7 +276,7 @@ pub fn sync(c: &Client, name: &str, spool: &Spool) -> Searched {
         Ok(held) => held,
         Err(why) => return Searched::Skipped { why },
     };
-    let storage = match CodeStorage::connect(c, name) {
+    let storage = match CodeStorage::connect(c, name, Wants::Write) {
         Ok(s) => s,
         Err(e) => return Searched::Skipped { why: format!("{e:#}") },
     };

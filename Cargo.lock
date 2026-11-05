@@ -568,6 +568,7 @@ dependencies = [
  "fs2",
  "hex",
  "ignore",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "rand 0.8.7",

@@ -1,0 +1,119 @@
+import Foundation
+import Testing
+@testable import Fragment
+
+struct TimelineTests {
+    private func record(_ seq: Int64, channel: String = "chat", principal: String = "agent", body: JSONValue) -> ChannelRecord {
+        ChannelRecord(channel: channel, seq: seq, at: 100, principal: principal, kind: "message", body: body)
+    }
+    private func frame(_ json: String) throws -> LiveFrame { try JSONDecoder().decode(LiveFrame.self, from: Data(json.utf8)) }
+
+    @Test func replayAndOlderPagesNeverRegressLiveCursor() {
+        var timeline = Timeline()
+        let latest = record(20, body: .string("latest"))
+        timeline.insert(latest)
+        timeline.insert(latest)
+        timeline.insert(record(2, body: .string("earlier")), advancingCursor: false)
+        timeline.insert(record(10, body: .string("middle")), advancingCursor: false)
+        #expect(timeline.records.map(\.seq) == [2, 10, 20])
+        #expect(timeline.cursors["chat"] == 20)
+    }
+
+    @Test func draftIsWholeTextAndReplacedOnlyByItsAuthorsCommit() throws {
+        var timeline = Timeline()
+        try timeline.apply(frame(#"{"type":"draft","channel":"chat","turn":"a","principal":"agent","text":"One","at":100}"#))
+        try timeline.apply(frame(#"{"type":"draft","channel":"chat","turn":"a","principal":"agent","text":"One two","at":101}"#))
+        #expect(timeline.drafts["a"]?.text == "One two")
+        timeline.insert(record(1, principal: "someone-else", body: .object(["turn": .string("a"), "text": .string("forged")])))
+        #expect(timeline.drafts["a"] != nil)
+        timeline.insert(record(2, body: .object(["turn": .string("a"), "text": .string("One two")])))
+        #expect(timeline.drafts.isEmpty)
+        #expect(timeline.records.count == 2)
+    }
+
+    @Test func replayedRecordDoesNotEraseNextPartOfTurn() throws {
+        var timeline = Timeline()
+        let commit = record(1, body: .object(["turn": .string("a"), "text": .string("First part")]))
+        timeline.insert(commit)
+        try timeline.apply(frame(#"{"type":"draft","channel":"chat","turn":"a","principal":"agent","text":"Next part","at":110}"#))
+        timeline.insert(commit)
+        #expect(timeline.drafts["a"]?.text == "Next part")
+        timeline.disconnected()
+        #expect(timeline.drafts.isEmpty)
+        #expect(timeline.records.count == 1)
+    }
+
+    @Test func channelsHaveIndependentCursorsAndUnknownKindsDecode() throws {
+        var timeline = Timeline()
+        try timeline.apply(frame(#"{"type":"record","channel":"chat","seq":8,"at":1,"principal":"person","kind":"message","body":"plain text"}"#))
+        try timeline.apply(frame(#"{"type":"record","channel":"work","seq":2,"at":2,"principal":"agent","kind":"message","body":{"kind":"future.kind","newField":true}}"#))
+        #expect(timeline.cursors == ["chat": 8, "work": 2])
+        #expect(timeline.records.first?.text == "plain text")
+        #expect(timeline.records.last?.isMessage == false)
+        #expect(throws: (any Error).self) {
+            try timeline.apply(frame(#"{"type":"record","channel":"chat","seq":-1}"#))
+        }
+    }
+
+    @Test func turnEndClearsWorkingAndDraft() throws {
+        var timeline = Timeline()
+        timeline.insert(record(1, channel: "work", body: .object(["kind": .string("turn.start"), "turn": .string("a")])))
+        #expect(timeline.activeTurns == ["a"])
+        try timeline.apply(frame(#"{"type":"draft","channel":"chat","turn":"a","principal":"agent","text":"unfinished","at":100}"#))
+        timeline.insert(record(2, channel: "work", body: .object(["kind": .string("turn.end"), "turn": .string("a")])))
+        #expect(timeline.activeTurns.isEmpty)
+        #expect(timeline.drafts.isEmpty)
+    }
+
+    // ---- which turns run, as the web's chat page decides it (chat.js
+    // `turnOf`, control.js `running`), records read in any order ----
+    private func work(_ seq: Int64, _ kind: String, _ turn: String, by agent: String = "npub1a") -> ChannelRecord {
+        ChannelRecord(channel: "work", seq: seq, at: seq * 10, principal: agent, kind: "message", body: .object(["kind": .string(kind), "turn": .string(turn)]))
+    }
+
+    @Test func anEndBeforeItsStartCountsOnlyFromTheAgentThatBeganIt() {
+        // its own agent's end, read before its start (paging back): it ended
+        var same = Timeline()
+        same.learn(work(9, "turn.end", "t"))
+        #expect(same.awaitsAStart)
+        same.learn(work(1, "turn.start", "t"))
+        #expect(same.activeTurns.isEmpty && !same.awaitsAStart)
+        // another agent's end naming it: A's turn still runs once its start is read
+        var other = Timeline()
+        other.learn(work(9, "turn.end", "t", by: "npub1b"))
+        other.learn(work(5, "turn.step", "t"))
+        other.learn(work(1, "turn.start", "t"))
+        #expect(other.activeTurns == ["t"])
+        other.learn(work(12, "turn.end", "t"))
+        #expect(other.activeTurns.isEmpty)
+    }
+
+    /// Codex's probe: a 1000-record backlog that holds a boundary turn's end
+    /// (its start older), 499 whole turns and a busy turn's step, then the
+    /// page before it: the ended turn never runs again; the busy one does.
+    @Test func pagingBackNeverRevivesAnEndedTurn() {
+        var timeline = Timeline()
+        timeline.learn(work(1001, "turn.end", "boundary"))
+        for i in Int64(0)..<499 {
+            timeline.learn(work(1002 + 2 * i, "turn.start", "done\(i)"))
+            timeline.learn(work(1003 + 2 * i, "turn.end", "done\(i)"))
+        }
+        timeline.learn(work(2000, "turn.step", "busy"))
+        #expect(timeline.activeTurns.isEmpty && timeline.awaitsAStart)
+        for (seq, turn) in [(Int64(500), "boundary"), (Int64(990), "busy")] { timeline.learn(work(seq, "turn.start", turn)) }
+        #expect(timeline.activeTurns == ["busy"] && !timeline.awaitsAStart)
+    }
+
+    @Test func pastItsBoundOnlyTurnsBegunAndEndedGo() {
+        var timeline = Timeline()
+        timeline.learn(work(1_000_000, "turn.end", "late"))
+        for i in Int64(0)..<Int64(Timeline.maximumTurns + 10) {
+            timeline.learn(work(10 + 2 * i, "turn.start", "w\(i)"))
+            timeline.learn(work(11 + 2 * i, "turn.end", "w\(i)"))
+        }
+        #expect(timeline.turns.count == Timeline.maximumTurns)
+        // the end read without its start is kept: its start, read later, never runs
+        timeline.learn(work(1, "turn.start", "late"))
+        #expect(timeline.activeTurns.isEmpty)
+    }
+}
