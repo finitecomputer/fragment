@@ -950,10 +950,18 @@ fn the_repo_is_its_members(s: &mut Suite, api: &Api, owner: &Keys, name: &str, r
         r.status == 200 && r.body["write"] == false && r.body["repo"] == repo && claims["repo"] == repo && claims["scopes"] == json!(["git:read"]) && claims["sub"] == format!("reader:{}", api.identity(viewer)?),
         json!({ "reply": r.body, "claims": claims }),
     );
-    let http = reqwest::blocking::Client::new();
-    let branch = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
-    let commit = http.post(format!("{}/api/repos/{repo}/commit-pack", s.fake.url)).bearer_auth(&token).body("{}").send()?.status().as_u16();
-    s.ok("code.storage reads with it (a fresh repo: 404, no main) and refuses it a commit (403)", branch == 404 && commit == 403, json!({ "branch": branch, "commit": commit }));
+    // asked of the code.storage fake: on the hosted lane (a preview, or
+    // its rehearsal) no lane reaches a fake, and real code.storage's answer
+    // to a bare pack is not this check's to pin
+    const READS_NOT_COMMITS: &str = "code.storage reads with it (a fresh repo: 404, no main) and refuses it a commit (403)";
+    if s.hosted() {
+        s.skip(READS_NOT_COMMITS, "it asks the code.storage fake, which the hosted lane does not reach");
+    } else {
+        let http = reqwest::blocking::Client::new();
+        let branch = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
+        let commit = http.post(format!("{}/api/repos/{repo}/commit-pack", s.fake.url)).bearer_auth(&token).body("{}").send()?.status().as_u16();
+        s.ok(READS_NOT_COMMITS, branch == 404 && commit == 403, json!({ "branch": branch, "commit": commit }));
+    }
     let bad = api.signed(viewer, "GET", &path("storage-token?access=write"), None)?;
     s.ok("another access is refused (400)", bad.status == 400, &bad);
 
