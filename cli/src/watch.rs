@@ -540,7 +540,7 @@ mod tests {
         assert!(matches!(watcher.serve(LOCAL, true).unwrap(), Served::Nothing), "the same folder: no pass");
         assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Checked), "a sweep reads main's head alone");
         let asked = mock.take_requests("");
-        assert!(asked.get("GET storage-token").is_none() && asked.get("GET files/metadata").is_none(), "{asked:?}");
+        assert!(!asked.contains_key("GET storage-token") && !asked.contains_key("GET files/metadata"), "{asked:?}");
 
         fs::write(dir.join("b.md"), "more").unwrap();
         let Served::Passed(report) = watcher.serve(LOCAL, true).unwrap() else { panic!("another edit is a pass") };
