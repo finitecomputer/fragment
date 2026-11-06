@@ -466,13 +466,13 @@ final class ChatSession {
         defer { paging = false }
         do {
             let page = try await api.historyPage(fragment.name, channel: "chat", after: newest.seq, limit: Self.page).records
-            var work: [ChannelRecord] = []
-            if let last = page.last?.at {
-                // its work from the newest learned at the window's end, whether
-                // or not the window holds any
-                let from = timeline.workSeq(atOrBefore: newest.at) ?? 0
-                work = await readWork(after: from, upTo: last).filter { $0.at > newest.at }
-            }
+            // its work from the newest learned at the window's end, whether or
+            // not the window holds any: through the page's last message, or,
+            // a last page, through the newest work heard (steps, a prompt, an
+            // end after the newest message), so the chat rejoined is whole
+            let last = page.count < Self.page ? Int64.max : page.last?.at ?? newest.at
+            let from = timeline.workSeq(atOrBefore: newest.at) ?? 0
+            let work = await readWork(after: from, upTo: last).filter { $0.at > newest.at }
             // whether it reaches the newest, decided after the reads: a message
             // heard meanwhile waits outside the window, and is read next
             let reaches = page.count < Self.page && (page.last?.seq ?? newest.seq) >= (timeline.cursors["chat"] ?? 0)
@@ -489,14 +489,18 @@ final class ChatSession {
         do {
             // read again while messages come meanwhile, so none heard is left out
             var page: [ChannelRecord] = []
+            var whole = false
             for _ in 0..<3 {
                 let cursor = timeline.cursors["chat"] ?? 0
                 page = try await api.history(fragment.name, before: cursor + 1, limit: Self.chatLast)
-                if (timeline.cursors["chat"] ?? 0) == cursor { break }
+                if (timeline.cursors["chat"] ?? 0) == cursor { whole = true; break }
             }
-            timeline.reset(page)
+            // messages still coming after three reads: it stays paged back, and
+            // its end's sentinel reads on to the newest, never claiming it
+            timeline.reset(page, live: whole)
             hasOlder = page.count == Self.chatLast
-            if let from = timeline.oldestChat?.at { await readWork(back: from) }
+            // its work back from the newest heard (steps after its newest message too)
+            if let from = timeline.oldestChat?.at { await readWork(back: from, through: whole ? .max : nil) }
         } catch { self.error = error.localizedDescription }
     }
 
@@ -504,9 +508,9 @@ final class ChatSession {
     /// its end, if it holds none), back to `from`: kept in the window between
     /// `from` and its newest message, learned otherwise. Batches as `earlierWork` sizes them; at most
     /// `earlierWorkMax`.
-    private func readWork(back from: Int64) async {
+    private func readWork(back from: Int64, through: Int64? = nil) async {
         // from the window's oldest work, else the newest learned at its end (it may hold none)
-        let end = timeline.newestChat?.at ?? .max
+        let end = through ?? timeline.newestChat?.at ?? .max
         var before = timeline.records.first { $0.channel == "work" }?.seq
             ?? (timeline.workSeq(atOrBefore: end) ?? (timeline.cursors["work"] ?? 0)) + 1
         var read = 0, batch = Self.workBatch
