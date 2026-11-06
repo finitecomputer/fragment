@@ -6019,6 +6019,79 @@ fn making_states(
     );
     archive(b, &made)?;
 
+    // ---- each New chat owns its own: the Reader's made, its list's reads
+    // failing (its room waiting), then the main agent's New chat, which
+    // takes its blank chat again: that chat opens, the Reader's room ends,
+    // and nothing says a chat was not made; the list back, the Reader's
+    // chat is listed, not opened
+    let main_hero = format!("#chats [data-key={}]", js(&format!("agent:{}", own_named(api, me.session, me.first)?)));
+    let fail_lists = "(() => { const f = window.fetch; window.__listOff = true; window.__posts = 0; window.__failedAfter = 0; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posts > 0) { window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
+                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posts++; return r; }; return true; })()";
+    let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
+    let no_refusal = "!(document.getElementById('action-notices')?.innerText ?? '').includes('not made')";
+    let blank = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "main-blank", "template": "chat", "title": "New chat", "agent": first_id })), &[])?;
+    anyhow::ensure!(blank.status == 200, "a blank chat with the main agent: {blank}");
+    let blank = blank.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(b.until(page, &format!("!!{}", row_of(&blank)), wait), "{blank} listed");
+    let before = names();
+    b.eval(page, fail_lists)?;
+    let picked = new_chat(b, reader_hero)?;
+    let waiting = b.until(page, &format!("window.__failedAfter >= 1 && !!{refresh} && {making_shown}"), wait);
+    let picked_main = new_chat(b, &main_hero)?;
+    let reused = b.until(page, &format!("{shown} === {} && !document.querySelector('#frames .making-standin') && !document.querySelector('#chats .making') && {no_refusal}", js(&blank)), wait);
+    b.eval(page, "(window.__listOff = false, true)")?;
+    b.eval(page, &format!("({refresh}?.click(), true)"))?;
+    let made: Vec<String> = names().into_iter().filter(|n| !before.contains(n)).collect();
+    let made = made.first().cloned().unwrap_or_default();
+    let listed = b.until(page, &format!("!!{0} && !{0}.classList.contains('active') && {shown} === {1} && !{refresh} && {no_refusal}", row_of(&made), js(&blank)), wait);
+    b.eval(page, "(window.__restoreList(), true)")?;
+    s.ok(
+        "the Reader's chat made, its room waiting for a list that fails, then the main agent's New chat with a blank chat: that chat opens, the Reader's room ends, nothing says a chat was not made; the list back, the Reader's chat is listed, not opened",
+        picked && waiting && picked_main && reused && !made.is_empty() && listed,
+        json!({ "reused": reused, "made": made, "listed": listed, "shown": open_chat(b, page), "said": b.eval(page, "document.getElementById('action-notices')?.innerText ?? ''")? }),
+    );
+    archive(b, &made)?;
+    archive(b, &blank)?;
+
+    // ---- the same, the main agent with no blank chat: its New chat makes
+    // one, its own room in place of the Reader's; the list back, the main
+    // agent's chat opens there, the Reader's listed, not opened
+    let fragments = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
+    for f in fragments.body["fragments"].as_array().into_iter().flatten() {
+        let alone = f["agents"].as_array().is_some_and(|a| a.len() == 1 && a[0] == json!(first_id));
+        if f["role"] == "owner" && f["title"] == "New chat" && f["preview"].is_null() && f["archived"] != true && alone {
+            archive(b, f["name"].as_str().unwrap_or(""))?;
+        }
+    }
+    let before = names();
+    b.eval(page, fail_lists)?;
+    let picked = new_chat(b, reader_hero)?;
+    let waiting = b.until(page, &format!("window.__failedAfter >= 1 && !!{refresh} && {making_shown}"), wait);
+    let picked_main = new_chat(b, &main_hero)?;
+    let own_room = b.until(page, &format!("window.__posts >= 2 && {making_shown} && !!document.querySelector({}) && {no_refusal}", js(&format!("{main_hero} ~ .chat-row.making.active"))), wait);
+    let one_room = b.eval(page, "document.querySelectorAll('#frames .making-standin').length === 1 && document.querySelectorAll('#chats .making').length <= 1")?;
+    b.eval(page, "(window.__listOff = false, true)")?;
+    b.eval(page, &format!("({refresh}?.click(), true)"))?;
+    let made: Vec<String> = names().into_iter().filter(|n| !before.contains(n)).collect();
+    let mains: Vec<&String> = made.iter().filter(|n| label_of(n).starts_with(&format!("{}-chat", me.first))).collect();
+    let readers: Vec<&String> = made.iter().filter(|n| label_of(n).starts_with("reader-chat")).collect();
+    let (main_made, reader_made) = (mains.first().map(|n| n.to_string()).unwrap_or_default(), readers.first().map(|n| n.to_string()).unwrap_or_default());
+    let opened = b.until(
+        page,
+        &format!("{shown} === {} && !document.querySelector('#frames .making-standin') && !!{1} && !{1}.classList.contains('active') && {no_refusal}", js(&main_made), row_of(&reader_made)),
+        wait,
+    );
+    b.eval(page, "(window.__restoreList(), true)")?;
+    s.ok(
+        "the same with no blank chat: the main agent's New chat shows its own room in place of the Reader's; the list back, the main agent's chat opens there, and the Reader's is listed, not opened",
+        picked && waiting && picked_main && own_room && one_room == json!(true) && made.len() == 2 && opened,
+        json!({ "made": made, "own_room": own_room, "one_room": one_room, "shown": open_chat(b, page) }),
+    );
+    archive(b, &main_made)?;
+    archive(b, &reader_made)?;
+
     // ---- another chat opened meanwhile, then refused
     click_chat(b, page, &first_chat)?;
     b.until(page, &format!("{shown} === {}", js(&first_chat)), wait);

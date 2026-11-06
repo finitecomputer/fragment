@@ -3,7 +3,7 @@
 // by `step` alone (FIN-395). Pure: shell.js does what each step answers.
 //
 //   phase   event                        next    then
-//   none    start {agent,name,title,before} shown  stay
+//   none    start {by,agent,name,title,before} shown stay
 //   shown   answered made, listed        none    open     its chat opens in its place
 //   shown   answered made, unlisted      made    wait     its room stays for the list
 //   shown   answered refused             none    restore  the view it was started from
@@ -17,7 +17,9 @@
 //   shown|away renamed {name}            same    stay     its name was taken (409)
 //   any     reload                       none    stay     memory only: the list is the truth
 //
-// Any other pair is a mistake of the shell's, and throws (`MakingError`).
+// Any other pair is a mistake of the shell's, and throws (`MakingError`),
+// as does an `answered` or `renamed` from another New chat than the one
+// that started it (`by`, its owner: each New chat owns its own; `owns`).
 //
 // Two answers come of it, never one: the chat whose row is active
 // (`shownChat`: its own while its room shows), and the chat whose messages
@@ -36,31 +38,39 @@ export class MakingError extends Error {}
 
 const phaseOf = (m) => m?.phase ?? "none";
 const go = (next, then = "stay") => ({ next, then });
+// an event only its owner sends: refused from any other
+const own = (take) => (m, event) => {
+  if (!owns(m, event.by)) throw new MakingError(`a chat being made takes ${event.type} from the New chat that started it alone`);
+  return take(m, event);
+};
 
 // each phase's events: (m, event) => {next, then}
 const TABLE = {
   none: {
-    start: (_, { agent, name, title, before }) => go({ phase: "shown", agent, name, title, before }),
+    start: (_, { by, agent, name, title, before }) => {
+      if (!by) throw new MakingError("a chat being made is started by its New chat (`by`)");
+      return go({ phase: "shown", by, agent, name, title, before });
+    },
     listed: (m) => go(m),
     left: (m) => go(m),
     reload: () => go(null),
   },
   shown: {
-    answered: (m, { outcome, listed }) => {
+    answered: own((m, { outcome, listed }) => {
       if (outcome === "refused") return go(null, "restore");
       if (outcome !== "made") throw new MakingError(`an answer is made or refused, not ${outcome}`);
       return listed ? go(null, "open") : go({ ...m, phase: "made" }, "wait");
-    },
+    }),
     listed: (m) => go(m),
     left: (m) => go({ ...m, phase: "away" }),
-    renamed: (m, { name }) => go({ ...m, name }),
+    renamed: own((m, { name }) => go({ ...m, name })),
     reload: () => go(null),
   },
   away: {
-    answered: () => go(null),
+    answered: own(() => go(null)),
     listed: (m) => go(m),
     left: (m) => go(m),
-    renamed: (m, { name }) => go({ ...m, name }),
+    renamed: own((m, { name }) => go({ ...m, name })),
     reload: () => go(null),
   },
   made: {
@@ -78,6 +88,12 @@ export function step(m, event) {
   const take = TABLE[phase]?.[event?.type];
   if (!take) throw new MakingError(`a chat being made takes no ${event?.type} while ${phase}`);
   return take(m, event);
+}
+
+/// Whether the New chat `by` (its token) started `m`: its own answers and
+/// renames are taken from it alone.
+export function owns(m, by) {
+  return !!m && !!by && m.by === by;
 }
 
 /// Whether its room has the middle column (shown, or made and waiting).

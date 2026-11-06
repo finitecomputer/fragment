@@ -9,31 +9,34 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { step, PHASES, EVENTS, MakingError, holdsView, shownChat, readChat, ownRow, drawName } from "../shell/making.js";
+import { step, PHASES, EVENTS, MakingError, owns, holdsView, shownChat, readChat, ownRow, drawName } from "../shell/making.js";
 
 const NAME = "reader-chat--bbbb";
 const before = { page: null, current: "talk--aaaa" };
-const started = { type: "start", agent: "npub1reader", name: NAME, title: "New chat", before };
+// the New chat that started it (asks.js `hold("start")`'s token), and another
+const BY = Object.freeze({ kind: "start", key: "" });
+const OTHER = Object.freeze({ kind: "start", key: "" });
+const started = { type: "start", by: BY, agent: "npub1reader", name: NAME, title: "New chat", before };
 const at = {
   none: null,
   shown: step(null, started).next,
   away: step(step(null, started).next, { type: "left" }).next,
-  made: step(step(null, started).next, { type: "answered", outcome: "made", listed: false }).next,
+  made: step(step(null, started).next, { type: "answered", by: BY, outcome: "made", listed: false }).next,
 };
 // each event, with each payload it comes with
 const events = {
   start: [started],
   answered: [
-    { type: "answered", outcome: "made", listed: true },
-    { type: "answered", outcome: "made", listed: false },
-    { type: "answered", outcome: "refused" },
+    { type: "answered", by: BY, outcome: "made", listed: true },
+    { type: "answered", by: BY, outcome: "made", listed: false },
+    { type: "answered", by: BY, outcome: "refused" },
   ],
   listed: [
     { type: "listed", has: (name) => name === NAME },
     { type: "listed", has: () => false },
   ],
   left: [{ type: "left" }],
-  renamed: [{ type: "renamed", name: "reader-chat--dddd" }],
+  renamed: [{ type: "renamed", by: BY, name: "reader-chat--dddd" }],
   reload: [{ type: "reload" }],
 };
 const phase = (m) => m?.phase ?? "none";
@@ -115,11 +118,31 @@ test("made, waiting for its list: its room keeps the view and reads nothing; the
 
 test("renamed (its name taken), it keeps its phase and its view before, under its new name", () => {
   for (const p of ["shown", "away"]) {
-    const { next } = step(at[p], { type: "renamed", name: "reader-chat--dddd" });
+    const { next } = step(at[p], { type: "renamed", by: BY, name: "reader-chat--dddd" });
     assert.equal(next.phase, p);
     assert.equal(next.name, "reader-chat--dddd");
     assert.deepEqual(next.before, before);
   }
+});
+
+test("each New chat owns its own: another's answer or rename never reaches it, and a start names its owner", () => {
+  for (const p of ["shown", "away"]) {
+    assert.equal(owns(at[p], BY), true);
+    assert.equal(owns(at[p], OTHER), false, "a token alike is not the same token");
+    for (const e of [
+      { type: "answered", by: OTHER, outcome: "made", listed: true },
+      { type: "answered", by: OTHER, outcome: "refused" },
+      { type: "answered", outcome: "made", listed: true },
+      { type: "renamed", by: OTHER, name: "reader-chat--eeee" },
+    ]) assert.throws(() => step(at[p], e), MakingError, `${e.type} from another New chat while ${p}`);
+  }
+  // an earlier one waiting for its list takes no answer at all, its own or
+  // another's: a later New chat ends it by giving the column a view (`left`)
+  assert.throws(() => step(at.made, { type: "answered", by: OTHER, outcome: "made", listed: true }), MakingError);
+  assert.deepEqual(step(at.made, { type: "left" }), { next: null, then: "stay" });
+  assert.equal(owns(null, BY), false);
+  assert.equal(owns(at.shown, null), false);
+  assert.throws(() => step(null, { ...started, by: null }), MakingError, "a start names its owner");
 });
 
 test("its own row is drawn until the list has its name; another device's chat is not it", () => {

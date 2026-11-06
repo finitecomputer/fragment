@@ -1438,13 +1438,13 @@ async function stillBlank(name) {
 // the middle column (its empty room's stand-in, frame-standin.js) and
 // titled, until the create answers. Its states and their moves are
 // making.js's; what each move shows is here.
-function showMaking(identity, name) {
+function showMaking(identity, name, by) {
   const before = { page: state.page, current: state.current };
   // its agent's menu (or the launcher's) gone before its room shows
   closeMenu(true);
   newView();
   at("/");
-  stepMaking({ type: "start", agent: identity, name, title: UNTITLED, before });
+  stepMaking({ type: "start", by, agent: identity, name, title: UNTITLED, before });
   state.page = null;
   hideNotice();
   $("layout").classList.remove("settings-view");
@@ -1468,9 +1468,23 @@ function showMaking(identity, name) {
 // room gone once it no longer has the middle column, and what shows
 // (`then`): its chat opened in its place (true), the view it was started
 // from back, or the list drawn as it is.
+//
+// A pair the table does not take (making.js `MakingError`) is the shell's
+// mistake: it never leaves the page stuck in a room. It is logged, the
+// chat being made ends (its room gone), and the list is read again, the
+// truth of what was made.
 function stepMaking(event) {
   const m = state.making;
-  const { next, then } = making.step(m, event);
+  let stepped;
+  try {
+    stepped = making.step(m, event);
+  } catch (e) {
+    if (!(e instanceof making.MakingError)) throw e;
+    console.error("New chat:", e.message, { phase: m?.phase ?? "none", event: event.type });
+    stepped = { next: null, then: "stay" };
+    load().catch(() => {});
+  }
+  const { next, then } = stepped;
   state.making = next;
   if (!making.holdsView(next) && makingRoom) {
     makingRoom.remove();
@@ -1511,6 +1525,10 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
   // one at a time: a second press while one is made starts nothing
   const start = agent ? asks.hold("start") : null;
   if (!start) return;
+  // this New chat's own chat being made, if it shows one (its hold is its
+  // token): an earlier one still waiting for its list is not it, and ends
+  // as this one gives the middle column a view (`newView`: `left`)
+  const ours = () => making.owns(state.making, start);
   try {
     let name = blank(identity)?.name;
     // one that cannot be asked is not taken: a new chat is made
@@ -1520,7 +1538,7 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
       // whichever comes first, the list's read or the create's answer
       const label = chatLabel(agent.fragment);
       name = making.drawName(label);
-      if (open) showMaking(identity, name);
+      if (open) showMaking(identity, name, start);
       // made with its agent in it, in one step: its row names its agent
       // from the start, and its computer is told it joined (`joined`)
       for (let draw = 1; ; draw++) {
@@ -1530,7 +1548,7 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
         } catch (e) {
           if (e.status !== 409 || draw >= NAME_DRAWS) throw e;
           name = making.drawName(label);
-          if (state.making) stepMaking({ type: "renamed", name });
+          if (ours()) stepMaking({ type: "renamed", by: start, name });
         }
       }
       // made: a list read that fails says so itself (`load`: the band's
@@ -1539,16 +1557,18 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
       else await load();
     }
     if (!open) return name;
-    if (!state.making) {
+    // a blank chat taken again, or this one's room given up since: it
+    // opens as any chat does (an earlier room ends there: `left`)
+    if (!ours()) {
       openChat(name);
       leaveSidebar();
-    } else if (stepMaking({ type: "answered", outcome: "made", listed: !!byName(state.making.name) })) leaveSidebar();
+    } else if (stepMaking({ type: "answered", by: start, outcome: "made", listed: !!byName(name) })) leaveSidebar();
     return name;
   } catch (e) {
     // refused: nothing of it is left shown, and the view it was started
     // from is back if it was still shown (one made already waits for its
     // list, and is no refusal)
-    if (["shown", "away"].includes(state.making?.phase)) stepMaking({ type: "answered", outcome: "refused" });
+    if (ours() && ["shown", "away"].includes(state.making.phase)) stepMaking({ type: "answered", by: start, outcome: "refused" });
     if (quiet) throw e;
     said("The chat was not made", e.message);
   } finally {
