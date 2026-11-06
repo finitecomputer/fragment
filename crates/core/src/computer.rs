@@ -302,17 +302,12 @@ pub struct Retry {
 /// read to fill a phase that release stored (`Lifecycle::read`). Debt:
 /// docs/technical-debt-ledger.md, "A computer's lifecycle writes its old
 /// flags too".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Legacy {
-    #[serde(default)]
     wake_after_sleep: bool,
-    #[serde(default)]
     retry_at_ms: Option<i64>,
-    #[serde(default)]
     failed_ms: i64,
-    #[serde(default)]
     owner_sleep: bool,
-    #[serde(default)]
     restarting: bool,
 }
 
@@ -613,10 +608,20 @@ pub struct Lifecycle {
     /// was kept: none of that life's work is counted kept (`Ended::quiet`).
     #[serde(default)]
     kept_ms: i64,
-    /// What the previous release keeps for the phase, kept equal to it
-    /// (`Legacy::of`) at every step, stored with it for one release.
-    #[serde(flatten)]
-    legacy: Legacy,
+    /// The previous release's fields (`Legacy`), by its names, kept equal
+    /// to the phase (`Legacy::of`) at every step and stored with it for one
+    /// release. Plain fields, never `#[serde(flatten)]`: its buffering
+    /// costs the cell's Wasm more than its budget had left.
+    #[serde(default)]
+    wake_after_sleep: bool,
+    #[serde(default)]
+    retry_at_ms: Option<i64>,
+    #[serde(default)]
+    failed_ms: i64,
+    #[serde(default)]
+    owner_sleep: bool,
+    #[serde(default)]
+    restarting: bool,
 }
 
 impl Default for Lifecycle {
@@ -656,7 +661,11 @@ impl Lifecycle {
             unmetered: None,
             worked_ms: 0,
             kept_ms: 0,
-            legacy: Legacy::default(),
+            wake_after_sleep: false,
+            retry_at_ms: None,
+            failed_ms: 0,
+            owner_sleep: false,
+            restarting: false,
         }
     }
 
@@ -666,9 +675,20 @@ impl Lifecycle {
     /// comes up as it was.
     pub fn read(text: &str) -> serde_json::Result<Lifecycle> {
         let mut life: Lifecycle = serde_json::from_str(text)?;
-        life.phase = life.legacy.fill(life.phase.clone());
-        life.legacy = Legacy::of(&life.phase);
+        life.phase = life.legacy().fill(life.phase.clone());
+        life.set_legacy();
         Ok(life)
+    }
+
+    /// The previous release's fields, as stored.
+    fn legacy(&self) -> Legacy {
+        Legacy { wake_after_sleep: self.wake_after_sleep, retry_at_ms: self.retry_at_ms, failed_ms: self.failed_ms, owner_sleep: self.owner_sleep, restarting: self.restarting }
+    }
+
+    /// The previous release's fields, written from the phase.
+    fn set_legacy(&mut self) {
+        let Legacy { wake_after_sleep, retry_at_ms, failed_ms, owner_sleep, restarting } = Legacy::of(&self.phase);
+        (self.wake_after_sleep, self.retry_at_ms, self.failed_ms, self.owner_sleep, self.restarting) = (wake_after_sleep, retry_at_ms, failed_ms, owner_sleep, restarting);
     }
 
     pub fn generation(&self) -> u64 {
@@ -1451,7 +1471,7 @@ impl Lifecycle {
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
         }
-        self.legacy = Legacy::of(&self.phase);
+        self.set_legacy();
         step.alarm_ms = self.next_alarm();
         self.assert_valid();
         step
@@ -1477,7 +1497,7 @@ impl Lifecycle {
         if let Phase::Sleeping { owner, restarting: true, owes_start, .. } = self.phase {
             assert!(owner && owes_start, "a restart is its owner's sleep, a start after it");
         }
-        assert_eq!(self.legacy, Legacy::of(&self.phase), "the previous release's fields say what the phase does");
+        assert_eq!(self.legacy(), Legacy::of(&self.phase), "the previous release's fields say what the phase does");
         assert!(self.failures <= STARTS_FAILED_MAX, "failures stop counting at the limit");
         if self.ready {
             assert!(matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }), "only a start that came up, and is not gone, is ready");
