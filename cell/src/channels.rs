@@ -64,7 +64,7 @@ use fragment_proto::{
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use worker::*;
@@ -73,13 +73,10 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 
-/// A postable channel's running total of body bytes, and the first and
-/// last record it counted (`posted_bytes`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct PostedTotal {
-    bytes: i64,
-    first: i64,
-    last: i64,
+/// The `meta` row of a postable channel's running total of body bytes
+/// (`posted_bytes`).
+fn posted_key(channel: &str) -> String {
+    format!("{}:{channel}", MetaKey::PostedBytes.key())
 }
 
 /// Due pending mutations one sweep settles.
@@ -254,6 +251,9 @@ impl FragmentCell {
             Some(_) => (None, false),
         };
         let size = i64::try_from(raw.get().len()).expect("a body's length fits i64");
+        // its place, taken before any room is made: a channel emptied to fit
+        // it (one record near the byte bound) never numbers from 1 again
+        let next = self.rows("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM records WHERE channel = ?", vec![channel.into()])?[0]["n"].as_i64().expect("a seq is an integer");
         // room made before the insert, in its turn, so an append past a bound
         // frees space first; a replay appends nothing, and frees nothing
         let room = match (posted, op) {
@@ -263,15 +263,19 @@ impl FragmentCell {
         };
         let rows = self.rows(
             "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
-             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?, 0)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING seq",
-            vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), raw.get().into(), op_id, idx],
+            vec![channel.into(), SqlStorageValue::Integer(next), SqlStorageValue::Integer(now), principal.into(), kind.into(), raw.get().into(), op_id, idx],
         )?;
         let Some(row) = rows.first() else { return Ok(None) };
         let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
-        assert!(seq > 0, "a channel's records number from 1");
+        assert!(seq > 0 && seq == next, "a channel's records number from 1, each the next");
         if let Some(bytes) = room {
-            self.posted_total_set(channel, PostedTotal { bytes: bytes + size, first: self.channel_first(channel)?.expect("the record just appended is kept"), last: seq })?;
+            let first = self.channel_first(channel)?.expect("the record just appended is kept");
+            self.exec(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                vec![posted_key(channel).into(), format!("{} {first} {seq}", bytes + size).into()],
+            )?;
         }
         // a message on an app channel goes to its people's search, in this
         // turn, as its read role says (`channel_read_role`, the one source)
@@ -325,36 +329,21 @@ impl FragmentCell {
     }
 
     /// The bytes of bodies a postable channel holds: its running total
-    /// (`MetaKey::PostedBytes`), while it covers the channel's first and last
-    /// record as they are; else counted again, once (a total never kept, or
-    /// one an older release left behind as it appended and trimmed).
+    /// (`posted_key`: "bytes first last"), while it covers the channel's
+    /// first and last record as they are; else counted again, once (a total
+    /// never kept, or one an older release left behind as it appended and
+    /// trimmed).
     fn posted_bytes(&self, channel: &str) -> CellResult<i64> {
-        let span = self.rows("SELECT MIN(seq) AS lo, MAX(seq) AS hi FROM records WHERE channel = ?", vec![channel.into()])?;
+        let span = self.rows("SELECT MIN(seq) AS lo, MAX(seq) AS hi, (SELECT value FROM meta WHERE key = ?) AS kept FROM records WHERE channel = ?", vec![posted_key(channel).into(), channel.into()])?;
         let (lo, hi) = (span[0]["lo"].as_i64(), span[0]["hi"].as_i64());
-        if let Some(t) = self.posted_totals()?.get(channel) {
-            if Some(t.first) == lo && Some(t.last) == hi {
-                return Ok(t.bytes);
+        let kept: Vec<i64> = span[0]["kept"].as_str().unwrap_or("").split(' ').filter_map(|n| n.parse().ok()).collect();
+        if let ([bytes, first, last], Some(lo), Some(hi)) = (kept.as_slice(), lo, hi) {
+            if (*first, *last) == (lo, hi) {
+                return Ok(*bytes);
             }
         }
         let n = self.rows("SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0) AS n FROM records WHERE channel = ?", vec![channel.into()])?;
         Ok(n[0]["n"].as_i64().expect("a sum of lengths is an integer"))
-    }
-
-    fn posted_totals(&self) -> CellResult<BTreeMap<String, PostedTotal>> {
-        match self.meta(MetaKey::PostedBytes)? {
-            None => Ok(BTreeMap::new()),
-            // unreadable (a later release's shape): counted again
-            Some(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
-        }
-    }
-
-    fn posted_total_set(&self, channel: &str, total: PostedTotal) -> CellResult<()> {
-        let mut all = self.posted_totals()?;
-        all.insert(channel.to_string(), total);
-        // bounded: one entry a declared channel (a channel gone is dropped)
-        let declared: Vec<String> = self.declared_channels()?.into_iter().map(|(name, _)| name).collect();
-        all.retain(|name, _| declared.contains(name));
-        self.set_meta(MetaKey::PostedBytes, &serde_json::to_string(&all).expect("totals serialize"))
     }
 
     fn channel_first(&self, channel: &str) -> CellResult<Option<i64>> {

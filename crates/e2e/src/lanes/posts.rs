@@ -635,7 +635,8 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// always makes room, and a record that nearly fills the bound alone is
 /// kept alone. Reached through the `posted-bytes` lever (100,000 bytes),
 /// with posts of known sizes: after each, the channel holds the newest
-/// records whose bodies fit.
+/// records whose bodies fit, numbered on (one that empties the channel to
+/// fit is not numbered from 1 again).
 fn retention_bytes(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = s.named(api, owner, "wall-bytes")?;
     let c = s.create(api, owner, &name)?;

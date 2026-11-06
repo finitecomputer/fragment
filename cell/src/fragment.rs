@@ -388,8 +388,8 @@ pub(crate) enum MetaKey {
     BlobsGcAt,
     /// The fragment's VAPID key, sealed (push.rs).
     Vapid,
-    /// Each postable channel's running total of body bytes (channels.rs
-    /// `posted_bytes`), JSON: `{channel: {bytes, first, last}}`.
+    /// The prefix of each postable channel's running total of body bytes
+    /// (channels.rs `posted_key`: `posted_bytes:<channel>`).
     PostedBytes,
     /// Test fleets only: a shorter ledger window (`/test/fragment ledger`).
     TestLedgerMs,
