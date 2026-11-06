@@ -205,7 +205,12 @@ megapixels. One attaching goes at a time, from the choosing until its upload:
 the composer is busy, and nothing sends, until it is done. Jumping to the latest holds scrolling off
 for the jump, which stops a fling's momentum, and while following the latest the
 bottom stays pinned as rows are drawn taller than the lazy stack's guess. Connected accounts follow the signed list watcher, discard
-stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
+stale list reloads, and mark visible, caught-up chats read. A chat's socket closed (4001 as its object sleeps, 1001, the network)
+is opened again at once, and again on returning to the app; only a repeated
+failure, or a connection that closes within 5 s of its hello, backs off. Nothing
+is said unless it is not back within 5 s ("Reconnecting…"); the composer stays
+open (sends go over HTTP), and a reply being written stays until the next
+connection's work says its turn ended. HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not
 deliver background replies.

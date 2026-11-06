@@ -95,7 +95,7 @@ struct TransportTests {
 
         first.drop()
         try await waitUntil("the socket dropped") { !session.connected }
-        #expect(session.timeline.drafts.isEmpty)
+        #expect(session.timeline.drafts["t1"]?.text == "Hal" && session.error == nil, "a reply being written stays, and nothing is said")
         try await waitUntil("the second socket") { stub.sockets.count == 2 }
         let second = stub.sockets[1]
         second.push(hello)
@@ -189,6 +189,55 @@ struct TransportTests {
         second.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
         try await waitUntil("its work read again") { session.workRead && session.caughtUp }
         #expect(session.activeTurns.isEmpty)
+    }
+
+    /// A socket closed as its object sleeps (4001) is opened again at once,
+    /// with nothing said, the composer open (sends go over HTTP) and the
+    /// reply being written kept; "Reconnecting…" only once it is not back
+    /// soon, and gone once it is. Only a repeated failure waits.
+    @Test func aSocketClosedAsItsObjectSleepsReconnectsQuietly() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        session.reconnectNoticeAfter = .milliseconds(300)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let first = stub.sockets[0]
+        first.push(hello)
+        try await waitUntil("its subscriptions") { first.sent.count == 2 }
+        first.push(frame("chat", 1, body: #"{"text":"Hi"}"#))
+        first.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+        first.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        first.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        first.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Half a reply","at":2500}"#)
+        try await waitUntil("a reply being written") { session.read && session.drafts.map(\.text) == ["Half a reply"] }
+
+        let clock = ContinuousClock(), closed = clock.now
+        first.close(URLSessionWebSocketTask.CloseCode(rawValue: 4001)!)
+        try await waitUntil("opened again") { stub.sockets.count == 2 }
+        #expect(clock.now - closed < .seconds(1), "at once, no wait")
+        #expect(session.error == nil && session.read && session.drafts.map(\.text) == ["Half a reply"], "nothing said, the composer open, the draft kept")
+        let second = stub.sockets[1]
+        second.push(hello)
+        try await waitUntil("its subscriptions") { second.sent.count == 2 }
+        second.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        second.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        try await waitUntil("caught up again") { session.caughtUp && session.workRead }
+        #expect(session.drafts.map(\.text) == ["Half a reply"] && session.error == nil, "its turn still runs: its draft stays")
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(session.error == nil, "back in time: never said")
+
+        // failing again and again: the second waits, and past the notice's time it is said
+        second.drop()
+        try await waitUntil("opened again") { stub.sockets.count == 3 }
+        stub.sockets[2].drop()
+        try await waitUntil("said") { session.error == ChatSession.reconnecting }
+        #expect(stub.sockets.count == 3, "a repeated failure backs off")
+        try await waitUntil("opened again, after a while", timeout: .seconds(8)) { stub.sockets.count == 4 }
+        stub.sockets[3].push(hello)
+        try await waitUntil("unsaid once back") { session.error == nil && session.connected }
     }
 
     @Test func stopPostsAStopForEachActiveTurn() async throws {

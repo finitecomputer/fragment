@@ -104,7 +104,8 @@ final class ScriptedSocket: LiveSocket {
     init(request: URLRequest) { self.request = request }
 
     var response: URLResponse? { nil }
-    var closeCode: URLSessionWebSocketTask.CloseCode { .invalid }
+    private let code = Mutex(URLSessionWebSocketTask.CloseCode.invalid)
+    var closeCode: URLSessionWebSocketTask.CloseCode { code.withLock { $0 } }
     var sent: [JSONValue] { state.withLock { $0.sent } }
     var cancelled: Bool { state.withLock { $0.cancelled } }
     func resume() {}
@@ -130,6 +131,11 @@ final class ScriptedSocket: LiveSocket {
     }
     func push(_ frame: String) { deliver(.success(.string(frame))) }
     func drop() { deliver(.failure(URLError(.networkConnectionLost))) }
+    /// The server closes it with `code` (4001: its object slept).
+    func close(_ code: URLSessionWebSocketTask.CloseCode) {
+        self.code.withLock { $0 = code }
+        deliver(.failure(URLError(.networkConnectionLost)))
+    }
     private func deliver(_ result: Result<URLSessionWebSocketTask.Message, any Error>) {
         let waiting = state.withLock { s -> CheckedContinuation<URLSessionWebSocketTask.Message, any Error>? in
             guard let waiting = s.waiting else { s.queue.append(result); return nil }

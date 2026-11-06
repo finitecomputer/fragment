@@ -365,7 +365,12 @@ struct Timeline {
         }
     }
 
-    mutating func disconnected() { drafts.removeAll() }
+    /// Drafts of turns read to have ended (or begun nowhere): a reconnect
+    /// keeps drafts until the new connection's work says this.
+    mutating func settleDrafts() {
+        let running = Set(activeTurns)
+        drafts = drafts.filter { running.contains($0.key) }
+    }
 
     /// The turns running, the earliest begun first: each id once (a Stop
     /// names a turn by its id).

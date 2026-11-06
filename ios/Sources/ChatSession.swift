@@ -152,8 +152,21 @@ final class ChatSession {
 
     // Owned by the view's .task: backgrounding or leaving the chat closes the
     // socket, including a suspended receive. Each foreground visit catches up.
+    /// How long a reconnect goes unsaid: back within it, nothing is shown.
+    var reconnectNoticeAfter = Duration.seconds(5)
+    static let reconnecting = "Reconnecting…"
+    @ObservationIgnored private var reconnectNotice: Task<Void, Never>?
+
     func run() async {
+        // failures since the last hello: the first reconnects at once (a
+        // socket closed as its object sleeps, 4001, or the network dropped),
+        // only repeated ones back off
         var attempt = 0
+        // a connection closed within this of its hello was no connection: a
+        // server opening and closing at once is backed off from, not looped on
+        let lastsAtLeast = Duration.seconds(5), clock = ContinuousClock()
+        var openedAt: ContinuousClock.Instant?
+        defer { reconnectNotice?.cancel(); reconnectNotice = nil; if error == Self.reconnecting { error = nil } }
         while !Task.isCancelled {
             let socket: LiveSocket
             do { socket = try api.socket(fragment.name) }
@@ -184,8 +197,9 @@ final class ChatSession {
                             presence = Dictionary((frame.presence ?? []).prefix(256).filter { $0.data != nil && $0.data != .null }.map { ($0.id, $0.principal) }, uniquingKeysWith: { _, last in last })
                             principal = frame.principal ?? ""
                             connected = true
-                            error = nil
-                            attempt = 0
+                            reconnectNotice?.cancel(); reconnectNotice = nil
+                            if error == Self.reconnecting { error = nil }
+                            openedAt = clock.now
                             for channel in ["chat", "work"] {
                                 try await subscribe(socket, channel: channel, after: timeline.cursors[channel])
                             }
@@ -215,6 +229,8 @@ final class ChatSession {
                                 if !workRead { workRead = true; timelineChanged() }
                                 if chatReadNow && !read { read = true }
                                 await earlierWork()
+                                // drafts kept across the reconnect go once their turn is read to have ended
+                                timeline.settleDrafts()
                             }
                         }
                     }
@@ -230,7 +246,7 @@ final class ChatSession {
                     catch APIError.unauthorized { refused = true }
                     catch { /* A transient check failure can retry with the usual backoff. */ }
                 }
-                if !Task.isCancelled { self.error = refused ? "Your access ended. Reconnect your account or check sharing permissions." : "Connection interrupted. Reconnecting…" }
+                if !Task.isCancelled && refused { self.error = "Your access ended. Reconnect your account or check sharing permissions." }
             }
             socket.cancel(with: .goingAway, reason: nil)
             connected = false
@@ -239,12 +255,27 @@ final class ChatSession {
             // no turn is said to run while none is heard; the next connection
             // says again which do, once its work is read
             workRead = false
-            timeline.disconnected()
+            // a reply being written stays on screen until the next connection
+            // says what became of it (`settleDrafts`)
+            timelineChanged()
             presence = [:]
             guard !Task.isCancelled, !refused else { return }
-            attempt = min(attempt + 1, 4)
-            do { try await Task.sleep(for: .seconds(min(15, 1 << attempt))) }
-            catch { return }
+            // said only if it is not back soon, so the words are true
+            if reconnectNotice == nil {
+                let after = reconnectNoticeAfter
+                reconnectNotice = Task { [weak self] in
+                    do { try await Task.sleep(for: after) } catch { return }
+                    guard let self, !self.connected, self.error == nil else { return }
+                    self.error = Self.reconnecting
+                }
+            }
+            if let opened = openedAt, clock.now - opened >= lastsAtLeast { attempt = 0 }
+            openedAt = nil
+            attempt += 1
+            if attempt > 1 {
+                do { try await Task.sleep(for: .seconds(min(15, 1 << min(attempt - 1, 4)))) }
+                catch { return }
+            }
         }
     }
 

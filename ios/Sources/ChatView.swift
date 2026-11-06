@@ -139,7 +139,8 @@ struct ChatView: View {
                 }
                 composerAccessories
                 ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
-                    enabled: session.connected && session.caughtUp, busy: session.attaching, recording: voice.recording,
+                    // sends go over HTTP: a reconnect never holds the composer
+                    enabled: session.read, busy: session.attaching, recording: voice.recording,
                     attachPhotos: { photos = true }, attachFiles: { importer = true },
                     pasteImages: { pasteboard in paste(pasteboard) },
                     record: { Task { await recordVoice() } },

@@ -38,7 +38,8 @@ struct TimelineTests {
         try timeline.apply(frame(#"{"type":"draft","channel":"chat","turn":"a","principal":"agent","text":"Next part","at":110}"#))
         timeline.insert(commit)
         #expect(timeline.drafts["a"]?.text == "Next part")
-        timeline.disconnected()
+        // its turn read to run nowhere, its draft goes
+        timeline.settleDrafts()
         #expect(timeline.drafts.isEmpty)
         #expect(timeline.records.count == 1)
     }
