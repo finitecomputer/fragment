@@ -6,8 +6,10 @@ live and everyone watching follows, page by page. Anyone signed in can
 leave a note on a page.
 
 ```sh
-fragment init my-talk --template slides   # scaffold, create, deploy
-# or: fragment new my-talk --template slides, then fragment deploy <name> --dir my-talk
+fragment init my-talk --template slides   # scaffold, create, first deploy (a page saying to build)
+cd my-talk
+node scripts/build.mjs                    # the first build installs open-slide (below)
+fragment deploy my-talk --dir .
 ```
 
 ## Files
@@ -27,10 +29,10 @@ fragment init my-talk --template slides   # scaffold, create, deploy
   `slides-live.css`, and `slides-route.js` (`/` opens the deck).
 - `app.mjs` and `applib/notes.mjs` are the notes: the doc template's
   mixin, copied whole. A note's `anchor` is its page: `p1` for the first.
-- `site/` is the built deck the fragment serves. The template ships one,
-  built from the starter deck, so a new deck deploys as it is.
+- `site/` is the built deck the fragment serves; the build writes it, and
   `site/build.json` names the hash of every input the build read and of
-  every file it made.
+  every file it made. The template ships no build, only a page saying to
+  make one: nothing of open-slide rides in the CLI or in any image.
 
 ## Building
 
@@ -58,8 +60,8 @@ An editor or the owner presses **Present live**. Their page goes to the
 `present` channel (`{page, live, from}`, which only editors and up may
 post), and every open page follows it, in open-slide's present mode too.
 If two start at once, the later start presents and the other gives way,
-on every page alike. A viewer can stop following and follow again. Presenting ends with
-**Stop**, or when the presenter's page closes. The presenter's view
+on every page alike. A viewer can stop following and follow again.
+Presenting ends with **Stop**, or when the presenter's page closes. The presenter's view
 (`/s/deck/presenter`, with speaker notes and a timer) is open-slide's.
 
 ## Notes

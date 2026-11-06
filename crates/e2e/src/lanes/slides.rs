@@ -1,7 +1,10 @@
 //! The slides template (templates/slides): a deck built with open-slide,
 //! scaffolded and deployed with the CLI as an agent does (`fragment new
-//! --template slides`, then `fragment deploy`), its committed build served
-//! as the site, so no npm runs here. Valid: the deck opens at its own
+//! --template slides`, then `fragment deploy`). The template holds no build
+//! (nothing of the deck's toolchain or output rides in the CLI), so its
+//! starter deck's build is this crate's fixture (fixtures/slides-site,
+//! made by its scripts/build.mjs; its stamp is checked below), copied in
+//! as the build would write it: no npm runs here. Valid: the deck opens at its own
 //! address and at open-slide's (`/s/deck`, its presenter's view), its
 //! hashed assets are served; an editor presents live on the `present`
 //! channel and a second, anonymous page follows page by page, also in
@@ -12,7 +15,7 @@
 //! `FRAGMENT_E2E_KEEP`, the run keeps the two pages' screenshots in
 //! `slides-media/`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -48,6 +51,25 @@ fn at_page(p: u32) -> String {
     format!("new URLSearchParams(location.search).get('p') === '{p}' && location.pathname === '/s/deck'")
 }
 
+/// The starter deck's build (fixtures/slides-site).
+fn fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/slides-site")
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 fn shot(chrome: &mut Browser, page: &Page, dir: &Path, name: &str) {
     let _ = chrome.screenshot(page, &dir.join(name));
 }
@@ -66,15 +88,18 @@ pub fn slides(s: &mut Suite, api: &Api) -> Result<()> {
     let dir_s = dir.to_str().expect("utf-8 path").to_string();
     let out = s.cli(api, &home, &["new", &dir_s, "--template", "slides"]);
     s.ok(
-        "fragment new scaffolds the slides template: the deck, its pins, its build script and its built site",
+        "fragment new scaffolds the slides template: the deck, its pins and lockfile, its build script, and no build",
         out.status.success()
             && dir.join("slides/deck/index.tsx").is_file()
-            && dir.join("package.json").is_file()
+            && dir.join("package-lock.json").is_file()
             && dir.join("scripts/build.mjs").is_file()
-            && dir.join("site/index.html").is_file()
-            && dir.join("site/build.json").is_file(),
+            && std::fs::read_to_string(dir.join("site/index.html")).is_ok_and(|p| p.contains("isn't built yet"))
+            && !dir.join("site/build.json").exists(),
         String::from_utf8_lossy(&out.stderr),
     );
+    // the build, as scripts/build.mjs writes it
+    std::fs::remove_dir_all(dir.join("site"))?;
+    copy_dir(&fixture(), &dir.join("site"))?;
     let out = s.cli(api, &home, &["deploy", &name, "--dir", &dir_s]);
     s.ok("it deploys as it is", out.status.success(), String::from_utf8_lossy(&out.stderr));
     let st = api.status(&owner, &name)?;
@@ -213,4 +238,80 @@ pub fn slides(s: &mut Suite, api: &Api) -> Result<()> {
         json!(kept),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixture;
+    use sha2::{Digest, Sha256};
+    use std::path::Path;
+
+    /// Each file under `dir` at `names` (a file, or a folder whole), by
+    /// `/`-separated path, sorted: scripts/build.mjs `filesOf`.
+    fn files_of(dir: &Path, names: &[String]) -> Vec<String> {
+        fn walk(dir: &Path, rel: &str, out: &mut Vec<String>) {
+            let at = dir.join(rel);
+            if at.is_dir() {
+                for entry in std::fs::read_dir(&at).expect("a folder") {
+                    walk(dir, &format!("{rel}/{}", entry.expect("an entry").file_name().to_string_lossy()), out);
+                }
+            } else if at.is_file() {
+                out.push(rel.to_string());
+            }
+        }
+        let mut out = vec![];
+        for name in names {
+            walk(dir, name, &mut out);
+        }
+        out.sort();
+        out
+    }
+
+    /// scripts/build.mjs `hashOf`: `path \0 bytes \0`, in path order.
+    fn hash_of(dir: &Path, files: &[String]) -> String {
+        let mut h = Sha256::new();
+        for rel in files {
+            h.update(rel.as_bytes());
+            h.update([0]);
+            h.update(std::fs::read(dir.join(rel)).expect("a file"));
+            h.update([0]);
+        }
+        hex::encode(h.finalize())
+    }
+
+    /// Goal: the e2e's prebuilt deck is the slides template's build as the
+    /// template is now. Method: its `build.json` names the hash of every
+    /// input scripts/build.mjs read (`INPUTS`: the deck, its config,
+    /// package.json, the lockfile, the build script, the live layer) and of
+    /// every file it made; both are recomputed here, from the template and
+    /// the fixture. That those inputs make this output is
+    /// `node scripts/build.mjs --check`'s to say, with npm (the Hermes
+    /// image's Docker test, by name). Invalid: an input edited and not built
+    /// again; a built file edited by hand; a live file copied stale.
+    #[test]
+    fn the_slides_fixture_is_the_templates_build() {
+        let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/slides");
+        let site = fixture();
+        let inputs: Vec<String> = ["live", "open-slide.config.ts", "package-lock.json", "package.json", "scripts", "slides"].map(String::from).to_vec();
+        let stamp: serde_json::Value = serde_json::from_slice(&std::fs::read(site.join("build.json")).expect("build.json")).expect("json");
+        assert_eq!(stamp["inputs"], hash_of(&template, &files_of(&template, &inputs)), "the fixture was built from templates/slides as it is: build it again (scripts/build.mjs) and copy its site/ here");
+        let top: Vec<String> = std::fs::read_dir(&site).expect("the fixture").map(|e| e.expect("an entry").file_name().to_string_lossy().to_string()).collect();
+        let made: Vec<String> = files_of(&site, &top).into_iter().filter(|f| f != "build.json").collect();
+        assert_eq!(stamp["output"], hash_of(&site, &made), "the fixture is as its build made it: never edit it by hand");
+        let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(template.join("package.json")).expect("package.json")).expect("json");
+        assert_eq!(stamp["openSlide"], pkg["dependencies"]["@open-slide/core"]);
+        for live in ["slides-live.css", "slides-live.js", "slides-present.js", "slides-route.js"] {
+            assert_eq!(std::fs::read(site.join(live)).ok(), std::fs::read(template.join("live").join(live)).ok(), "{live} is live/'s");
+        }
+        let page = std::fs::read_to_string(site.join("index.html")).expect("the page");
+        for at in ["s/deck/index.html", "s/deck/presenter/index.html"] {
+            assert_eq!(std::fs::read_to_string(site.join(at)).ok().as_deref(), Some(page.as_str()), "{at} is the deck's page");
+        }
+        let (route, app) = (page.find("/slides-route.js").expect("the route"), page.find("/assets/index-").expect("the app"));
+        assert!(route < app && page.contains("/slides-live.js"), "the route runs before the app, and the live layer is on the page");
+        for (at, _) in page.match_indices("\"/assets/") {
+            let asset = page[at + 2..].split('"').next().expect("a quoted path");
+            assert!(site.join(asset).is_file(), "the page's {asset} is in the fixture");
+        }
+    }
 }

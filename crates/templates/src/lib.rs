@@ -585,65 +585,31 @@ pub(crate) mod tests {
         assert!(page.contains("<html lang=\"en\">"), "cursors are off by default (the e2e turns them on by this tag)");
     }
 
-    /// Goal: the slides template's committed build is its inputs', so a
-    /// deck scaffolded with `fragment new` deploys as it is, and its notes
-    /// are the doc's. Method: `site/build.json` names the hash of every
-    /// input the build read (scripts/build.mjs `INPUTS`: the deck, its
-    /// config, package.json and its lockfile, the build script and the live
-    /// layer, each file by path) and of every file it made; both are
-    /// recomputed here from the template's files, so neither an input nor
-    /// an output changes without a build. That the inputs make that output
-    /// is `node scripts/build.mjs --check`'s to say (images/bridge/tests/
-    /// docker.rs runs it by name: it needs npm's registry). Invalid: a deck,
-    /// a lockfile, the build script or a live file edited and not built
-    /// again; a built file edited by hand.
+    /// Goal: the slides template holds its sources and no build, so the
+    /// CLI and every image that carries it pay for no deck's toolchain or
+    /// output (the e2e's prebuilt deck is crates/e2e/fixtures/slides-site,
+    /// checked beside it); its pins are exact and its lockfile is theirs;
+    /// one deck; its notes are the doc's. Invalid: a built file in the
+    /// template, a range pin, a lockfile for other pins.
     #[cfg(feature = "embed")]
     #[test]
-    fn the_slides_templates_build_is_its_decks() {
+    fn the_slides_template_is_its_sources() {
         use fragment_proto::Role;
         let file = |path: &str| SLIDES.file(path).unwrap_or_else(|| panic!("slides has {path}")).bytes;
         let text = |path: &str| std::str::from_utf8(file(path)).expect("utf-8");
-        // scripts/build.mjs `hashOf`: `path \0 bytes \0`, in path order
-        let hash = |files: &[(&str, &[u8])]| {
-            let mut h = Sha256::new();
-            for (path, bytes) in files {
-                h.update(path.as_bytes());
-                h.update([0]);
-                h.update(bytes);
-                h.update([0]);
-            }
-            hex::encode(h.finalize())
-        };
-        let under = |f: &File, names: &[&str]| names.iter().any(|n| f.path == *n || f.path.strip_prefix(n).is_some_and(|rest| rest.starts_with('/')));
-        let inputs: Vec<&File> = SLIDES.files.iter().filter(|f| under(f, &["live", "open-slide.config.ts", "package-lock.json", "package.json", "scripts", "slides"])).collect();
-        assert!(inputs.iter().any(|f| f.path == "package-lock.json") && inputs.iter().any(|f| f.path == "scripts/build.mjs"), "the lockfile and the build script are inputs");
-        let outputs: Vec<&File> = SLIDES.files.iter().filter(|f| f.path.starts_with("site/") && f.path != "site/build.json").collect();
-        let stamp: serde_json::Value = serde_json::from_str(text("site/build.json")).expect("site/build.json");
-        assert_eq!(stamp["inputs"], hash(&inputs.iter().map(|f| (f.path, f.bytes)).collect::<Vec<_>>()), "site/ was built from the template's inputs as they are: build it again (scripts/build.mjs)");
-        assert_eq!(stamp["output"], hash(&outputs.iter().map(|f| (f.path.strip_prefix("site/").expect("under site/"), f.bytes)).collect::<Vec<_>>()), "site/ is as its build made it: build it again, never edit it");
+        let site: Vec<&str> = SLIDES.files.iter().filter_map(|f| f.path.strip_prefix("site/")).collect();
+        assert_eq!(site, ["index.html"], "no build in the template: only the page that says to build it");
+        assert!(text("site/index.html").contains("node scripts/build.mjs") && !text("site/index.html").contains("<script"), "a page with no code, saying how to build");
+        let total: u64 = SLIDES.files.iter().map(|f| f.size).sum();
+        assert!(total < 256 * 1024, "the template's sources are small: {total} bytes");
         let pkg: serde_json::Value = serde_json::from_str(text("package.json")).expect("package.json");
-        assert_eq!(stamp["openSlide"], pkg["dependencies"]["@open-slide/core"], "built with the open-slide it pins");
         for (dep, pin) in pkg["dependencies"].as_object().expect("its dependencies") {
             assert!(pin.as_str().is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit() || b == b'.')), "{dep} is pinned to one version, not {pin}");
         }
         let lock: serde_json::Value = serde_json::from_str(text("package-lock.json")).expect("package-lock.json");
         assert_eq!(lock["packages"][""]["dependencies"], pkg["dependencies"], "the lockfile is package.json's");
-        let decks: std::collections::BTreeSet<&str> = inputs.iter().filter_map(|f| f.path.strip_prefix("slides/")?.split_once('/').map(|(d, _)| d)).collect();
-        assert_eq!(decks.into_iter().collect::<Vec<_>>(), [stamp["deck"].as_str().expect("its deck")], "one deck");
-        for live in ["slides-live.css", "slides-live.js", "slides-present.js", "slides-route.js"] {
-            assert_eq!(file(&format!("site/{live}")), file(&format!("live/{live}")), "site/{live} is live/{live}: build it again");
-        }
-        let page = text("site/index.html");
-        for at in ["site/s/deck/index.html", "site/s/deck/presenter/index.html"] {
-            assert_eq!(text(at), page, "{at} is the deck's page");
-        }
-        let route = page.find("/slides-route.js").expect("the route");
-        let app = page.find("/assets/index-").expect("the app's script");
-        assert!(route < app && page.contains("/slides-live.js"), "the route runs before the app, and the live layer is on the page");
-        for (at, _) in page.match_indices("\"/assets/") {
-            let asset = page[at + 2..].split('"').next().expect("a quoted path");
-            assert!(SLIDES.file(&format!("site/{asset}")).is_some(), "the page's {asset} is in site/");
-        }
+        let decks: std::collections::BTreeSet<&str> = SLIDES.files.iter().filter_map(|f| f.path.strip_prefix("slides/")?.split_once('/').map(|(d, _)| d)).collect();
+        assert_eq!(decks.into_iter().collect::<Vec<_>>(), ["deck"], "one deck");
         assert_eq!(file("applib/notes.mjs"), DOC.file("applib/notes.mjs").expect("doc's notes").bytes, "the notes are the doc's, copied whole");
         assert!(text("app.mjs").contains("extends withNotes(DurableObject)"), "app.mjs takes the mixin");
         let m = fragment_core::manifest::parse(file("fragment.json")).expect("slides' fragment.json");
