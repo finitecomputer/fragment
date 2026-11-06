@@ -160,12 +160,13 @@ out. Its answer: the fragment, and whether it is archived now.
 
 ### `ChannelPage`
 
-out. `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader): A page in ascending seq order. `next` is its last seq for a forward read, its first seq for a backwards read, or the input cursor if empty.
+out. `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader): A page in ascending seq order. `next` is its last seq for a forward read, its first seq for a backwards read, or the input cursor if empty. `more`: whether the channel holds records past the page in the direction read (added 2026-11; absent from older releases' pages).
 
 | field | type | | |
 | --- | --- | --- | --- |
 | `channel` | `string` | required |  |
-| `next` | `integer` | required |  |
+| `more` | `boolean` | required | Whether records remain past the page in the direction read: a page cut short by its bytes (`limits::CHANNEL_HTTP_PAGE_MAX_BYTES`) says so here, so it is not read as the last. |
+| `next` | `integer` | required | The next page's cursor: `after` it reading forward, `before` it reading back. |
 | `records` | `array` of [`ChannelRecord`](#channelrecord) | required |  |
 
 ### `ChannelRecord`

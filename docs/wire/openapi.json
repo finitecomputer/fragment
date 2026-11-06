@@ -19,12 +19,18 @@
         "x-fragment-direction": "out"
       },
       "ChannelPage": {
-        "description": "`GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):\nA page in ascending seq order. `next` is its last seq for a forward\nread, its first seq for a backwards read, or the input cursor if empty.",
+        "description": "`GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):\nA page in ascending seq order. `next` is its last seq for a forward\nread, its first seq for a backwards read, or the input cursor if empty.\n`more`: whether the channel holds records past the page in the\ndirection read (added 2026-11; absent from older releases' pages).",
         "properties": {
           "channel": {
             "type": "string"
           },
+          "more": {
+            "default": false,
+            "description": "Whether records remain past the page in the direction read: a page\ncut short by its bytes (`limits::CHANNEL_HTTP_PAGE_MAX_BYTES`) says\nso here, so it is not read as the last.",
+            "type": "boolean"
+          },
           "next": {
+            "description": "The next page's cursor: `after` it reading forward, `before` it\nreading back.",
             "format": "int64",
             "type": "integer"
           },
@@ -38,7 +44,8 @@
         "required": [
           "channel",
           "records",
-          "next"
+          "next",
+          "more"
         ],
         "type": "object",
         "x-fragment-direction": "out"

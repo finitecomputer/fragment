@@ -1500,7 +1500,7 @@ impl PrincipalCell {
                     self.open(run, core::channel_path(&name, &c), true);
                     run.job.frag().counted = 0;
                 }
-                let page = if after < newest { self.page(run, &person, &name, &c, after).await? } else { vec![] };
+                let (page, more) = if after < newest { self.page(run, &person, &name, &c, after).await? } else { (vec![], false) };
                 let mut text = Vec::new();
                 let mut last = after;
                 for r in page.iter().filter(|r| r.seq <= newest) {
@@ -1511,7 +1511,7 @@ impl PrincipalCell {
                     run.job.frag().counted += 1;
                 }
                 self.more(run, &text).await?;
-                if page.len() < limits::CHANNEL_PAGE || last >= newest {
+                if !more || last >= newest {
                     self.close(run).await?;
                     let counted = run.job.frag().counted;
                     note(run, "channels", core::Counted { name: c.clone(), count: counted, file: core::within(&core::channel_path(&name, &c), &core::fragment_dir(&name)) });
@@ -1528,10 +1528,10 @@ impl PrincipalCell {
                     let head = core::transcript_head(&name, item.title.as_deref(), run.job.made_at);
                     self.more(run, head.as_bytes()).await?;
                 }
-                let chats = if chat < chat_max { self.page(run, &person, &name, "chat", chat).await? } else { vec![] };
-                let works = if work < work_max { self.page(run, &person, &name, "work", work).await? } else { vec![] };
-                let chat_end = chats.len() < limits::CHANNEL_PAGE || chats.last().is_some_and(|r| r.seq >= chat_max);
-                let work_end = works.len() < limits::CHANNEL_PAGE || works.last().is_some_and(|r| r.seq >= work_max);
+                let (chats, chat_more) = if chat < chat_max { self.page(run, &person, &name, "chat", chat).await? } else { (vec![], false) };
+                let (works, work_more) = if work < work_max { self.page(run, &person, &name, "work", work).await? } else { (vec![], false) };
+                let chat_end = !chat_more || chats.last().is_some_and(|r| r.seq >= chat_max);
+                let work_end = !work_more || works.last().is_some_and(|r| r.seq >= work_max);
                 let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Value)> { rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), serde_json::from_str(r.body.get()).unwrap_or(Value::Null))).collect() };
                 let (a, b) = (parse(&chats, chat_max), parse(&works, work_max));
                 let names = core::Names(run.job.frag().names.clone());
@@ -1731,16 +1731,23 @@ impl PrincipalCell {
     }
 
     /// A page of a channel's records after `after`, as the person reads it.
-    async fn page(&self, run: &mut Run, person: &str, name: &str, channel: &str, after: i64) -> Step<Vec<Record>> {
+    async fn page(&self, run: &mut Run, person: &str, name: &str, channel: &str, after: i64) -> Step<(Vec<Record>, bool)> {
         #[derive(Deserialize)]
         struct Page {
             records: Vec<Record>,
+            // a page cut by its bytes says so (`ChannelPage::more`)
+            more: Option<bool>,
         }
         match self.read_bytes(person, name, &format!("channels/{channel}"), &format!("?after={after}&limit={}", limits::CHANNEL_PAGE)).await? {
-            Ok(bytes) => serde_json::from_slice::<Page>(&bytes).map(|p| p.records).map_err(|e| Stop::Retry(format!("{name}'s {channel} records: {e}"))),
+            Ok(bytes) => serde_json::from_slice::<Page>(&bytes)
+                .map(|p| {
+                    let more = p.more.unwrap_or(p.records.len() >= limits::CHANNEL_PAGE);
+                    (p.records, more)
+                })
+                .map_err(|e| Stop::Retry(format!("{name}'s {channel} records: {e}"))),
             Err(e) => {
                 skip(run, &format!("channels/{channel}"), &e);
-                Ok(vec![])
+                Ok((vec![], false))
             }
         }
     }

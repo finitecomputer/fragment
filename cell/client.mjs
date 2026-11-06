@@ -114,7 +114,9 @@ export function observePosts(handler) {
 /// Reads one page without changing a live subscription's cursor. With
 /// `before`, the nearest older records come in ascending seq order; pass
 /// the returned `next` as `before` for the next older page. Otherwise read
-/// forward after `after` (default 0). A page holds at most 1000 records.
+/// forward after `after` (default 0). A page holds at most 1000 records,
+/// and about 4 MiB of their bodies; its `more` says whether records remain
+/// past it in the direction read.
 export async function read(channel, { after, before, limit = 1000 } = {}) {
   if (after !== undefined && before !== undefined) throw new TypeError("choose after or before, not both");
   const url = new URL(`__channel/${encodeURIComponent(channel)}`, base);

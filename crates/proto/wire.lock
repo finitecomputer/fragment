@@ -5,6 +5,7 @@
 # client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
 # fact gone on purpose is retired in wire.retired.
 
+bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.at range i64
 bound ChannelRecord.seq range i64
@@ -83,6 +84,7 @@ extends LiveOut.record ChannelRecord
 field Archived.archived required boolean
 field Archived.name required string
 field ChannelPage.channel required string
+field ChannelPage.more required boolean
 field ChannelPage.next required integer
 field ChannelPage.records required array<ChannelRecord>
 field ChannelRecord.at required integer

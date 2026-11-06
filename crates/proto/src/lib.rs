@@ -125,6 +125,11 @@ pub mod limits {
     /// A page of a channel on the live socket also ends at about this many
     /// bytes of record frames (a record is at most `RECORD_BODY_MAX_BYTES`).
     pub const CHANNEL_PAGE_MAX_BYTES: usize = 1024 * 1024;
+    /// A page of a channel over HTTP also ends at this many bytes of record
+    /// bodies (at least one record a page): `CHANNEL_PAGE` records of
+    /// `RECORD_BODY_MAX_BYTES` would be 64 MiB. Its `more` says whether
+    /// records remain, so a page cut short is not read as the last.
+    pub const CHANNEL_HTTP_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// Effects one mutation may have, of every kind together: the records
     /// it publishes, the files it writes, and its pushes.
     pub const EFFECTS_MAX: usize = 64;
@@ -331,6 +336,10 @@ const _: () = assert!(limits::POSTED_BYTES_MAX >= 1000 * limits::RECORD_BODY_MAX
 const _: () = assert!(limits::POSTED_BYTES_MAX <= 10_000 * limits::RECORD_BODY_MAX_BYTES as i64);
 const _: () = assert!((limits::SEARCH_BATCH_MAX as i64) < limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX);
 const _: () = assert!(limits::SEARCH_BATCH_MAX * limits::SEARCH_TEXT_MAX_BYTES < limits::BODY_MAX_BYTES);
+// A page over HTTP holds at least one record whole, and a socket's page
+// is the smaller.
+const _: () = assert!(limits::RECORD_BODY_MAX_BYTES < limits::CHANNEL_HTTP_PAGE_MAX_BYTES);
+const _: () = assert!(limits::CHANNEL_PAGE_MAX_BYTES < limits::CHANNEL_HTTP_PAGE_MAX_BYTES);
 // An editor's write through the API is an app's and more, in a body the
 // router reads.
 const _: () = assert!(limits::FILE_WRITE_MAX_BYTES < limits::API_FILES_WRITE_MAX_BYTES);
@@ -2082,13 +2091,22 @@ pub const POST_KIND: &str = "message";
 /// `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):
 /// A page in ascending seq order. `next` is its last seq for a forward
 /// read, its first seq for a backwards read, or the input cursor if empty.
+/// `more`: whether the channel holds records past the page in the
+/// direction read (added 2026-11; absent from older releases' pages).
 // no PartialEq: a record's body is raw JSON text (compare the JSON instead)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelPage {
     pub channel: String,
     pub records: Vec<ChannelRecord>,
+    /// The next page's cursor: `after` it reading forward, `before` it
+    /// reading back.
     pub next: i64,
+    /// Whether records remain past the page in the direction read: a page
+    /// cut short by its bytes (`limits::CHANNEL_HTTP_PAGE_MAX_BYTES`) says
+    /// so here, so it is not read as the last.
+    #[serde(default)]
+    pub more: bool,
 }
 
 /// What a subscription's URL receives (`POST`, unsigned: the URL is the
@@ -2808,8 +2826,11 @@ mod tests {
         assert_eq!(value(&invites), serde_json::json!({ "invites": [] }));
         let runs = RunList { runs: vec![], counts: [("held".to_string(), 2)].into(), paused: vec!["digest".into()] };
         assert_eq!(value(&runs), serde_json::json!({ "runs": [], "counts": { "held": 2 }, "paused": ["digest"] }));
-        let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7 };
-        assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7 }));
+        let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7, more: true };
+        assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7, "more": true }));
+        // an older release's page has no `more`: it reads as none said
+        let old: ChannelPage = serde_json::from_value(serde_json::json!({ "channel": "chat", "records": [], "next": 7 })).unwrap();
+        assert!(!old.more);
     }
 
     /// Goal: a list from a newer platform, one of whose fragments is of a
