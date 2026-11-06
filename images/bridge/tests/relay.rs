@@ -912,6 +912,54 @@ async fn a_replys_file_is_kept_until_its_post() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-405, review of #1062): a message's file that a later reply
+/// sends on (`send_media` of its `/relay/media/in-…` URL) is kept for that
+/// reply, its own turn long over. With the chat's posts held behind a slow
+/// lane, another chat's download needs the room: it finds none, and the
+/// file reaches the reply.
+#[tokio::test]
+async fn a_messages_file_sent_on_is_kept_for_the_reply() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-sent-on");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.media_max_bytes = 100;
+    let bridge = support::start(cfg, relay(&port, &dir));
+    let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    let (chat, other) = (fake.chat("talk", &["juniper"]), fake.chat("other", &["juniper"]));
+    let blob = |chat: &str, fill: u8, name: &str| {
+        let bytes = bytes::Bytes::from(vec![fill; 60]);
+        let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        fake.with(|w| w.fragments.get_mut(chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
+        (json!({ "sha256": sha, "size": 60, "type": "image/png", "name": name }), dir.join("media").join(&sha), sha)
+    };
+    let ((f, at_f, sha_f), (g, at_g, _)) = (blob(&chat, 1, "f.png"), blob(&other, 2, "g.png"));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 3).await;
+    let turn_of = |chat: &str, r: &Value| records::turn_id("juniper--k3x9", chat, "chat", r["seq"].as_u64().unwrap());
+    let first = turn_of(&chat, &fake.say(&chat, &person("paul"), json!({ "text": "look", "attachments": [f] })));
+    fake.until(WAIT, "its turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == first.as_str())).await;
+
+    fake.with(|w| w.chat_post_delay_ms = 3_000);
+    let posts = || fake.with(|w| w.calls.iter().filter(|c| *c == &format!("POST /api/f/{chat}/channels/chat")).count());
+    let before = posts();
+    let turn = turn_of(&chat, &fake.say(&chat, &person("paul"), json!({ "text": format!("image:http://{listen}/relay/media/in-{first}-0") })));
+    let t = std::time::Instant::now();
+    while posts() == before {
+        assert!(t.elapsed() < Duration::from_millis(WAIT), "the reply's first post, held");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake.say(&other, &person("paul"), json!({ "text": "and this", "attachments": [g] }));
+    fake.until(WAIT, "the other chat's turn", |w| !w.bodies(&other, "work", "turn.start").is_empty()).await;
+    assert!(at_f.exists() && !at_g.exists(), "the file sent on stayed; the other found no room");
+    fake.with(|w| w.chat_post_delay_ms = 0);
+    // (its URL says `media`, so the scripted Hermes sends its cat too)
+    fake.until(30_000, "the reply with the file sent on", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn.as_str() && r["attachments"][0]["sha256"] == sha_f.as_str())).await;
+    fake.with(|w| assert!(replies(w, &chat).iter().filter(|r| r["turn"] == turn.as_str()).all(|r| !r["text"].as_str().unwrap_or("").contains("could not be attached"))));
+    bridge.stop().await;
+}
+
 /// A provider's file server, as FAL's CDN would be (here on this host):
 /// `/cat.png` an image, `/moved.png` a redirect to it, `/page.html` a page,
 /// `/big.png` an image past the 25 MiB a chat takes.

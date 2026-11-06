@@ -40,13 +40,15 @@ use crate::net::Backoff;
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
-use crate::scratch::{InUse, Scratch};
+use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::scratch::Scratch;
 
-/// Each running turn's files (its message's, its answers'), by turn: in use
-/// until the engine ends the turn (`act`), so no other download makes room
-/// with them while its runtime may still read them.
-type TurnFiles = Arc<Mutex<HashMap<String, Vec<InUse>>>>;
+/// Each running turn's files (its message's, its answers'), by turn: their
+/// pins (`LocalFile::pin`) held until the engine ends the turn (`act`), so
+/// no other download makes room with them while its runtime may still read
+/// them by path. Any other copy of the file (a reply that sends it on)
+/// holds the same pin, as long as it lives.
+type TurnFiles = Arc<Mutex<HashMap<String, Vec<Kept>>>>;
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -1640,19 +1642,19 @@ impl RuntimeLane {
             while let Some(mut c) = rx.recv().await {
                 // an answer's files, downloaded as a turn's are, then named
                 // in its words with where each is (`with_files`)
-                let keep = |turn: &str, used: Vec<InUse>| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(used);
+                let keep = |turn: &str, files: &[LocalFile]| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(files.iter().map(|f| f.pin.clone()));
                 match &mut c {
                     Command::Tell { turn, text, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let (files, used) = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
-                            keep(turn, used);
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, &files);
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
                         }
                     }
                     Command::Answer { turn, words, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let (files, used) = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
-                            keep(turn, used);
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, &files);
                             *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a.by_name, a.refs.len(), &files));
                         }
                     }
@@ -1674,8 +1676,8 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let ((files, used), note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
-                    keep(&ts.turn, used);
+                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    keep(&ts.turn, &files);
                     ts.files = files;
                     // its age first (a late message's), then a late card
                     // answer's turn's own note (engine.rs `hand`)
@@ -1731,21 +1733,18 @@ fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bo
 }
 
 /// A message's attachments, from the chat's blobs to scratch files, each
-/// streamed (transfer.rs), and each in use while the `InUse`s live (so one
-/// downloaded never goes for the next); one that does not download is left
-/// out, and the runtime is told how many (`with_files`).
-async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> (Vec<LocalFile>, Vec<InUse>) {
-    let (mut out, mut used) = (Vec::new(), Vec::new());
+/// streamed (transfer.rs), and each pinned while any copy of it lives (so
+/// one downloaded never goes for the next); one that does not download is
+/// left out, and the runtime is told how many (`with_files`).
+async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> Vec<LocalFile> {
+    let mut out = Vec::new();
     for r in refs.iter().take(limits::ATTACHMENTS_MAX) {
         match crate::transfer::download(api, agent, fragment, r, scratch).await {
-            Ok((path, u)) => {
-                out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size, pin: Default::default() });
-                used.push(u);
-            }
+            Ok((path, used)) => out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size, pin: Kept(Some(Arc::new(used))) }),
             Err(e) => crate::ev!("attachment.unread", { "sha256": r.sha256, "size": r.size, "error": e.to_string() }),
         }
     }
-    (out, used)
+    out
 }
 
 // ---- the journal read back: a turn's note (note.rs), a late card answer (cards.rs) ----

@@ -733,7 +733,10 @@ impl Loop {
             for (i, f) in ts.files.iter().enumerate().filter(|(_, f)| f.size <= limits::HERMES_MEDIA_MAX_BYTES) {
                 let id = format!("in-{}-{i}", ts.turn);
                 let url = format!("http://{}/relay/media/{id}", self.cfg.listen);
-                t.insert(id, Media { file: f.clone() });
+                // unpinned: the turn keeps its files; a reply that sends
+                // one on pins it then (`SendMedia`), so the table never
+                // holds a message's files past their use
+                t.insert(id, Media { file: LocalFile { pin: Kept::default(), ..f.clone() } });
                 hosted.push((url, f.media_type.clone()));
             }
         }
@@ -1076,7 +1079,8 @@ impl Loop {
                 if let Some(name) = filename {
                     m.file.name = name;
                 }
-                self.attach(&chat, caption, m.file).await
+                // a message's file sent on is pinned for the reply's life
+                self.attach(&chat, caption, crate::scratch::pinned(m.file)).await
             }
             Action::GetChatInfo { chat } => {
                 let name = self.by_chat.get(&chat).and_then(|t| self.inflight.get(t)).map(|f| f.start.chat_name.clone()).or_else(|| wire::split_chat_id(&chat).map(|(f, _)| f.split('.').next().unwrap_or(f).to_string())).unwrap_or(chat);

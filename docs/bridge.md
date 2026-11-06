@@ -588,8 +588,8 @@ streamed to `PUT …/blobs/{sha256}` with its length; an upload to
 GiB) and 1024 files (`scratch.rs`). A transfer reserves its room before
 it starts, until it is done; a file in use is never let go (a running
 turn's, until the engine ends it; a reply's, from the relay taking it
-until its post is done or given up; an upload the relay still keeps for
-Hermes). A reply whose file could not be read all the same posts its
+until its post is done or given up, a message's file a reply sends on
+too; an upload the relay still keeps for Hermes). A reply whose file could not be read all the same posts its
 words saying so. Room is made from the rest, those
 used least lately first, the relay's oldest uploads let go when it needs
 theirs; a file with no room left is refused (told as unread, or 507). SimpleX keeps its own 25 MiB a file (`simplex/run.rs`,

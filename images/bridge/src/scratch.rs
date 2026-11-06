@@ -136,10 +136,10 @@ impl Scratch {
         let mut bytes: u64 = files.iter().map(|f| f.size).sum::<u64>() + reserved.values().sum::<u64>();
         let mut count = files.len() + reserved.len();
         let fits = |bytes: u64, count: usize| bytes.saturating_add(size) <= self.max_bytes && count < self.max_files;
-        let mut free: Vec<&Entry> = {
-            let used = IN_USE.lock().expect("the files in use");
-            files.iter().filter(|f| !used.contains_key(&f.path)).collect()
-        };
+        // held while files are chosen and removed: a file taken into use
+        // meanwhile (`pinned`) is either kept, or seen gone by its taker
+        let used = IN_USE.lock().expect("the files in use");
+        let mut free: Vec<&Entry> = files.iter().filter(|f| !used.contains_key(&f.path)).collect();
         free.sort_by_key(|f| f.used);
         let freeable: u64 = free.iter().map(|f| f.size).sum();
         if !fits(bytes.saturating_sub(freeable), count - free.len()) {
@@ -158,6 +158,7 @@ impl Scratch {
             bytes -= f.size;
             count -= 1;
         }
+        drop(used);
         if freed.0 > 0 {
             crate::ev!("scratch.freed", { "dir": self.dir.display().to_string(), "files": freed.0, "bytes": freed.1 });
         }
@@ -194,6 +195,22 @@ impl Scratch {
         }
         Ok(out)
     }
+}
+
+/// `file`, pinned (`LocalFile::pin`): as it was if it already is, else
+/// taken into use now if it is still there (a copy kept unpinned, as the
+/// relay's table keeps a message's files, sent on in a reply). Atomic with
+/// any scratch making room: never one it lets go after.
+pub fn pinned(file: crate::runtime::LocalFile) -> crate::runtime::LocalFile {
+    if file.pin.0.is_some() {
+        return file;
+    }
+    let used = InUse::new([file.path.clone()]);
+    if !file.path.is_file() {
+        // gone already: its post says it could not be attached
+        return file;
+    }
+    crate::runtime::LocalFile { pin: crate::runtime::Kept(Some(Arc::new(used))), ..file }
 }
 
 /// A file used now: the last to go.
