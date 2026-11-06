@@ -461,6 +461,16 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
     Ok(())
 }
 
+/// A queue message's body, the JSON value a cell sent (`queue_send`),
+/// decoded by serde_json from its JSON text as the routes decode theirs
+/// (`from_slice`), so its type has that one decoder in the Wasm and not a
+/// second, serde_wasm_bindgen one (`worker::Message::try_from`): the meter
+/// queue's `MeterRow` alone was a 44 KB visitor.
+pub(crate) fn queue_body<T: serde::de::DeserializeOwned>(raw: &worker::RawMessage) -> Result<T, String> {
+    let text = js_sys::JSON::stringify(&raw.body()).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
+    serde_json::from_slice(String::from(text).as_bytes()).map_err(|e| e.to_string())
+}
+
 /// A request to the Browser Rendering binding (`BROWSER`, wrangler.jsonc
 /// `browser`), through its `fetch`: the routes `@cloudflare/puppeteer`
 /// speaks to it, a WebSocket upgrade among them (card.rs).

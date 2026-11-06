@@ -175,6 +175,18 @@ pub struct Meter {
     pub rows: Vec<MeterRow>,
 }
 
+/// A batch on the ledger queue, on its way to its payer's ledger: from
+/// fragment `source`, its outbox's batch `seq`; or, `source` empty, a paid
+/// call's charge, which no fragment is told of (cell/src/meter.rs). The
+/// consumer decodes it from its JSON text (`serde_json::from_slice`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterBatch {
+    pub payer: String,
+    pub source: String,
+    pub seq: i64,
+    pub meter: Meter,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterRow {

@@ -33,7 +33,7 @@
 //! fragment asks through the gate (ledger.rs `may`): its isolate asks the
 //! owner's ledger at most once a minute, rather than on every write.
 
-use fragment_core::ledger::{Meter, MeterRow, Metered, Refused, Spend};
+use fragment_core::ledger::{Meter, MeterBatch, MeterRow, Metered, Refused, Spend};
 use fragment_core::price::{StorageClass, Usage};
 use fragment_proto::ledger::{PutCap, SetFragmentCap, Why};
 use fragment_proto::{ErrorCode, Role};
@@ -74,17 +74,6 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
 const _: () = assert!(BATCH_ROWS as usize <= fragment_core::ledger::BATCH_ROWS_MAX, "a fragment's batch is one the ledger takes");
-
-/// A batch on its way to its payer's ledger: from fragment `source`, its
-/// outbox's batch `seq`; or, `source` empty, a paid call's charge
-/// (`charge`), which no fragment is told of.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MeterBatch {
-    pub payer: String,
-    pub source: String,
-    pub seq: i64,
-    pub meter: Meter,
-}
 
 /// What the consumer tells the fragment its batch came to.
 #[derive(Debug, Serialize, Deserialize)]
@@ -424,20 +413,19 @@ pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
 }
 
 async fn consume_one(raw: RawMessage, env: &Env) {
-    let message = match Message::<MeterBatch>::try_from(raw) {
-        Ok(m) => m,
+    let b: MeterBatch = match js::queue_body(&raw) {
+        Ok(b) => b,
         Err(e) => {
             // not one a fragment sent: nothing can take it
-            console_error!("{}", json!({ "event": "meter.unreadable", "message": e.to_string() }));
+            console_error!("{}", json!({ "event": "meter.unreadable", "message": e }));
             return;
         }
     };
-    let b = message.body();
     let (metered, refused) = match ledger::ask(env, &b.payer, &b.meter).await {
         Ok(metered) => (Some(metered), None),
         Err(e) if e.refused.is_some() => (None, Some(e.message)),
         Err(_) => {
-            message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build());
+            raw.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build());
             return;
         }
     };
@@ -447,7 +435,7 @@ async fn consume_one(raw: RawMessage, env: &Env) {
         if refused.is_some() || rows_refused > 0 {
             console_error!("{}", json!({ "event": "ledger.charge-refused", "batch": b.meter.batch, "refused": refused, "rows": metered.map(|m| m.refused) }));
         }
-        message.ack();
+        raw.ack();
         return;
     }
     let acked = Acked { seq: b.seq, batch: b.meter.batch.clone(), metered, refused };
@@ -459,7 +447,7 @@ async fn consume_one(raw: RawMessage, env: &Env) {
     };
     match heard.await {
         // a fragment deleted since has nothing to forget
-        Ok(200 | 404) => message.ack(),
-        _ => message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build()),
+        Ok(200 | 404) => raw.ack(),
+        _ => raw.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build()),
     }
 }

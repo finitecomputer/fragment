@@ -944,3 +944,42 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     w.ok(Op::Sweep);
     assert_eq!(w.store.entry("aig:old"), None, "forgotten as any is");
 }
+
+/// The two bodies the ledger queue carries, as this release and the one
+/// before write them (`serde_json::to_value`, sent as JSON and read back
+/// by the consumer from `JSON.stringify` of what arrives), every kind of
+/// usage among their rows: the outbox's batch, and a paid call's charge.
+fn queued_batches() -> Vec<(MeterBatch, &'static str)> {
+    let usages = [
+        Usage::Tokens { model: "@cf/zai-org/glm-5.3".into(), input: 1200, cached_input: 300, cache_write: 0, output: 450 },
+        Usage::Neurons { milli: 100_000_000 },
+        Usage::Awake { instance: "standard-1".into(), ms: 60_000 },
+        Usage::Storage { class: StorageClass::R2, byte_hours: 9 },
+        Usage::Storage { class: StorageClass::Sqlite, byte_hours: 1 },
+        Usage::Storage { class: StorageClass::Git, byte_hours: 2 },
+        Usage::Requests { count: 3 },
+        Usage::DynamicWorkers { count: 1 },
+        Usage::Browser { ms: 1500 },
+        Usage::Images { count: 4 },
+        Usage::Key { key: "brave".into(), units: 1 },
+    ];
+    let rows: Vec<MeterRow> = usages.into_iter().enumerate().map(|(i, u)| row(&format!("r:{i}"), u, Some("notes--8x7j"), T0 + i as i64)).collect();
+    let outbox = MeterBatch { payer: "npub1owner".into(), source: "notes--8x7j".into(), seq: 7, meter: Meter { batch: "frag:k:7".into(), rows } };
+    let charged = MeterRow { agent: Some("npub1agent".into()), computer: Some("cmp-1".into()), fragment: None, ..row("key:cmp-1:00aa", Usage::Key { key: "brave".into(), units: 1 }, None, T0) };
+    let charge = MeterBatch { payer: "npub1owner".into(), source: String::new(), seq: 0, meter: Meter { batch: "key:cmp-1:00aa".into(), rows: vec![charged] } };
+    vec![(outbox, OUTBOX), (charge, CHARGE)]
+}
+
+const OUTBOX: &str = r#"{"meter":{"batch":"frag:k:7","rows":[{"agent":null,"at_ms":1790812800000,"computer":null,"fragment":"notes--8x7j","ref":"r:0","usage":{"cache_write":0,"cached_input":300,"input":1200,"kind":"tokens","model":"@cf/zai-org/glm-5.3","output":450}},{"agent":null,"at_ms":1790812800001,"computer":null,"fragment":"notes--8x7j","ref":"r:1","usage":{"kind":"neurons","milli":100000000}},{"agent":null,"at_ms":1790812800002,"computer":null,"fragment":"notes--8x7j","ref":"r:2","usage":{"instance":"standard-1","kind":"awake","ms":60000}},{"agent":null,"at_ms":1790812800003,"computer":null,"fragment":"notes--8x7j","ref":"r:3","usage":{"byte_hours":9,"class":"r2","kind":"storage"}},{"agent":null,"at_ms":1790812800004,"computer":null,"fragment":"notes--8x7j","ref":"r:4","usage":{"byte_hours":1,"class":"sqlite","kind":"storage"}},{"agent":null,"at_ms":1790812800005,"computer":null,"fragment":"notes--8x7j","ref":"r:5","usage":{"byte_hours":2,"class":"git","kind":"storage"}},{"agent":null,"at_ms":1790812800006,"computer":null,"fragment":"notes--8x7j","ref":"r:6","usage":{"count":3,"kind":"requests"}},{"agent":null,"at_ms":1790812800007,"computer":null,"fragment":"notes--8x7j","ref":"r:7","usage":{"count":1,"kind":"dynamic_workers"}},{"agent":null,"at_ms":1790812800008,"computer":null,"fragment":"notes--8x7j","ref":"r:8","usage":{"kind":"browser","ms":1500}},{"agent":null,"at_ms":1790812800009,"computer":null,"fragment":"notes--8x7j","ref":"r:9","usage":{"count":4,"kind":"images"}},{"agent":null,"at_ms":1790812800010,"computer":null,"fragment":"notes--8x7j","ref":"r:10","usage":{"key":"brave","kind":"key","units":1}}]},"payer":"npub1owner","seq":7,"source":"notes--8x7j"}"#;
+const CHARGE: &str = r#"{"meter":{"batch":"key:cmp-1:00aa","rows":[{"agent":"npub1agent","at_ms":1790812800000,"computer":"cmp-1","fragment":null,"ref":"key:cmp-1:00aa","usage":{"key":"brave","kind":"key","units":1}}]},"payer":"npub1owner","seq":0,"source":""}"#;
+
+#[test]
+fn a_queued_batch_reads_back_from_its_json_text() {
+    for (batch, text) in queued_batches() {
+        assert_eq!(serde_json::to_value(&batch).unwrap().to_string(), text, "the form this release writes");
+        assert_eq!(serde_json::from_slice::<MeterBatch>(text.as_bytes()).unwrap(), batch, "{text}");
+    }
+    let unknown = OUTBOX.replacen(r#""batch":"frag:k:7""#, r#""batch":"frag:k:7","extra":1"#, 1);
+    assert!(serde_json::from_slice::<MeterBatch>(unknown.as_bytes()).is_err(), "a meter names only its batch and rows");
+    assert!(serde_json::from_slice::<MeterBatch>(b"{}").is_err());
+}
