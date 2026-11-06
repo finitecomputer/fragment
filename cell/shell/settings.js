@@ -43,7 +43,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, seg, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
+export function createSettings({ api, $, seg, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, markOffer }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -156,13 +156,12 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     };
     page.onscroll();
   }
-  // Each load of settings is numbered, and only the latest renders, while
-  // settings are shown: an older one that answers last (an action's reload, a
-  // second press, Back) read older state, and is dropped (#441).
-  let settingsLoads = 0;
-  // Each visit to settings, from another page (never a reload of them): an
-  // action's failure is said only in the visit it was pressed in (#439).
-  let visits = 0;
+  // Each load of settings is an ask (asks.js `settings-load`), and only the
+  // latest renders, while settings are shown: an older one that answers
+  // last (an action's reload, a second press, Back) read older state, and is
+  // dropped (#441). Each visit to settings, from another page (never a
+  // reload of them), is an ask too (`settings`): an action's failure is said
+  // only in the visit it was pressed in (#439).
   // A read of settings that failed on its way (no answer reached the page, or
   // a gateway's or a deploy's 502, 503, 504) is asked again by itself, calmly
   // (3 s doubling to 30 s, for READ_AGAIN_MS from the first such failure).
@@ -186,7 +185,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     again.since ??= Date.now();
     if (Date.now() - again.since >= READ_AGAIN_MS) return;
     again.timer = setTimeout(async () => {
-      const current = () => ticket === settingsLoads && isOpen();
+      const current = () => asks.current(ticket) && isOpen();
       if (!current()) return;
       const now = await Promise.all(failed.map((r) => read(r.path)));
       if (!current()) return;
@@ -200,8 +199,8 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
   // `failed`: what the action that asked for this load says once it renders
   // (a failure's notice, [title, text]).
   async function openSettings(push = true, failed = null) {
-    const ticket = ++settingsLoads;
-    const lost = () => ticket !== settingsLoads || !isOpen();
+    const ticket = asks.ask("settings-load");
+    const lost = () => !asks.current(ticket) || !isOpen();
     if (push) at(SETTINGS);
     // settings render with no notice: one of the page they came from stays
     // there, an action that worked takes its earlier failure's away, and
@@ -212,7 +211,7 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
       if (failed && noticeCurrent(gen)) notice(...failed);
     };
     if (!isOpen()) {
-      visits++;
+      asks.ask("settings");
       // a visit's reads are its own: asked again from its first failure
       clearTimeout(again.timer);
       again.since = null;
@@ -530,5 +529,5 @@ export function createSettings({ api, $, seg, account, navigation, notices, sect
     s.append(row);
     return s;
   }
-  return { openSettings, reopenSettings, skillsFragment, visit: () => visits };
+  return { openSettings, reopenSettings, skillsFragment };
 }
