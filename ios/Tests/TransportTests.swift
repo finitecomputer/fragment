@@ -95,7 +95,7 @@ struct TransportTests {
 
         first.drop()
         try await waitUntil("the socket dropped") { !session.connected }
-        #expect(session.timeline.drafts.isEmpty)
+        #expect(session.timeline.drafts["t1"]?.text == "Hal" && session.error == nil, "a reply being written stays, and nothing is said")
         try await waitUntil("the second socket") { stub.sockets.count == 2 }
         let second = stub.sockets[1]
         second.push(hello)
@@ -191,6 +191,108 @@ struct TransportTests {
         #expect(session.activeTurns.isEmpty)
     }
 
+    /// A socket closed as its object sleeps (4001) is opened again at once,
+    /// with nothing said, the composer open (sends go over HTTP) and the
+    /// reply being written kept; "Reconnecting…" only once it is not back
+    /// soon, and gone once it is. Only a repeated failure waits.
+    @Test func aSocketClosedAsItsObjectSleepsReconnectsQuietly() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        session.reconnectNoticeAfter = .milliseconds(300)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let first = stub.sockets[0]
+        first.push(hello)
+        try await waitUntil("its subscriptions") { first.sent.count == 2 }
+        first.push(frame("chat", 1, body: #"{"text":"Hi"}"#))
+        first.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+        first.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        first.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        first.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Half a reply","at":2500}"#)
+        try await waitUntil("a reply being written") { session.read && session.drafts.map(\.text) == ["Half a reply"] }
+
+        let clock = ContinuousClock(), closed = clock.now
+        first.close(URLSessionWebSocketTask.CloseCode(rawValue: 4001)!)
+        try await waitUntil("opened again") { stub.sockets.count == 2 }
+        #expect(clock.now - closed < .seconds(1), "at once, no wait")
+        #expect(session.error == nil && session.read && session.drafts.map(\.text) == ["Half a reply"], "nothing said, the composer open, the draft kept")
+        let second = stub.sockets[1]
+        second.push(hello)
+        try await waitUntil("its subscriptions") { second.sent.count == 2 }
+        second.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        second.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        try await waitUntil("caught up again") { session.caughtUp && session.workRead }
+        #expect(session.drafts.map(\.text) == ["Half a reply"] && session.error == nil, "its turn still runs: its draft stays")
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(session.error == nil, "back in time: never said")
+
+        // failing again and again: the second waits, and past the notice's time it is said
+        second.drop()
+        try await waitUntil("opened again") { stub.sockets.count == 3 }
+        stub.sockets[2].drop()
+        try await waitUntil("said") { session.error == ChatSession.reconnecting }
+        #expect(stub.sockets.count == 3, "a repeated failure backs off")
+        try await waitUntil("opened again, after a while", timeout: .seconds(8)) { stub.sockets.count == 4 }
+        stub.sockets[3].push(hello)
+        try await waitUntil("unsaid once back") { session.error == nil && session.connected }
+    }
+
+    /// A chat deleted (4004, or an upgrade answered 404) or one whose access
+    /// changed (4003, 403) is closed for good: said as the web's chat says
+    /// it, never reconnected, and a reply being written goes with it.
+    @Test func aChatClosedForGoodIsNeverReconnected() async throws {
+        for (end, said) in [("4004", ChatSession.deleted), ("4003", ChatSession.accessChanged), ("404", ChatSession.deleted), ("403", ChatSession.accessChanged)] {
+            let stub = Stub { _, _ in (404, "{}") }
+            let api = try stub.api()
+            defer { try? ChatDraftStore.removeAccount(api: api) }
+            let session = ChatSession(fragment: chat, api: api)
+            let run = Task { await session.run() }
+            try await waitUntil("a socket") { stub.sockets.count == 1 }
+            let first = stub.sockets[0]
+            if end.hasPrefix("40") && end.count == 3 {
+                // its upgrade refused, after a connection that had been open
+                first.push(hello)
+                try await waitUntil("its subscriptions") { first.sent.count == 2 }
+                first.close(URLSessionWebSocketTask.CloseCode(rawValue: 4001)!)
+                try await waitUntil("opened again") { stub.sockets.count == 2 }
+                stub.sockets[1].refuse(Int(end)!)
+            } else {
+                first.push(hello)
+                try await waitUntil("its subscriptions") { first.sent.count == 2 }
+                first.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+                first.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+                first.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+                first.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Half","at":2500}"#)
+                try await waitUntil("a reply being written") { session.drafts.count == 1 }
+                first.close(URLSessionWebSocketTask.CloseCode(rawValue: Int(end)!)!)
+            }
+            await run.value
+            let sockets = stub.sockets.count
+            #expect(session.error == said, "\(end): \(session.error ?? "nothing said")")
+            #expect(session.drafts.isEmpty && !session.connected, "\(end): nothing left writing")
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(stub.sockets.count == sockets, "\(end): no socket after")
+            // back to the app (its view's task runs it again): still closed, no socket
+            await session.run()
+            #expect(stub.sockets.count == sockets && session.error == said && session.closed == said, "\(end): a return to the app opens nothing")
+
+            // left and opened again: a new session asks anew
+            let library = Library()
+            library.sessions[chat.name] = session
+            library.leftChat(chat.name)
+            #expect(library.sessions[chat.name] == nil, "\(end): a closed session goes once the chat is left")
+        }
+        // one still open stays across leaving (its drafts and cursors)
+        let open = ChatSession(fragment: chat, api: try Stub { _, _ in (404, "{}") }.api())
+        let library = Library()
+        library.sessions[chat.name] = open
+        library.leftChat(chat.name)
+        #expect(library.sessions[chat.name] === open)
+    }
+
     @Test func stopPostsAStopForEachActiveTurn() async throws {
         let route = posts
         let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 9, replayed: false) : (404, "{}") }
@@ -256,12 +358,23 @@ struct TransportTests {
         }
     }
 
-    @Test func earlierMessagesAreAPageBeforeTheOldestAndNeverMoveTheCursor() async throws {
+    /// Earlier work is read in batches that grow with how little their
+    /// records take: a call or two, not twenty. What falls in the window
+    /// (from its oldest message on) is kept, for its turns' steps; what is
+    /// older only says which turns run. A batch that overflows the answer's
+    /// bound is read again at the first batch's size.
+    @Test func earlierWorkIsACallOrTwoAndKeepsWhatTheWindowShows() async throws {
+        // work 1 to 2000: t7's start at 500, then its steps; 871 to 940 are
+        // large (60 KB): a batch of them all is past the 4 MiB an answer holds
+        let large = String(repeating: "x", count: 60_000)
+        let work: @Sendable (Int64) -> String = { seq in
+            record("work", seq, body: seq == 500 ? #"{"kind":"turn.start","turn":"t7"}"# : #"{"kind":"turn.step","turn":"t7","text":"\#((871...940).contains(seq) ? large : "s")"}"#)
+        }
         let stub = Stub { seen, _ in
-            guard seen.route == "GET /api/f/chat--abc123/channels/chat" else { return (404, "{}") }
-            let before = Int64(seen.query["before"] ?? "") ?? 0
-            let page = (1..<before).map { record("chat", $0, body: #"{"text":"old"}"#) }.joined(separator: ",")
-            return (200, #"{"channel":"chat","records":[\#(page)],"next":null}"#)
+            guard seen.route == "GET /api/f/chat--abc123/channels/work" else { return (404, "{}") }
+            let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
+            return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
         }
         let api = try stub.api()
         defer { try? ChatDraftStore.removeAccount(api: api) }
@@ -271,15 +384,238 @@ struct TransportTests {
         try await waitUntil("a socket") { stub.sockets.count == 1 }
         let socket = stub.sockets[0]
         socket.push(hello)
-        for seq: Int64 in [31, 32] { socket.push(frame("chat", seq, body: #"{"text":"new"}"#)) }
-        socket.push(#"{"type":"subscribed","channel":"chat","next":32,"more":false}"#)
-        try await waitUntil("caught up") { session.caughtUp }
-        await session.loadEarlier()
-        let asked = try #require(stub.seen.first { $0.method == "GET" })
-        #expect(asked.query == ["before": "31", "limit": "50"])
-        #expect(session.timeline.records.count == 32)
-        #expect(session.timeline.cursors["chat"] == 32)
-        #expect(!session.hasEarlier)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        // the window's oldest message is at work 960's time; the backlog is the last 1000
+        socket.push(frame("chat", 960, body: #"{"text":"Look this up"}"#))
+        for seq: Int64 in 1001...2000 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":960,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":2000,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t7"] }
+        let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/work" }.map(\.query)
+        #expect(Array(asked.prefix(3)) == [["before": "1001", "limit": "50"], ["before": "951", "limit": "950"], ["before": "951", "limit": "50"]],
+                "a small batch grows; one past the bound is read again small")
+        #expect(asked.count <= 6, "\(asked.count) calls")
+        #expect(session.error == nil)
+        #expect(session.timeline.records.contains { $0.id == "work:960" }, "its steps in the window are kept")
+        #expect(!session.timeline.records.contains { $0.id == "work:500" }, "older work only says which turns run")
+    }
+
+    /// A completed turn straddling the backlog: its steps and end are held,
+    /// its start older than both the backlog and the oldest message shown.
+    /// Earlier work goes on past that message until the start, so its card
+    /// (drawn from its start) shows.
+    @Test func aCompletedTurnStraddlingTheBacklogGetsItsStart() async throws {
+        let work: @Sendable (Int64) -> String = { seq in
+            record("work", seq, body: seq == 50 ? #"{"kind":"turn.start","turn":"t"}"# : seq == 110 ? #"{"kind":"turn.end","turn":"t"}"# : #"{"kind":"turn.step","turn":"t","tool":"search"}"#)
+        }
+        let stub = Stub { seen, _ in
+            guard seen.route == "GET /api/f/chat--abc123/channels/work" else { return (404, "{}") }
+            let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
+            return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        // its intermediate reply is the oldest message shown, after its start
+        socket.push(frame("chat", 95, body: #"{"text":"Still looking","turn":"t"}"#))
+        for seq: Int64 in 101...110 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":95,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":110,"more":false}"#)
+        try await waitUntil("its start read back") { session.timeline.turns[TurnKey(agent: "npub1agent", id: "t")]?.startAt != nil }
+        #expect(session.activeTurns.isEmpty && session.error == nil)
+        #expect(!session.activity.cards.isEmpty, "its steps show as a card")
+    }
+
+    /// A chat of 1,000 messages, opened on its newest 50: scrolled up, a
+    /// page at a time before the oldest, never moving the live cursor; past
+    /// the window's 600 its newest end goes. A live message then waits
+    /// outside the window, counted; scrolled down, the window pages newer
+    /// until it reaches the newest; Latest reads the newest page at once.
+    /// Tool work k, between messages 990 + k and 991 + k.
+    nonisolated private static func toolWork(_ k: Int64) -> String {
+        #"{"channel":"work","seq":\#(k),"at":\#((990 + k) * 1000 + 500),"principal":"npub1agent","kind":"message","body":{"kind":"turn.step","turn":"t\#(k)","tool":"search"}}"#
+    }
+
+    @Test func aLongChatPagesBothWaysInAWindowOf600() async throws {
+        let stub = Stub { seen, _ in
+            let limit = Int64(seen.query["limit"] ?? "") ?? 0
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/chat":
+                let seqs: [Int64]
+                if let before = seen.query["before"].flatMap({ Int64($0) }) { seqs = Array(max(1, before - limit)..<min(before, 1002)) }
+                else { let after = Int64(seen.query["after"] ?? "") ?? 0; seqs = Array((after + 1)...min(after + limit, 1001)).filter { $0 <= 1001 } }
+                let page = seqs.map { record("chat", $0, body: #"{"text":"m"}"#) }.joined(separator: ",")
+                return (200, #"{"channel":"chat","records":[\#(page)],"next":null}"#)
+            case "GET /api/f/chat--abc123/channels/work":
+                // tool work only between messages 990 and 1000: work 1...10
+                let seqs: [Int64]
+                if let before = seen.query["before"].flatMap({ Int64($0) }) { seqs = Array(max(1, before - limit)..<min(before, 11)) }
+                else { let after = Int64(seen.query["after"] ?? "") ?? 0; seqs = after >= 10 ? [] : Array((after + 1)...min(after + limit, 10)) }
+                return (200, #"{"channel":"work","records":[\#(seqs.map(Self.toolWork).joined(separator: ","))],"next":null}"#)
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        for seq: Int64 in 951...1000 { socket.push(frame("chat", seq, body: #"{"text":"m"}"#)) }
+        for k: Int64 in 1...10 { socket.push(#"{"type":"record",\#(Self.toolWork(k).dropFirst())"#) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":1000,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":10,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        #expect(session.hasOlder, "a full first page: there may be more")
+
+        await session.loadOlder()
+        let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/chat" }.map(\.query)
+        #expect(asked == [["before": "951", "limit": "50"]])
+        #expect(session.rows.first?.id == "chat:901" && session.rows.last?.id == "chat:1000" && session.timeline.cursors["chat"] == 1000)
+        for _ in 0..<10 { await session.loadOlder() }
+        #expect(session.timeline.chatCount == 600 && !session.detached, "600 held, still the newest")
+        await session.loadOlder()
+        #expect(session.timeline.chatCount == 600 && session.detached, "past 600, the newest end goes")
+        #expect(session.rows.first?.id == "chat:351" && session.rows.last?.id == "chat:950")
+        #expect(!session.timeline.records.contains { $0.channel == "work" }, "a stretch with no tool work")
+
+        // a live message while paged back: counted, not in the window
+        let heard = session.heard
+        socket.push(frame("chat", 1001, body: #"{"text":"new"}"#))
+        try await waitUntil("heard") { session.heard == heard + 1 }
+        #expect(session.rows.last?.id == "chat:950" && session.timeline.cursors["chat"] == 1001)
+
+        // scrolled down: the page after the window's newest
+        await session.loadNewer()
+        #expect(stub.seen.last { $0.route == "GET /api/f/chat--abc123/channels/chat" }?.query == ["after": "950", "limit": "50"])
+        #expect(session.rows.last?.id == "chat:1000" && session.detached && session.timeline.chatCount == 600)
+        #expect(session.timeline.records.contains { $0.id == "work:5" }, "a newer page gets its tool steps though the window held none")
+        await session.loadNewer()
+        #expect(session.rows.last?.id == "chat:1001" && !session.detached, "the newest reached: the chat's again")
+
+        // Latest from far back: the newest page at once
+        for _ in 0..<13 { await session.loadOlder() }
+        #expect(session.detached)
+        await session.resetToLatest()
+        #expect(stub.seen.last { $0.route == "GET /api/f/chat--abc123/channels/chat" }?.query == ["before": "1002", "limit": "50"])
+        #expect(!session.detached && session.rows.first?.id == "chat:952" && session.rows.last?.id == "chat:1001")
+    }
+
+    /// Paged back to the chat's first message and forward again, the window
+    /// pages back once more (its oldest end went); a stretch holding no work
+    /// still gets its newer pages' tool steps (`workIndex`); and messages
+    /// replayed on reconnect count on the pill as live ones.
+    @Test func aWindowPagedBackComesBackWhole() async throws {
+        // 300 messages; tool work only for the last 20 (work 1...20, between messages 281 and 300)
+        let stub = Stub { seen, _ in
+            let limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let before = seen.query["before"].flatMap { Int64($0) }, after = Int64(seen.query["after"] ?? "") ?? 0
+            func span(_ top: Int64) -> [Int64] { before.map { Array(max(1, $0 - limit)..<min($0, top + 1)) } ?? (after >= top ? [] : Array((after + 1)...min(after + limit, top))) }
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/chat":
+                return (200, #"{"channel":"chat","records":[\#(span(300).map { record("chat", $0, body: #"{"text":"m"}"#) }.joined(separator: ","))],"next":null}"#)
+            case "GET /api/f/chat--abc123/channels/work":
+                let page = span(20).map { k in #"{"channel":"work","seq":\#(k),"at":\#((280 + k) * 1000 + 500),"principal":"npub1agent","kind":"message","body":{"kind":"turn.step","turn":"t\#(k)","tool":"search"}}"# }
+                return (200, #"{"channel":"work","records":[\#(page.joined(separator: ","))],"next":null}"#)
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let first = stub.sockets[0]
+        first.push(hello)
+        try await waitUntil("its subscriptions") { first.sent.count == 2 }
+        for seq: Int64 in 251...300 { first.push(frame("chat", seq, body: #"{"text":"m"}"#)) }
+        for k: Int64 in 1...20 { first.push(#"{"type":"record","channel":"work","seq":\#(k),"at":\#((280 + k) * 1000 + 500),"principal":"npub1agent","kind":"message","body":{"kind":"turn.step","turn":"t\#(k)","tool":"search"}}"#) }
+        first.push(#"{"type":"subscribed","channel":"chat","next":300,"more":false}"#)
+        first.push(#"{"type":"subscribed","channel":"work","next":20,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        // to the first message, then on, a window of 600 never detaches here: back at its first, hasOlder is no
+        for _ in 0..<6 { await session.loadOlder() }
+        #expect(session.rows.first?.id == "chat:1" && !session.hasOlder)
+
+        // a reconnect replays two messages: both count
+        let heard = session.heard
+        first.drop()
+        try await waitUntil("the second socket") { stub.sockets.count == 2 }
+        let second = stub.sockets[1]
+        second.push(hello)
+        try await waitUntil("its subscriptions") { second.sent.count == 2 }
+        // (no new messages on the server here: these are the live ones it replays)
+        second.push(frame("chat", 301, body: #"{"text":"while away"}"#))
+        second.push(frame("chat", 302, body: #"{"text":"while away too"}"#))
+        second.push(#"{"type":"subscribed","channel":"chat","next":302,"more":false}"#)
+        second.push(#"{"type":"subscribed","channel":"work","next":20,"more":false}"#)
+        try await waitUntil("caught up") { session.caughtUp && session.workRead }
+        #expect(session.heard == heard + 2, "a catch-up's replay counts")
+        #expect(session.rows.last?.id == "chat:302")
+        // its oldest end goes as the window passes its bound: there are older messages again
+        for seq: Int64 in 303...602 { second.push(frame("chat", seq, body: #"{"text":"m"}"#)) }
+        try await waitUntil("its oldest end gone") { session.rows.first?.id != "chat:1" }
+        #expect(session.hasOlder, "its oldest end evicted, older messages are there again")
+    }
+
+    /// Steps and a prompt after the newest message, heard while paged back,
+    /// are the chat's when it rejoins the newest: by Latest, and by paging
+    /// forward to its end.
+    @Test func rejoiningTheNewestBringsTheWorkAfterItsLastMessage() async throws {
+        // 700 messages; work 1...6 after message 700: five steps, then a prompt
+        let work: @Sendable (Int64) -> String = { k in
+            #"{"channel":"work","seq":\#(k),"at":\#(700_000 + 100 * k),"principal":"npub1agent","kind":"message","body":{"kind":"\#(k == 6 ? "turn.prompt" : "turn.step")","turn":"t","tool":"search","text":"Go on?"}}"#
+        }
+        let stub = Stub { seen, _ in
+            let limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let before = seen.query["before"].flatMap { Int64($0) }, after = Int64(seen.query["after"] ?? "") ?? 0
+            func span(_ top: Int64) -> [Int64] { before.map { Array(max(1, $0 - limit)..<min($0, top + 1)) } ?? (after >= top ? [] : Array((after + 1)...min(after + limit, top))) }
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/chat":
+                return (200, #"{"channel":"chat","records":[\#(span(700).map { record("chat", $0, body: #"{"text":"m"}"#) }.joined(separator: ","))],"next":null}"#)
+            case "GET /api/f/chat--abc123/channels/work":
+                return (200, #"{"channel":"work","records":[\#(span(6).map(work).joined(separator: ","))],"next":null}"#)
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        for seq: Int64 in 651...700 { socket.push(frame("chat", seq, body: #"{"text":"m"}"#)) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":700,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":0,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        func pageBack() async { while !session.detached { await session.loadOlder() } }
+        await pageBack()
+        // heard while paged back: the steps and the prompt after the newest message
+        for k: Int64 in 1...6 { socket.push(#"{"type":"record",\#(work(k).dropFirst())"#) }
+        try await waitUntil("heard") { session.timeline.cursors["work"] == 6 }
+        #expect(!session.timeline.records.contains { $0.channel == "work" }, "paged back, outside the window")
+
+        await session.resetToLatest()
+        #expect(!session.detached && (1...6).allSatisfy { k in session.timeline.records.contains { $0.id == "work:\(k)" } }, "Latest: the chat whole, its prompt too")
+
+        await pageBack()
+        #expect(!session.timeline.records.contains { $0.channel == "work" })
+        while session.detached { await session.loadNewer() }
+        #expect((1...6).allSatisfy { k in session.timeline.records.contains { $0.id == "work:\(k)" } }, "paged forward to its end: whole too")
     }
 }
 

@@ -145,6 +145,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 #latest { position: absolute; bottom: 12px; padding: 9px 15px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 3px 12px #0002; font: inherit; font-size: 13px; cursor: pointer; }
 .column { width: min(760px, calc(100vw - 16px)); margin: 0 0 0 max(8px, calc((100vw - 760px) / 2)); padding: 16px 17px 32px; }
 .msg { margin: 20px 0; }
+/* a long chat lays out only the items near the reader: one off screen is
+   skipped at its last drawn height (an estimate until drawn once) */
+.column > * { content-visibility: auto; contain-intrinsic-size: auto 120px; }
 /* the first run's making, as the platform has it (chat.js setupNodes): no one's message */
 .setup-card { margin: 20px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: var(--chat-message-radius); background: var(--surface-subtle); font-size: 13px; }
 .setup-title { margin: 0 0 10px; color: var(--text-secondary); font-weight: 600; }

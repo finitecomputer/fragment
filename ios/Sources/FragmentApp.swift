@@ -19,6 +19,10 @@ final class Library {
     var sessions: [String: ChatSession] = [:]
     /// Their agents' fragments in their computer's order (`loadComputer`).
     var agentOrder: [String] = []
+    /// Where this deployment serves fragments' pages, from a fragment of
+    /// theirs' canonical URL, read once (`loadPages`): until it is, no link
+    /// is one of theirs, and every link opens in Safari.
+    var pages: FragmentPages?
     /// Their computer's `phase` as last read (`ComputerView`), or nil.
     var computerPhase: String?
     @ObservationIgnored private var loadID = UUID()
@@ -46,6 +50,19 @@ final class Library {
     }
     var agent: FragmentSummary? { agents.first { $0.name == selectedAgent } ?? agents.first }
     func agent(for identity: String) -> FragmentSummary? { agents.first { identities[$0.name] == identity } }
+    /// The fragment of the person's list a link is a page of (the web's
+    /// "Open" for one: templates/chat/site/chat.js `openBeside`), opening at
+    /// that page; none for another's or any other address, which Safari opens.
+    func fragment(linkedBy url: URL) -> FragmentSummary? {
+        guard let name = MessageLinks.fragmentName(url, pages: pages), var found = fragments.first(where: { $0.name == name }) else { return nil }
+        if found.kind != "chat" { found.link = url }
+        return found
+    }
+    /// A chat left: a session of it closed for good goes, so opening it
+    /// again asks anew what it is now (deleted, or open to them again).
+    func leftChat(_ name: String) {
+        if sessions[name]?.closed != nil { sessions.removeValue(forKey: name) }
+    }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]
@@ -86,6 +103,7 @@ final class Library {
             if loadID == requestID { error = nil }
         } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
         await loadImported(api, requestID)
+        await loadPages(api)
         await titleUntitled(api)
     }
     /// The person's agents in their computer's order (`ComputerView.agents`,
@@ -107,6 +125,11 @@ final class Library {
         let phase = read.computers.first?.phase
         if computerPhase != phase { computerPhase = phase }
         for agent in taken where identities[agent.fragment] != agent.identity { identities[agent.fragment] = agent.identity }
+    }
+    private func loadPages(_ api: FragmentAPI) async {
+        guard pages == nil, let mine = fragments.first(where: { $0.role == "owner" }) else { return }
+        let status: FragmentStatus? = try? await api.request("api/f/\(mine.name)/status")
+        if let status, let found = FragmentPages(canonical: status.urls.canonical, name: mine.name) { pages = found }
     }
     /// Told the list changed: read again a moment after, so a burst (each
     /// message of a reply streaming in) is one read, as the web's
@@ -281,17 +304,8 @@ struct FragmentRoot: View {
     private func shell(_ api: FragmentAPI) -> some View {
         ZStack(alignment: .leading) {
             Group {
-                if showingApps {
-                    NavigationStack {
-                        AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
-                            .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
-                                }
-                            }
-                    }
-                } else {
+                    // Your Apps is pushed onto the page it was opened from, so
+                    // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
                         content(api)
                             .navigationTitle(title)
@@ -301,7 +315,8 @@ struct FragmentRoot: View {
                                     Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
                                 }
                                 ToolbarItemGroup(placement: .topBarTrailing) {
-                                    if page != .launcher && page != .apps {
+                                    // a chat has no New chat of its own: the sidebar's starts one
+                                    if page == .history || page == .settings {
                                         Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
                                     }
                                     if page != .apps {
@@ -309,8 +324,11 @@ struct FragmentRoot: View {
                                     }
                                 }
                             }
+                            .navigationDestination(isPresented: $showingApps) {
+                                AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
+                                    .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
+                            }
                     }
-                }
             }
             .accessibilityHidden(sidebar)
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
@@ -327,6 +345,9 @@ struct FragmentRoot: View {
         .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(scenePhase)") {
             if scenePhase == .active { await library.load(api); await library.watch(api) }
         }
+        .onChange(of: page) { left, _ in
+            if case .chat(let name) = left { library.leftChat(name) }
+        }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }
         }
@@ -338,7 +359,7 @@ struct FragmentRoot: View {
         case .chat(let name):
             if let chat = library.fragments.first(where: { $0.name == name }) {
                 if let session = try? library.session(for: chat, api: api) {
-                    ChatView(session: session, library: library).id(chat.name)
+                    ChatView(session: session, library: library, open: { open($0) }).id(chat.name)
                 } else {
                     ContentUnavailableView("Your drafts are safe", systemImage: "square.and.pencil", description: Text("Finish or discard a draft in another chat before opening more conversations."))
                 }
@@ -354,7 +375,6 @@ struct FragmentRoot: View {
         }
     }
     private var title: String {
-        if showingApps { return "Your Apps" }
         switch page {
         case .launcher: return "Finite.Computer"
         case .chat(let name): return library.fragments.first { $0.name == name }?.displayTitle ?? "Chat"

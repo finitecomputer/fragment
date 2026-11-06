@@ -17,7 +17,7 @@
 //! it is the card.
 
 use fragment_core::{blob, site};
-use fragment_proto::{ErrorCode, Role};
+use fragment_proto::{limits, ErrorCode, Role};
 use serde_json::json;
 use worker::*;
 
@@ -84,7 +84,9 @@ impl FragmentCell {
             Some(size) => (size, false),
             None => {
                 let body = req.inner().body().ok_or_else(|| CellError::invalid("a blob upload carries the bytes as its body"))?;
-                let (size, digest) = js::blob_put(&self.env, &key, body).await?;
+                // the router checked the length it declares (`blob_length`)
+                let size = req.headers().get("content-length")?.and_then(|l| l.parse::<u64>().ok()).filter(|n| *n <= limits::BLOB_MAX_BYTES).ok_or_else(|| CellError::invalid("a blob upload declares its content-length"))?;
+                let digest = js::blob_put(&self.env, &key, body, size).await?;
                 if digest != sha {
                     js::blob_delete(&self.env, &[key]).await?;
                     return Err(CellError::invalid(format!("the bytes hash to {digest}, not {sha}")));

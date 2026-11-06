@@ -124,13 +124,14 @@ const CHAT_LOOK_MS: u64 = 30_000;
 /// The tickets an agent's link took, kept until they would have run out
 /// anyway, at most (each holds 10 minutes; its owner makes them by hand).
 const USED_MAX: usize = 64;
-/// A reply's file sent over SimpleX, at most: the chat's own bound on an
-/// attachment, so every file a reply carries can go (the chat takes none
-/// bigger). XFTP takes up to 1 GB; the platform's relay carries 32 MiB a
-/// connection both ways, four at once, 2 GiB a computer a day
-/// (`fragment_core::relay`), so this, padded into XFTP's 4 MB chunks (28
-/// MB), is one connection's worth: about four minutes at 100 KB/s.
-const SEND_BYTES_MAX: u64 = crate::limits::ATTACHMENT_MAX_BYTES;
+/// A file carried over SimpleX either way, at most: a reply's sent, an
+/// owner's forwarded to the chat. Its own, below a chat's attachment
+/// (`limits::ATTACHMENT_MAX_BYTES`): XFTP takes up to 1 GB, but the
+/// platform's relay carries 32 MiB a connection both ways, four at once,
+/// 2 GiB a computer a day (`fragment_core::relay`), so this, padded into
+/// XFTP's 4 MB chunks (28 MB), is one connection's worth: about four
+/// minutes at 100 KB/s. A reply's larger file stays in the chat alone.
+const FILE_BYTES_MAX: u64 = 25 * 1024 * 1024;
 /// `fragment_core::relay::BYTES_MAX`, which the cell holds a relay to (its
 /// own workspace: a copy, for the assertion below).
 const RELAY_BYTES_MAX: u64 = 32 << 20;
@@ -140,7 +141,7 @@ const SENDING_MAX: usize = crate::limits::ATTACHMENTS_MAX;
 /// A file not uploaded this long after its send was answered is given up
 /// on: its send cancelled at the core, its copy let go, and its note sent.
 /// The core retries a server it cannot reach for good, saying nothing (as
-/// for a receive, `FILE_WAIT_MS`); `SEND_BYTES_MAX` at 100 KB/s is about
+/// for a receive, `FILE_WAIT_MS`); `FILE_BYTES_MAX` at 100 KB/s is about
 /// four minutes.
 const SEND_WAIT_MS: u64 = 5 * 60 * 1000;
 /// Entries of a link's `OUT_DIR` one sweep reads, at most.
@@ -149,7 +150,7 @@ const OUT_SWEEP_MAX: usize = 1024;
 /// folder each (`<life>-<n>`), so its receiver sees the file's own name.
 pub const OUT_DIR: &str = "out";
 
-const _: () = assert!(SEND_BYTES_MAX.div_ceil(4_000_000) * 4_000_000 < RELAY_BYTES_MAX && SENDING_MAX <= OUT_SWEEP_MAX, "a file, padded into chunks, is one relay's worth, and the sweep sees every send");
+const _: () = assert!(FILE_BYTES_MAX.div_ceil(4_000_000) * 4_000_000 < RELAY_BYTES_MAX && SENDING_MAX <= OUT_SWEEP_MAX, "a file, padded into chunks, is one relay's worth, and the sweep sees every send");
 const _: () = assert!(DISPLAY_NAME_MAX <= wire::NAME_MAX_BYTES, "an agent's name is one the wire takes");
 
 /// What the image gives the bridge for SimpleX (main.rs reads it).
@@ -378,7 +379,7 @@ pub fn file_name(name: &str) -> String {
 /// A reply's files, each copied into a folder of its own in `out` (a
 /// link's `OUT_DIR`) under its own name made safe (`file_name`), with what
 /// it goes as (`file_kind`); and, in a note's words, those that cannot go
-/// (empty, past `SEND_BYTES_MAX`, unread, or not written), which stay in
+/// (empty, past `FILE_BYTES_MAX`, unread, or not written), which stay in
 /// the chat alone. At most a reply's files (`limits::ATTACHMENTS_MAX`).
 pub async fn outgoing(out: &Path, files: &[LocalFile]) -> (Vec<Outgoing>, Vec<&'static str>) {
     // a folder's name is this life's start and a count: never another's,
@@ -388,9 +389,9 @@ pub async fn outgoing(out: &Path, files: &[LocalFile]) -> (Vec<Outgoing>, Vec<&'
     let life = *LIFE.get_or_init(crate::log::now_ms);
     let (mut sent, mut kept) = (vec![], vec![]);
     for f in files.iter().take(crate::limits::ATTACHMENTS_MAX) {
-        let fits = tokio::fs::metadata(&f.path).await.is_ok_and(|m| m.len() > 0 && m.len() <= SEND_BYTES_MAX);
+        let fits = tokio::fs::metadata(&f.path).await.is_ok_and(|m| m.len() > 0 && m.len() <= FILE_BYTES_MAX);
         let read = if fits { tokio::fs::read(&f.path).await.ok() } else { None };
-        let Some(bytes) = read.filter(|b| !b.is_empty() && b.len() as u64 <= SEND_BYTES_MAX) else {
+        let Some(bytes) = read.filter(|b| !b.is_empty() && b.len() as u64 <= FILE_BYTES_MAX) else {
             crate::ev!("simplex.file_kept", { "name": wire::cut(&f.name, 100), "why": "empty, unread, or past the bound" });
             kept.push(words_of(&f.media_type));
             continue;
@@ -1661,7 +1662,7 @@ impl Manager {
             Resp::FileReady { file } if s.files.contains_key(file) => self.act(f, Action::Ask(Cmd::Receive { file: *file })),
             Resp::FileDone { file, path } => match s.files.remove(file) {
                 Some((inbound, _)) => {
-                    let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size) };
+                    let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size), pin: Default::default() };
                     self.post(f, inbound, Some(local), None);
                 }
                 // one given up on (`files_overdue`) that came anyway, its
@@ -1695,7 +1696,7 @@ impl Manager {
         let Some(file) = inbound.file.clone() else {
             return self.post(f, inbound, None, None);
         };
-        if file.size > crate::limits::ATTACHMENT_MAX_BYTES {
+        if file.size > FILE_BYTES_MAX {
             let note = file_note(&inbound.kind, &format!("was too large to carry here ({} MB)", file.size / 1_000_000));
             return self.post(f, inbound, None, Some(note));
         }
@@ -1707,7 +1708,7 @@ impl Manager {
         }
         if let Some(path) = file.path.clone() {
             // received already (a catch-up of one received before)
-            let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size };
+            let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size, pin: Default::default() };
             self.reserve(f, file.id, false);
             return self.post(f, inbound, Some(local), None);
         }
@@ -2484,7 +2485,7 @@ mod tests {
         std::fs::create_dir_all(dir).expect("its directory");
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("written");
-        LocalFile { path, media_type: media_type.into(), name: name.into(), size: bytes.len() as u64 }
+        LocalFile { path, media_type: media_type.into(), name: name.into(), size: bytes.len() as u64, pin: Default::default() }
     }
 
     /// One file's reply (a PDF named `name`), handed to the manager: its
@@ -2532,14 +2533,14 @@ mod tests {
         let f = "juniper--k3x9";
         let src = dir.join("media");
         let big = reply_file(&src, "huge.bin", "application/octet-stream", b"");
-        std::fs::File::options().write(true).open(&big.path).expect("it").set_len(SEND_BYTES_MAX + 1).expect("sparse");
+        std::fs::File::options().write(true).open(&big.path).expect("it").set_len(FILE_BYTES_MAX + 1).expect("sparse");
         let files = vec![
             reply_file(&src, "tts_1.mp3", "audio/mpeg", &super::super::audio::silence_mp3(3)),
             reply_file(&src, "../a pic.png", "image/png", b"\x89PNG not really"),
             reply_file(&src, "report.pdf", "application/pdf; charset=binary", b"%PDF-1.7"),
             reply_file(&src, "empty.txt", "text/plain", b""),
             big,
-            LocalFile { path: src.join("gone.ogg"), media_type: "audio/ogg".into(), name: "gone.ogg".into(), size: 3 },
+            LocalFile { path: src.join("gone.ogg"), media_type: "audio/ogg".into(), name: "gone.ogg".into(), size: 3, pin: Default::default() },
         ];
         let out = m.slots[f].dir.join(OUT_DIR);
         let (outgoing, kept) = outgoing(&out, &files).await;
