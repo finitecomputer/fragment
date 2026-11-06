@@ -92,6 +92,9 @@ pub struct World {
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
     pub fail_posts: u32,
+    /// A blob upload past this many bytes is refused 413, as a computer's
+    /// egress that reads a body whole refuses one past 32 MiB.
+    pub blob_put_max: Option<usize>,
     /// The next posts on this channel (any fragment's) that would append a
     /// record: refused 503 before it is appended (`false`), or appended
     /// and answered 503, the answer lost (`true`). A retry of one appended
@@ -115,6 +118,9 @@ pub struct World {
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
+    /// Each post to a `chat` channel (a reply, among others) is answered
+    /// this much later: a fragment's lane of posts held.
+    pub chat_post_delay_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
     /// Each agent's door, by its fragment: the nonce of the link ticket its
@@ -503,7 +509,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         if w.down {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the fake is down");
         }
-        if method == Method::POST && path.ends_with("/channels/work") { w.work_post_delay_ms } else { 0 }
+        match method {
+            Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
+            Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
+            _ => 0,
+        }
     };
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -710,6 +720,8 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         return refuse(StatusCode::NOT_FOUND, "no such route");
     }
     let fragment = p[2].to_string();
+    // `bytes=<from>-`, the one form the bridge asks (a blob's resumed download)
+    let from = req.headers().get("range").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")?.strip_suffix('-')?.parse::<usize>().ok());
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let mut w = world.lock().unwrap();
     let Some(f) = w.fragments.get(&fragment) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
@@ -837,6 +849,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             answer(StatusCode::OK, json!({ "ok": true }))
         }
+        (Method::PUT, ["blobs", _]) if w.blob_put_max.is_some_and(|max| body.len() > max) => refuse(StatusCode::PAYLOAD_TOO_LARGE, "past what the egress reads"),
         (Method::PUT, ["blobs", sha]) => {
             let got = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&body));
             if got != *sha {
@@ -846,9 +859,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.fragments.get_mut(&fragment).unwrap().blobs.insert(sha.to_string(), ("application/octet-stream".into(), body));
             answer(StatusCode::OK, json!({ "ok": true, "sha": sha, "size": size, "stored": true }))
         }
-        (Method::GET, ["blobs", sha]) => match f.blobs.get(*sha) {
-            Some((ty, bytes)) => net::respond(StatusCode::OK, ty, bytes.clone()),
-            None => refuse(StatusCode::NOT_FOUND, "no such blob"),
+        (Method::GET, ["blobs", sha]) => match (f.blobs.get(*sha), from) {
+            (Some((ty, bytes)), Some(from)) if from > 0 && from < bytes.len() => {
+                let mut r = net::respond(StatusCode::PARTIAL_CONTENT, ty, bytes.slice(from..));
+                r.headers_mut().insert("content-range", format!("bytes {from}-{}/{}", bytes.len() - 1, bytes.len()).parse().unwrap());
+                r
+            }
+            (Some((ty, bytes)), _) => net::respond(StatusCode::OK, ty, bytes.clone()),
+            (None, _) => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
         (Method::GET, ["files"]) => {
             // a file's version moves with its bytes, as a commit's does

@@ -114,9 +114,32 @@ pub const ERROR_MAX_CHARS: usize = 300;
 
 /// Attachments one message or reply carries, at most.
 pub const ATTACHMENTS_MAX: usize = 8;
-/// One attachment's bytes, at most: Hermes' own media cap (its
-/// `MEDIA_MAX_BYTES`), well under the platform's 256 MiB blob cap.
-pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// One attachment's bytes, at most: the platform's blob cap
+/// (`fragment_proto::limits::BLOB_MAX_BYTES`, its own workspace: a copy).
+/// Each streams to disk (transfer.rs), never whole in memory.
+pub const ATTACHMENT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+/// A file Hermes takes as media, at most: its own cap (its
+/// `MEDIA_MAX_BYTES`), which it reads whole into memory. A message's file
+/// past it is named to Hermes by its path alone, never hosted for it at
+/// `/relay/media` (relay/mod.rs, `start`); a file Hermes sends by URL is
+/// fetched, whole, within it (relay/fetch.rs).
+pub const HERMES_MEDIA_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// A file's transfer (a blob's download or upload, Hermes' upload to
+/// `/relay/media`) that moves no byte this long is cut: a slow transfer
+/// that moves runs as long as it takes, a stuck one never holds its lane.
+pub const TRANSFER_STALL_MS: u64 = 15_000;
+/// Requests one blob's download makes, at most: each after the first
+/// resumes where the last was cut (`Range`), signed afresh by the egress
+/// (NIP-98's `created_at` is checked as a request starts).
+pub const DOWNLOAD_TRIES_MAX: u32 = 8;
+/// Each scratch folder's bytes (the message files downloaded for a
+/// runtime; Hermes' uploads and fetches), at most: one message's most files
+/// whole. Past it, the files used least lately go (scratch.rs): a computer
+/// has a 20 GB disk, which has filled before.
+pub const SCRATCH_MAX_BYTES: u64 = ATTACHMENTS_MAX as u64 * ATTACHMENT_MAX_BYTES;
+/// Files in one scratch folder, at most, the same way (each pass that
+/// makes room reads the folder whole).
+pub const SCRATCH_FILES_MAX: usize = 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
 /// otherwise. An hour: the person may be away from the chat. A card
@@ -347,3 +370,5 @@ const _: () = assert!(2 * (ANSWER_TEXT_MAX_BYTES + ANSWER_ASKED_MAX_BYTES + ANSW
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
 const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");
+const _: () = assert!(HERMES_MEDIA_MAX_BYTES < ATTACHMENT_MAX_BYTES && ATTACHMENT_MAX_BYTES <= SCRATCH_MAX_BYTES, "a file past Hermes' cap still fits, and so does the largest file in scratch");
+const _: () = assert!(DOWNLOAD_TRIES_MAX >= 2, "a cut download resumes");
