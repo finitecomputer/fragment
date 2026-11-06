@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn a_stale_list_or_a_walk_without_the_shell_is_refused() {
         let paths = |extra: &[&str]| {
-            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
+            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js", "templates/slides/site/assets/index-C_sEAvZ8.js"].map(String::from).to_vec();
             all.extend(extra.iter().map(|p| p.to_string()));
             all
         };
