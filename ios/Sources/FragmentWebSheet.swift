@@ -30,14 +30,15 @@ final class WebSheetModel {
             _ = try PlatformOrigin.parse(origin.url!.absoluteString)
             var components = URLComponents(url: status.urls.canonical, resolvingAgainstBaseURL: false)
             if let key = fragment.sessionKey { components?.queryItems = [URLQueryItem(name: "s", value: key)] }
-            // a link's own page, on this fragment's origin alone (a link elsewhere opens its canonical page)
+            // a link's own page, path, query and hash, on this fragment's origin
+            // alone (a link elsewhere opens its canonical page), as the web's Open
             if let link = fragment.link, PlatformOrigin.same(link, status.urls.canonical) {
                 components = URLComponents(url: link, resolvingAgainstBaseURL: false)
-                components?.fragment = nil
             }
             guard let destination = components?.url else { throw APIError.invalidResponse }
             struct Session: Decodable { let consentRequired: Bool; var url: URL?; var email: String? }
             let back = components!.percentEncodedPath + (components!.percentEncodedQuery.map { "?" + $0 } ?? "")
+                + (components!.percentEncodedFragment.map { "#" + $0 } ?? "")
             let session: Session = try await api.request("api/f/\(fragment.name)/session", method: "POST", body: .object([
                 "returnTo": .string(back.isEmpty ? "/" : back), "consent": .bool(consent)
             ]))

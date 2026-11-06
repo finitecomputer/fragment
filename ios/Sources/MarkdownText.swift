@@ -93,12 +93,24 @@ enum MessageLinks {
     /// A message's links at most: past them, it names none more.
     static let max = 8
 
-    static func find(in text: String) -> [URL] {
+    /// The links a message shows, the very URLs its words link (a tap opens
+    /// the same one a copy or share takes): a reply's Markdown parsed as
+    /// `MarkdownText` draws it, code blocks aside; the person's own words
+    /// as typed, bare URLs alone.
+    static func find(in text: String, markdown: Bool) -> [URL] {
+        let shown: [AttributedString] = markdown
+            ? MarkdownBlock.parse(text).compactMap { block in
+                if case .code = block.kind { return nil }
+                return linked((try? AttributedString(markdown: block.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(block.text))
+            }
+            : [linked(AttributedString(text))]
         var found: [URL] = []
-        for match in bare.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            guard let range = Range(match.range, in: text), let url = URL(string: String(text[range])), !found.contains(url) else { continue }
-            found.append(url)
-            if found.count == max { break }
+        for part in shown {
+            for run in part.runs {
+                guard let url = run.link, !found.contains(url) else { continue }
+                found.append(url)
+                if found.count == max { return found }
+            }
         }
         return found
     }
@@ -118,12 +130,31 @@ enum MessageLinks {
         return text
     }
 
-    /// A fragment's page: an http(s) host `<name>--<suffix>.<domain>`, the
-    /// web's `NAME_AT` (templates/chat/site/chat.js `fragmentPage`); its name.
-    static func fragmentName(_ url: URL) -> String? {
-        guard ["http", "https"].contains(url.scheme), url.user == nil, url.password == nil,
-              let host = url.host?.lowercased(), let dot = host.firstIndex(of: ".") else { return nil }
+    /// A page of a fragment of this deployment, as the web's `fragmentPage`
+    /// (templates/chat/site/chat.js) tells one: its host a name (`NAME_AT`)
+    /// then the deployment's own domain for fragments, on its scheme and
+    /// port (`pages`); its name. Any other address is none, however alike.
+    static func fragmentName(_ url: URL, pages: FragmentPages?) -> String? {
+        guard let pages, url.scheme?.lowercased() == pages.scheme, url.user == nil, url.password == nil,
+              url.port == pages.port, let host = url.host?.lowercased(), let dot = host.firstIndex(of: ".") else { return nil }
         let label = String(host[..<dot])
-        return label.wholeMatch(of: nameAt) == nil ? nil : label
+        return host[host.index(after: dot)...] == pages.domain && label.wholeMatch(of: nameAt) != nil ? label : nil
+    }
+}
+
+/// Where this deployment serves fragments' pages: `<name>.<domain>` on a
+/// scheme and port, as a fragment's own canonical URL says it
+/// (`GET /api/f/{name}/status`, `urls.canonical`).
+struct FragmentPages: Equatable, Sendable {
+    let scheme: String
+    let domain: String
+    let port: Int?
+    /// From a fragment's canonical URL, which must be its name's.
+    init?(canonical: URL, name: String) {
+        guard let scheme = canonical.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = canonical.host?.lowercased(), host.hasPrefix(name + "."), host.count > name.count + 1 else { return nil }
+        self.scheme = scheme
+        self.domain = String(host.dropFirst(name.count + 1))
+        self.port = canonical.port
     }
 }

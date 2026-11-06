@@ -19,6 +19,10 @@ final class Library {
     var sessions: [String: ChatSession] = [:]
     /// Their agents' fragments in their computer's order (`loadComputer`).
     var agentOrder: [String] = []
+    /// Where this deployment serves fragments' pages, from a fragment of
+    /// theirs' canonical URL, read once (`loadPages`): until it is, no link
+    /// is one of theirs, and every link opens in Safari.
+    var pages: FragmentPages?
     /// Their computer's `phase` as last read (`ComputerView`), or nil.
     var computerPhase: String?
     @ObservationIgnored private var loadID = UUID()
@@ -50,7 +54,7 @@ final class Library {
     /// "Open" for one: templates/chat/site/chat.js `openBeside`), opening at
     /// that page; none for another's or any other address, which Safari opens.
     func fragment(linkedBy url: URL) -> FragmentSummary? {
-        guard let name = MessageLinks.fragmentName(url), var found = fragments.first(where: { $0.name == name }) else { return nil }
+        guard let name = MessageLinks.fragmentName(url, pages: pages), var found = fragments.first(where: { $0.name == name }) else { return nil }
         if found.kind != "chat" { found.link = url }
         return found
     }
@@ -94,6 +98,7 @@ final class Library {
             if loadID == requestID { error = nil }
         } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
         await loadImported(api, requestID)
+        await loadPages(api)
         await titleUntitled(api)
     }
     /// The person's agents in their computer's order (`ComputerView.agents`,
@@ -115,6 +120,11 @@ final class Library {
         let phase = read.computers.first?.phase
         if computerPhase != phase { computerPhase = phase }
         for agent in taken where identities[agent.fragment] != agent.identity { identities[agent.fragment] = agent.identity }
+    }
+    private func loadPages(_ api: FragmentAPI) async {
+        guard pages == nil, let mine = fragments.first(where: { $0.role == "owner" }) else { return }
+        let status: FragmentStatus? = try? await api.request("api/f/\(mine.name)/status")
+        if let status, let found = FragmentPages(canonical: status.urls.canonical, name: mine.name) { pages = found }
     }
     /// Told the list changed: read again a moment after, so a burst (each
     /// message of a reply streaming in) is one read, as the web's

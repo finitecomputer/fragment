@@ -235,24 +235,45 @@ struct ShellTests {
         #expect(model.url?.query == "token=t2" && model.error == nil)
     }
 
-    /// A message's links as the web's renderer finds them: a bare URL ends
-    /// before trailing punctuation; Markdown and `<autolinks>` count too.
-    @Test func aMessagesLinksAreFoundAsTheWebLinksThem() {
+    /// A message's links are the URLs its words link, as drawn: Markdown
+    /// targets whole (parentheses, a final `!`), `<autolinks>`, and bare
+    /// URLs, which end before trailing punctuation.
+    @Test func aMessagesLinksAreTheOnesItsWordsLink() {
         let text = "Same link as before: https://sports-schedule--ugzb.finite.place/?view=fe1f4b5067d2339a83ba0f62. See [docs](https://example.com/a) or <https://example.com/b>, and https://example.com/a again."
-        #expect(MessageLinks.find(in: text).map(\.absoluteString) == [
+        #expect(MessageLinks.find(in: text, markdown: true).map(\.absoluteString) == [
             "https://sports-schedule--ugzb.finite.place/?view=fe1f4b5067d2339a83ba0f62", "https://example.com/a", "https://example.com/b"])
-        #expect(MessageLinks.fragmentName(URL(string: "https://sports-schedule--ugzb.finite.place/?view=1")!) == "sports-schedule--ugzb")
-        #expect(MessageLinks.fragmentName(URL(string: "https://example.com/")!) == nil)
-        #expect(MessageLinks.fragmentName(URL(string: "https://a--b1.finite.place/")!) == nil, "a suffix is four of its letters")
-        #expect(MessageLinks.fragmentName(URL(string: "ftp://sports-schedule--ugzb.finite.place/")!) == nil)
+        #expect(MessageLinks.find(in: "[Wiki](https://example.com/wiki/Function_(mathematics)) and [Page](https://example.com/report!)", markdown: true).map(\.absoluteString)
+                == ["https://example.com/wiki/Function_(mathematics)", "https://example.com/report!"])
+        #expect(MessageLinks.find(in: "```\nhttps://example.com/in-code\n```", markdown: true).isEmpty, "code is not a link")
+        #expect(MessageLinks.find(in: "mine: https://example.com/x.", markdown: false).map(\.absoluteString) == ["https://example.com/x"])
         // a bare one is linked in the words shown, and every link underlined
         let shown = MessageLinks.linked(AttributedString("go to https://example.com/x."))
         let linked = shown.runs.filter { $0.link != nil }
         #expect(linked.count == 1 && linked.first?.link?.absoluteString == "https://example.com/x" && linked.first?.underlineStyle == .single)
     }
 
+    /// A page of this deployment's fragments is told as the web's
+    /// `fragmentPage` tells one: a name, then its own domain, scheme and port.
+    @Test func aFragmentsPageIsTheDeploymentsAlone() throws {
+        let pages = try #require(FragmentPages(canonical: URL(string: "https://sports-schedule--ugzb.finite.place/")!, name: "sports-schedule--ugzb"))
+        func name(_ link: String) -> String? { MessageLinks.fragmentName(URL(string: link)!, pages: pages) }
+        #expect(name("https://sports-schedule--ugzb.finite.place/week?view=1") == "sports-schedule--ugzb")
+        #expect(name("https://SPORTS-schedule--ugzb.Finite.Place/") == "sports-schedule--ugzb")
+        #expect(name("https://sports-schedule--ugzb.example.com/week") == nil, "a lookalike domain")
+        #expect(name("https://sports-schedule--ugzb.finite.place:444/week") == nil, "another port")
+        #expect(name("http://sports-schedule--ugzb.finite.place/") == nil, "another scheme")
+        #expect(name("https://sports-schedule--ugzb.preview.finite.place/") == nil, "another deployment's domain")
+        #expect(name("https://a--b1.finite.place/") == nil, "a suffix is four of its letters")
+        #expect(MessageLinks.fragmentName(URL(string: "https://sports-schedule--ugzb.finite.place/")!, pages: nil) == nil, "unknown until read")
+        #expect(FragmentPages(canonical: URL(string: "https://other--abcd.finite.place/")!, name: "sports-schedule--ugzb") == nil)
+        let local = try #require(FragmentPages(canonical: URL(string: "http://todo--rcmf.fragment.localhost:8790/")!, name: "todo--rcmf"))
+        #expect(MessageLinks.fragmentName(URL(string: "http://sports--abcd.fragment.localhost:8790/x")!, pages: local) == "sports--abcd")
+        #expect(MessageLinks.fragmentName(URL(string: "http://sports--abcd.fragment.localhost/x")!, pages: local) == nil)
+    }
+
     /// A link to a fragment of the person's opens it in the app, an app at
-    /// the linked page; another's, or any other address, is Safari's.
+    /// the linked page, path, query and hash; another's, a lookalike, or any
+    /// other address is Safari's.
     @Test func aLinkToTheirFragmentOpensItAtItsPage() async throws {
         let list = #"{"fragments":[{"name":"sports-schedule--ugzb","kind":"app","title":"Sports schedule","role":"owner"},{"name":"trip-chat--k3x9","kind":"chat","title":"Trip","role":"owner"}]}"#
         let stub = Stub { seen, _ in
@@ -271,11 +292,16 @@ struct ShellTests {
         #expect(app.name == "sports-schedule--ugzb" && app.link == link)
         #expect(library.fragment(linkedBy: URL(string: "https://trip-chat--k3x9.finite.place/")!)?.link == nil, "a chat opens as a chat")
         #expect(library.fragment(linkedBy: URL(string: "https://someone-else--abcd.finite.place/")!) == nil)
+        #expect(library.fragment(linkedBy: URL(string: "https://sports-schedule--ugzb.example.com/week")!) == nil, "a lookalike opens as typed")
         let model = WebSheetModel(fragment: app, api: api)
         await model.load()
         #expect(model.error == nil && model.url?.path == "/__signin")
-        let asked = try #require(stub.seen.first { $0.route == "POST /api/f/sports-schedule--ugzb/session" })
-        #expect(asked.json["returnTo"].string == "/week?view=fe1f", "its page, the link's own")
+        let asked = try #require(stub.seen.last { $0.route == "POST /api/f/sports-schedule--ugzb/session" })
+        #expect(asked.json["returnTo"].string == "/week?view=fe1f#today", "its page, the link's own, hash and all")
+        // a hash-routed page keeps its route
+        let routed = try #require(library.fragment(linkedBy: URL(string: "https://sports-schedule--ugzb.finite.place/#/week/2")!))
+        await WebSheetModel(fragment: routed, api: api).load()
+        #expect(stub.seen.last { $0.route == "POST /api/f/sports-schedule--ugzb/session" }?.json["returnTo"].string == "/#/week/2")
     }
 
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
@@ -465,7 +491,8 @@ struct ShellTests {
         #expect(library.agents.map(\.name) == ["juniper--a2", "moss--a1"])
         #expect(library.agent?.name == "juniper--a2", "new chats are with the main agent")
         #expect(library.agentsByIdentity["npub1moss"]?.name == "moss--a1" && library.computerPhase == "awake")
-        #expect(!stub.seen.contains { $0.path.hasSuffix("/status") })
+        // no agent's status for its identity; one read alone, the deployment's pages (`loadPages`)
+        #expect(stub.seen.filter { $0.path.hasSuffix("/status") }.count <= 1)
         // a computer that cannot be read keeps the list's order
         let plain = Library()
         await plain.load(try Stub(Self.platform).api())

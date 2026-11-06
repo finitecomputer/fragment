@@ -175,8 +175,12 @@ running turns), each set only when it changes, so a reply's words redraw that
 reply alone. Pictures are read once a session, kept by their versioned URL. Links
 in a message are found as the web's renderer finds them (bare http(s) URLs too)
 and underlined; a tap opens a page of a fragment of the person's in the app, at
-that page, with an Open beside the message as the web's chat gives one, and any
-other address in Safari; a long press copies or shares each. Your Apps is pushed
+that page (path, query and hash), with an Open beside the message as the web's
+chat gives one, and any other address in Safari; a long press copies or shares
+each, the very URL its words link. A page of a fragment is told as the web's
+`fragmentPage` tells one: a name, then the deployment's own domain for
+fragments, on its scheme and port, as a fragment's canonical URL says (read once
+a session); a lookalike opens as typed. Your Apps is pushed
 onto the page it was opened from, so Back returns there; a chat's top bar has no
 New chat (the sidebar's starts one). Jumping to the latest holds scrolling off
 for the jump, which stops a fling's momentum, and while following the latest the

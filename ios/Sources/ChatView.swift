@@ -198,7 +198,7 @@ private struct ChatRows: View {
         let faces = library.agentsByIdentity
         let you = session.principal
         ForEach(session.rows) { record in
-            let links = record.isMessage ? MessageLinks.find(in: record.text) : []
+            let links = record.isMessage ? MessageLinks.find(in: record.text, markdown: record.principal != you) : []
             ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal], card: session.activity.cards[record.id],
                     links: links, opens: links.compactMap(library.fragment(linkedBy:)).reduce(into: []) { kept, app in if !kept.contains(where: { $0.name == app.name }) { kept.append(app) } },
                     api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 }, open: open)
@@ -254,7 +254,7 @@ struct ChatRow: View, Equatable {
                     HStack(spacing: 8) {
                         ForEach(opens) { app in
                             Button { open(app) } label: {
-                                Label("Open \(app.displayTitle)", systemImage: "rectangle.portrait.on.rectangle.portrait").font(.footnote.weight(.semibold)).lineLimit(1)
+                                Label("Open \(app.displayTitle)", systemImage: "arrow.up.forward.app").font(.footnote.weight(.semibold)).lineLimit(1)
                             }
                             .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
                             .accessibilityIdentifier("openLinked-\(app.name)")
