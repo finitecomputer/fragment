@@ -407,10 +407,6 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
-    /// The start this isolate found failed, and destroys: its container's
-    /// end is that start's own failure, which the start reports itself
-    /// (`exit_of`), never a crash as well.
-    failing: std::cell::Cell<Option<u64>>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -437,7 +433,6 @@ impl DurableObject for ComputerCell {
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
-            failing: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
         }
@@ -763,7 +758,8 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            // this release's, or the previous one's (`Lifecycle::read`)
+            Some(text) => Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
             None => Ok(Lifecycle::new()),
         }
     }
@@ -1031,6 +1027,13 @@ impl ComputerCell {
     /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
         let life = self.lifecycle()?;
+        if let Phase::Starting { generation, destroying: true, .. } = life.phase {
+            // a start that failed was destroying what it started when its
+            // isolate went, and its own report (why, and whether it is a
+            // strike) went with it: one failure, its container destroyed
+            let _ = self.destroy(generation, "its start failed").await;
+            return Ok(Some(Event::StartFailed { generation, why: format!("start {generation} failed, and the isolate that saw why went before it said so") }));
+        }
         let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
@@ -1232,7 +1235,8 @@ impl ComputerCell {
             // what it destroys below ends as this start's failure, reported
             // by the event this answers, so the end is not a crash too: it
             // would count a second strike, and start again with no pause
-            self.failing.set(Some(generation));
+            // (#1004). Stored, so an isolate after this one knows it too.
+            self.start_failing(generation);
         }
         match started {
             Ok(()) => {
@@ -1267,7 +1271,7 @@ impl ComputerCell {
             Err(Unstarted::Dead(why)) => {
                 // as a snapshot that would not start : its snapshot
                 // forgotten and its container destroyed, whose exit is this
-                // report's to make (`exit_of`), and the same wake starts the
+                // report's to make (`start_failing`), and the same wake starts the
                 // image and the save, no strike. Its own line, so the logs
                 // count how often a snapshot's restore comes up dead (#362).
                 let forgot = self.update_saves(|s| s.snapshot_failed());
@@ -1463,16 +1467,35 @@ impl ComputerCell {
     /// stopped on its own before it came up is the start's own failure (the
     /// snapshot is forgotten), never a strike.
     fn exit_of(&self, generation: u64) -> CellResult<Option<Event>> {
-        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
-        if starting && self.failing.get() == Some(generation) {
-            return Ok(None);
-        }
+        // a failing start's own destroy is the lifecycle's to tell from a
+        // crash (`Phase::Starting`'s `destroying`): reported as it is
+        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, destroying: false, .. } if g == generation);
         if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {
             let forgot = self.update_saves(|s| s.snapshot_failed())?;
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "snapshot": "stopped", "generation": generation, "forgot": forgot }));
             return Ok(Some(Event::SnapshotFailed { generation, why: "its container stopped as it started from the snapshot".into() }));
         }
         Ok(Some(Event::Exited { generation }))
+    }
+
+    /// Its start `generation` failed and destroys what it started next:
+    /// the lifecycle keeps that (`Event::StartFailing`), so the container's
+    /// exit is no crash, whichever isolate hears it. Its step changes
+    /// nothing else (no action, the same deadline). Logged, never failed:
+    /// one missed is that exit counted as a crash, as before it was kept.
+    fn start_failing(&self, generation: u64) {
+        let applied = (|| -> CellResult<()> {
+            let mut life = self.lifecycle()?;
+            let event = Event::StartFailing { generation };
+            let logged = json!(event);
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            assert!(step.actions.is_empty() && step.ended.is_none(), "a start's failing asks for nothing");
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)
+        })();
+        if let Err(e) = applied {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start_failing": generation, "error": e.message }));
+        }
     }
 
     /// Whether a container runs here now.
@@ -2045,12 +2068,12 @@ impl ComputerCell {
         let life = self.lifecycle()?;
         let (phase, why) = match &life.phase {
             // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep => (ComputerPhase::Asleep, None),
+            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
+            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
             Phase::Starting { .. } => (ComputerPhase::Starting, None),
             Phase::Awake { .. } => (ComputerPhase::Awake, None),
             Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why } => (ComputerPhase::WontWake, Some(why.clone())),
+            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;

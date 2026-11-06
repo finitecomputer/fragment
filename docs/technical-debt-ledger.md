@@ -5,6 +5,29 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A computer's lifecycle writes its old flags too
+
+- **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
+  phase into the phases that own it (`fragment_core::computer::Phase`:
+  `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
+  `owes_start`, `Failed`'s `since_ms`). The previous release reads only
+  the old fields (`wake_after_sleep`, `retry_at_ms`, `failed_ms`,
+  `owner_sleep`, `restarting`), so every stored lifecycle still carries
+  them too, written from the phase (`Legacy`), and `Lifecycle::read` fills
+  a phase stored by that release from them. Each step asserts the two
+  agree.
+- **Risk:** none while they agree. A rollback reads the same computer;
+  only `Starting`'s `destroying` is new to it, so a rolled-back release
+  counts a failing start's own destroy as a crash again (one more strike,
+  as before #1004's note in memory, which it still has).
+- **Delete when:** writing them, once no deployment can roll back to a
+  release before this one (production runs a release after it): step two
+  stops writing them (`Legacy::of`, the per-step assertion). Reading them
+  (`Legacy::fill`) goes too once every stored lifecycle has been written
+  by this release or a later one: a computer that has not woken since
+  keeps the old fields until its next event, so that last cut waits for
+  a sweep that touches every computer, or for no computer being older.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made
