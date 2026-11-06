@@ -640,6 +640,17 @@ impl FragmentCell {
                 }
                 json!({ "kept": self.posted_kept()? })
             }
+            Some("posted-bytes") => {
+                // a channel people may post to keeps fewer bytes, trimmed at
+                // its next append (channels.rs `make_room`); no number,
+                // `limits::POSTED_BYTES_MAX`
+                match body["n"].as_i64() {
+                    Some(n) if (1..=limits::POSTED_BYTES_MAX).contains(&n) => self.set_meta(MetaKey::TestPostedBytes, &n.to_string())?,
+                    Some(_) => return Err(CellError::invalid(format!("n is 1 to {}", limits::POSTED_BYTES_MAX))),
+                    None => self.del_meta(MetaKey::TestPostedBytes)?,
+                }
+                json!({ "bytes": self.posted_bytes_max()? })
+            }
             Some("blessed-stale") => {
                 // as if the platform had deployed a newer release of its
                 // blessed template since: its next request installs that

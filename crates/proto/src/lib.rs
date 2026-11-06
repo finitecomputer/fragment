@@ -101,9 +101,17 @@ pub mod limits {
     /// Records a channel people may post to keeps (a `post` role in
     /// fragment.json; the oldest go first, whoever appended them): at the
     /// public call limits a public chat would otherwise grow ~38 MB a
-    /// minute, for good. A chat's two channels at about 1.5 KB a record
-    /// hold about 300 MB at most (FIN-415).
+    /// minute, for good (FIN-415: about 150 MB a channel at a chat's
+    /// typical 1.5 KB a record).
     pub const POSTED_KEPT: i64 = 100_000;
+    /// Bytes of record bodies such a channel keeps, whichever bound comes
+    /// first: a safety bound, not the policy (that is `POSTED_KEPT`).
+    /// `POSTED_KEPT` records of `RECORD_BODY_MAX_BYTES` would be 6.1 GiB a
+    /// channel, 12.2 GiB a chat, past a Durable Object's 10 GB of SQLite.
+    /// At most what the old 10,000-record cap allowed (625 MiB), so a
+    /// chat's storage and its export (`FRAGMENT_MAX_BYTES`, 2 GiB) are no
+    /// larger than before the count was raised.
+    pub const POSTED_BYTES_MAX: i64 = 512 * 1024 * 1024;
     /// `public`-role calls per minute by one principal that is not a member.
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;
     /// `public`-role calls per minute into one fragment by non-members.
@@ -313,6 +321,10 @@ pub mod limits {
 // more than one fragment; one delivery is a small part of a fragment's.
 const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX < limits::SEARCH_ENTRIES_MAX);
 const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX <= limits::POSTED_KEPT);
+// A postable channel's byte bound holds many records whole, and a chat's two
+// channels at it stay no larger than at the old cap (10,000 of the largest).
+const _: () = assert!(limits::POSTED_BYTES_MAX >= 1000 * limits::RECORD_BODY_MAX_BYTES as i64);
+const _: () = assert!(limits::POSTED_BYTES_MAX <= 10_000 * limits::RECORD_BODY_MAX_BYTES as i64);
 const _: () = assert!((limits::SEARCH_BATCH_MAX as i64) < limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX);
 const _: () = assert!(limits::SEARCH_BATCH_MAX * limits::SEARCH_TEXT_MAX_BYTES < limits::BODY_MAX_BYTES);
 // An editor's write through the API is an app's and more, in a body the

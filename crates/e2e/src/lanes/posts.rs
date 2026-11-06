@@ -626,6 +626,54 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": 0 })))?;
     s.ok("(a cap of none is refused)", r.status == 400, &r);
+    retention_bytes(s, api, owner)
+}
+
+/// Such a channel keeps its newest records by bytes too, whichever bound
+/// comes first (`limits::POSTED_BYTES_MAX`, a safety bound under a Durable
+/// Object's storage): an append past it first lets the oldest go, so it
+/// always makes room, and a record that nearly fills the bound alone is
+/// kept alone. Reached through the `posted-bytes` lever (100,000 bytes),
+/// with posts of known sizes: after each, the channel holds the newest
+/// records whose bodies fit.
+fn retention_bytes(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "wall-bytes")?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, WALL_APP, WALL_JSON);
+    let cap = 100_000usize;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-bytes", "n": cap })))?;
+    s.ok("(a test lever lowers the byte bound)", r.status == 200 && r.body["bytes"] == cap, &r);
+    // each body `{"text":"x…"}`, `n` bytes in all
+    let body = |n: usize| json!({ "text": "x".repeat(n - r#"{"text":""}"#.len()) });
+    let sizes = [20_000, 20_000, 20_000, 20_000, 20_000, 20_000, 60_000, 60_000];
+    // the deploy lands: the first post again until it has
+    s.eventually(Duration::from_secs(15), || post(api, owner, &name, "wall", "b0", body(sizes[0])).is_ok_and(|r| r.status == 200));
+    let mut steps = vec![];
+    for (i, n) in sizes.iter().enumerate() {
+        let r = post(api, owner, &name, "wall", &format!("b{i}"), body(*n))?;
+        let held: Vec<(i64, usize)> = records(api, owner, &name, "wall").iter().map(|r| (r["seq"].as_i64().unwrap_or(0), r["body"].to_string().len())).collect();
+        // the newest that fit, newest first, as the bound keeps them
+        let (mut want, mut sum) = (vec![], 0);
+        for (j, m) in sizes[..=i].iter().enumerate().rev() {
+            if sum + m > cap {
+                break;
+            }
+            sum += m;
+            want.insert(0, (j as i64 + 1, *m));
+        }
+        steps.push(json!({ "status": r.status, "held": held, "want": want }));
+        if r.status != 200 || held != want {
+            break;
+        }
+    }
+    let kept_alone = steps.last().is_some_and(|l| l["held"].as_array().map(Vec::len) == Some(1));
+    s.ok(
+        &format!("past {cap} bytes of bodies, the oldest go before each append (whichever bound comes first): the newest that fit are kept, and one that nearly fills the bound alone is kept alone"),
+        steps.len() == sizes.len() && steps.iter().all(|x| x["status"] == 200 && x["held"] == x["want"]) && kept_alone,
+        json!(steps),
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-bytes", "n": 0 })))?;
+    s.ok("(a byte bound of none is refused)", r.status == 400, &r);
     Ok(())
 }
 

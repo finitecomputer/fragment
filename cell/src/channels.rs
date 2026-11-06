@@ -64,7 +64,7 @@ use fragment_proto::{
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use worker::*;
@@ -72,6 +72,15 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
+
+/// A postable channel's running total of body bytes, and the first and
+/// last record it counted (`posted_bytes`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct PostedTotal {
+    bytes: i64,
+    first: i64,
+    last: i64,
+}
 
 /// Due pending mutations one sweep settles.
 const SWEEP_ROWS: i64 = 64;
@@ -234,6 +243,24 @@ impl FragmentCell {
             None => (SqlStorageValue::Null, SqlStorageValue::Null),
         };
         let raw = serde_json::value::to_raw_value(body).expect("a JSON value serializes");
+        // retention: the built-in channels keep their newest records; those
+        // people may post to, their newest by count and by bytes (a post's
+        // key goes with its record)
+        let declared = if BUILTIN_CHANNELS.contains(&channel) { None } else { self.declared_channel(channel)? };
+        let (kept, posted) = match &declared {
+            None if BUILTIN_CHANNELS.contains(&channel) => (Some(limits::AUDIT_KEPT), false),
+            None => (None, false),
+            Some(d) if d.post.is_some() => (Some(self.posted_kept()?), true),
+            Some(_) => (None, false),
+        };
+        let size = i64::try_from(raw.get().len()).expect("a body's length fits i64");
+        // room made before the insert, in its turn, so an append past a bound
+        // frees space first; a replay appends nothing, and frees nothing
+        let room = match (posted, op) {
+            (true, Some((id, i))) if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![id.into(), SqlStorageValue::Integer(i)])?.is_empty() => None,
+            (true, _) => Some(self.make_room(channel, kept.expect("a postable channel keeps a count"), size)?),
+            (false, _) => None,
+        };
         let rows = self.rows(
             "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
              VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?, 0)
@@ -243,15 +270,9 @@ impl FragmentCell {
         let Some(row) = rows.first() else { return Ok(None) };
         let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
         assert!(seq > 0, "a channel's records number from 1");
-        // retention: the built-in channels, and those people may post to,
-        // keep their newest records (a post's key goes with its record)
-        let declared = if BUILTIN_CHANNELS.contains(&channel) { None } else { self.declared_channel(channel)? };
-        let kept = match &declared {
-            None if BUILTIN_CHANNELS.contains(&channel) => Some(limits::AUDIT_KEPT),
-            None => None,
-            Some(d) if d.post.is_some() => Some(self.posted_kept()?),
-            Some(_) => None,
-        };
+        if let Some(bytes) = room {
+            self.posted_total_set(channel, PostedTotal { bytes: bytes + size, first: self.channel_first(channel)?.expect("the record just appended is kept"), last: seq })?;
+        }
         // a message on an app channel goes to its people's search, in this
         // turn, as its read role says (`channel_read_role`, the one source)
         if declared.is_some() {
@@ -261,7 +282,7 @@ impl FragmentCell {
         if let Some(listed) = declared.as_ref().and_then(|d| d.listed.as_ref()) {
             self.list_record(channel, listed, principal, seq, now, body)?;
         }
-        if let Some(kept) = kept {
+        if let Some(kept) = kept.filter(|_| !posted) {
             assert!(kept >= 1, "a channel keeps the record just appended");
             self.exec(
                 "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) - ?",
@@ -271,6 +292,84 @@ impl FragmentCell {
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// Makes room in a postable channel for a record of `size` bytes: its
+    /// oldest go until, with it, the channel holds at most `kept` records and
+    /// `posted_bytes_max` bytes of bodies. Answers the bytes left. The count
+    /// is one indexed range delete; the bytes, the oldest one at a time (one
+    /// a record appended, once the channel is full), bounded by `kept`.
+    fn make_room(&self, channel: &str, kept: i64, size: i64) -> CellResult<i64> {
+        assert!(kept >= 1, "a channel keeps the record about to be appended");
+        let max = self.posted_bytes_max()?;
+        let mut bytes = self.posted_bytes(channel)?;
+        let gone = self.rows(
+            "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) + 1 - ? RETURNING length(CAST(body AS BLOB)) AS n",
+            vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
+        )?;
+        bytes -= gone.iter().filter_map(|r| r["n"].as_i64()).sum::<i64>();
+        for _ in 0..kept {
+            if bytes + size <= max {
+                break;
+            }
+            let gone = self.rows(
+                "DELETE FROM records WHERE channel = ? AND seq = (SELECT MIN(seq) FROM records WHERE channel = ?) RETURNING length(CAST(body AS BLOB)) AS n",
+                vec![channel.into(), channel.into()],
+            )?;
+            // (empty: a record larger than the bound alone is kept alone)
+            let Some(n) = gone.first().and_then(|r| r["n"].as_i64()) else { break };
+            bytes -= n;
+        }
+        assert!(bytes >= 0, "a channel's bytes never go below none: {bytes}");
+        Ok(bytes)
+    }
+
+    /// The bytes of bodies a postable channel holds: its running total
+    /// (`MetaKey::PostedBytes`), while it covers the channel's first and last
+    /// record as they are; else counted again, once (a total never kept, or
+    /// one an older release left behind as it appended and trimmed).
+    fn posted_bytes(&self, channel: &str) -> CellResult<i64> {
+        let span = self.rows("SELECT MIN(seq) AS lo, MAX(seq) AS hi FROM records WHERE channel = ?", vec![channel.into()])?;
+        let (lo, hi) = (span[0]["lo"].as_i64(), span[0]["hi"].as_i64());
+        if let Some(t) = self.posted_totals()?.get(channel) {
+            if Some(t.first) == lo && Some(t.last) == hi {
+                return Ok(t.bytes);
+            }
+        }
+        let n = self.rows("SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0) AS n FROM records WHERE channel = ?", vec![channel.into()])?;
+        Ok(n[0]["n"].as_i64().expect("a sum of lengths is an integer"))
+    }
+
+    fn posted_totals(&self) -> CellResult<BTreeMap<String, PostedTotal>> {
+        match self.meta(MetaKey::PostedBytes)? {
+            None => Ok(BTreeMap::new()),
+            // unreadable (a later release's shape): counted again
+            Some(text) => Ok(serde_json::from_str(&text).unwrap_or_default()),
+        }
+    }
+
+    fn posted_total_set(&self, channel: &str, total: PostedTotal) -> CellResult<()> {
+        let mut all = self.posted_totals()?;
+        all.insert(channel.to_string(), total);
+        // bounded: one entry a declared channel (a channel gone is dropped)
+        let declared: Vec<String> = self.declared_channels()?.into_iter().map(|(name, _)| name).collect();
+        all.retain(|name, _| declared.contains(name));
+        self.set_meta(MetaKey::PostedBytes, &serde_json::to_string(&all).expect("totals serialize"))
+    }
+
+    fn channel_first(&self, channel: &str) -> CellResult<Option<i64>> {
+        let rows = self.rows("SELECT MIN(seq) AS n FROM records WHERE channel = ?", vec![channel.into()])?;
+        Ok(rows.first().and_then(|r| r["n"].as_i64()))
+    }
+
+    /// Bytes of bodies a channel people may post to keeps:
+    /// `limits::POSTED_BYTES_MAX`, or fewer a test set (`posted-bytes`, on
+    /// fleets with test hooks only).
+    pub(crate) fn posted_bytes_max(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(limits::POSTED_BYTES_MAX);
+        }
+        Ok(self.meta(MetaKey::TestPostedBytes)?.and_then(|v| v.parse().ok()).unwrap_or(limits::POSTED_BYTES_MAX))
     }
 
     /// Records a channel people may post to keeps: `limits::POSTED_KEPT`,
