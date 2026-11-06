@@ -18,7 +18,8 @@ struct Seen: Sendable {
 /// is a `ScriptedSocket` the test drives, and both are recorded. Answers
 /// are written by hand here; the wire they stand for is docs/api.md.
 final class Stub: Sendable {
-    /// The answer to a request, given every request this stub saw before it.
+    /// The answer to a request, given every request this stub saw before it
+    /// (a body of `base64:<bytes>` is those bytes).
     typealias Handler = @Sendable (Seen, [Seen]) -> (Int, String)
     private static let live = Mutex<[String: Stub]>([:])
     static func named(_ host: String) -> Stub? { live.withLock { $0[host] } }
@@ -73,7 +74,9 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             guard !stopped.withLock({ $0 }) else { return }
             let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            // `base64:` answers bytes that are not text (a picture)
+            let bytes = body.hasPrefix("base64:") ? Data(base64Encoded: String(body.dropFirst(7))) ?? Data() : Data(body.utf8)
+            client?.urlProtocol(self, didLoad: bytes)
             client?.urlProtocolDidFinishLoading(self)
         }
     }
