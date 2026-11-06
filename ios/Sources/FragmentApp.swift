@@ -122,8 +122,11 @@ final class Library {
     /// A chat of the person's still titled `untitled` that has a message is
     /// titled from its first message with words, as the web titles it
     /// (cell/shell/shell.js `titleFromFirst`): its first line's words, cut
-    /// to `titleMax` characters; one renamed meanwhile keeps its name. Once
-    /// per chat a session, unless it had no words to take yet.
+    /// to `titleMax` characters; one its manifest no longer titles so keeps
+    /// its name. Once per chat a session, unless it had no words to take yet.
+    /// As the web's, the check is of the manifest read, not the write: a
+    /// rename landing between them is overwritten (last writer wins), as
+    /// `POST files` takes no expectation of what main holds.
     static let untitled = "New chat"
     static let titleMax = 48
     private func titleUntitled(_ api: FragmentAPI) async {
@@ -146,19 +149,37 @@ final class Library {
             if let text = record.body.string { return text }
             guard (record.body["kind"].string ?? "message") == "message" else { return nil }
             return record.body["text"].string
-        }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }.first { !jsTrimmed(Array($0.unicodeScalars)).isEmpty }
     }
-    /// Its first line with words, spaces made one, cut to `titleMax` (counted
-    /// in code points, as the web's `[...words]`) with an ellipsis.
+    /// Its title as the web's `titleFromFirst` makes it, code point for code
+    /// point: the words trimmed, split on LF alone (a CR stays, a space to
+    /// the trim), its first line with words, each run of JavaScript's `\s`
+    /// made one space, cut to `titleMax` code points (`[...words]`) with an
+    /// ellipsis. Never Swift's Characters, which hold CRLF as one.
     static func title(from said: String) -> String {
-        let line = said.split(separator: "\n", omittingEmptySubsequences: false)
-            .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
-        let words = line.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        let scalars = Array(words.unicodeScalars)
-        guard scalars.count > titleMax else { return words }
-        var cut = String(String.UnicodeScalarView(scalars.prefix(titleMax - 1)))
-        while cut.last?.isWhitespace == true { cut.removeLast() }
-        return cut + "…"
+        let lines = jsTrimmed(Array(said.unicodeScalars)).split(separator: "\n", omittingEmptySubsequences: false)
+        let line = lines.first { !jsTrimmed(Array($0)).isEmpty }.map(Array.init) ?? []
+        var words: [Unicode.Scalar] = []
+        for scalar in line {
+            if jsSpace(scalar) { if words.last != " " { words.append(" ") } } else { words.append(scalar) }
+        }
+        words = jsTrimmed(words)
+        guard words.count > titleMax else { return String(String.UnicodeScalarView(words)) }
+        let cut = jsTrimmed(Array(words.prefix(titleMax - 1)))
+        return String(String.UnicodeScalarView(cut)) + "…"
+    }
+    /// JavaScript's white space and line terminators (`\s`, `trim()`):
+    /// ECMA-262's WhiteSpace (tab, VT, FF, ZWNBSP, every Zs) and
+    /// LineTerminator (LF, CR, LS, PS).
+    static func jsSpace(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x09...0x0D, 0x20, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF: true
+        default: false
+        }
+    }
+    static func jsTrimmed(_ scalars: [Unicode.Scalar]) -> [Unicode.Scalar] {
+        guard let first = scalars.firstIndex(where: { !jsSpace($0) }), let last = scalars.lastIndex(where: { !jsSpace($0) }) else { return [] }
+        return Array(scalars[first...last])
     }
     /// The person's imported chats: their session archive's `index/chat.json`
     /// (templates/sessions/README.md), apart from the rest of the list. An

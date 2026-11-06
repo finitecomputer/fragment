@@ -15,13 +15,17 @@ final class ChatSession {
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
     private(set) var chatCursor: Int64 = 0
-    /// Whether the chat was ever read to its end here: before, it is
-    /// loading, never shown as an empty chat.
+    /// Whether the chat was ever read to its end here, both its channels
+    /// (`chat` and the `work` it shows): before, it is loading, never shown
+    /// as an empty chat nor its backlog streaming in. Once shown, it stays.
     private(set) var read = false
-    /// Whether its `work` was read to its end too: until then a turn's start
-    /// may be read without its end, so none is said to run (no Working…,
-    /// no Stop) while the backlog streams in.
+    /// Whether this connection has read its `work` to its end: until then
+    /// (and while none is open) a turn's start may be read without its end,
+    /// as a catch-up replays them, so none is said to run (no Working…, no
+    /// Stop). Each connection reads it again.
     private(set) var workRead = false
+    /// Whether this connection has read its `chat` to its end.
+    @ObservationIgnored private var chatReadNow = false
     @ObservationIgnored private var rowsRevision = -1
     private(set) var pending: [PendingPost] = [] { didSet { scheduleDraftSave() } }
     private(set) var connected = false
@@ -134,6 +138,8 @@ final class ChatSession {
                         }
                         let frame = try JSONDecoder().decode(LiveFrame.self, from: data)
                         if frame.type == "hello" {
+                            chatReadNow = false
+                            if workRead { workRead = false; timelineChanged() }
                             principal = frame.principal ?? ""
                             connected = true
                             error = nil
@@ -151,10 +157,12 @@ final class ChatSession {
                                 try await subscribe(socket, channel: channel, after: frame.next)
                             } else if channel == "chat" {
                                 caughtUp = true
-                                read = true
+                                chatReadNow = true
+                                if workRead && !read { read = true }
                                 if timeline.records.filter({ $0.channel == "chat" }).count < Self.chatLast { hasEarlier = false }
                             } else if channel == "work" {
                                 if !workRead { workRead = true; timelineChanged() }
+                                if chatReadNow && !read { read = true }
                                 await earlierWork()
                             }
                         }
@@ -176,6 +184,10 @@ final class ChatSession {
             socket.cancel(with: .goingAway, reason: nil)
             connected = false
             caughtUp = false
+            chatReadNow = false
+            // no turn is said to run while none is heard; the next connection
+            // says again which do, once its work is read
+            workRead = false
             timeline.disconnected()
             guard !Task.isCancelled, !refused else { return }
             attempt = min(attempt + 1, 4)

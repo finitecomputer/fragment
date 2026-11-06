@@ -370,11 +370,19 @@ struct ShellTests {
         #expect(!stub.seen.contains { $0.path.hasPrefix("/api/f/shared--c3/") || $0.path.hasPrefix("/api/f/quiet--c4/") })
     }
 
+    /// The web's semantics, code point for code point: lines split on LF
+    /// alone (a CRLF's CR is white space), JavaScript's white space trimmed
+    /// and collapsed, 48 code points kept.
     @Test func aTitleIsItsFirstLineWithWordsCutAsTheWebCutsIt() {
         #expect(Library.title(from: "\n \n  Two   words  \nnext") == "Two words")
+        #expect(Library.title(from: "First\r\nSecond") == "First", "a CRLF ends the line, as the web splits it")
+        #expect(Library.title(from: "\r\n\u{3000}\u{A0}Wide\u{2003}\u{3000}space\u{FEFF}\r\nnext") == "Wide space")
+        #expect(Library.title(from: "One\u{2028}two") == "One two", "a line separator is white space, not a line: the web splits on LF alone")
+        #expect(Library.title(from: "\u{85}x") == "\u{85}x", "NEL is no JavaScript white space")
+        #expect(Library.title(from: String(repeating: "é", count: 60)).unicodeScalars.count == 48)
+        #expect(Library.firstSaid([]) == nil)
         #expect(Library.title(from: String(repeating: "a", count: 48)) == String(repeating: "a", count: 48))
         #expect(Library.title(from: String(repeating: "a", count: 49)) == String(repeating: "a", count: 47) + "…")
-        #expect(Library.firstSaid([]) == nil)
     }
 
     /// The person's agents in their computer's order, as the web's sidebar

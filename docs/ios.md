@@ -165,9 +165,12 @@ its own, is shared from there, and can be made again beside it. Its reads and ma
 run one after another, so an older read never lands after a newer export; the file
 is kept with its export, deleted once the export shown is another, and a download
 still in flight for one no longer shown is never kept. A chat opened is loading
-(a quiet spinner) until its backlog is read to its end, then shown at its end at
-once: never as an empty chat, nor its backlog streaming in; no turn is said to run
-until its `work` is read. Its view observes what each part draws (rows, drafts,
+(a quiet spinner) until both its channels' backlogs are read to their end, then
+shown at its end at once: never as an empty chat, nor its backlog streaming in. No
+turn is said to run while no connection is open, nor until each connection has
+read its `work`, so a catch-up's replayed start never shows as running. Titling
+checks the manifest it read, not its write, as the web's does: a rename landing
+between them is overwritten, as `POST files` takes no expectation. Its view observes what each part draws (rows, drafts,
 running turns), each set only when it changes, so a reply's words redraw that
 reply alone. Pictures are read once a session, kept by their versioned URL. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
