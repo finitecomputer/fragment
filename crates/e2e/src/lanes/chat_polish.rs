@@ -892,3 +892,62 @@ pub(super) fn work_backfill(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     chrome.close(page)?;
     Ok(())
 }
+
+/// Older messages after a read of them failed (Codex's review of #1075:
+/// a blip that failed a read and dropped the socket left the history
+/// unreachable until a reload). Valid: the failure is said at the top with
+/// Try again, the keyboard's control stays; the socket dropped and
+/// connected again, nothing is said and the history is reachable again: a
+/// page by the keyboard's control, then a page by scrolling up. Method: a
+/// chat of 500 messages whose page's first read of older messages fails.
+pub(super) fn history_recovers(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "chat-history-retry")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the retry chat: {made}");
+    s.owned(&made.body, owner);
+    for i in 0..500 {
+        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("line-{i}"), "body": { "text": format!("Line {i:03}") } })))?;
+        anyhow::ensure!(r.status == 200, "posting line {i}: {r}");
+    }
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let fail = "if (window === window.top) { window.__failOlder = true; const real = window.fetch.bind(window); \
+        window.fetch = (url, o) => { const u = String(url); if (window.__failOlder && u.includes('__channel/chat') && u.includes('before=')) { window.__failOlder = false; return Promise.reject(new TypeError('Failed to fetch')); } return real(url, o); }; }";
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), fail)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let count = "document.querySelectorAll('.msg.user').length";
+    let history = "document.getElementById('scroll').dataset.history";
+    anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 100 && document.getElementById('scroll').dataset.watching === '1'")), "the retry chat opens on its newest page");
+    chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+    let failed = super::shows(chrome, &page, &format!("{history} === 'failed' && document.getElementById('history-status').textContent === \"Couldn't load earlier messages.\" && !document.getElementById('earlier-again').hidden && !document.getElementById('earlier-load').hidden"));
+    s.ok("a read of older messages that fails says so at the top, with Try again, and the keyboard's control stays", failed, chrome.eval(&page, &format!("({{ history: {history}, said: document.getElementById('history-status').textContent }})"))?);
+    // away from the top, then the socket dropped and connected again
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "drop-live", "code": 4000 })))?;
+    anyhow::ensure!(r.status == 200, "dropping the live socket: {r}");
+    let recovered = super::shows(chrome, &page, &format!("{history} === 'more' && document.getElementById('history-status').textContent === '' && document.getElementById('earlier-again').hidden"));
+    s.ok("connected again, nothing is said and older messages are there to load", recovered, chrome.eval(&page, history)?);
+    // by the keyboard's control
+    let mut reached = false;
+    for _ in 0..40 {
+        chrome.press(&page, "Tab", false)?;
+        if chrome.eval(&page, "document.activeElement?.id === 'earlier-load'")? == true {
+            reached = true;
+            break;
+        }
+    }
+    anyhow::ensure!(super::shows(chrome, &page, &format!("{history} === 'more'")), "no page in flight");
+    let before = chrome.eval(&page, count)?.as_u64().unwrap_or(0);
+    chrome.press(&page, "Enter", false)?;
+    let by_key = reached && super::shows(chrome, &page, &format!("{count} === {} && {history} === 'more'", before + 100));
+    // and by scrolling up
+    let before = chrome.eval(&page, count)?.as_u64().unwrap_or(0);
+    chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+    let by_scroll = super::shows(chrome, &page, &format!("{count} === {}", before + 100));
+    s.ok(
+        "after it, a page comes by the keyboard's control and a page by scrolling up",
+        by_key && by_scroll,
+        json!({ "reached": reached, "byKey": by_key, "byScroll": by_scroll, "now": chrome.eval(&page, count)? }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}

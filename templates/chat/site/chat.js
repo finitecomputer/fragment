@@ -476,8 +476,9 @@ export function mount(root) {
   function historyStatus(text, again) {
     $("history-status").textContent = text;
     $("earlier-again").hidden = !again;
-    // (kept while a page loads, so a keyboard's focus stays on it)
-    $("earlier-load").hidden = history.done || history.failed || !caughtUp;
+    // (kept while a page loads, so a keyboard's focus stays on it, and
+    // after a failure: only the chat's start takes it away)
+    $("earlier-load").hidden = history.done || !caughtUp;
     $("earlier-load").setAttribute("aria-disabled", String(history.loading));
     $("scroll").dataset.history = history.loading ? "loading" : history.failed ? "failed" : history.done ? "done" : "more";
   }
@@ -499,7 +500,8 @@ export function mount(root) {
     } catch (err) {
       history.loading = false;
       history.failed = true;
-      historyStatus(`Could not load earlier messages: ${err.message}.`, true);
+      console.error("chat: earlier messages", err);
+      historyStatus("Couldn't load earlier messages.", true);
     } finally {
       history.watch = true;
       schedule();
@@ -517,7 +519,11 @@ export function mount(root) {
   }
   // a keyboard's or a screen reader's way to the page above: the
   // sentinel's loader (nothing while a page is in flight)
-  $("earlier-load").onclick = () => earlier();
+  // (a try again after a failure, too)
+  $("earlier-load").onclick = () => {
+    history.failed = false;
+    earlier();
+  };
   $("earlier-again").onclick = async () => {
     history.failed = false;
     historyStatus("", false);
@@ -526,7 +532,8 @@ export function mount(root) {
     try { await earlierWork(); }
     catch (err) {
       history.failed = true;
-      historyStatus(`Could not load earlier progress: ${err.message}.`, true);
+      console.error("chat: earlier progress", err);
+      historyStatus("Couldn't load earlier progress.", true);
     }
     schedule();
   };
@@ -3032,6 +3039,9 @@ export function mount(root) {
     // chat's oldest kept is found by one read that comes back with none)
     if (!caughtUp && (history.first.chat === null || history.first.chat <= 1)) history.done = true;
     caughtUp = true;
+    // connected again (a reconnect after a blip): a read that failed is
+    // tried again as the sentinel is next seen, or from the button
+    history.failed = false;
     historyStatus("", false);
     history.watch = true;
     arrive();
@@ -3053,7 +3063,8 @@ export function mount(root) {
       try { await earlierWork(); }
       catch (err) {
         history.failed = true;
-        historyStatus(`Could not load earlier progress: ${err.message}.`, true);
+        console.error("chat: earlier progress", err);
+        historyStatus("Couldn't load earlier progress.", true);
       }
     } });
     // what they had typed here before the page last went (any reload), theirs alone; anyone else's goes
