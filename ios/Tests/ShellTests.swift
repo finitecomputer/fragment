@@ -370,6 +370,27 @@ struct ShellTests {
         #expect(!stub.seen.contains { $0.path.hasPrefix("/api/f/shared--c3/") || $0.path.hasPrefix("/api/f/quiet--c4/") })
     }
 
+    /// The title written is the one made, exactly: no second trim of its
+    /// own (Foundation's takes NEL, which JavaScript's keeps).
+    @Test func aMadeTitleIsWrittenExactly() async throws {
+        let list = #"{"fragments":[{"name":"nel--c1","kind":"chat","title":"New chat","preview":"x","role":"owner"}]}"#
+        let page = #"{"records":[\#(record("chat", 1, principal: "npub1me", body: #"{"text":"x\u0085"}"#))]}"#
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": (200, list)
+            case "GET /api/f/nel--c1/channels/chat": (200, page)
+            case "GET /api/f/nel--c1/manifest": (200, #"{"template":"chat","meta":{"title":"New chat"}}"#)
+            case "POST /api/f/nel--c1/files": (200, #"{"commit":"c1"}"#)
+            case "POST /api/f/nel--c1/deploy": (200, #"{"deployed":true}"#)
+            default: (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+        await Library().load(try stub.api())
+        let files = try #require(stub.seen.first { $0.route == "POST /api/f/nel--c1/files" }?.json)
+        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data((files["files"].array.first?["text"].string ?? "").utf8))
+        #expect(manifest["meta"]["title"].string == "x\u{85}", "as the web writes it")
+    }
+
     /// The web's semantics, code point for code point: lines split on LF
     /// alone (a CRLF's CR is white space), JavaScript's white space trimmed
     /// and collapsed, 48 code points kept.

@@ -136,7 +136,7 @@ final class Library {
                 struct Page: Decodable { let records: [ChannelRecord] }
                 let page: Page = try await api.request("api/f/\(chat.name)/channels/chat", query: [URLQueryItem(name: "after", value: "0"), URLQueryItem(name: "limit", value: "20")])
                 guard let said = Self.firstSaid(page.records) else { titling.remove(chat.name); continue }
-                if try await api.rename(chat, title: Self.title(from: said), from: Self.untitled, message: "its title, from its first message") {
+                if try await api.retitle(chat, exactly: Self.title(from: said), from: Self.untitled, message: "its title, from its first message") {
                     listChanged(api)
                 }
             } catch { titling.remove(chat.name) }

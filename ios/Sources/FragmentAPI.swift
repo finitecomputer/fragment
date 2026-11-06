@@ -150,21 +150,29 @@ struct FragmentAPI: Sendable {
             method: "PUT", body: .object(["role": .string("editor")]))
     }
 
-    /// A chat's or an app's name, in its manifest. An agent's name is its
-    /// job's too, which only the shell and the CLI rewrite today. With
-    /// `from`, only a manifest still titled so is renamed (one renamed
-    /// meanwhile keeps its name); whether it was.
-    @discardableResult
-    func rename(_ fragment: FragmentSummary, title: String, from: String? = nil, message: String = "Rename from Finite for iOS") async throws -> Bool {
-        precondition(fragment.kind != "agent", "an agent is renamed where its job is rewritten with it")
+    /// A chat's or an app's name, in its manifest, as a person typed it
+    /// (trimmed). An agent's name is its job's too, which only the shell and
+    /// the CLI rewrite today.
+    func rename(_ fragment: FragmentSummary, title: String) async throws {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { throw APIError.server("Enter a name.") }
+        try await retitle(fragment, exactly: clean)
+    }
+
+    /// A title written exactly as given, as the web's `retitle` writes it.
+    /// With `from`, only a manifest still titled so when read is renamed
+    /// (one renamed before the manifest read keeps its name; a rename after
+    /// it is overwritten, as `POST files` takes no expectation); whether it was.
+    @discardableResult
+    func retitle(_ fragment: FragmentSummary, exactly title: String, from: String? = nil, message: String = "Rename from Finite for iOS") async throws -> Bool {
+        precondition(fragment.kind != "agent", "an agent is renamed where its job is rewritten with it")
+        precondition(!title.isEmpty, "a title is never empty")
         let manifest: JSONValue = try await request("api/f/\(fragment.name)/manifest")
         guard case .object(var fields) = manifest else { throw APIError.invalidResponse }
         var meta: [String: JSONValue] = [:]
         if case .object(let existing) = fields["meta"] { meta = existing }
         if let from, meta["title"]?.string != from { return false }
-        meta["title"] = .string(clean); fields["meta"] = .object(meta)
+        meta["title"] = .string(title); fields["meta"] = .object(meta)
         let text = String(decoding: try JSONEncoder().encode(JSONValue.object(fields)), as: UTF8.self)
         let _: JSONValue = try await request("api/f/\(fragment.name)/files", method: "POST", body: .object([
             "message": .string(message), "files": .array([.object(["path": .string("fragment.json"), "text": .string(text)])])
