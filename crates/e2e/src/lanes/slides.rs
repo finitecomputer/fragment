@@ -119,12 +119,21 @@ pub fn slides(s: &mut Suite, api: &Api) -> Result<()> {
     let mut served = vec![];
     for a in &assets {
         let r = api.call(Call { method: "GET", url: api.site_url(&name, a), ..Call::default() })?;
-        served.push(json!({ "path": a, "status": r.status, "type": r.header("content-type"), "bytes": r.bytes.len() }));
+        served.push(json!({ "path": a, "status": r.status, "type": r.header("content-type"), "bytes": r.bytes.len(), "cache": r.header("cache-control") }));
     }
     s.ok(
         "the page's own hashed assets are served, the 1.4 MB app among them",
         assets.len() >= 3 && served.iter().all(|r| r["status"] == 200) && served.iter().any(|r| r["bytes"].as_u64().unwrap_or(0) > 1024 * 1024),
         json!(served),
+    );
+    // fragment.json's `immutable: ["assets/**"]`: kept for good below 1 MiB
+    // (a file of 1 MiB or more, and every page, is asked about again)
+    let kept = |r: &Value| r["cache"].as_str().is_some_and(|c| c.contains("immutable"));
+    let big = |r: &Value| r["bytes"].as_u64().unwrap_or(0) >= 1024 * 1024;
+    s.ok(
+        "its assets under 1 MiB are kept for good, the app's 1.4 MB bundle and the page are not",
+        served.iter().filter(|r| !big(r)).all(kept) && served.iter().filter(|r| big(r)).all(|r| !kept(r)) && !root.header("cache-control").contains("immutable"),
+        json!({ "assets": served, "page": root.header("cache-control") }),
     );
 
     // who presents: editors and up post to `present`
