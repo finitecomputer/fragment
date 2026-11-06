@@ -53,7 +53,7 @@ const REPLY: Duration = Duration::from_secs(5 * 60);
 const LET_GO: Duration = Duration::from_secs(3 * 60);
 /// A restart: its sleep (the hold, the save, the stop) and its start from
 /// the image and the save, to running; its request waits this long for
-/// its answer (`Api::patient`).
+/// its answer (`Api::patient`), which comes once its start is owed.
 const RESTART: Duration = Duration::from_secs(8 * 60);
 /// Its owner's sleep, asked until it is asleep.
 const SLEEP: Duration = Duration::from_secs(3 * 60);
@@ -184,8 +184,9 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(QUEUE_DRAIN);
     let before = view();
     let g = before["generation"].as_u64().unwrap_or(0);
-    // its answer comes once it runs again (its save, then its start), as a
-    // browser's fetch waits for it
+    // its answer comes once the restart is under way (its save, then its
+    // start owed: `starting`, docs/api.md), and its view is followed to
+    // running
     let patient = api.patient(RESTART);
     let restart = || patient.signed(&keys, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": g })));
     let t0 = Instant::now();
@@ -208,8 +209,8 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
         restored
     );
     s.ok(
-        "its owner's restart answers, and it comes back running: a new start",
-        pressed.as_ref().is_ok_and(|r| r.status == 200) && came_back.is_some(),
+        "its owner's restart answers starting, and it comes back running: a new start",
+        pressed.as_ref().is_ok_and(|r| r.status == 200 && r.body["phase"] == "starting") && came_back.is_some(),
         json!({ "answer": pressed.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null), "view": after }),
     );
     s.ok(
