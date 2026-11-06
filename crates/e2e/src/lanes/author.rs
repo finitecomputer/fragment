@@ -413,7 +413,52 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
         tail == (total - 2..=total + 2).collect::<Vec<_>>() && sub["more"] == false && sub["next"] == total + 2,
         format!("{tail:?} {sub}"),
     );
+    http_pages(s, api, &owner, &paged, total + 2)?;
     live_queries(s, api, &owner)
+}
+
+/// The same backlog over HTTP (`GET …/channels/{c}`): a page ends at
+/// `CHANNEL_PAGE` records or about `CHANNEL_HTTP_PAGE_MAX_BYTES` of
+/// bodies, and its `more` says whether records remain, so a page cut
+/// short by its bytes is not the last. Read forward and back, every
+/// record once.
+fn http_pages(s: &mut Suite, api: &Api, owner: &Keys, name: &str, total: i64) -> Result<()> {
+    let page = |q: &str| api.signed(owner, "GET", &format!("/api/f/{name}/channels/room?{q}&limit={}", limits::CHANNEL_PAGE), None);
+    let first = page("after=0")?;
+    let n = first.body["records"].as_array().map_or(0, Vec::len);
+    s.ok("an HTTP page ends at CHANNEL_PAGE records, with more to read", first.status == 200 && n == limits::CHANNEL_PAGE && first.body["more"] == true, format!("{} {n} more {}", first.status, first.body["more"]));
+    for back in [false, true] {
+        let mut cursor = if back { total + 1 } else { 0 };
+        let (mut seqs, mut sizes, mut more, mut cut) = (vec![], vec![], true, false);
+        // bounded: every page holds at least one record
+        for _ in 0..total {
+            if !more {
+                break;
+            }
+            let r = page(&if back { format!("before={cursor}") } else { format!("after={cursor}") })?;
+            anyhow::ensure!(r.status == 200, "page: {r}");
+            let records = r.body["records"].as_array().cloned().unwrap_or_default();
+            let bytes: usize = records.iter().map(|r| r["body"].to_string().len()).sum();
+            more = r.body["more"] == true;
+            cut |= more && records.len() < limits::CHANNEL_PAGE;
+            sizes.push(bytes);
+            let got: Vec<i64> = records.iter().filter_map(|r| r["seq"].as_i64()).collect();
+            cursor = r.body["next"].as_i64().unwrap_or(cursor);
+            if back {
+                seqs.splice(0..0, got);
+            } else {
+                seqs.extend(got);
+            }
+        }
+        let want: Vec<i64> = (1..=total).collect();
+        let gap = seqs.iter().zip(&want).position(|(a, b)| a != b);
+        s.ok(
+            &format!("read {}, HTTP pages cut by their bytes say more, and together hold every record once", if back { "back" } else { "forward" }),
+            seqs == want && !more && cut && sizes.iter().all(|b| *b <= limits::CHANNEL_HTTP_PAGE_MAX_BYTES),
+            format!("{} pages of {sizes:?} bytes, {} records, first difference at {gap:?}", sizes.len(), seqs.len()),
+        );
+    }
+    Ok(())
 }
 
 /// Queries over the live socket: run as the socket's principal and role,
@@ -655,9 +700,10 @@ fn fill_past_a_page(api: &Api, keys: &Keys, name: &str, bytes: bool) -> Result<i
         anyhow::ensure!(r.status == 200, "bulk: {r}");
         total += limits::EFFECTS_MAX as i64;
     }
-    // records of 60 KiB, past the byte budget of one page
+    // records of 60 KiB, past the byte budget of one page (an HTTP page's,
+    // the larger)
     let size = 60 * 1024;
-    for i in 0..if bytes { limits::CHANNEL_PAGE_MAX_BYTES / size + 3 } else { 0 } {
+    for i in 0..if bytes { limits::CHANNEL_HTTP_PAGE_MAX_BYTES / size + 3 } else { 0 } {
         let r = api.op(keys, name, "bulk", &format!("big-{i}"), json!({ "n": 1, "size": size }))?;
         anyhow::ensure!(r.status == 200, "bulk: {r}");
         total += 1;
