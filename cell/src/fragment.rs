@@ -350,6 +350,10 @@ pub(crate) enum MetaKey {
     /// The live manifest's `files` (`FilesDecl`), as JSON text: its page as
     /// the files view, and that view's layer (FIN-372).
     FilesLive,
+    /// The live manifest's `immutable`, with the commit it was read from
+    /// (`site::Declared`, JSON): the site's paths kept for good, beside
+    /// that commit's tree alone (site.rs `declared_immutable`, FIN-391).
+    ImmutableLive,
     /// Per woke trigger's operation, the main commit its last triggered run
     /// started at (JSON, op → commit or null): what a wake compares main's
     /// head against before it starts anything (jobs.rs `woke_due`).
@@ -503,6 +507,7 @@ impl MetaKey {
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
             MetaKey::FilesLive => "files_live",
+            MetaKey::ImmutableLive => "immutable_live",
             MetaKey::WokeCovered => "woke_covered",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
