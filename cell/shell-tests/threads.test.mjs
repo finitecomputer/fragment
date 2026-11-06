@@ -14,7 +14,10 @@ const BOB = { identity: "npub1bob", fragment: "bob--efgh" };
 const ASKING = "ann-chat--wxyz";
 const PAIR = "ann-bob--k2m3";
 
-function world() {
+// `cut`: the records a page holds at most, as a page cut at its bytes
+// (docs/api.md) holds fewer than asked; `legacy`: pages as an older
+// release answers them, with no `more`.
+function world({ cut = Infinity, legacy = false } = {}) {
   const records = new Map();
   const rows = new Map([
     [ASKING, { name: ASKING, role: "owner", kind: "chat", agents: [ANN.identity] }],
@@ -40,10 +43,14 @@ function world() {
       previewAt: said.at(-1)?.at,
     });
   };
+  // a backwards page, as the platform answers it: ascending, its `next`
+  // the first seq, and `more` whether older records remain
   const api = async (method, path) => {
-    const m = path.match(/^\/api\/f\/([^/]+)\/channels\/([a-z]+)\?before=\d+&limit=(\d+)$/);
+    const m = path.match(/^\/api\/f\/([^/]+)\/channels\/([a-z]+)\?before=(\d+)&limit=(\d+)$/);
     assert.ok(method === "GET" && m, `${method} ${path}`);
-    return { records: [...(records.get(`${m[1]}/${m[2]}`) ?? [])].reverse().slice(0, Number(m[3])) };
+    const older = (records.get(`${m[1]}/${m[2]}`) ?? []).filter((r) => r.seq < Number(m[3]));
+    const page = older.slice(-Math.min(Number(m[4]), cut));
+    return { records: page, next: page[0]?.seq ?? Number(m[3]), ...(legacy ? {} : { more: older.length > page.length }) };
   };
   const el = (tag, cls = "", text = "") => ({ tag, className: cls, textContent: text, dataset: {}, children: [], append(...c) { this.children.push(...c); } });
   const strip = el("div");
@@ -83,7 +90,7 @@ function world() {
     work(ASKING, ANN, "turn.start", `answer-${turn}`, { cause: { fragment: ANN.fragment, channel: "tasks", seq: a.seq } });
     work(ASKING, ANN, "turn.end", `answer-${turn}`, { outcome: "idle" });
   };
-  return { publish, lines, ask, work, answer };
+  return { publish, lines, ask, work, answer, post };
 }
 
 test("the pair chat's label is the CLI's (cli/src/ask.rs pair_label)", () => {
@@ -135,6 +142,59 @@ test("an answer that came before its thread's end was read still takes its line 
     w.publish(PAIR);
     assert.deepEqual(await w.lines(), [], "the second's end read, its answer is found");
     assert.deepEqual(await w.lines(), [], "and stays found");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// Alex's review of #1070: a page cut at its bytes holds fewer records than
+// asked. An ask behind 80 large replies is still among the pair chat's
+// newest 100, read page after page, and its line says working; an answer
+// behind many of its asker's `tasks` records is still found.
+test("an ask behind large replies, read in pages cut at their bytes, still shows working", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const w = world({ cut: 7 });
+    const q = w.ask("look it up");
+    w.work(PAIR, BOB, "turn.start", "t1", { cause: { channel: "chat", seq: q.seq } });
+    for (let i = 0; i < 80; i++) w.post(PAIR, "chat", BOB.identity, { text: `part ${i}`, turn: "t1" });
+    w.work(PAIR, BOB, "turn.step", "t1");
+    w.publish(PAIR);
+    w.publish(ASKING);
+    assert.deepEqual(await w.lines(), ["working"]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("an answer behind many tasks records, read in pages cut at their bytes, still takes its line away", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const w = world({ cut: 5 });
+    const q = w.ask("first");
+    w.work(PAIR, BOB, "turn.start", "t1", { cause: { channel: "chat", seq: q.seq } });
+    w.work(PAIR, BOB, "turn.end", "t1", { outcome: "idle" });
+    w.answer("t1");
+    for (let i = 0; i < 40; i++) w.post(ANN.fragment, "tasks", ANN.identity, { kind: "routine", turn: `r${i}` });
+    w.publish(PAIR);
+    w.publish(ASKING);
+    assert.deepEqual(await w.lines(), []);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// An older release's pages (no `more`): a full page reads on, a short one
+// is the last.
+test("pages with no more, as an older release answers, read on while full", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const w = world({ legacy: true });
+    const q = w.ask("look it up");
+    w.work(PAIR, BOB, "turn.start", "t1", { cause: { channel: "chat", seq: q.seq } });
+    w.publish(PAIR);
+    w.publish(ASKING);
+    assert.deepEqual(await w.lines(), ["working"]);
   } finally {
     mock.timers.reset();
   }
