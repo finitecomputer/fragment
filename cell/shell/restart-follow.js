@@ -6,10 +6,12 @@
 // those effects and turns their outcomes into events.
 //
 // A state is none (no restart followed), `failed`, or one of the reading
-// states, each of which also says whether the restart's own ask failed
-// and is not yet decided (`refused`: its words). Every pairing is one the
-// page can be in; `failed` carries neither, so a refused ask always waits
-// for a read that decides it, whatever happens between:
+// states, each of which also says where the restart's own ask is (`ask`):
+// `pending`; `confirmed` (it answered, or it failed and a read showed the
+// restart under way all the same); or `{ refused }`, failed and not yet
+// decided (its words). Every pairing is one the page can be in; `failed`
+// carries none, so a refused ask always waits for a read that decides it,
+// whatever happens between:
 //
 //   following    its view is read every FOLLOW_MS
 //     hidden           -> paused       (no timer; a read under way dropped)
@@ -24,11 +26,22 @@
 //     its ask answers  -> following, or paused (an answer is a read that worked)
 //     its ask fails    -> read_failed, refused (decided after Check again)
 //   any read that works, refused: under way (its answer was what was lost)
-//                    -> refused forgotten; not -> failed, with its words
+//                    -> confirmed; not -> failed, with its words
 //   failed       the ask failed and a read showed no restart under way
 //     Restart          -> a new restart
 //   any state:   a view awake on a newer start, or a newer start that won't
 //                start (its own notice says so) -> none; disposed -> none
+//   confirmed:   a read awake (or won't start) on the start it restarted
+//                -> none. A restart of a start under way adopts it (Codex
+//                and a second review on #1053: pressed while starting at N,
+//                it comes up awake at N, never N+1). Its answer says
+//                `starting` at N either way, so what tells is the order:
+//                once it answered, the start it restarted can come up only
+//                if it was adopted (one running was stopped before the
+//                answer), and its answer drops every read asked before it,
+//                so a read after it is never the view before the restart.
+//                A read before it, or a view the page took elsewhere,
+//                finishes it only on a newer start
 //
 // An active restart (`active`) is one being followed, never a failure kept
 // on screen: only it makes Settings' State say Saving (computer.js).
@@ -39,16 +52,20 @@ export const PAUSED = "paused";
 export const READ_FAILED = "read_failed";
 export const FAILED = "failed";
 
+const up = (c) => c.phase === "awake" || c.phase === "wont_wake";
 // done: awake on a newer start than the one it restarted, or a newer start
 // that won't start (its own notice then says so)
-export const finished = (c, asked) => !!c && c.generation > asked && (c.phase === "awake" || c.phase === "wont_wake");
+export const finished = (c, asked) => !!c && c.generation > asked && up(c);
+// done, its restart confirmed: also the start it restarted come up (adopted)
+const finishedAfter = (s, c) => finished(c, s.asked) || (s.ask === "confirmed" && !!c && c.generation === s.asked && up(c));
 // the computer shows this restart going on: a newer start, or its save or
 // start under way
 export const underway = (c, asked) => !!c && (c.generation > asked || c.phase === "sleeping" || c.phase === "starting");
 // a restart being followed (not a failure kept on screen)
 export const active = (op) => !!op && op.state !== FAILED;
 
-const reading = (s, name, more = {}) => ({ name, asked: s.asked, at: s.at, refused: s.refused, error: null, ...more });
+const reading = (s, name, more = {}) => ({ name, asked: s.asked, at: s.at, ask: s.ask, error: null, ...more });
+const refusal = (s) => (typeof s.ask === "object" ? s.ask.refused : null);
 
 // The machine: `s` (null, or a state as above) and an event to `{ s, fx }`.
 // Events: press {asked, at, hidden} · tick · read_ok {v} · read_err
@@ -61,39 +78,42 @@ export function step(s, e) {
   if (e.type === "press") {
     if (s && s.name !== FAILED) return { s, fx: [] };
     const name = e.hidden ? PAUSED : FOLLOWING;
-    return { s: { name, asked: e.asked, at: e.at, refused: null, error: null }, fx: [{ do: "cancel" }, { do: "ask" }, ...(name === FOLLOWING ? [{ do: "schedule" }] : [])] };
+    return { s: { name, asked: e.asked, at: e.at, ask: "pending", error: null }, fx: [{ do: "cancel" }, { do: "ask" }, ...(name === FOLLOWING ? [{ do: "schedule" }] : [])] };
   }
   if (!s) return { s, fx: [] };
   switch (e.type) {
     case "dispose":
       return none;
     case "view":
+      // from elsewhere, maybe asked before the restart: a newer start only
       return finished(e.v, s.asked) ? none : { s, fx: [] };
     case "tick":
       return { s, fx: s.name === FOLLOWING ? [{ do: "read" }] : [] };
     case "read_ok": {
       // a read is only ever under way while following
       if (s.name !== FOLLOWING) return { s, fx: [] };
-      if (finished(e.v, s.asked)) return none;
-      if (s.refused && !underway(e.v, s.asked)) return { s: { name: FAILED, asked: s.asked, at: s.at, error: s.refused }, fx: [{ do: "cancel" }] };
-      return { s: s.refused ? reading(s, FOLLOWING, { refused: null }) : s, fx: [{ do: "schedule" }] };
+      if (finishedAfter(s, e.v)) return none;
+      const refused = refusal(s);
+      if (refused !== null && !underway(e.v, s.asked)) return { s: { name: FAILED, asked: s.asked, at: s.at, error: refused }, fx: [{ do: "cancel" }] };
+      return { s: refused !== null ? reading(s, FOLLOWING, { ask: "confirmed" }) : s, fx: [{ do: "schedule" }] };
     }
     case "read_err":
       if (s.name !== FOLLOWING) return { s, fx: [] };
       return { s: reading(s, READ_FAILED, { error: e.message }), fx: [{ do: "cancel" }] };
     case "ask_ok": {
       if (s.name === FAILED) return { s, fx: [] };
-      if (finished(e.v, s.asked)) return none;
-      // newer than any read under way
+      const confirmed = reading(s, s.name, { ask: "confirmed", error: s.error });
+      if (finishedAfter(confirmed, e.v)) return none;
+      // newer than any read under way, which it drops
       if (s.name === READ_FAILED) {
         const name = e.hidden ? PAUSED : FOLLOWING;
-        return { s: reading(s, name), fx: name === FOLLOWING ? [{ do: "schedule" }] : [] };
+        return { s: reading(confirmed, name), fx: name === FOLLOWING ? [{ do: "schedule" }] : [] };
       }
-      return { s, fx: s.name === FOLLOWING ? [{ do: "cancel" }, { do: "schedule" }] : [] };
+      return { s: confirmed, fx: s.name === FOLLOWING ? [{ do: "cancel" }, { do: "schedule" }] : [] };
     }
     case "ask_err": {
       if (s.name === FAILED) return { s, fx: [] };
-      const refused = reading(s, s.name, { refused: e.message, error: s.error });
+      const refused = reading(s, s.name, { ask: { refused: e.message }, error: s.error });
       // decided by the next read, which waits while hidden or after a read
       // that failed, for shown or Check again
       return { s: refused, fx: s.name === FOLLOWING ? [{ do: "cancel" }, { do: "read" }] : [] };

@@ -216,7 +216,8 @@ every chat and Settings.
   every two seconds while the page is shown
   (`cell/shell/restart-follow.js`), and a line that a big save or restore
   can take a few minutes once it has run 30 seconds; awake on its new
-  start, the notice goes. A read that fails says so, with Check again,
+  start (or, pressed while a start was under way, which the restart
+  adopts, on that start, read after its answer), the notice goes. A read that fails says so, with Check again,
   never that the restart failed; an ask that fails is decided by the next
   read that works (none while the page is hidden or waits for Check
   again): no restart under way says it didn't restart, with Try again.
