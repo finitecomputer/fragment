@@ -710,6 +710,8 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         return refuse(StatusCode::NOT_FOUND, "no such route");
     }
     let fragment = p[2].to_string();
+    // `bytes=<from>-`, the one form the bridge asks (a blob's resumed download)
+    let from = req.headers().get("range").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")?.strip_suffix('-')?.parse::<usize>().ok());
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let mut w = world.lock().unwrap();
     let Some(f) = w.fragments.get(&fragment) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
@@ -846,9 +848,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.fragments.get_mut(&fragment).unwrap().blobs.insert(sha.to_string(), ("application/octet-stream".into(), body));
             answer(StatusCode::OK, json!({ "ok": true, "sha": sha, "size": size, "stored": true }))
         }
-        (Method::GET, ["blobs", sha]) => match f.blobs.get(*sha) {
-            Some((ty, bytes)) => net::respond(StatusCode::OK, ty, bytes.clone()),
-            None => refuse(StatusCode::NOT_FOUND, "no such blob"),
+        (Method::GET, ["blobs", sha]) => match (f.blobs.get(*sha), from) {
+            (Some((ty, bytes)), Some(from)) if from > 0 && from < bytes.len() => {
+                let mut r = net::respond(StatusCode::PARTIAL_CONTENT, ty, bytes.slice(from..));
+                r.headers_mut().insert("content-range", format!("bytes {from}-{}/{}", bytes.len() - 1, bytes.len()).parse().unwrap());
+                r
+            }
+            (Some((ty, bytes)), _) => net::respond(StatusCode::OK, ty, bytes.clone()),
+            (None, _) => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
         (Method::GET, ["files"]) => {
             // a file's version moves with its bytes, as a commit's does

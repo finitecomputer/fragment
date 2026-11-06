@@ -877,6 +877,42 @@ async fn chat_attachments_have_tool_usable_paths_with_native_images() {
     assert!(!text.contains("[New message]"), "the file note creates no empty new-message section: {text}");
 }
 
+/// Goal (FIN-405): a 64 MiB file, past Hermes' own 25 MiB, reaches real
+/// Hermes by its path alone. The bridge streams it to disk (its peak memory
+/// stays well under the file's size), Hermes is handed no media to read
+/// whole, and the agent's terminal reads the original bytes at the path.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_large_attachment_reaches_hermes_by_its_path() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 120_000, "the bridge follows the chat", |w| w.live_sockets() >= 2).await;
+    let size = 64 * 1024 * 1024;
+    let bytes = bytes::Bytes::from(support::big(size));
+    let sha = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("video/mp4".into(), bytes.clone())));
+    let path = format!("/tmp/bridge-media/{sha}");
+    let before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": format!("run: sha256sum {path}"), "attachments": [{ "name": "film.mp4", "type": "video/mp4", "size": size, "sha256": sha }] }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 180_000, "the large file's turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    fake.with(|w| {
+        let said: Vec<String> = w.bodies(&chat, "chat", "reply").iter().filter(|r| r["turn"] == turn).filter_map(|r| r["text"].as_str().map(str::to_string)).collect();
+        assert!(said.iter().any(|t| t.contains(&format!("{sha}  {path}"))), "the agent's terminal read the original at its path: {said:?}");
+    });
+    let calls = model.calls.lock().unwrap()[before..].to_vec();
+    let inbound = calls.iter().find_map(|call| call.body["messages"].as_array()?.iter().find(|m| m["role"] == "user" && content_text(m).contains("run: sha256sum")).cloned()).expect("the turn reached the model");
+    assert!(content_text(&inbound).contains(&format!("[paul sent a file: 'film.mp4' (video/mp4). It is on your computer at: {path}]")), "{inbound}");
+    assert!(inbound["content"].as_array().is_none_or(|parts| parts.iter().all(|p| p["type"] == "text")), "nothing but words reach the model: {inbound}");
+    let peak = c.exec_out(&["sh", "-c", "grep VmHWM /proc/$(pgrep -o -x fragment-bridge)/status"]);
+    let kib: u64 = peak.split_whitespace().nth(1).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("the bridge's peak memory: {peak:?}"));
+    eprintln!("the bridge's peak memory: {kib} KiB, for a {} KiB file", size / 1024);
+    assert!(kib * 1024 < size as u64 / 2, "streamed, never whole in memory: {kib} KiB");
+}
+
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;

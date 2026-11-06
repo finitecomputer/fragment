@@ -806,6 +806,38 @@ async fn media_both_ways() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-405): files past Hermes' own 25 MiB, both ways. A message's
+/// 40 MiB file streams to the computer's disk and is named to Hermes by its
+/// path alone, never hosted for it to read whole; a 40 MiB file Hermes
+/// uploads streams to disk and up to the chat's blobs, on its reply.
+#[tokio::test]
+async fn large_files_both_ways() {
+    let (fake, bridge, hermes, dir) = setup("relay-large", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let turn_of = |r: &Value| records::turn_id("juniper--k3x9", &chat, "chat", r["seq"].as_u64().unwrap());
+    let bytes = bytes::Bytes::from(support::big(support::BIG_BYTES));
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("video/mp4".into(), bytes.clone())));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "look", "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "video/mp4", "name": "film.mp4" }] })));
+    fake.until(30_000, "its reply", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn.as_str())).await;
+    let path = dir.join("media").join(&sha);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes.as_ref(), "the original, whole, on disk");
+    hermes.with(|s| {
+        let event = s.heard.last().unwrap();
+        assert_eq!(event["text"], format!("look\n[paul sent a file: 'film.mp4' (video/mp4). It is on your computer at: {}]", path.display()));
+        assert!(event.get("media_urls").is_none() && event.get("media").is_none(), "never hosted for Hermes to read whole: {event}");
+    });
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "send a film" })));
+    fake.until(30_000, "a reply with the film", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn.as_str() && r.get("attachments").is_some())).await;
+    fake.with(|w| {
+        let r = replies(w, &chat).into_iter().find(|r| r["turn"] == turn.as_str() && r.get("attachments").is_some()).unwrap();
+        assert_eq!((&r["attachments"][0]["name"], &r["attachments"][0]["size"], &r["attachments"][0]["sha256"]), (&json!("film.mp4"), &json!(bytes.len()), &json!(sha)));
+        assert_eq!(w.fragments[&chat].blobs[&sha].1, bytes, "the chat's blob is Hermes' file");
+    });
+    bridge.stop().await;
+}
+
 /// A provider's file server, as FAL's CDN would be (here on this host):
 /// `/cat.png` an image, `/moved.png` a redirect to it, `/page.html` a page,
 /// `/big.png` an image past the 25 MiB a chat takes.

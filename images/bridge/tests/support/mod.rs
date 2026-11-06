@@ -45,6 +45,15 @@ pub fn dir(name: &str) -> PathBuf {
     d
 }
 
+/// A large file's length: past Hermes' own 25 MiB, and past the 32 MiB a
+/// whole-body read took before (the egress, `/relay/media`).
+pub const BIG_BYTES: usize = 40 * 1024 * 1024;
+
+/// `n` bytes no two runs differ in, none repeating within a page.
+pub fn big(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i as u32).wrapping_mul(2_654_435_761).rotate_right(13) as u8).collect()
+}
+
 pub fn settings() -> Settings {
     Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 60_000 }
 }

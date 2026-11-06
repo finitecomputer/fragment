@@ -504,7 +504,8 @@ experimental: a Hermes upgrade reads it again, and the real-Hermes lane
   reconnects with backoff.
 - **Media**: `POST <url>/relay/media` (the bytes, `content-type`,
   `x-media-filename`) → `{id}`, and `GET <url>/relay/media/<id>`, behind
-  the same token. At most 25 MiB.
+  the same token. Hermes reads a file whole, at most 25 MiB (its
+  `MEDIA_MAX_BYTES`).
 - Hermes `hello {platform, botId}` → the connector's `descriptor`: the
   keys Hermes requires, and `supported_ops`. Draft streaming needs both
   `supports_draft_streaming` and `draft`.
@@ -568,8 +569,24 @@ the bridge serves `/relay`, `/relay/media` and `/relay/activity` on
 chats to Hermes. Its message id is the turn's id. A message's files are
 downloaded first to `<BRIDGE_MEDIA_DIR>/<sha256>`, a scratch no save
 keeps, and named after its words (name, type, path); no name from a
-record becomes a path. A file Hermes sends by its provider's URL is
-fetched by the bridge (`relay/fetch.rs`).
+record becomes a path. Only those within Hermes' 25 MiB are also hosted
+at `/relay/media` as the message's media: a larger one is named by its
+path alone, so Hermes never reads it whole. A file Hermes sends by its
+provider's URL is fetched by the bridge (`relay/fetch.rs`), at most 25
+MiB.
+
+Files of up to 256 MiB, the platform's blob bound, go both ways
+(`transfer.rs`), never whole in memory: a message's file streams from
+`GET …/blobs/{sha256}` to disk, hashed as it comes. A transfer that
+moves no byte for 15 s is cut (a slow one runs as long as it moves),
+and a cut download resumes where it stopped with `Range`, each request
+signed afresh by the egress. A reply's file is hashed on disk, then
+streamed to `PUT …/blobs/{sha256}` with its length; an upload to
+`/relay/media` streams to disk. Each scratch folder (`BRIDGE_MEDIA_DIR`,
+`BRIDGE_RELAY_MEDIA_DIR`) holds at most one message's most files (2
+GiB) and 1024 files; past that, the files used least lately go
+(`scratch.rs`). SimpleX keeps its own 25 MiB a file (`simplex/run.rs`,
+`FILE_BYTES_MAX`).
 
 - **A routine with nothing to tell says nothing.** A model's bare
   `[SILENT]` gets Hermes' warning instead (`wire::UNEXPECTED_SILENCE`):

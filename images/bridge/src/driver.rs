@@ -27,10 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -43,6 +41,7 @@ use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
 use crate::runtime::{Agent, Command, Event, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::scratch::Scratch;
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -298,7 +297,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // never before: a restore swaps `/data` into place.
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
-    std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
+    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), limits::SCRATCH_MAX_BYTES).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?);
     // its answer to the platform's holds, for its whole life (none claims
     // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
@@ -383,7 +382,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, cfg.media_dir.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
@@ -1504,8 +1503,16 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     // its files refused here (an agent that is a viewer of a connector's
     // chat may post there, not upload): its words go alone, saying so
     let mut files_refused = false;
+    // its files, once uploaded: a retried post sends their refs again,
+    // never the bytes (a file may be 256 MiB)
+    let mut done: Option<Vec<AttachmentRef>> = None;
     for attempt in 1..=tries {
-        let uploaded = match if files_refused { Ok(Vec::new()) } else { upload(api, fragment, agent, files).await } {
+        let uploading = match &done {
+            _ if files_refused => Ok(Vec::new()),
+            Some(refs) => Ok(refs.clone()),
+            None => upload(api, fragment, agent, files).await,
+        };
+        let uploaded = match uploading {
             Err(e) if e.status() == Some(403) && !files.is_empty() => {
                 crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len() });
                 files_refused = true;
@@ -1518,6 +1525,7 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
         let mut attached = Vec::new();
         let result = match uploaded {
             Ok(refs) => {
+                done = Some(refs.clone());
                 if !refs.is_empty() {
                     body["attachments"] = json!(refs);
                 }
@@ -1558,24 +1566,19 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     unreachable!("the last try returns")
 }
 
-/// Uploads a reply's files as the fragment's blobs: their refs.
+/// Uploads a reply's files as the fragment's blobs, each streamed from
+/// disk (transfer.rs): their refs.
 async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<Vec<AttachmentRef>, ApiError> {
     let mut refs = Vec::new();
     for f in files.iter().take(limits::ATTACHMENTS_MAX) {
-        let bytes = match tokio::fs::read(&f.path).await {
-            Ok(b) if !b.is_empty() && b.len() as u64 <= limits::ATTACHMENT_MAX_BYTES => Bytes::from(b),
-            Ok(_) => {
-                crate::ev!("attachment.skipped", { "name": f.name, "why": "empty, or past the bound" });
-                continue;
-            }
+        let (sha, size) = match crate::transfer::hash_file(&f.path).await {
+            Ok(hashed) => hashed,
             Err(e) => {
                 crate::ev!("attachment.skipped", { "name": f.name, "why": e.to_string() });
                 continue;
             }
         };
-        let sha = records::hex(&Sha256::digest(&bytes));
-        let size = bytes.len() as u64;
-        api.put_blob(agent, fragment, &sha, &f.media_type, bytes).await?;
+        api.put_blob_file(agent, fragment, &sha, &f.media_type, &f.path, size).await?;
         refs.push(AttachmentRef { sha256: sha, size, media_type: f.media_type.clone(), name: f.name.clone() });
     }
     Ok(refs)
@@ -1594,7 +1597,7 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, media_dir: PathBuf) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -1604,13 +1607,13 @@ impl RuntimeLane {
                 match &mut c {
                     Command::Tell { text, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
                         }
                     }
                     Command::Answer { words, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
                             *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a.by_name, a.refs.len(), &files));
                         }
                     }
@@ -1632,7 +1635,7 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &media_dir), note, quote);
+                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
                     ts.files = files;
                     // its age first (a late message's), then a late card
                     // answer's turn's own note (engine.rs `hand`)
@@ -1687,31 +1690,17 @@ fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bo
     principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
 }
 
-/// A message's attachments, from the chat's blobs to scratch files.
-async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], dir: &Path) -> Vec<LocalFile> {
-    let mut out = Vec::new();
+/// A message's attachments, from the chat's blobs to scratch files, each
+/// streamed (transfer.rs); one that does not download is left out, and the
+/// runtime is told how many (`with_files`).
+async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> Vec<LocalFile> {
+    let mut out: Vec<LocalFile> = Vec::new();
     for r in refs.iter().take(limits::ATTACHMENTS_MAX) {
-        let path = dir.join(&r.sha256);
-        let have = tokio::fs::metadata(&path).await.is_ok_and(|m| m.len() == r.size);
-        if !have {
-            match api.get_blob(agent, fragment, &r.sha256).await {
-                Ok(bytes) if records::hex(&Sha256::digest(&bytes)) == r.sha256 => {
-                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
-                        crate::ev!("attachment.unsaved", { "sha256": r.sha256, "error": e.to_string() });
-                        continue;
-                    }
-                }
-                Ok(_) => {
-                    crate::ev!("attachment.refused", { "sha256": r.sha256, "why": "its bytes are not its hash" });
-                    continue;
-                }
-                Err(e) => {
-                    crate::ev!("attachment.unread", { "sha256": r.sha256, "error": e.to_string() });
-                    continue;
-                }
-            }
+        let keep: Vec<PathBuf> = out.iter().map(|f| f.path.clone()).collect();
+        match crate::transfer::download(api, agent, fragment, r, scratch, &keep).await {
+            Ok(path) => out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size }),
+            Err(e) => crate::ev!("attachment.unread", { "sha256": r.sha256, "size": r.size, "error": e.to_string() }),
         }
-        out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
     }
     out
 }

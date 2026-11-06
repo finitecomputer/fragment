@@ -706,7 +706,12 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         gw.act(react("✅", false)).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if text.contains("media") {
+    if text.contains("send a film") {
+        // past Hermes' own 25 MiB, as a file of its own it sends may be
+        if let Some(url) = upload(gw, &super::big(super::BIG_BYTES)).await {
+            gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "video", "source_url": url, "content": "a film", "reply_to": mid, "filename": "film.mp4", "metadata": {} })).await;
+        }
+    } else if text.contains("media") {
         if let Some(url) = upload(gw, b"a picture of a cat").await {
             gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "image", "source_url": url, "content": "a cat", "reply_to": mid, "filename": "cat.png", "metadata": {} })).await;
         }
