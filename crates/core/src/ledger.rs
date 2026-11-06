@@ -178,13 +178,70 @@ pub struct Meter {
 /// A batch on the ledger queue, on its way to its payer's ledger: from
 /// fragment `source`, its outbox's batch `seq`; or, `source` empty, a paid
 /// call's charge, which no fragment is told of (cell/src/meter.rs). The
-/// consumer decodes it from its JSON text (`serde_json::from_slice`).
+/// consumer reads it with `MeterBatch::from_queue`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeterBatch {
     pub payer: String,
     pub source: String,
     pub seq: i64,
     pub meter: Meter,
+}
+
+impl MeterBatch {
+    /// A batch from the JSON text of a queue message. A field a later
+    /// release added to the batch, its meter or a row is dropped first,
+    /// so its message still reads here, mid-deploy or after a rollback:
+    /// a paid call's charge has no outbox to send it again. That is what
+    /// worker's serde_wasm_bindgen read did, visiting only the fields a
+    /// struct names. What is left decodes through the one strict decoder
+    /// the ledger's route uses for a `Meter`, which still refuses a field it
+    /// does not know, so the cell's Wasm carries no second decoder of these
+    /// types. A usage stays as strict as it was (that read saw all of an
+    /// internally tagged enum's keys), and so does a missing or malformed field.
+    pub fn from_queue(text: &[u8]) -> Result<MeterBatch, String> {
+        let mut v: serde_json::Value = serde_json::from_slice(text).map_err(|e| e.to_string())?;
+        keep_named::<MeterBatch>(&mut v);
+        if let Some(meter) = v.get_mut("meter") {
+            keep_named::<Meter>(meter);
+            for row in meter.get_mut("rows").and_then(serde_json::Value::as_array_mut).into_iter().flatten() {
+                keep_named::<MeterRow>(row);
+            }
+        }
+        let kept = serde_json::to_vec(&v).expect("a JSON value serializes");
+        serde_json::from_slice(&kept).map_err(|e| e.to_string())
+    }
+}
+
+/// Drops the keys of `v`, an object, that `T`'s derived Deserialize does
+/// not name. The names are the ones `T` hands `deserialize_struct`, asked of
+/// it by a deserializer that only takes that list (`FieldNames`), so they
+/// cannot drift from the struct's own (renames included).
+fn keep_named<'de, T: Deserialize<'de>>(v: &mut serde_json::Value) {
+    let mut names = FieldNames(None);
+    let _ = T::deserialize(&mut names);
+    let names = names.0.expect("a struct names its fields");
+    if let Some(object) = v.as_object_mut() {
+        object.retain(|k, _| names.contains(&k.as_str()));
+    }
+}
+
+struct FieldNames(Option<&'static [&'static str]>);
+
+impl<'de> serde::Deserializer<'de> for &mut FieldNames {
+    type Error = serde::de::value::Error;
+
+    fn deserialize_struct<V: serde::de::Visitor<'de>>(self, _: &'static str, fields: &'static [&'static str], _: V) -> Result<V::Value, Self::Error> {
+        self.0 = Some(fields);
+        Err(serde::de::Error::custom("only its field names were asked"))
+    }
+
+    fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        Err(serde::de::Error::custom("not a struct"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

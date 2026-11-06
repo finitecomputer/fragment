@@ -413,7 +413,7 @@ pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
 }
 
 async fn consume_one(raw: RawMessage, env: &Env) {
-    let b: MeterBatch = match js::queue_body(&raw) {
+    let b = match js::queue_text(&raw).and_then(|text| MeterBatch::from_queue(text.as_bytes())) {
         Ok(b) => b,
         Err(e) => {
             // not one a fragment sent: nothing can take it

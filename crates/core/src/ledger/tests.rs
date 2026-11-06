@@ -977,9 +977,73 @@ const CHARGE: &str = r#"{"meter":{"batch":"key:cmp-1:00aa","rows":[{"agent":"npu
 fn a_queued_batch_reads_back_from_its_json_text() {
     for (batch, text) in queued_batches() {
         assert_eq!(serde_json::to_value(&batch).unwrap().to_string(), text, "the form this release writes");
-        assert_eq!(serde_json::from_slice::<MeterBatch>(text.as_bytes()).unwrap(), batch, "{text}");
+        assert_eq!(MeterBatch::from_queue(text.as_bytes()), Ok(batch), "{text}");
     }
-    let unknown = OUTBOX.replacen(r#""batch":"frag:k:7""#, r#""batch":"frag:k:7","extra":1"#, 1);
-    assert!(serde_json::from_slice::<MeterBatch>(unknown.as_bytes()).is_err(), "a meter names only its batch and rows");
-    assert!(serde_json::from_slice::<MeterBatch>(b"{}").is_err());
+}
+
+/// Each queued form with a field a later release might add (to the batch,
+/// its meter, and a row), as a message from it would reach this one, mid-deploy
+/// or after a rollback.
+fn with_added_fields(text: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+    v["region"] = serde_json::json!("weur");
+    v["meter"]["sent_at"] = serde_json::json!(T0);
+    for row in v["meter"]["rows"].as_array_mut().unwrap() {
+        row["model_route"] = serde_json::json!({ "tier": "cheap" });
+        row["note"] = serde_json::Value::Null;
+    }
+    v.to_string()
+}
+
+#[test]
+fn a_queued_batch_with_fields_a_later_release_added_still_reads_and_bills() {
+    for (batch, text) in queued_batches() {
+        let added = with_added_fields(text);
+        assert_ne!(added, text);
+        assert_eq!(MeterBatch::from_queue(added.as_bytes()), Ok(batch.clone()), "{added}");
+        // billed exactly as its own form is, on a seat's ledger
+        let billed = |text: &str| {
+            let mut w = World::seat();
+            let mut priced = book();
+            priced.keys.push(KeyPrice { key: "brave".into(), micros: 5_000_000, per: 1_000 });
+            priced.instances.push(crate::price::InstancePrice { instance: "standard-1".into(), hour: 100_000 });
+            w.ok(Op::Book(priced));
+            let answer = w.ok(Op::Meter(MeterBatch::from_queue(text.as_bytes()).unwrap().meter));
+            (answer, w.balance())
+        };
+        let (answer, balance) = billed(&added);
+        let Outcome::Metered(m) = &answer else { panic!("{added}: {answer:?}") };
+        assert_eq!(m.rows_new as usize, batch.meter.rows.len(), "every row is new: {m:?}");
+        assert!(m.charged > 0 && m.refused.is_empty(), "{m:?}");
+        assert_eq!((answer, balance), billed(text));
+    }
+    // the route's own decoder keeps its contract: no field it does not know
+    let meter = |text: &str| serde_json::to_string(&serde_json::from_str::<serde_json::Value>(text).unwrap()["meter"]).unwrap();
+    assert!(serde_json::from_str::<Meter>(&meter(&with_added_fields(OUTBOX))).unwrap_err().to_string().contains("unknown field"));
+    assert!(serde_json::from_str::<Meter>(&meter(OUTBOX)).is_ok());
+}
+
+#[test]
+fn a_queued_batch_missing_or_malformed_is_still_refused() {
+    let refused = |from: &str, to: &str| {
+        let text = OUTBOX.replacen(from, to, 1);
+        assert_ne!(text, OUTBOX, "{from}");
+        let e = MeterBatch::from_queue(text.as_bytes()).expect_err(&text);
+        (text, e)
+    };
+    for (from, to, says) in [
+        (r#""ref":"r:0","#, "", "missing field `ref`"),
+        (r#""at_ms":1790812800000,"#, r#""at_ms":"soon","#, "invalid type"),
+        (r#""kind":"neurons","#, r#""kind":"neutrinos","#, "unknown variant"),
+        (r#""milli":100000000}"#, r#""milli":100000000,"extra":1}"#, "unknown field `extra`"),
+        (r#""payer":"npub1owner","#, "", "missing field `payer`"),
+        (r#""batch":"frag:k:7","#, "", "missing field `batch`"),
+        (r#""seq":7"#, r#""seq":"7""#, "invalid type"),
+    ] {
+        let (text, e) = refused(from, to);
+        assert!(e.contains(says), "{text}: {e}");
+    }
+    assert!(MeterBatch::from_queue(b"{}").is_err());
+    assert!(MeterBatch::from_queue(br#"{"meter":7,"payer":"p","seq":0,"source":""}"#).is_err());
+    assert!(MeterBatch::from_queue(b"not json").is_err());
 }
