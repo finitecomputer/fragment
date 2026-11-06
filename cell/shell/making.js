@@ -1,66 +1,88 @@
 // The chat a New chat is making: the one thing the shell shows before the
 // platform has it (Paul, 2026-11-04), so it is one explicit state, changed
-// by these transitions alone (FIN-395). Pure: shell.js does what each
-// answers.
+// by `step` alone (FIN-395). Pure: shell.js does what each step answers.
 //
-//   none ──start──▶ shown    its room is the middle column's view
-//   shown ──settled──▶       its create answered:
-//       made, listed:    none, its chat opens in its place
-//       made, unlisted:  made: its room stays until the list has its chat
-//                        (a list read that failed, or a deploy going out)
-//       refused:         none, the view it was started from comes back
-//   made ──listed──▶ none    the list has its chat: it opens in its place
-//   shown ──left──▶ away     another view was given since (a chat,
-//                            Settings, Apps, History): its room is hidden,
-//                            its row stays, inactive, until the create answers
-//   made ──left──▶ none      nothing is left to wait for: the list lists it
-//   away ──settled──▶ none   nothing moves; the list says what there is
-//   shown|away ──renamed──▶ the same, its name drawn again (taken: 409)
+//   phase   event                        next    then
+//   none    start {agent,name,title,before} shown  stay
+//   shown   answered made, listed        none    open     its chat opens in its place
+//   shown   answered made, unlisted      made    wait     its room stays for the list
+//   shown   answered refused             none    restore  the view it was started from
+//   away    answered (either)            none    stay     the list says what there is
+//   made    listed, has it               none    open     its chat opens in its place
+//   shown|away|made|none listed (else)   same    stay
+//   shown   left                         away    stay     another view was given: its
+//                                                         room goes, its row stays
+//   made    left                         none    stay     nothing is left to wait for
+//   away|none left                       same    stay
+//   shown|away renamed {name}            same    stay     its name was taken (409)
+//   any     reload                       none    stay     memory only: the list is the truth
 //
-// Two answers come of it, never one: the chat whose row is active (its
-// own while its room is shown), and the chat whose messages are on screen
-// (none while its room is shown: a room shows no messages, even once the
-// list has its chat), which alone is marked seen and shows no unread.
+// Any other pair is a mistake of the shell's, and throws (`MakingError`).
+//
+// Two answers come of it, never one: the chat whose row is active
+// (`shownChat`: its own while its room shows), and the chat whose messages
+// are on screen (`readChat`: none while its room shows, even once the list
+// has its chat), which alone is marked seen and shows no unread.
 //
 // Its name is chosen before the create (`CreateFragment.name`), so the
 // row the list reads for it is known as it, whichever comes first: the
 // live list's read, or the create's answer.
 
-/// `{agent, name, title, before}`: `before`, the view it was started from
-/// (`{page, current}`), for a refusal while it is shown.
-export function start({ agent, name, title, before }) {
-  return { phase: "shown", agent, name, title, before };
-}
+export const PHASES = ["none", "shown", "away", "made"];
+export const EVENTS = ["start", "answered", "listed", "left", "renamed", "reload"];
 
-/// Its name was taken (the create's 409): the one drawn next is its name.
-export function renamed(m, name) {
-  return m ? { ...m, name } : m;
-}
+/// An event its phase does not take: the shell's mistake, never a person's.
+export class MakingError extends Error {}
 
-/// Another view was given: a shown one is away from now on, and a made
-/// one is no more (the list lists its chat).
-export function left(m) {
-  if (m?.phase === "made") return null;
-  return m?.phase === "shown" ? { ...m, phase: "away" } : m;
+const phaseOf = (m) => m?.phase ?? "none";
+const go = (next, then = "stay") => ({ next, then });
+
+// each phase's events: (m, event) => {next, then}
+const TABLE = {
+  none: {
+    start: (_, { agent, name, title, before }) => go({ phase: "shown", agent, name, title, before }),
+    listed: (m) => go(m),
+    left: (m) => go(m),
+    reload: () => go(null),
+  },
+  shown: {
+    answered: (m, { outcome, listed }) => {
+      if (outcome === "refused") return go(null, "restore");
+      if (outcome !== "made") throw new MakingError(`an answer is made or refused, not ${outcome}`);
+      return listed ? go(null, "open") : go({ ...m, phase: "made" }, "wait");
+    },
+    listed: (m) => go(m),
+    left: (m) => go({ ...m, phase: "away" }),
+    renamed: (m, { name }) => go({ ...m, name }),
+    reload: () => go(null),
+  },
+  away: {
+    answered: () => go(null),
+    listed: (m) => go(m),
+    left: (m) => go(m),
+    renamed: (m, { name }) => go({ ...m, name }),
+    reload: () => go(null),
+  },
+  made: {
+    listed: (m, { has }) => (has(m.name) ? go(null, "open") : go(m)),
+    left: () => go(null),
+    reload: () => go(null),
+  },
+};
+
+/// `m` (null: none) after `event` (`{type, …}`): `{next, then}`, where
+/// `then` is what shows: `open` its chat, `restore` the view before, `wait`
+/// in its room, or `stay` as it is.
+export function step(m, event) {
+  const phase = phaseOf(m);
+  const take = TABLE[phase]?.[event?.type];
+  if (!take) throw new MakingError(`a chat being made takes no ${event?.type} while ${phase}`);
+  return take(m, event);
 }
 
 /// Whether its room has the middle column (shown, or made and waiting).
 export function holdsView(m) {
   return m?.phase === "shown" || m?.phase === "made";
-}
-
-/// Its create answered (`made` or `refused`), `listed`: whether the list
-/// has its chat. `{next, then}`: its state after, and what shows: `open`
-/// its chat, `restore` the view before, `wait` in its room, or `stay`.
-export function settled(m, outcome, listed) {
-  if (m?.phase !== "shown") return { next: null, then: "stay" };
-  if (outcome !== "made") return { next: null, then: "restore" };
-  return listed ? { next: null, then: "open" } : { next: { ...m, phase: "made" }, then: "wait" };
-}
-
-/// A list read (`listed(name)`): a made one the list has opens.
-export function listed(m, isListed) {
-  return m?.phase === "made" && isListed(m.name) ? "open" : "stay";
 }
 
 /// The chat whose row is active: the one being made while its room has
