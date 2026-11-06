@@ -210,8 +210,108 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
 
     heard(s, api, &owner, &stranger)?;
     posters_kind(s, api, &owner)?;
+    draft_refusals(s, api, &owner)?;
     listed(s, api, &owner)?;
     retention(s, api, &owner)
+}
+
+/// Drafts use the real PUT route and live socket: refusing a caller or the
+/// fragment's pace must not broadcast, and successful drafts are never records.
+fn draft_refusals(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let (name, _) = room(s, api, owner, "draft-refusals", false)?;
+    let editor = api.person()?;
+    let viewer = api.person()?;
+    let stranger = api.person()?;
+    for (keys, role) in [(&editor, "editor"), (&viewer, "viewer")] {
+        let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", keys.pubkey_hex()), Some(&json!({ "role": role })))?;
+        anyhow::ensure!(r.status == 200, "adding the draft's {role}: {r}");
+    }
+    let editor_id = api.identity(&editor)?;
+    let path = format!("/api/f/{name}/channels/notes/draft");
+    let mut reader = Socket::open(api, &name, "__live", Some(&viewer), None)?;
+    reader.until("hello", 5)?;
+    reader.send(&json!({ "type": "subscribe", "channel": "notes", "after": 0 }))?;
+    reader.until("subscribed", 5)?;
+
+    let body = json!({ "turn": "refused", "text": "must not be broadcast" });
+    let unsigned = api.unsigned("PUT", &path, Some(&body))?;
+    let outsider = api.signed(&stranger, "PUT", &path, Some(&body))?;
+    let below = api.signed(&viewer, "PUT", &path, Some(&body))?;
+    s.ok(
+        "the draft PUT refuses an unsigned caller (401), a signed stranger and a viewer below its post role (403)",
+        unsigned.status == 401 && unsigned.code() == Some(ErrorCode::Unauthenticated)
+            && outsider.status == 403 && outsider.code() == Some(ErrorCode::Forbidden)
+            && below.status == 403 && below.code() == Some(ErrorCode::Forbidden),
+        format!("{unsigned} {outsider} {below}"),
+    );
+    let accepted = api.signed(&editor, "PUT", &path, Some(&json!({ "turn": "accepted", "text": "the editor's draft" })))?;
+    let heard = reader.until("draft", 10)?;
+    let stored = api.signed(owner, "GET", &format!("/api/f/{name}/channels/notes"), None)?;
+    s.ok(
+        "the first draft a reader receives is the allowed editor's, never a refused caller's",
+        accepted.status == 200 && heard["channel"] == "notes" && heard["principal"] == editor_id.as_str()
+            && heard["turn"] == "accepted" && heard["text"] == "the editor's draft"
+            && stored.status == 200 && stored.body["records"] == json!([]),
+        json!({ "status": accepted.status, "heard": heard }),
+    );
+
+    // One bounded simultaneous burst, no retrying PUTs. The cell's clock
+    // remains real: exact boundary/refill arithmetic is covered in core/live.rs.
+    // If a runner is too slow to reach the limiter, fail with the elapsed time;
+    // do not silently skip the 429 assertion or turn a transport error into one.
+    const REQUESTS: usize = 64;
+    let barrier = std::sync::Barrier::new(REQUESTS);
+    let started = std::time::Instant::now();
+    let replies: Vec<(String, Reply)> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..REQUESTS).map(|i| {
+            let (barrier, path, editor) = (&barrier, &path, &editor);
+            scope.spawn(move || {
+                let turn = format!("burst-{i}");
+                barrier.wait();
+                api.signed(editor, "PUT", path, Some(&json!({ "turn": turn, "text": "latest text" }))).map(|r| (turn, r))
+            })
+        }).collect();
+        threads.into_iter().map(|t| t.join().expect("draft request thread")).collect::<Result<_>>()
+    })?;
+    let elapsed = started.elapsed();
+    let allowed: std::collections::BTreeSet<_> = replies.iter().filter(|(_, r)| r.status == 200).map(|(turn, _)| turn.clone()).collect();
+    let limited: Vec<_> = replies.iter().filter(|(_, r)| r.status == 429 && r.code() == Some(ErrorCode::RateLimited)
+        && r.message() == format!("drafts past {} a second are dropped", limits::PRESENCE_PER_S)).map(|(turn, _)| turn.clone()).collect();
+    s.ok(
+        "a bounded draft PUT burst reaches the fragment's own 429 limiter, with no other errors",
+        !allowed.is_empty() && !limited.is_empty() && allowed.len() + limited.len() == REQUESTS,
+        json!({ "allowed": allowed.len(), "limited": limited.len(), "elapsedMs": elapsed.as_millis(), "statuses": replies.iter().map(|(_, r)| (r.status, r.code())).collect::<Vec<_>>() }),
+    );
+
+    // More than a full burst's debt can drain, regardless of which concurrent
+    // request was last admitted. Reuse a refused turn to show it was not stored.
+    std::thread::sleep(Duration::from_millis(((limits::PRESENCE_BURST + 1) * fragment_core::live::PRESENCE_EVERY_MS) as u64));
+    let retry_turn = limited.first().map(String::as_str).unwrap_or("recovery-without-429");
+    let recovered = api.signed(&editor, "PUT", &path, Some(&json!({ "turn": retry_turn, "text": "after the pace recovers" })))?;
+    anyhow::ensure!(recovered.status == 200, "the draft after refill: {recovered}");
+    let mut delivered = Vec::new();
+    let mut recovery = None;
+    for _ in 0..REQUESTS + 10 {
+        let frame = reader.next()?;
+        if frame["type"] != "draft" { continue; }
+        if frame["turn"] == retry_turn && frame["text"] == "after the pace recovers" {
+            recovery = Some(frame);
+            break;
+        }
+        delivered.push(frame);
+    }
+    let turns: std::collections::BTreeSet<_> = delivered.iter().filter_map(|f| f["turn"].as_str().map(str::to_string)).collect();
+    let stored = api.signed(owner, "GET", &format!("/api/f/{name}/channels/notes"), None)?;
+    s.ok(
+        "only accepted burst drafts arrive once; a refused turn can be sent after refill, and drafts append no records",
+        !limited.is_empty() && turns == allowed && delivered.len() == allowed.len()
+            && delivered.iter().all(|f| f["channel"] == "notes" && f["principal"] == editor_id.as_str() && f["text"] == "latest text")
+            && recovery.as_ref().is_some_and(|f| f["channel"] == "notes" && f["principal"] == editor_id.as_str())
+            && stored.status == 200 && stored.body["records"] == json!([]),
+        json!({ "allowed": allowed, "delivered": delivered, "recovery": recovery }),
+    );
+    reader.close();
+    Ok(())
 }
 
 /// A fragment with a channel its agents post to that any member reads, and
