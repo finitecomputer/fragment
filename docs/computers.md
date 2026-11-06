@@ -70,7 +70,10 @@ an image may rely on this:
   The lifecycle keeps that it is destroying (`Phase::Starting`'s
   `destroying`, stored before the destroy), so an isolate that comes up
   after it knows it as well; one that finds the start's own report gone
-  with the isolate before it counts the start failed, once.
+  with the isolate before it destroys that container (whatever runs: its
+  host owns no start yet) and counts the start failed, once, or, the
+  container still running, tells nothing and tries again at the next
+  event.
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,

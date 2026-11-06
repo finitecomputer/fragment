@@ -2520,6 +2520,56 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
         return Ok(());
     }
+    // a start that fails, its isolate gone between storing that it fails
+    // and destroying its container (the node crashed in that gap: the
+    // lever's stall): a new isolate and host find that container still
+    // running, destroy it, and count the start failed once; its exit,
+    // reported again, counts nothing; and it comes up after its pause
+    // (Codex on #1079: a new host destroyed no start's container but
+    // its own, so it was left running)
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let froze = lever_with(api, &id, json!({ "op": "alive-check", "ms": 3_000, "freeze": true }))?;
+    let stall = lever_with(api, &id, json!({ "op": "stall-failing-start", "ms": 600_000 }))?;
+    // its wake waits on the stalled start: given up on here, as a page's would be
+    let _ = api.impatient(Duration::from_secs(20)).signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let saves = |api: &Api| lever(api, &id, "saves").map(|r| r.body).unwrap_or(Value::Null);
+    let mut stalled = Value::Null;
+    let gap = s.eventually(Duration::from_secs(60), || {
+        stalled = saves(api);
+        stalled["phase"]["phase"] == "starting" && stalled["phase"]["destroying"] == true && stalled["running"] == true
+    });
+    s.crash()?;
+    let fresh = s.start(false)?;
+    let api = &fresh;
+    let found = saves(api);
+    let generation = found["generation"].as_u64().unwrap_or(0);
+    // the runtime's report of its exit: this isolate takes the computer
+    // over first (its container destroyed, the start failed once), then
+    // the report, of a start no longer under way
+    let first = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let again = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let up = s.eventually(wake, || {
+        let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+        v["phase"] == "awake" && v["generation"].as_u64().is_some_and(|g| g > generation)
+    });
+    s.ok(
+        "a start that fails, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container and count the start failed once; its exit, reported again, counts nothing; then it comes up",
+        slept.body["phase"] == "asleep"
+            && froze.status == 200
+            && stall.status == 200
+            && gap
+            && found["running"] == true
+            && found["phase"]["destroying"] == true
+            && first.status == 200
+            && first.body["running"] == false
+            && first.body["failures"] == 1
+            && first.body["phase"]["phase"] == "asleep"
+            && again.status == 200
+            && again.body["failures"] == 1
+            && up,
+        json!({ "stalled": stalled, "found": found, "first": first.body, "again": again.body }),
+    );
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once; its
     // agent's routine, the platform's own data, is kept, and fires

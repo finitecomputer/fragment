@@ -711,6 +711,11 @@ impl Lifecycle {
         self.generation
     }
 
+    /// Starts of this wake that failed in a row.
+    pub fn failures(&self) -> u32 {
+        self.failures
+    }
+
     /// Whether its owner's restart of start `asked` (0: whatever runs) is
     /// one to make: it names its newest start, the one that runs, starts,
     /// sleeps, slept or would not start. A restart of an earlier one was
