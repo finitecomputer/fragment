@@ -324,6 +324,31 @@ impl Handle {
     }
 }
 
+/// Where a reply's file is. `Staged` is a copy whose send has been asked but
+/// not answered; `Sending` has its core file id. Sent and failed are terminal
+/// events, not durable states: removing the send is what makes their replay a
+/// no-op, and an unanswered staged copy is swept on restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendState {
+    Staged,
+    Sending,
+}
+
+enum SendEvent {
+    Accepted,
+    Ended,
+}
+
+impl SendState {
+    fn transition(self, event: SendEvent) -> Option<Self> {
+        match (self, event) {
+            (SendState::Staged, SendEvent::Accepted) => Some(SendState::Sending),
+            (SendState::Sending, SendEvent::Ended) => None,
+            _ => Some(self),
+        }
+    }
+}
+
 /// A file of a reply's, copied where its link's core sends it from (a
 /// folder of its own in the link's `OUT_DIR`), and what it goes as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,12 +357,29 @@ pub struct Outgoing {
     pub kind: Kind,
 }
 
+impl Outgoing {
+    fn state(&self) -> SendState {
+        SendState::Staged
+    }
+}
+
 /// A send under way (`Saved::sending`): its copy's folder in `OUT_DIR`, and
 /// what it went as (what its note says, if it fails).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sending {
     pub folder: String,
     pub kind: Kind,
+}
+
+impl Sending {
+    fn from_staged(staged: Outgoing, folder: String) -> Self {
+        assert_eq!(staged.state().transition(SendEvent::Accepted), Some(SendState::Sending));
+        Self { folder, kind: staged.kind }
+    }
+
+    fn state(&self) -> SendState {
+        SendState::Sending
+    }
 }
 
 /// What a file goes to SimpleX as: a voice message when it is audio whose
@@ -547,6 +589,66 @@ pub struct Saved {
 pub enum Abandoned {
     Cancelling,
     Settled,
+}
+
+/// The one logical state of an incoming file. The two persisted collections
+/// are its compatibility encoding: an abandoned value wins an old overlap,
+/// exactly as `load` has always resolved it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Incoming {
+    Receiving,
+    Cancelling,
+    Settled,
+}
+
+impl From<Abandoned> for Incoming {
+    fn from(state: Abandoned) -> Self {
+        match state {
+            Abandoned::Cancelling => Incoming::Cancelling,
+            Abandoned::Settled => Incoming::Settled,
+        }
+    }
+}
+
+impl Saved {
+    fn incoming(&self, id: FileId) -> Option<Incoming> {
+        self.abandoned.get(&id).copied().map(Incoming::from).or_else(|| self.receiving.contains(&id).then_some(Incoming::Receiving))
+    }
+
+    /// The only incoming transitions. Completion or failure releases a
+    /// receive to no state; settling an abandoned file retains its tombstone.
+    /// Replays and invalid regressions change nothing.
+    fn transition_incoming(&mut self, id: FileId, next: Option<Incoming>) -> bool {
+        let current = self.incoming(id);
+        if current == next {
+            return false;
+        }
+        let valid = matches!((current, next), (None, Some(Incoming::Receiving)) | (Some(Incoming::Receiving), None) | (None | Some(Incoming::Receiving), Some(Incoming::Cancelling)) | (Some(Incoming::Cancelling), Some(Incoming::Settled)));
+        if !valid {
+            return false;
+        }
+        match next {
+            Some(Incoming::Receiving) => {
+                self.receiving.insert(id);
+            }
+            Some(Incoming::Cancelling) | Some(Incoming::Settled) => {
+                self.receiving.remove(&id);
+                self.abandoned.insert(id, if next == Some(Incoming::Cancelling) { Abandoned::Cancelling } else { Abandoned::Settled });
+            }
+            None => {
+                self.receiving.remove(&id);
+            }
+        }
+        true
+    }
+
+    fn abandoned(&self, id: FileId) -> bool {
+        matches!(self.incoming(id), Some(Incoming::Cancelling | Incoming::Settled))
+    }
+
+    fn unsettled(&self) -> usize {
+        self.abandoned.values().filter(|state| **state == Abandoned::Cancelling).count()
+    }
 }
 
 /// Whether a core's answer to a cancel settles it: it took it, or refused
@@ -1211,7 +1313,9 @@ impl Manager {
             crate::ev!("simplex.file_unsendable", { "agent": f });
             return self.kept(f, path, kind);
         };
-        s.saved.sending.insert(id, Sending { folder, kind });
+        let sending = Sending::from_staged(Outgoing { path: path.to_path_buf(), kind }, folder);
+        assert_eq!(sending.state(), SendState::Sending);
+        s.saved.sending.insert(id, sending);
         s.sends.insert(id, Instant::now());
         assert!(s.saved.sending.len() <= SENDING_MAX, "the sends under way are bounded");
         if let Err(e) = store(&s.dir, &s.saved) {
@@ -1227,7 +1331,9 @@ impl Manager {
     fn send_ended(&mut self, f: &str, id: FileId, ok: bool) {
         let Some(s) = self.slots.get_mut(f) else { return };
         s.sends.remove(&id);
-        let Some(sending) = s.saved.sending.remove(&id) else { return };
+        let Some(sending) = s.saved.sending.get(&id) else { return };
+        assert_eq!(sending.state().transition(SendEvent::Ended), None);
+        let sending = s.saved.sending.remove(&id).expect("the send under way");
         remove_copy(&s.dir, &sending.folder);
         if let Err(e) = store(&s.dir, &s.saved) {
             crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
@@ -1302,8 +1408,8 @@ impl Manager {
     /// transfer (Alex's reviews).
     fn reserve(&mut self, f: &str, id: FileId, on: bool) -> bool {
         let Some(s) = self.slots.get_mut(f) else { return false };
-        let changed = if on { s.saved.receiving.insert(id) } else { s.saved.receiving.remove(&id) };
-        if !changed {
+        let next = on.then_some(Incoming::Receiving);
+        if !s.saved.transition_incoming(id, next) {
             return true;
         }
         match store(&s.dir, &s.saved) {
@@ -1311,7 +1417,7 @@ impl Manager {
             Err(e) => {
                 crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
                 if on {
-                    s.saved.receiving.remove(&id);
+                    s.saved.transition_incoming(id, None);
                 }
                 false
             }
@@ -1322,15 +1428,12 @@ impl Manager {
     /// `ABANDONED_MAX`, the oldest settled let go first (then the oldest).
     fn abandon(&mut self, f: &str, id: FileId, state: Abandoned) {
         let Some(s) = self.slots.get_mut(f) else { return };
-        if s.saved.abandoned.get(&id) == Some(&state) {
+        if !s.saved.transition_incoming(id, Some(state.into())) {
             return;
         }
         if state == Abandoned::Cancelling {
             s.cancel_at = None;
         }
-        // from receiving to given up on in one write (Alex's review)
-        s.saved.receiving.remove(&id);
-        s.saved.abandoned.insert(id, state);
         // bounded: a settled one goes for each past `ABANDONED_MAX`, never a
         // cancel still to be taken (`forward` keeps those within it)
         while s.saved.abandoned.len() > ABANDONED_MAX {
@@ -1666,7 +1769,7 @@ impl Manager {
                 }
                 // one given up on (`files_overdue`) that came anyway, its
                 // message posted with a note: nothing carries it, so it goes
-                None if s.saved.abandoned.contains_key(file) => {
+                None if s.saved.abandoned(*file) => {
                     let late = s.dir.join("files").join(path);
                     crate::ev!("simplex.file_late", { "agent": f, "file": file, "removed": std::fs::remove_file(&late).is_ok() });
                     self.abandon(f, *file, Abandoned::Settled);
@@ -1680,7 +1783,7 @@ impl Manager {
                 if let Some((inbound, _)) = s.files.remove(file) {
                     let note = file_note(&inbound.kind, "did not arrive");
                     self.post(f, inbound, None, Some(note));
-                } else if s.saved.abandoned.contains_key(file) {
+                } else if s.saved.abandoned(*file) {
                     self.abandon(f, *file, Abandoned::Settled);
                 }
             }
@@ -1699,7 +1802,7 @@ impl Manager {
             let note = file_note(&inbound.kind, &format!("was too large to carry here ({} MB)", file.size / 1_000_000));
             return self.post(f, inbound, None, Some(note));
         }
-        if s.saved.abandoned.contains_key(&file.id) {
+        if s.saved.abandoned(file.id) {
             // given up on before (a catch-up's forward again): its note
             // again, by the same id, never a second wait
             let note = file_note(&inbound.kind, "did not arrive");
@@ -1721,8 +1824,8 @@ impl Manager {
         // posted with its note now, so no unsettled cancel is ever let go
         // (the receives asked count, kept across restarts: one the core
         // resumed holds its place, and is waited for again, never refused)
-        let unsettled = s.saved.abandoned.values().filter(|a| **a == Abandoned::Cancelling).count();
-        let reserved = s.saved.receiving.contains(&file.id) || s.files.contains_key(&file.id);
+        let unsettled = s.saved.unsettled();
+        let reserved = s.saved.incoming(file.id) == Some(Incoming::Receiving) || s.files.contains_key(&file.id);
         if !reserved && unsettled + s.saved.receiving.len() >= ABANDONED_MAX {
             crate::ev!("simplex.files_held_back", { "agent": f, "unsettled": unsettled, "receiving": s.saved.receiving.len() });
             let note = file_note(&inbound.kind, "did not arrive");
@@ -2518,6 +2621,19 @@ mod tests {
         lines.iter().filter_map(|(c, l)| Some((c, serde_json::from_str::<serde_json::Value>(l.strip_prefix("/_send @3 json ")?).ok()?))).filter(|(_, b)| b[0]["filePath"].is_string()).map(|(c, b)| (c.clone(), b[0]["filePath"].as_str().expect("a path").to_string(), b[0]["msgContent"]["type"].as_str().expect("a type").to_string())).collect()
     }
 
+    /// Goal: an outgoing copy moves from staged to sending, then its terminal
+    /// event removes it. Acceptance replay stays sending; an end cannot move a
+    /// staged copy, and no terminal state is persisted for a later replay.
+    #[test]
+    fn outgoing_transitions_end_by_removal() {
+        let staged = SendState::Staged;
+        assert_eq!(staged.transition(SendEvent::Ended), Some(SendState::Staged));
+        let sending = staged.transition(SendEvent::Accepted);
+        assert_eq!(sending, Some(SendState::Sending));
+        assert_eq!(sending.and_then(|s| s.transition(SendEvent::Accepted)), Some(SendState::Sending));
+        assert_eq!(sending.and_then(|s| s.transition(SendEvent::Ended)), None);
+    }
+
     /// Goal (B, valid and invalid): a reply's files go to its owner's app
     /// after its text, an MP3 as a voice message with its length, a PNG as
     /// an image, anything else as a file, each from a copy of its own under
@@ -2548,6 +2664,7 @@ mod tests {
         let names: Vec<String> = outgoing.iter().map(|o| o.path.file_name().expect("a name").to_string_lossy().to_string()).collect();
         assert_eq!(names, ["tts_1.mp3", "a pic.png", "report.pdf"], "their own names, made safe");
         assert!(outgoing.iter().all(|o| o.path.parent().and_then(|p| p.parent()) == Some(out.as_path()) && o.path.exists()), "each a copy in a folder of its own");
+        assert!(outgoing.iter().all(|o| o.state() == SendState::Staged));
         m.on(Msg::Reply { agent: f.into(), text: noted("Here you go.", &kept), files: outgoing.clone() }).await;
         let lines = sent_lines(&mut sent);
         assert_eq!(texts(&lines), ["Here you go.\n\n(I sent a file, in our chat.)\n\n(I sent a file, in our chat.)\n\n(I sent a voice message, in our chat.)"], "its text first, what stays noted");
@@ -2555,7 +2672,7 @@ mod tests {
         assert_eq!(sends.iter().map(|(_, p, k)| (p.clone(), k.clone())).collect::<Vec<_>>(), outgoing.iter().zip(["voice", "image", "file"]).map(|(o, k)| (o.path.to_string_lossy().to_string(), k.to_string())).collect::<Vec<_>>());
         // the voice answered with its file: kept until its upload ends, in the link's file too
         m.frame(f, 1, &sent_answer(&sends[0].0, 21));
-        assert_eq!(m.slots[f].saved.sending.get(&21).map(|s| s.kind), Some(Kind::Voice { secs: 3 }));
+        assert_eq!(m.slots[f].saved.sending.get(&21).map(|s| (s.kind, s.state())), Some((Kind::Voice { secs: 3 }, SendState::Sending)));
         assert!(load(&m.slots[f].dir, &agent()).expect("its file").sending.contains_key(&21), "written");
         // the image refused: its copy let go, its note sent
         m.frame(f, 1, &json!({ "corrId": sends[1].0, "resp": { "type": "chatCmdError", "chatError": { "type": "error", "errorType": { "type": "fileNotFound" } } } }).to_string());
@@ -2911,6 +3028,30 @@ mod tests {
         let read = load(&link_dir, &agent()).expect("its file");
         assert!(read.abandoned.contains_key(&5) && read.receiving.is_empty(), "no place held by one given up on");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal: an incoming file has one explicit state, with only the real
+    /// transitions; replays are no-op and a settled tombstone cannot become a
+    /// receive again. Its old JSON encoding survives every transition, and an
+    /// unknown future abandoned state is refused rather than guessed.
+    #[test]
+    fn incoming_transitions_and_their_compatible_encoding() {
+        let mut saved = Saved { identity: "npub1juniper".into(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None };
+        assert_eq!(saved.incoming(7), None);
+        assert!(saved.transition_incoming(7, Some(Incoming::Receiving)));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&saved).expect("written")).expect("JSON")["receiving"], json!([7]));
+        assert!(!saved.transition_incoming(7, Some(Incoming::Receiving)), "a reservation replay");
+        assert!(!saved.transition_incoming(7, Some(Incoming::Settled)), "a receive must be abandoned before it settles");
+        assert!(saved.transition_incoming(7, Some(Incoming::Cancelling)));
+        let encoded = serde_json::to_string(&saved).expect("written");
+        assert!(!encoded.contains("receiving") && encoded.contains(r#""abandoned":{"7":"cancelling"}"#));
+        let mut restarted: Saved = serde_json::from_str(&encoded).expect("old encoding reads");
+        assert_eq!(restarted.incoming(7), Some(Incoming::Cancelling));
+        assert!(!restarted.transition_incoming(7, Some(Incoming::Receiving)), "a catch-up cannot revive it");
+        assert!(!restarted.transition_incoming(7, None), "a completion cannot erase its tombstone");
+        assert!(restarted.transition_incoming(7, Some(Incoming::Settled)));
+        assert!(!restarted.transition_incoming(7, Some(Incoming::Settled)), "a late completion replay");
+        assert!(serde_json::from_str::<Saved>(r#"{"identity":"npub1juniper","phase":"off","abandoned":{"7":"future"}}"#).is_err());
     }
 
     /// Goal (Alex's review of 880ef4b2): a reservation released while the
