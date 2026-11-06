@@ -550,6 +550,7 @@ mod derived {
         pub struct Frame {
             pub id: String,
             #[serde(default, skip_serializing_if = "Option::is_none")]
+            #[schemars(extend("default" = null))]
             pub more: Option<String>,
         }
     }
@@ -626,6 +627,7 @@ mod derived_inline {
         }
         #[derive(schemars::JsonSchema)]
         pub struct Wrap {
+            #[schemars(extend("default" = null))]
             pub inner: Option<Inner>,
         }
     }
@@ -746,4 +748,157 @@ fn a_tag_is_read_as_a_field() {
     assert!(lock.lines().any(|l| l == "field T.ping.type required \"ping\""), "{lock}");
     let refused = project(&tagged(json!({ "type": "string", "const": "ping", "not": { "const": "ping" } }))).unwrap_err().to_string();
     assert!(refused.contains("`not`"), "{refused}");
+}
+
+/// A type's document as a route answers it (`answers`) or takes it, and
+/// its root schema.
+fn doc_of<T: schemars::JsonSchema>(answers: bool) -> (Value, Value) {
+    let mut g = super::openapi::generator(answers);
+    let root = g.subschema_for::<T>().to_value();
+    let defs = g.take_definitions(true);
+    let schemas = if answers { super::openapi::components(defs, Map::new()) } else { super::openapi::components(Map::new(), defs) }.unwrap();
+    let op = json!({ "operationId": "t.call", "responses": { "200": { "content": { "application/json": { "schema": root } } } } });
+    (json!({ "paths": { "/t": { "post": op } }, "components": { "schemas": schemas } }), root)
+}
+
+/// That `T`'s stated defaults are what serde reads of their fields left out.
+fn defaults_hold<T: schemars::JsonSchema + serde::Serialize + serde::de::DeserializeOwned>() -> anyhow::Result<usize> {
+    let (doc, root) = doc_of::<T>(true);
+    super::defaults::check("t", &root, doc["components"]["schemas"].as_object().unwrap(), fragment_proto::routes::round_trip::<T>)
+}
+
+#[allow(dead_code)]
+mod derived_hidden {
+    /// Absent is `Some(true)`, and written as nothing.
+    pub mod on {
+        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        pub struct Row {
+            #[serde(default = "on", skip_serializing_if = "is_on")]
+            #[schemars(extend("default" = true))]
+            pub flag: Option<bool>,
+        }
+        fn on() -> Option<bool> {
+            Some(true)
+        }
+        fn is_on(v: &Option<bool>) -> bool {
+            *v == Some(true)
+        }
+    }
+    /// Absent is `Some(false)` now.
+    pub mod off {
+        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        pub struct Row {
+            #[serde(default = "off", skip_serializing_if = "is_off")]
+            #[schemars(extend("default" = false))]
+            pub flag: Option<bool>,
+        }
+        fn off() -> Option<bool> {
+            Some(false)
+        }
+        fn is_off(v: &Option<bool>) -> bool {
+            *v == Some(false)
+        }
+    }
+    /// Its absence unsaid: a nullable field's need not be null.
+    pub mod unsaid {
+        #[derive(schemars::JsonSchema)]
+        pub struct Row {
+            #[serde(default = "on", skip_serializing_if = "is_on")]
+            pub flag: Option<bool>,
+        }
+        fn on() -> Option<bool> {
+            Some(true)
+        }
+        fn is_on(v: &Option<bool>) -> bool {
+            *v == Some(true)
+        }
+    }
+    /// Said wrong.
+    pub mod lying {
+        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        pub struct Row {
+            #[serde(default = "on", skip_serializing_if = "is_on")]
+            #[schemars(extend("default" = null))]
+            pub flag: Option<bool>,
+        }
+        fn on() -> Option<bool> {
+            Some(true)
+        }
+        fn is_on(v: &Option<bool>) -> bool {
+            *v == Some(true)
+        }
+    }
+    macro_rules! flattened {
+        ($m:ident, $default:literal, $fn:literal, $value:literal) => {
+            pub mod $m {
+                /// A field of a flattened union's branch that its wrapper does
+                /// not describe: data, not a condition on the wrapper's.
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                pub struct Wrap {
+                    pub id: String,
+                    #[serde(flatten)]
+                    pub value: Choice,
+                }
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[serde(untagged)]
+                pub enum Choice {
+                    Docked {
+                        #[serde(default = $fn, skip_serializing_if = "is_it")]
+                        #[schemars(extend("default" = $default))]
+                        dock: bool,
+                        kind: String,
+                    },
+                    Other {
+                        other: u8,
+                    },
+                }
+                fn yes() -> bool {
+                    true
+                }
+                fn no() -> bool {
+                    false
+                }
+                fn is_it(b: &bool) -> bool {
+                    *b == $value
+                }
+            }
+        };
+    }
+    flattened!(flat_on, true, "yes", true);
+    flattened!(flat_off, false, "no", false);
+    flattened!(flat_lying, false, "yes", true);
+}
+
+/// The two ways a hidden default once passed: a nullable field whose
+/// absence is not null, and a field of a flattened union's branch. Each is
+/// refused unsaid, held to serde said, and a change of it fails.
+#[test]
+fn hidden_defaults_are_said_held_and_locked() {
+    use derived_hidden::*;
+    let none = BTreeSet::new();
+    // the change a reader feels: Some(false) written as nothing, read as Some(true)
+    let written = serde_json::to_value(off::Row { flag: Some(false) }).unwrap();
+    assert_eq!(written, json!({}));
+    assert_eq!(serde_json::from_value::<on::Row>(written).unwrap().flag, Some(true));
+    assert_eq!(facts_of(&breaches(&lock_of::<on::Row>(true), &lock_of::<off::Row>(true), &none)), ["bound Row.flag default true"]);
+    let refused = project(&doc_of::<unsaid::Row>(true).0).unwrap_err().to_string();
+    assert!(refused.contains("Row.flag") && refused.contains("leaving it out"), "{refused}");
+    assert_eq!(defaults_hold::<on::Row>().unwrap(), 1);
+    let lie = defaults_hold::<lying::Row>().unwrap_err().to_string();
+    assert!(lie.contains("`flag` left out is not its stated default null"), "{lie}");
+    // a flattened branch's own field
+    let written = serde_json::to_value(flat_off::Wrap { id: "a".into(), value: flat_off::Choice::Docked { dock: false, kind: "k".into() } }).unwrap();
+    let read: flat_on::Wrap = serde_json::from_value(written).unwrap();
+    assert!(matches!(read.value, flat_on::Choice::Docked { dock: true, .. }), "an older reader reads it docked");
+    assert_eq!(facts_of(&breaches(&lock_of::<flat_on::Wrap>(true), &lock_of::<flat_off::Wrap>(true), &none)), ["bound Wrap.#0.dock default true"]);
+    assert_eq!(defaults_hold::<flat_on::Wrap>().unwrap(), 1);
+    let lie = defaults_hold::<flat_lying::Wrap>().unwrap_err().to_string();
+    assert!(lie.contains("`#0.dock` left out is not its stated default false"), "{lie}");
+}
+
+/// The wire's own defaults hold, every one reached from its routes.
+#[test]
+fn the_wires_defaults_hold() {
+    let held = super::defaults::hold(&super::openapi::document().unwrap()).unwrap();
+    assert!(held >= 30, "{held} defaults held");
 }

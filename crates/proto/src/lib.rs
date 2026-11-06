@@ -671,12 +671,14 @@ pub struct ErrorBody {
     /// a client that knows none ignores it, and one that does not know this
     /// one reads none (`reason_or_none`).
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "reason_or_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub reason: Option<Reason>,
     /// How long to wait before asking again, in ms, where a refusal knows
     /// (a 429 `rate_limited` of an embeddings model's rate limit: its
     /// writer waits exactly this, then writes again). Add-only: absent
     /// from every other refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub retry_after_ms: Option<u64>,
 }
 
@@ -1105,10 +1107,12 @@ pub struct FragmentStatus {
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// An agent fragment's role, as its face says it (`ListedFragment`'s
     /// `agent_role`): what its runtime tells it it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     pub npub: String,
     pub owner: String,
@@ -1137,10 +1141,12 @@ pub struct FragmentStatus {
     /// Files this large or larger are stored as blobs, their pointers in
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub blob_min_bytes: Option<u64>,
     /// What the page reported as its last preview card's shot loaded it
     /// (docs/api.md, Cards); absent before the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub page: Option<PageReport>,
 }
 
@@ -1169,6 +1175,7 @@ pub struct PageError {
     pub text: String,
     /// The script or resource it names (`url`, or `url:line:column`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub source: Option<String>,
 }
 
@@ -1199,17 +1206,20 @@ pub struct ListedFragment {
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// Its picture, as the address on the platform that serves it: an
     /// agent fragment's `avatar.png` at live (its agent's identity's
     /// `/api/identities/<npub>/picture?v=…`), any other's icon
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub picture: Option<String>,
     /// An agent fragment's role (its live `fragment.json`'s `meta.role`,
     /// trimmed; none when it says nothing), as its last install said: the
     /// tag the shell shows beside its name. Never any other fragment's.
     #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
@@ -1220,10 +1230,12 @@ pub struct ListedFragment {
     /// `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it
     /// (none when it holds none: docs/api.md, Search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub preview: Option<String>,
     /// With `preview`: when its message was said (ms), so a list can put
     /// its chats newest first.
     #[serde(default, rename = "previewAt", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub preview_at: Option<i64>,
     /// A chat's messages the signer's search holds that came after the
     /// last they saw (`PUT /api/fragments/{name}/seen`), at most
@@ -1234,6 +1246,7 @@ pub struct ListedFragment {
     /// Its owner's row only: who else is in it, as the fragment last said
     /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
     /// shell's sidebar leaves it out; search still finds it).
@@ -1377,6 +1390,7 @@ pub struct Sharing {
     pub members: u64,
     pub guests: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub invites: Option<u64>,
     /// It holds a secret or a door, so it is shared with no one but its
     /// owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,
@@ -1501,9 +1515,11 @@ pub struct Member {
     pub added_at: i64,
     /// `person` or `agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub kind: Option<IdentityKind>,
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
 }
 
@@ -1913,6 +1929,7 @@ pub struct OpDecl {
     pub role: Role,
     /// Its input's JSON Schema (the supported subset); also its tool schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub input: Option<Value>,
     /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
     /// no replay (the same id runs again) and no effects (docs/api.md, Apps).
@@ -1923,6 +1940,7 @@ pub struct OpDecl {
     /// (1 to `limits::OP_DESCRIPTION_MAX_CHARS` characters). None when the
     /// manifest gives none, and then absent from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub description: Option<String>,
 }
 
@@ -2046,6 +2064,7 @@ pub struct PostRecord {
 pub struct PutDraft {
     pub turn: String,
     /// At most `limits::RECORD_BODY_MAX_BYTES`.
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub text: Option<String>,
 }
 
@@ -2927,51 +2946,5 @@ mod tests {
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
         assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");
         assert_eq!(ErrorCode::Deploying.status(), 503, "a deploy going out is tried again, as a 503 is");
-    }
-}
-
-/// A field's schema default is what leaving it out means: some are
-/// declared beside their serde default (`schemars(extend("default" = …))`,
-/// where schemars leaves out one its `skip_serializing_if` skips), so each
-/// is held to what serde reads here.
-#[cfg(all(test, feature = "schema"))]
-mod schema_defaults {
-    use serde::de::DeserializeOwned;
-    use serde::Serialize;
-    use serde_json::{json, Value};
-
-    /// Goal: a reader of a row without a field reads its default. Method:
-    /// for each property with a default, the row decoded without it and
-    /// decoded with its default are the same once written again.
-    fn absent_is_default<T: DeserializeOwned + Serialize + schemars::JsonSchema>(minimal: Value) -> usize {
-        let schema = schemars::generate::SchemaSettings::draft2020_12().for_serialize().into_generator().into_root_schema_for::<T>().to_value();
-        let decode = |v: Value| serde_json::to_value(serde_json::from_value::<T>(v.clone()).unwrap_or_else(|e| panic!("{v}: {e}"))).expect("it writes");
-        let without = decode(minimal.clone());
-        let mut held = 0;
-        for (field, property) in schema["properties"].as_object().expect("an object's schema") {
-            let Some(default) = property.get("default") else { continue };
-            assert!(minimal.get(field).is_none(), "{field} is left out of the row");
-            let mut with = minimal.clone();
-            with[field] = default.clone();
-            assert_eq!(decode(with), without, "{field}: left out, it is not its default {default}");
-            held += 1;
-        }
-        held
-    }
-
-    #[test]
-    fn each_default_is_what_leaving_its_field_out_means() {
-        let held = absent_is_default::<crate::ListedFragment>(json!({ "name": "notes--b2c", "role": "viewer" }))
-            + absent_is_default::<crate::Sharing>(json!({ "visibility": "link", "members": 1, "guests": 0 }))
-            + absent_is_default::<crate::ListedRecord>(json!({ "channel": "work", "principal": "npub1", "kind": "turn.start", "at": 1 }))
-            + absent_is_default::<crate::OpDecl>(json!({ "kind": "query", "role": "viewer" }))
-            + absent_is_default::<crate::Urls>(json!({ "canonical": "https://notes--b2c.example" }))
-            + absent_is_default::<crate::FragmentStatus>(json!({
-                "name": "notes--b2c", "npub": "npub1", "owner": "npub1", "role": "owner", "visibility": "members", "repo": "",
-                "pins": { "main": null, "live": null }, "counts": { "files": 0, "events": 0, "members": 1 },
-                "code": { "sha": null, "id": null, "operations": {}, "error": null },
-                "viewToken": null, "inboxToken": null, "urls": { "canonical": "https://notes--b2c.example" },
-            }));
-        assert_eq!(held, 14, "each declared default is held");
     }
 }

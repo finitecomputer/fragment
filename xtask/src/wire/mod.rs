@@ -3,10 +3,13 @@
 //! routes.rs and the types it names); `cargo xtask check` fails when any
 //! is not what proto makes, or when the lock breaks a fact master's holds
 //! in a way an older client would feel (lock.rs), but those wire.retired
-//! names. wire.retired is appended to by hand, never edited: master's
+//! names. Every default the document states is held to serde's reading
+//! of its field left out (defaults.rs) as it is made.
+//! wire.retired is appended to by hand, never edited: master's
 //! lines stay as they are. Master is read as the schema lock reads it
 //! (`schema_lock::master_file`).
 
+mod defaults;
 mod lock;
 mod openapi;
 mod reference;
@@ -40,6 +43,8 @@ pub struct Generated {
 
 pub fn generate() -> Result<Generated> {
     let doc = openapi::document()?;
+    // each default it states is what serde reads of its field left out
+    defaults::hold(&doc)?;
     let mut openapi = serde_json::to_string_pretty(&doc).context("the document is JSON")?;
     openapi.push('\n');
     Ok(Generated { lock: lock::project(&doc)?, reference: reference::render(&doc)?, openapi })

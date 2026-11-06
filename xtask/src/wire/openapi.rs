@@ -158,17 +158,17 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
         op["parameters"] = Value::Array(params);
     }
     if let Some(request) = route.request {
-        op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": request(inn).to_value() } } });
+        op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": (request.schema)(inn).to_value() } } });
     }
     let mut responses = Map::new();
     match route.answer {
         Answer::Json(answer) => {
-            responses.insert("200".into(), json!({ "description": "OK", "content": { "application/json": { "schema": answer(out).to_value() } } }));
+            responses.insert("200".into(), json!({ "description": "OK", "content": { "application/json": { "schema": (answer.schema)(out).to_value() } } }));
         }
         Answer::Socket { sends, receives } => {
             responses.insert("101".into(), json!({ "description": "Switching Protocols: a WebSocket of JSON text frames (`x-fragment-socket`)." }));
-            let sends = sends.map(|s| s(inn).to_value()).unwrap_or(Value::Null);
-            op["x-fragment-socket"] = json!({ "sends": sends, "receives": receives(out).to_value() });
+            let sends = sends.map(|s| (s.schema)(inn).to_value()).unwrap_or(Value::Null);
+            op["x-fragment-socket"] = json!({ "sends": sends, "receives": (receives.schema)(out).to_value() });
         }
     }
     let mut codes: Vec<ErrorCode> = route.errors.iter().chain(ANY_ROUTE.iter()).copied().collect();

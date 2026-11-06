@@ -42,13 +42,15 @@
 //! nullable inline shape is a field's `T|null`; `never` is a field a
 //! branch forbids; `null` one it holds only as null or absent.
 //!
-//! An optional field says what leaving it out means: its `default`, or
-//! it is nullable (left out is none). One that says neither is refused:
-//! schemars drops a default its field's `skip_serializing_if` skips, so
-//! such a field declares it (`schemars(extend("default" = …))`, which
-//! proto's tests hold to serde), else a change of its meaning would pass.
-//! A route's parameters and a condition's fields are spared: their
-//! absence is said where they are described. Integers' ranges compare
+//! An optional field says what leaving it out means, by its `default`;
+//! one that does not is refused. schemars drops a default its field's
+//! `skip_serializing_if` skips, and a nullable field's absence need not
+//! be null, so such a field declares it (`schemars(extend("default" = …))`)
+//! and defaults.rs holds every stated default to what serde reads of its
+//! field left out. Spared are a route's parameters, a `never` field, one
+//! a condition beside it requires by name, and a condition branch's
+//! predicate on a field described above it: their absence is said where
+//! they are described. Integers' ranges compare
 //! exactly; a u128's would not, and is refused.
 //!
 //! The projection is closed: every keyword of every schema is a fact
@@ -109,7 +111,7 @@ pub fn project(doc: &Value) -> Result<String> {
                 let scheme = requirement.as_object().and_then(|m| m.keys().next()).map_or("none", String::as_str);
                 lines.insert(format!("route {name} accepts {scheme}"));
             }
-            let mut p = Projector { lines: &mut lines, lenient: 0 };
+            let mut p = Projector { lines: &mut lines, params: 0, predicates: vec![] };
             // its inputs beside its body, each an `in` shape every route has
             // (empty when it takes none), so a first optional one is a new
             // optional field: a path's and a query's
@@ -124,9 +126,9 @@ pub fn project(doc: &Value) -> Result<String> {
                     }
                 }
                 let pseudo = format!("{name}.{at}");
-                p.lenient += 1;
+                p.params += 1;
                 p.object(&pseudo, &serde_json::json!({ "type": "object", "properties": fields, "required": required }), Direction::In, false)?;
-                p.lenient -= 1;
+                p.params -= 1;
                 p.lines.insert(format!("route {name} {at} {pseudo}"));
             }
             if let Some(body) = op.pointer("/requestBody/content/application~1json/schema") {
@@ -150,7 +152,7 @@ pub fn project(doc: &Value) -> Result<String> {
     let schemas = doc["components"]["schemas"].as_object().context("the document has components")?;
     for (name, schema) in schemas {
         let direction = schema["x-fragment-direction"].as_str().and_then(Direction::parse).with_context(|| format!("{name} names its direction"))?;
-        Projector { lines: &mut lines, lenient: 0 }.node(name, schema, direction, schema["x-fragment-open"] == true)?;
+        Projector { lines: &mut lines, params: 0, predicates: vec![] }.node(name, schema, direction, schema["x-fragment-open"] == true)?;
     }
     let mut out = HEADER.to_string();
     out.push('\n');
@@ -163,10 +165,13 @@ pub fn project(doc: &Value) -> Result<String> {
 
 struct Projector<'a> {
     lines: &'a mut BTreeSet<String>,
-    /// Inside a route's parameters, or a condition beside an object's
-    /// fields (`branches` of `object`): an optional field there says what
-    /// leaving it out means elsewhere (its parameter's doc, its parent).
-    lenient: usize,
+    /// Inside a route's parameters, whose absence each parameter's doc
+    /// says (not given), or the reference's scratch projection.
+    params: usize,
+    /// The fields described by the objects a condition branch stands
+    /// beside (`branches` of `object`): a branch's own field of one of
+    /// these names is a predicate on it, not data of its own.
+    predicates: Vec<BTreeSet<String>>,
 }
 
 /// A schema's keywords, every one of them known.
@@ -279,14 +284,24 @@ impl Projector<'_> {
             self.lines.insert(format!("extends {name} {}", base.strip_prefix(COMPONENTS).unwrap_or(base)));
         }
         let required: BTreeSet<&str> = map.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+        // the names a condition beside these fields requires: their absence is the condition's
+        let conditioned: BTreeSet<&str> = union_of(map)
+            .map(|(_, branches)| branches.iter().flat_map(|b| b["required"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect())
+            .unwrap_or_default();
+        let predicates = self.predicates.last().cloned().unwrap_or_default();
         for (field, s) in map.get("properties").and_then(Value::as_object).into_iter().flatten() {
-            let t = self.render(s, &format!("{name}.{field}"), direction)?;
+            // a field's own shape is data again, whatever its object stands beside
+            self.predicates.push(BTreeSet::new());
+            let t = self.render(s, &format!("{name}.{field}"), direction);
+            self.predicates.pop();
+            let t = t?;
             let need = if required.contains(field.as_str()) { "required" } else { "optional" };
-            // what leaving it out means is part of the wire; schemars drops a
-            // default its field's `skip_serializing_if` would skip, so it is said
-            let absent_is_none = t.ends_with("|null") || matches!(t.as_str(), "any" | "never" | "null");
-            if need == "optional" && !absent_is_none && self.lenient == 0 && s.get("default").is_none() {
-                bail!("{name}.{field}: an optional field that says nothing of what leaving it out means: give it `#[cfg_attr(feature = \"schema\", schemars(extend(\"default\" = …)))]` beside its serde default (schemars leaves out a default its `skip_serializing_if` skips), or make it an `Option`");
+            // what leaving it out means is part of the wire, said by its
+            // default: schemars drops one its `skip_serializing_if` skips, and
+            // a null field's need not be null (wire/defaults.rs holds each to serde)
+            let said_elsewhere = self.params > 0 || t == "never" || conditioned.contains(field.as_str()) || predicates.contains(field);
+            if need == "optional" && !said_elsewhere && s.get("default").is_none() {
+                bail!("{name}.{field}: an optional field that says nothing of what leaving it out means: give it `#[cfg_attr(feature = \"schema\", schemars(extend(\"default\" = …)))]`, its serde default as JSON (schemars leaves out a default its `skip_serializing_if` skips; an `Option`'s is usually `null`)");
             }
             self.lines.insert(format!("field {name}.{field} {need} {t}"));
         }
@@ -303,13 +318,16 @@ impl Projector<'_> {
                 self.lines.insert(format!("field {name}.* optional {t}"));
             }
         }
-        // a flattened union beside its fields: conditions on them
+        // a flattened union beside its fields: its branches' fields of the
+        // names these describe (and those described above) are predicates
         if let Some((keyword, branches)) = union_of(map) {
             let tag = tag_of(branches);
             self.lines.insert(format!("branches {name} {}", tag.clone().unwrap_or_else(|| keyword.to_string())));
-            self.lenient += 1;
+            let mut described = predicates.clone();
+            described.extend(map.get("properties").and_then(Value::as_object).into_iter().flatten().map(|(k, _)| k.clone()));
+            self.predicates.push(described);
             let done = self.branches(name, branches, tag.as_deref(), direction);
-            self.lenient -= 1;
+            self.predicates.pop();
             done?;
         }
         Ok(())
@@ -949,7 +967,7 @@ fn field_of<'f>(path: &str, facts: &'f Facts) -> Option<&'f (bool, String)> {
 /// A schema as the lock writes a field's type (the reference's).
 pub fn type_of(schema: &Value, at: &str) -> String {
     let mut scratch = BTreeSet::new();
-    Projector { lines: &mut scratch, lenient: 1 }.render(schema, at, Direction::Both).unwrap_or_else(|_| "any".into())
+    Projector { lines: &mut scratch, params: 1, predicates: vec![] }.render(schema, at, Direction::Both).unwrap_or_else(|_| "any".into())
 }
 
 /// A component's string values, if it is an enum (the reference's).

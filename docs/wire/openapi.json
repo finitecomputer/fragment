@@ -195,9 +195,11 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "description": "Why, where one status means several causes a person acts on\ndifferently (billing's, seats' and orgs' refusals): the shell picks\nits plain words by it. Add-only: absent from every other refusal, and\na client that knows none ignores it, and one that does not know this\none reads none (`reason_or_none`)."
           },
           "retry_after_ms": {
+            "default": null,
             "description": "How long to wait before asking again, in ms, where a refusal knows\n(a 429 `rate_limited` of an embeddings model's rate limit: its\nwriter waits exactly this, then writes again). Add-only: absent\nfrom every other refusal.",
             "format": "uint64",
             "minimum": 0,
@@ -382,6 +384,7 @@
         "description": "`GET /api/f/<name>/status` (viewer and up).",
         "properties": {
           "agentRole": {
+            "default": null,
             "description": "An agent fragment's role, as its face says it (`ListedFragment`'s\n`agent_role`): what its runtime tells it it does.",
             "type": [
               "string",
@@ -389,6 +392,7 @@
             ]
           },
           "blobMinBytes": {
+            "default": null,
             "description": "Files this large or larger are stored as blobs, their pointers in\ngit (absent from hosts without blobs: the TypeScript runtime).",
             "format": "uint64",
             "minimum": 0,
@@ -433,6 +437,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "description": "What the page reported as its last preview card's shot loaded it\n(docs/api.md, Cards); absent before the first."
           },
           "pins": {
@@ -452,6 +457,7 @@
             "description": "The caller's role."
           },
           "title": {
+            "default": null,
             "type": [
               "string",
               "null"
@@ -548,6 +554,7 @@
         "description": "A fragment the signer holds a role on: a row of `GET /api/fragments`\n(and of a search's fragments), with the role they hold.",
         "properties": {
           "agentRole": {
+            "default": null,
             "description": "An agent fragment's role (its live `fragment.json`'s `meta.role`,\ntrimmed; none when it says nothing), as its last install said: the\ntag the shell shows beside its name. Never any other fragment's.",
             "type": [
               "string",
@@ -594,6 +601,7 @@
             "type": "boolean"
           },
           "picture": {
+            "default": null,
             "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at live (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
             "type": [
               "string",
@@ -606,6 +614,7 @@
             "type": "boolean"
           },
           "preview": {
+            "default": null,
             "description": "A chat's newest message, its first line (at most\n`limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it\n(none when it holds none: docs/api.md, Search).",
             "type": [
               "string",
@@ -613,6 +622,7 @@
             ]
           },
           "previewAt": {
+            "default": null,
             "description": "With `preview`: when its message was said (ms), so a list can put\nits chats newest first.",
             "format": "int64",
             "type": [
@@ -632,9 +642,11 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "description": "Its owner's row only: who else is in it, as the fragment last said\n(`None` until it has)."
           },
           "title": {
+            "default": null,
             "type": [
               "string",
               "null"
@@ -950,6 +962,7 @@
                 ]
               },
               "thinking": {
+                "default": null,
                 "format": "uint64",
                 "minimum": 0,
                 "type": [
@@ -1302,9 +1315,11 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "description": "`person` or `agent`."
           },
           "owner": {
+            "default": null,
             "description": "An agent member's owner, who reads what it reads.",
             "type": [
               "string",
@@ -1381,6 +1396,7 @@
         "description": "An operation as `fragment.json` declares it.",
         "properties": {
           "description": {
+            "default": null,
             "description": "What it does, in plain text, for a person or an agent choosing it\n(1 to `limits::OP_DESCRIPTION_MAX_CHARS` characters). None when the\nmanifest gives none, and then absent from the wire.",
             "type": [
               "string",
@@ -1393,6 +1409,7 @@
             "type": "boolean"
           },
           "input": {
+            "default": null,
             "description": "Its input's JSON Schema (the supported subset); also its tool schema."
           },
           "kind": {
@@ -1433,6 +1450,7 @@
             "$ref": "#/components/schemas/PageErrorKind"
           },
           "source": {
+            "default": null,
             "description": "The script or resource it names (`url`, or `url:line:column`).",
             "type": [
               "string",
@@ -1611,6 +1629,7 @@
         "description": "`PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post\nthere: a record not written yet, as it is written (a reply as it\nstreams), shown to the channel's readers live and never stored (a\n`draft` frame on `__live`); `text: null` stops it. The record its poster\nthen writes with the same `turn` replaces it on a page.",
         "properties": {
           "text": {
+            "default": null,
             "description": "At most `limits::RECORD_BODY_MAX_BYTES`.",
             "type": [
               "string",
@@ -1764,6 +1783,7 @@
             "type": "integer"
           },
           "invites": {
+            "default": null,
             "format": "uint64",
             "minimum": 0,
             "type": [

@@ -11,7 +11,9 @@
 //! limits; the shapes are the types here.
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
 use crate::{
@@ -70,6 +72,27 @@ pub fn shape<T: JsonSchema>(g: &mut SchemaGenerator) -> Schema {
     g.subschema_for::<T>()
 }
 
+/// A type a route takes or answers: its schema, and its round trip
+/// through serde (read, then written again), to which `cargo xtask wire`
+/// holds each default the schema states: what serde reads of a field left
+/// out.
+#[derive(Clone, Copy)]
+pub struct Ty {
+    pub schema: Shape,
+    pub round_trip: fn(Value) -> Result<Value, String>,
+}
+
+/// `T` as a route's body, answer or frame.
+pub const fn ty<T: JsonSchema + Serialize + DeserializeOwned>() -> Ty {
+    Ty { schema: shape::<T>, round_trip: round_trip::<T> }
+}
+
+/// `v` read as a `T`, then written again.
+pub fn round_trip<T: Serialize + DeserializeOwned>(v: Value) -> Result<Value, String> {
+    let t: T = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    serde_json::to_value(t).map_err(|e| e.to_string())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamAt {
     Path,
@@ -90,10 +113,10 @@ pub struct Param {
 #[derive(Clone, Copy)]
 pub enum Answer {
     /// 200, JSON of this type.
-    Json(Shape),
+    Json(Ty),
     /// A WebSocket (101): the frames a client sends on it, if any, and the
     /// frames it receives.
-    Socket { sends: Option<Shape>, receives: Shape },
+    Socket { sends: Option<Ty>, receives: Ty },
 }
 
 #[derive(Clone, Copy)]
@@ -108,7 +131,7 @@ pub struct Route {
     pub auth: &'static [Auth],
     pub params: &'static [Param],
     /// Its JSON body, if it takes one.
-    pub request: Option<Shape>,
+    pub request: Option<Ty>,
     pub answer: Answer,
     /// The refusals it answers with (`ErrorBody`), beside `ANY_ROUTE`'s.
     pub errors: &'static [ErrorCode],
@@ -153,7 +176,7 @@ pub const ROUTES: &[Route] = &[
             doc: "An agent's: the identity it acts for. The rows are the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there, `owned` on that identity's own, and no `listed`.",
         }],
         request: None,
-        answer: Answer::Json(shape::<FragmentList>),
+        answer: Answer::Json(ty::<FragmentList>()),
         errors: &[Unauthenticated, Forbidden, RegistryUnavailable],
     },
     Route {
@@ -164,7 +187,7 @@ pub const ROUTES: &[Route] = &[
         auth: SIGNED,
         params: &[],
         request: None,
-        answer: Answer::Socket { sends: None, receives: shape::<ListWatchFrame> },
+        answer: Answer::Socket { sends: None, receives: ty::<ListWatchFrame>() },
         errors: &[Unauthenticated, InvalidRequest, RateLimited],
     },
     Route {
@@ -174,8 +197,8 @@ pub const ROUTES: &[Route] = &[
         summary: "Archive or unarchive a fragment in the signer's own list.",
         auth: SIGNED,
         params: &[NAME],
-        request: Some(shape::<SetArchived>),
-        answer: Answer::Json(shape::<Archived>),
+        request: Some(ty::<SetArchived>()),
+        answer: Answer::Json(ty::<Archived>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
     Route {
@@ -185,8 +208,8 @@ pub const ROUTES: &[Route] = &[
         summary: "Put a fragment on the signer's dock, or take it off.",
         auth: SIGNED,
         params: &[NAME],
-        request: Some(shape::<SetDock>),
-        answer: Answer::Json(shape::<Docked>),
+        request: Some(ty::<SetDock>()),
+        answer: Answer::Json(ty::<Docked>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
     Route {
@@ -196,8 +219,8 @@ pub const ROUTES: &[Route] = &[
         summary: "Pin or unpin a fragment in the signer's sidebar.",
         auth: SIGNED,
         params: &[NAME],
-        request: Some(shape::<SetPinned>),
-        answer: Answer::Json(shape::<Pinned>),
+        request: Some(ty::<SetPinned>()),
+        answer: Answer::Json(ty::<Pinned>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
     Route {
@@ -208,7 +231,7 @@ pub const ROUTES: &[Route] = &[
         auth: SIGNED,
         params: &[NAME],
         request: None,
-        answer: Answer::Json(shape::<Seen>),
+        answer: Answer::Json(ty::<Seen>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
     Route {
@@ -225,7 +248,7 @@ pub const ROUTES: &[Route] = &[
             doc: "What to look for, once: words, each in a match as a word or a word's start.",
         }],
         request: None,
-        answer: Answer::Json(shape::<SearchAnswer>),
+        answer: Answer::Json(ty::<SearchAnswer>()),
         errors: &[Unauthenticated, InvalidRequest],
     },
     Route {
@@ -236,7 +259,7 @@ pub const ROUTES: &[Route] = &[
         auth: SIGNED,
         params: &[NAME],
         request: None,
-        answer: Answer::Json(shape::<FragmentStatus>),
+        answer: Answer::Json(ty::<FragmentStatus>()),
         errors: &[Unauthenticated, Forbidden, NotFound],
     },
     Route {
@@ -247,7 +270,7 @@ pub const ROUTES: &[Route] = &[
         auth: SIGNED,
         params: &[NAME],
         request: None,
-        answer: Answer::Json(shape::<MemberList>),
+        answer: Answer::Json(ty::<MemberList>()),
         errors: &[Unauthenticated, Forbidden, NotFound],
     },
     Route {
@@ -264,7 +287,7 @@ pub const ROUTES: &[Route] = &[
             Param { name: "limit", at: ParamAt::Query, required: false, schema: shape::<u64>, doc: "At most `CHANNEL_PAGE`." },
         ],
         request: None,
-        answer: Answer::Json(shape::<ChannelPage>),
+        answer: Answer::Json(ty::<ChannelPage>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound],
     },
     Route {
@@ -274,8 +297,8 @@ pub const ROUTES: &[Route] = &[
         summary: "Append a `message` record as the poster.",
         auth: SIGNED,
         params: &[NAME, CHANNEL],
-        request: Some(shape::<PostRecord>),
-        answer: Answer::Json(shape::<Posted>),
+        request: Some(ty::<PostRecord>()),
+        answer: Answer::Json(ty::<Posted>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, ConflictingBody, TooLarge, BudgetUsedUp],
     },
     Route {
@@ -285,8 +308,8 @@ pub const ROUTES: &[Route] = &[
         summary: "Show a record as it is written to the channel's live readers; never stored.",
         auth: SIGNED,
         params: &[NAME, CHANNEL],
-        request: Some(shape::<PutDraft>),
-        answer: Answer::Json(shape::<Done>),
+        request: Some(ty::<PutDraft>()),
+        answer: Answer::Json(ty::<Done>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, TooLarge, RateLimited],
     },
     Route {
@@ -297,7 +320,7 @@ pub const ROUTES: &[Route] = &[
         auth: VISITOR,
         params: &[NAME],
         request: None,
-        answer: Answer::Socket { sends: Some(shape::<LiveIn>), receives: shape::<LiveOut> },
+        answer: Answer::Socket { sends: Some(ty::<LiveIn>()), receives: ty::<LiveOut>() },
         errors: &[Unauthenticated, Forbidden, NotFound],
     },
 ];

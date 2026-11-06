@@ -141,6 +141,7 @@ pub enum LiveOut {
         text: Option<String>,
         at: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
         thinking: Option<u64>,
     },
     /// A mutation applied: re-run live queries.
