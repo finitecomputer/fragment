@@ -172,7 +172,15 @@ read its `work`, so a catch-up's replayed start never shows as running. Titling
 checks the manifest it read, not its write, as the web's does: a rename landing
 between them is overwritten, as `POST files` takes no expectation. Its view observes what each part draws (rows, drafts,
 running turns), each set only when it changes, so a reply's words redraw that
-reply alone. Pictures are read once a session, kept by their versioned URL. Connected accounts follow the signed list watcher, discard
+reply alone. Pictures are read once a session, kept by their versioned URL. Links
+in a message are found as the web's renderer finds them (bare http(s) URLs too)
+and underlined; a tap opens a page of a fragment of the person's in the app, at
+that page, with an Open beside the message as the web's chat gives one, and any
+other address in Safari; a long press copies or shares each. Your Apps is pushed
+onto the page it was opened from, so Back returns there; a chat's top bar has no
+New chat (the sidebar's starts one). Jumping to the latest holds scrolling off
+for the jump, which stops a fling's momentum, and while following the latest the
+bottom stays pinned as rows are drawn taller than the lazy stack's guess. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not

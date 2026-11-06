@@ -7,14 +7,21 @@ struct ChatView: View {
     @State private var session: ChatSession
     @State private var followsBottom = true
     @State private var scrollingByHand = false
+    /// A jump to the latest under way: scrolling is held off for it, which
+    /// stops a fling's momentum. Momentum ran on past a jump made while it
+    /// lasted, so the tap only hid the button.
+    @State private var jumping = false
     let library: Library
+    /// Opens a fragment of the person's (a chat, or an app at a page).
+    let open: (FragmentSummary) -> Void
     @State private var importer = false
     @State private var uploading = false
     @State private var voice = VoiceMemo()
 
-    init(session: ChatSession, library: Library) {
+    init(session: ChatSession, library: Library, open: @escaping (FragmentSummary) -> Void) {
         _session = State(initialValue: session)
         self.library = library
+        self.open = open
     }
 
     var body: some View {
@@ -26,7 +33,7 @@ struct ChatView: View {
                 // stack draws only the rows on screen.
                 LazyVStack(alignment: .leading, spacing: 24) {
                     EarlierButton(session: session)
-                    ChatRows(session: session, library: library)
+                    ChatRows(session: session, library: library, open: open)
                     PendingRows(session: session)
                     DraftRows(session: session, library: library)
                     WorkingLine(session: session, library: library)
@@ -44,7 +51,15 @@ struct ChatView: View {
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentSize.height - geometry.visibleRect.maxY < 100
             } action: { _, nearBottom in
-                if scrollingByHand { followsBottom = nearBottom }
+                if scrollingByHand && !jumping { followsBottom = nearBottom }
+            }
+            // Following the latest, the bottom stays pinned as the content
+            // grows: rows the lazy stack drew taller than its guess (a reveal
+            // landed short of the newest messages), a reply streaming in.
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentSize.height
+            } action: { old, new in
+                if followsBottom && !scrollingByHand && session.read && new > old { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onScrollPhaseChange { _, phase in
                 scrollingByHand = phase == .interacting || phase == .decelerating
@@ -58,6 +73,14 @@ struct ChatView: View {
             .onChange(of: session.drafts) { _, _ in
                 if followsBottom { proxy.scrollTo("bottom", anchor: .bottom) }
             }
+            .scrollDisabled(jumping)
+            // once scrolling is held off (the fling stopped), the jump lands
+            .onChange(of: jumping) { _, now in
+                guard now else { return }
+                scrollingByHand = false
+                proxy.scrollTo("bottom", anchor: .bottom)
+                jumping = false
+            }
             .animation(reduceMotion ? nil : .easeIn(duration: 0.2), value: session.read)
             .overlay(alignment: .bottomTrailing) {
                 if !followsBottom && session.read {
@@ -66,7 +89,7 @@ struct ChatView: View {
                     // bottom anchor then keeps it there as they are drawn.
                     Button("Latest messages", systemImage: "arrow.down") {
                         followsBottom = true
-                        proxy.scrollTo("bottom", anchor: .bottom)
+                        jumping = true
                     }
                     .labelStyle(.iconOnly).buttonStyle(.borderedProminent).buttonBorderShape(.circle).padding()
                     .accessibilityIdentifier("latestMessages")
@@ -74,6 +97,13 @@ struct ChatView: View {
             }
             .overlay { ChatEmptyState(session: session) }
         }
+        // A tapped link: a page of a fragment of theirs opens in the app, as the
+        // web's Open opens it beside the chat; any other, in Safari.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let fragment = library.fragment(linkedBy: url) else { return .systemAction }
+            open(fragment)
+            return .handled
+        })
         .background(FragmentStyle.background)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
@@ -163,12 +193,15 @@ private struct EarlierButton: View {
 private struct ChatRows: View {
     let session: ChatSession
     let library: Library
+    let open: (FragmentSummary) -> Void
     var body: some View {
         let faces = library.agentsByIdentity
         let you = session.principal
         ForEach(session.rows) { record in
+            let links = record.isMessage ? MessageLinks.find(in: record.text) : []
             ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal], card: session.activity.cards[record.id],
-                    api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 })
+                    links: links, opens: links.compactMap(library.fragment(linkedBy:)).reduce(into: []) { kept, app in if !kept.contains(where: { $0.name == app.name }) { kept.append(app) } },
+                    api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 }, open: open)
                 .equatable()
         }
     }
@@ -181,12 +214,18 @@ struct ChatRow: View, Equatable {
     let isYou: Bool
     let agent: FragmentSummary?
     var card: ToolCard? = nil
+    /// The web addresses in its words, and the fragments of theirs among
+    /// them, each with an Open of its own, as the web's chat gives one.
+    var links: [URL] = []
+    var opens: [FragmentSummary] = []
     let api: FragmentAPI
     let fragment: String
     let reply: (ChannelRecord) -> Void
+    var open: (FragmentSummary) -> Void = { _ in }
 
     nonisolated static func == (a: ChatRow, b: ChatRow) -> Bool {
         a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment && a.card == b.card
+            && a.links == b.links && a.opens == b.opens
     }
 
     var body: some View {
@@ -197,7 +236,31 @@ struct ChatRow: View, Equatable {
                         Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
                         Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
                         ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
+                        if links.count == 1, let link = links.first {
+                            Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
+                            ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                        } else if !links.isEmpty {
+                            Menu("Links", systemImage: "link") {
+                                ForEach(links, id: \.self) { link in
+                                    Menu(link.host() ?? link.absoluteString) {
+                                        Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
+                                        ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                                    }
+                                }
+                            }
+                        }
                     }
+                if !opens.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(opens) { app in
+                            Button { open(app) } label: {
+                                Label("Open \(app.displayTitle)", systemImage: "rectangle.portrait.on.rectangle.portrait").font(.footnote.weight(.semibold)).lineLimit(1)
+                            }
+                            .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                            .accessibilityIdentifier("openLinked-\(app.name)")
+                        }
+                    }
+                }
                 ForEach(attachments) { attachment in
                     AttachmentView(attachment: attachment, api: api, fragment: fragment)
                 }
@@ -318,7 +381,7 @@ struct MessageView: View {
                     }
                 }
                 if isYou {
-                    Text(text).font(.body).lineSpacing(5).textSelection(.enabled)
+                    Text(MessageLinks.linked(AttributedString(text))).font(.body).lineSpacing(5).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 } else { MarkdownText(text: text) }
             }

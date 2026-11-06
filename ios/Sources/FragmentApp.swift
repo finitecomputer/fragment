@@ -46,6 +46,14 @@ final class Library {
     }
     var agent: FragmentSummary? { agents.first { $0.name == selectedAgent } ?? agents.first }
     func agent(for identity: String) -> FragmentSummary? { agents.first { identities[$0.name] == identity } }
+    /// The fragment of the person's list a link is a page of (the web's
+    /// "Open" for one: templates/chat/site/chat.js `openBeside`), opening at
+    /// that page; none for another's or any other address, which Safari opens.
+    func fragment(linkedBy url: URL) -> FragmentSummary? {
+        guard let name = MessageLinks.fragmentName(url), var found = fragments.first(where: { $0.name == name }) else { return nil }
+        if found.kind != "chat" { found.link = url }
+        return found
+    }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]
@@ -281,17 +289,8 @@ struct FragmentRoot: View {
     private func shell(_ api: FragmentAPI) -> some View {
         ZStack(alignment: .leading) {
             Group {
-                if showingApps {
-                    NavigationStack {
-                        AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
-                            .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarLeading) {
-                                    Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
-                                }
-                            }
-                    }
-                } else {
+                    // Your Apps is pushed onto the page it was opened from, so
+                    // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
                         content(api)
                             .navigationTitle(title)
@@ -301,7 +300,8 @@ struct FragmentRoot: View {
                                     Button("Show sidebar", systemImage: "sidebar.left") { toggleSidebar() }.accessibilityIdentifier("sidebar")
                                 }
                                 ToolbarItemGroup(placement: .topBarTrailing) {
-                                    if page != .launcher && page != .apps {
+                                    // a chat has no New chat of its own: the sidebar's starts one
+                                    if page == .history || page == .settings {
                                         Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
                                     }
                                     if page != .apps {
@@ -309,8 +309,11 @@ struct FragmentRoot: View {
                                     }
                                 }
                             }
+                            .navigationDestination(isPresented: $showingApps) {
+                                AppsLibraryView(library: library, api: api, open: { openedApp = $0 })
+                                    .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
+                            }
                     }
-                }
             }
             .accessibilityHidden(sidebar)
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
@@ -338,7 +341,7 @@ struct FragmentRoot: View {
         case .chat(let name):
             if let chat = library.fragments.first(where: { $0.name == name }) {
                 if let session = try? library.session(for: chat, api: api) {
-                    ChatView(session: session, library: library).id(chat.name)
+                    ChatView(session: session, library: library, open: { open($0) }).id(chat.name)
                 } else {
                     ContentUnavailableView("Your drafts are safe", systemImage: "square.and.pencil", description: Text("Finish or discard a draft in another chat before opening more conversations."))
                 }
@@ -354,7 +357,6 @@ struct FragmentRoot: View {
         }
     }
     private var title: String {
-        if showingApps { return "Your Apps" }
         switch page {
         case .launcher: return "Finite.Computer"
         case .chat(let name): return library.fragments.first { $0.name == name }?.displayTitle ?? "Chat"

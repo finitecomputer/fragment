@@ -235,6 +235,49 @@ struct ShellTests {
         #expect(model.url?.query == "token=t2" && model.error == nil)
     }
 
+    /// A message's links as the web's renderer finds them: a bare URL ends
+    /// before trailing punctuation; Markdown and `<autolinks>` count too.
+    @Test func aMessagesLinksAreFoundAsTheWebLinksThem() {
+        let text = "Same link as before: https://sports-schedule--ugzb.finite.place/?view=fe1f4b5067d2339a83ba0f62. See [docs](https://example.com/a) or <https://example.com/b>, and https://example.com/a again."
+        #expect(MessageLinks.find(in: text).map(\.absoluteString) == [
+            "https://sports-schedule--ugzb.finite.place/?view=fe1f4b5067d2339a83ba0f62", "https://example.com/a", "https://example.com/b"])
+        #expect(MessageLinks.fragmentName(URL(string: "https://sports-schedule--ugzb.finite.place/?view=1")!) == "sports-schedule--ugzb")
+        #expect(MessageLinks.fragmentName(URL(string: "https://example.com/")!) == nil)
+        #expect(MessageLinks.fragmentName(URL(string: "https://a--b1.finite.place/")!) == nil, "a suffix is four of its letters")
+        #expect(MessageLinks.fragmentName(URL(string: "ftp://sports-schedule--ugzb.finite.place/")!) == nil)
+        // a bare one is linked in the words shown, and every link underlined
+        let shown = MessageLinks.linked(AttributedString("go to https://example.com/x."))
+        let linked = shown.runs.filter { $0.link != nil }
+        #expect(linked.count == 1 && linked.first?.link?.absoluteString == "https://example.com/x" && linked.first?.underlineStyle == .single)
+    }
+
+    /// A link to a fragment of the person's opens it in the app, an app at
+    /// the linked page; another's, or any other address, is Safari's.
+    @Test func aLinkToTheirFragmentOpensItAtItsPage() async throws {
+        let list = #"{"fragments":[{"name":"sports-schedule--ugzb","kind":"app","title":"Sports schedule","role":"owner"},{"name":"trip-chat--k3x9","kind":"chat","title":"Trip","role":"owner"}]}"#
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": (200, list)
+            case "GET /api/f/sports-schedule--ugzb/status": (200, #"{"npub":"npub1app","urls":{"canonical":"https://sports-schedule--ugzb.finite.place/"}}"#)
+            case "POST /api/f/sports-schedule--ugzb/session": (200, #"{"consentRequired":false,"url":"https://sports-schedule--ugzb.finite.place/__signin?token=t"}"#)
+            default: (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        let link = URL(string: "https://sports-schedule--ugzb.finite.place/week?view=fe1f#today")!
+        let app = try #require(library.fragment(linkedBy: link))
+        #expect(app.name == "sports-schedule--ugzb" && app.link == link)
+        #expect(library.fragment(linkedBy: URL(string: "https://trip-chat--k3x9.finite.place/")!)?.link == nil, "a chat opens as a chat")
+        #expect(library.fragment(linkedBy: URL(string: "https://someone-else--abcd.finite.place/")!) == nil)
+        let model = WebSheetModel(fragment: app, api: api)
+        await model.load()
+        #expect(model.error == nil && model.url?.path == "/__signin")
+        let asked = try #require(stub.seen.first { $0.route == "POST /api/f/sports-schedule--ugzb/session" })
+        #expect(asked.json["returnTo"].string == "/week?view=fe1f", "its page, the link's own")
+    }
+
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
         let stub = Stub { seen, before in
             seen.route == "PUT /api/f/talk--c9/members/npub1moss" ? (200, #"{"principal":"npub1moss","role":"editor"}"#) : Self.platform(seen, before)

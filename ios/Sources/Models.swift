@@ -13,6 +13,9 @@ struct FragmentSummary: Codable, Identifiable, Hashable, Sendable {
     var picture: String?
     // A navigation selection in the session archive, never an authentication token.
     var sessionKey: String?
+    /// A page of it a link named, to open there (`Library.fragment(linkedBy:)`):
+    /// a navigation selection, never from the wire.
+    var link: URL?
     var id: String { name }
     var displayTitle: String { title ?? name }
 }
