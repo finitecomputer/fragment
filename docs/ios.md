@@ -49,12 +49,13 @@ The live service uses these routes already (`docs/api.md` is authoritative):
 
 | Need | Existing API |
 | --- | --- |
-| Person, owned agent | `GET /api/identities/me`, `GET /api/fragments`, agent's `GET /api/f/{name}/status` for its npub |
+| Person, owned agent | `GET /api/identities/me`, `GET /api/fragments`, `GET /api/computers` (its agents' order and identities: the first is the main agent, as the web's sidebar takes it); an agent not on it, `GET /api/f/{name}/status` for its npub |
 | New chat | `POST /api/fragments {label, template:"chat", title}` then `PUT /api/f/{chat}/members/{agent npub} {role:"editor"}`; keep a successful create across a failed join |
 | Messages, Stop, prompt answer | `POST /api/f/{chat}/channels/chat {id, body}`, as `docs/chat-records.md` defines |
 | Stream/catch-up | `GET /f/{chat}/__live`, subscribe to `chat` and `work` with `last` initially, `after` on reconnect; follow `subscribed.more` until caught up |
 | Earlier messages | `GET /api/f/{chat}/channels/chat?before=&limit=50`; never advance live cursors from this page |
-| List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed` |
+| List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed`, a burst as one read 200 ms after (the web's `LIST_SETTLE_MS`) |
+| Chat title | A chat of the person's still titled "New chat" with a message: `GET /api/f/{chat}/channels/chat?after=0&limit=20`, then its manifest's `meta.title` from its first line with words (48 characters at most), written and deployed only if the manifest still says "New chat" (the web's `titleFromFirst`) |
 | Launcher search | `GET /api/search?q=` → fragments by title/label and messages by text, archived included; a message result opens its conversation |
 | Read marker | `PUT /api/fragments/{chat}/seen`, after the visible chat catches up |
 | App URL | `GET /api/f/{name}/status` → `urls.canonical` |
@@ -149,13 +150,26 @@ phone's network: an attachment of at most 25 MiB, and an icon fitted inside
 256×256 on the phone, as the server would fit it.
 
 JSON text subscriptions match the Worker’s live protocol. A chat reads its last
-50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Which turns run follows
+50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Its window holds at most
+600 `chat` records, as the web's chat holds about as many; `work` never counts
+toward it, and the `work` before its oldest message goes as that message does
+(at most 20,000 `work` records in all). Scrolled to its top,
+the chat reads the 50 messages before (and the work their turns show), keeping
+the row in view in place; past 600, the window's newest end goes, and live
+messages then say which turns run and are counted on the Latest pill ("3 new")
+without entering it. Scrolled back down, it reads the 50 after, until it reaches
+the newest; Latest reads the newest page at once, and so does a send. A chat is
+marked seen only while its newest messages are on screen (read, not paged back,
+following its end), and again on coming back there; a reconnect's catch-up counts
+on the pill as live messages do. The chat follows its newest record, never a count. Which turns run follows
 the web's chat page (`templates/chat/site/chat.js`): a turn is its agent's and its
 id, a record counts only toward its own poster's turn, and a turn runs once its
 start is read and until its end is, in either order; this is kept apart from the
 shown records. Earlier work is read back as the web reads it, to the oldest message
-shown, and also while a turn was read without its start, in batches of 50 (each
-answer within the app's 4 MiB) and at most 1000 records a visit, so Stop shows for
+shown (kept, for those turns' steps), and also while a turn that may run was read
+without its start (a turn whose end was read needs nothing), in batches that grow
+with how little their records take (from 50, each answer within the app's 4 MiB,
+one that overflows read again at 50), at most 1000 records a visit, so Stop shows for
 a long turn however the chat was opened. An archive's chats index is
 optional: an archive of other kinds alone has none, and a failed read never
 stops the list or its agents. An export is followed while it builds (every two
@@ -163,8 +177,45 @@ seconds, as the web's Settings), downloads with the phone's signature to a file 
 its own, is shared from there, and can be made again beside it. Its reads and makes
 run one after another, so an older read never lands after a newer export; the file
 is kept with its export, deleted once the export shown is another, and a download
-still in flight for one no longer shown is never kept. Connected accounts follow the signed list watcher, discard
-stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
+still in flight for one no longer shown is never kept. A chat opened is loading
+(a quiet spinner) until both its channels' backlogs are read to their end, then
+shown at its end at once: never as an empty chat, nor its backlog streaming in. No
+turn is said to run while no connection is open, nor until each connection has
+read its `work`, so a catch-up's replayed start never shows as running. Titling
+checks the manifest it read, not its write, as the web's does: a rename landing
+between them is overwritten, as `POST files` takes no expectation. Its view observes what each part draws (rows, drafts,
+running turns), each set only when it changes, so a reply's words redraw that
+reply alone. Pictures are read once a session, kept by their versioned URL. Links
+in a message are found as the web's renderer finds them (bare http(s) URLs too)
+and underlined; a tap opens a page of a fragment of the person's in the app, at
+that page (path, query and hash), with an Open beside the message as the web's
+chat gives one, and any other address in Safari; a long press copies or shares
+each, the very URL its words link. A page of a fragment is told as the web's
+`fragmentPage` tells one: a name, then the deployment's own domain for
+fragments, on its scheme and port, as a fragment's canonical URL says (read once
+a session); a lookalike opens as typed. Your Apps is pushed
+onto the page it was opened from, so Back returns there; a chat's top bar has no
+New chat (the sidebar's starts one). The composer's + offers Photos (the system's picker,
+several at once) or Files; a picture pasted into its field attaches too (a long
+press offers Paste when one is on the clipboard), as the web's chat takes a
+pasted file. Any file goes, 1 byte to 25 MB, eight a message, as the web's; a
+picture the web shows (PNG, JPEG, WebP, GIF) goes as it is, any other (a photo's
+HEIC) as JPEG, its metadata carried over, converted off the main thread within 100
+megapixels. One attaching goes at a time, from the choosing until its upload:
+the composer is busy, and nothing sends, until it is done. Jumping to the latest holds scrolling off
+for the jump, which stops a fling's momentum, and while following the latest the
+bottom stays pinned as rows are drawn taller than the lazy stack's guess. Connected accounts follow the signed list watcher, discard
+stale list reloads, and mark visible, caught-up chats read. A chat's socket closed (4001 as its object sleeps, 1001, the network)
+is opened again at once, and again on returning to the app; only a repeated
+failure, or a connection that closes within 5 s of its hello, backs off. Nothing
+is said unless it is not back within 5 s ("Reconnecting…"); the composer stays
+open (sends go over HTTP), and a reply being written stays until the next
+connection's work says its turn ended. A chat closed for good is never opened
+again by its session (not on returning to the app, nor its view coming back;
+leaving the chat and opening it again asks anew), and says so as the web's chat
+does: deleted (4004, or its upgrade answered
+404), "This chat was deleted."; its access changed (4003, or 403), "Your access to
+this chat changed." HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not
 deliver background replies.

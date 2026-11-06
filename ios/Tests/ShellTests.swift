@@ -1,4 +1,8 @@
 import Foundation
+import Observation
+import UIKit
+import ImageIO
+import UniformTypeIdentifiers
 import Synchronization
 import Testing
 @testable import Fragment
@@ -233,6 +237,152 @@ struct ShellTests {
         #expect(model.url?.query == "token=t2" && model.error == nil)
     }
 
+    /// A message's links are the URLs its words link, as drawn: Markdown
+    /// targets whole (parentheses, a final `!`), `<autolinks>`, and bare
+    /// URLs, which end before trailing punctuation.
+    @Test func aMessagesLinksAreTheOnesItsWordsLink() {
+        let text = "Same link as before: https://sports-schedule--ugzb.finite.place/?view=fe1f4b5067d2339a83ba0f62. See [docs](https://example.com/a) or <https://example.com/b>, and https://example.com/a again."
+        #expect(MessageLinks.find(in: text, markdown: true).map(\.absoluteString) == [
+            "https://sports-schedule--ugzb.finite.place/?view=fe1f4b5067d2339a83ba0f62", "https://example.com/a", "https://example.com/b"])
+        #expect(MessageLinks.find(in: "[Wiki](https://example.com/wiki/Function_(mathematics)) and [Page](https://example.com/report!)", markdown: true).map(\.absoluteString)
+                == ["https://example.com/wiki/Function_(mathematics)", "https://example.com/report!"])
+        #expect(MessageLinks.find(in: "```\nhttps://example.com/in-code\n```", markdown: true).isEmpty, "code is not a link")
+        #expect(MessageLinks.find(in: "mine: https://example.com/x.", markdown: false).map(\.absoluteString) == ["https://example.com/x"])
+        // a bare one is linked in the words shown, and every link underlined
+        let shown = MessageLinks.linked(AttributedString("go to https://example.com/x."))
+        let linked = shown.runs.filter { $0.link != nil }
+        #expect(linked.count == 1 && linked.first?.link?.absoluteString == "https://example.com/x" && linked.first?.underlineStyle == .single)
+    }
+
+    /// A page of this deployment's fragments is told as the web's
+    /// `fragmentPage` tells one: a name, then its own domain, scheme and port.
+    @Test func aFragmentsPageIsTheDeploymentsAlone() throws {
+        let pages = try #require(FragmentPages(canonical: URL(string: "https://sports-schedule--ugzb.finite.place/")!, name: "sports-schedule--ugzb"))
+        func name(_ link: String) -> String? { MessageLinks.fragmentName(URL(string: link)!, pages: pages) }
+        #expect(name("https://sports-schedule--ugzb.finite.place/week?view=1") == "sports-schedule--ugzb")
+        #expect(name("https://SPORTS-schedule--ugzb.Finite.Place/") == "sports-schedule--ugzb")
+        #expect(name("https://sports-schedule--ugzb.example.com/week") == nil, "a lookalike domain")
+        #expect(name("https://sports-schedule--ugzb.finite.place:444/week") == nil, "another port")
+        #expect(name("http://sports-schedule--ugzb.finite.place/") == nil, "another scheme")
+        #expect(name("https://sports-schedule--ugzb.preview.finite.place/") == nil, "another deployment's domain")
+        #expect(name("https://a--b1.finite.place/") == nil, "a suffix is four of its letters")
+        #expect(MessageLinks.fragmentName(URL(string: "https://sports-schedule--ugzb.finite.place/")!, pages: nil) == nil, "unknown until read")
+        #expect(FragmentPages(canonical: URL(string: "https://other--abcd.finite.place/")!, name: "sports-schedule--ugzb") == nil)
+        let local = try #require(FragmentPages(canonical: URL(string: "http://todo--rcmf.fragment.localhost:8790/")!, name: "todo--rcmf"))
+        #expect(MessageLinks.fragmentName(URL(string: "http://sports--abcd.fragment.localhost:8790/x")!, pages: local) == "sports--abcd")
+        #expect(MessageLinks.fragmentName(URL(string: "http://sports--abcd.fragment.localhost/x")!, pages: local) == nil)
+    }
+
+    /// A link to a fragment of the person's opens it in the app, an app at
+    /// the linked page, path, query and hash; another's, a lookalike, or any
+    /// other address is Safari's.
+    @Test func aLinkToTheirFragmentOpensItAtItsPage() async throws {
+        let list = #"{"fragments":[{"name":"sports-schedule--ugzb","kind":"app","title":"Sports schedule","role":"owner"},{"name":"trip-chat--k3x9","kind":"chat","title":"Trip","role":"owner"}]}"#
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": (200, list)
+            case "GET /api/f/sports-schedule--ugzb/status": (200, #"{"npub":"npub1app","urls":{"canonical":"https://sports-schedule--ugzb.finite.place/"}}"#)
+            case "POST /api/f/sports-schedule--ugzb/session": (200, #"{"consentRequired":false,"url":"https://sports-schedule--ugzb.finite.place/__signin?token=t"}"#)
+            default: (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        let link = URL(string: "https://sports-schedule--ugzb.finite.place/week?view=fe1f#today")!
+        let app = try #require(library.fragment(linkedBy: link))
+        #expect(app.name == "sports-schedule--ugzb" && app.link == link)
+        #expect(library.fragment(linkedBy: URL(string: "https://trip-chat--k3x9.finite.place/")!)?.link == nil, "a chat opens as a chat")
+        #expect(library.fragment(linkedBy: URL(string: "https://someone-else--abcd.finite.place/")!) == nil)
+        #expect(library.fragment(linkedBy: URL(string: "https://sports-schedule--ugzb.example.com/week")!) == nil, "a lookalike opens as typed")
+        let model = WebSheetModel(fragment: app, api: api)
+        await model.load()
+        #expect(model.error == nil && model.url?.path == "/__signin")
+        let asked = try #require(stub.seen.last { $0.route == "POST /api/f/sports-schedule--ugzb/session" })
+        #expect(asked.json["returnTo"].string == "/week?view=fe1f#today", "its page, the link's own, hash and all")
+        // a hash-routed page keeps its route
+        let routed = try #require(library.fragment(linkedBy: URL(string: "https://sports-schedule--ugzb.finite.place/#/week/2")!))
+        await WebSheetModel(fragment: routed, api: api).load()
+        #expect(stub.seen.last { $0.route == "POST /api/f/sports-schedule--ugzb/session" }?.json["returnTo"].string == "/#/week/2")
+    }
+
+    /// Pictures attach as the web's chat shows them: PNG, JPEG, WebP and GIF
+    /// as they are, any other (a photo's HEIC) as JPEG; files by their
+    /// extension's type; nothing empty or past 25 MB.
+    @Test func aPictureOrFileAttachesAsTheWebTakesIt() throws {
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let png = try #require(picture.pngData())
+        let kept = try AttachmentInput.image(png, type: .png, name: "photo-1")
+        #expect(kept == OutgoingFile(data: png, name: "photo-1.png", type: "image/png"))
+        // a photo's HEIC, turned (orientation 6), becomes a JPEG that keeps its turn
+        let heic = NSMutableData()
+        let out = try #require(CGImageDestinationCreateWithData(heic, UTType.heic.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(out, try #require(picture.cgImage), [kCGImagePropertyOrientation: 6] as CFDictionary)
+        #expect(CGImageDestinationFinalize(out))
+        let made = try AttachmentInput.image(heic as Data, type: .heic, name: "photo-2.heic")
+        #expect(made.type == "image/jpeg" && made.name == "photo-2.jpg" && UIImage(data: made.data) != nil)
+        let source = try #require(CGImageSourceCreateWithData(made.data as CFData, nil))
+        #expect(CGImageSourceGetType(source) as String? == UTType.jpeg.identifier)
+        let header = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        #expect(header?[kCGImagePropertyOrientation] as? Int == 6, "its metadata goes with it, as the web's upload keeps a file's")
+        #expect(throws: APIError.self) { try AttachmentInput.image(Data("not a picture".utf8), type: .heic, name: "x") }
+        #expect(throws: APIError.self) { try AttachmentInput.image(Data(), type: .png, name: "empty") }
+        #expect(throws: APIError.self) { try AttachmentInput.file(Data(count: ChatAttachment.bytesMax + 1), name: "big.bin", type: nil) }
+        #expect(try AttachmentInput.file(Data("a,b".utf8), name: "t.csv", type: UTType(filenameExtension: "csv")).type == "text/csv")
+        #expect(try AttachmentInput.file(Data([1]), name: "x.unknownext", type: UTType(filenameExtension: "unknownext")).type == "application/octet-stream")
+    }
+
+    /// A paste of pictures attaches each, as `image` makes it; words on the
+    /// clipboard are no picture.
+    @Test func pastedPicturesAttachAndWordsDoNot() throws {
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            UIColor.systemPink.setFill(); context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let png = try #require(picture.pngData()), heic = try #require(picture.heicData())
+        let board = UIPasteboard.withUniqueName()
+        defer { UIPasteboard.remove(withName: board.name) }
+        board.items = [[UTType.png.identifier: png], [UTType.plainText.identifier: "just words"], [UTType.heic.identifier: heic]]
+        let files = AttachmentInput.pasted(AttachmentInput.snapshot(board))
+        #expect(files.map(\.name) == ["pasted-image-1.png", "pasted-image-2.jpg"])
+        // the pasteboard hands a PNG back as it holds it, a picture all the same
+        #expect(files.map(\.type) == ["image/png", "image/jpeg"] && files.allSatisfy { UIImage(data: $0.data) != nil })
+        board.items = [[UTType.plainText.identifier: "only words"]]
+        #expect(AttachmentInput.snapshot(board).isEmpty)
+    }
+
+    /// Attaching is one at a time, reserved before anything is read: while
+    /// a chosen photo still loads, nothing sends and nothing more attaches;
+    /// once it is put, it goes with the message.
+    @Test func attachingHoldsTheComposerUntilItsFilesArePut() async throws {
+        let stub = Stub { seen, _ in
+            seen.method == "PUT" ? (200, #"{"ok":true,"stored":true}"#) : (404, #"{"error":"not_found","message":"no route"}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        session.edit("A caption")
+        let loading = Gate()
+        #expect(session.beginAttaching(1) && session.attaching)
+        let attach = Task {
+            await session.attach {
+                await Task.detached { loading.pass() }.value
+                return [OutgoingFile(data: Data("photo".utf8), name: "photo-1.jpg", type: "image/jpeg")]
+            }
+        }
+        // the photo still loading: Send waits, and another paste is refused
+        await session.send()
+        #expect(session.pending.isEmpty && session.composer == "A caption" && session.error == "Wait for the files being attached.")
+        #expect(!session.beginAttaching(1) && session.error == "Wait for the files being attached, then add more.")
+        loading.open()
+        await attach.value
+        #expect(!session.attaching && session.attachments.map(\.name) == ["photo-1.jpg"])
+        #expect(stub.seen.filter { $0.method == "PUT" }.count == 1)
+        // a reservation past eight a message is refused before anything is read
+        #expect(!session.beginAttaching(ChatAttachment.countMax) && !session.attaching)
+    }
+
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
         let stub = Stub { seen, before in
             seen.route == "PUT /api/f/talk--c9/members/npub1moss" ? (200, #"{"principal":"npub1moss","role":"editor"}"#) : Self.platform(seen, before)
@@ -323,6 +473,141 @@ struct ShellTests {
         defer { NotificationCenter.default.removeObserver(observer) }
         await #expect(throws: APIError.self) { let _: JSONValue = try await api.request("api/identities/me") }
         #expect(heard.keys.withLock { $0.contains(api.identity.publicKey) })
+    }
+
+    /// A chat of the person's still "New chat" with a message is titled
+    /// from it, as the web titles one (`titleFromFirst`): once, and never
+    /// one renamed meanwhile.
+    @Test func aNewChatIsTitledFromItsFirstMessageOnce() async throws {
+        let list = #"""
+        {"fragments":[
+          {"name":"moss--a1","kind":"agent","title":"Moss","role":"owner"},
+          {"name":"trip--c1","kind":"chat","title":"New chat","preview":"Plan","agents":["npub1moss"],"role":"owner"},
+          {"name":"named--c2","kind":"chat","title":"New chat","preview":"Hi","role":"owner"},
+          {"name":"shared--c3","kind":"chat","title":"New chat","preview":"Hi","role":"editor"},
+          {"name":"quiet--c4","kind":"chat","title":"New chat","role":"owner"}
+        ]}
+        """#
+        let first = #"{"records":[\#(record("chat", 1, body: #"{"kind":"stop","turn":"t0"}"#)),\#(record("chat", 2, principal: "npub1me", body: #"{"text":"\n  Plan a weekend trip to the coast with the whole family and the dog too\nand more"}"#))]}"#
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": (200, list)
+            case "GET /api/f/moss--a1/status": (200, #"{"npub":"npub1moss","urls":{"canonical":"https://moss--a1.finite.test/"}}"#)
+            case "GET /api/f/trip--c1/channels/chat", "GET /api/f/named--c2/channels/chat": (200, first)
+            case "GET /api/f/trip--c1/manifest": (200, #"{"template":"chat","meta":{"title":"New chat"}}"#)
+            // renamed on the web after the list was read
+            case "GET /api/f/named--c2/manifest": (200, #"{"template":"chat","meta":{"title":"Our plans"}}"#)
+            case "POST /api/f/trip--c1/files": (200, #"{"commit":"c1"}"#)
+            case "POST /api/f/trip--c1/deploy": (200, #"{"deployed":true}"#)
+            default: (404, #"{"error":"not_found","message":"no route \#(seen.route)"}"#)
+            }
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        await library.load(api)
+        let writes = stub.seen.filter { $0.method == "POST" }
+        #expect(writes.map(\.path) == ["/api/f/trip--c1/files", "/api/f/trip--c1/deploy"])
+        let files = try #require(writes.first?.json)
+        #expect(files["message"].string == "its title, from its first message")
+        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data((files["files"].array.first?["text"].string ?? "").utf8))
+        #expect(manifest["meta"]["title"].string == "Plan a weekend trip to the coast with the whole…" && manifest["template"].string == "chat")
+        #expect(stub.seen.filter { $0.path == "/api/f/trip--c1/channels/chat" }.count == 1, "once a session")
+        #expect(stub.seen.first { $0.path == "/api/f/trip--c1/channels/chat" }?.query == ["after": "0", "limit": "20"])
+        // another's chat, and one with nothing said, are never read for it
+        #expect(!stub.seen.contains { $0.path.hasPrefix("/api/f/shared--c3/") || $0.path.hasPrefix("/api/f/quiet--c4/") })
+    }
+
+    /// The title written is the one made, exactly: no second trim of its
+    /// own (Foundation's takes NEL, which JavaScript's keeps).
+    @Test func aMadeTitleIsWrittenExactly() async throws {
+        let list = #"{"fragments":[{"name":"nel--c1","kind":"chat","title":"New chat","preview":"x","role":"owner"}]}"#
+        let page = #"{"records":[\#(record("chat", 1, principal: "npub1me", body: #"{"text":"x\u0085"}"#))]}"#
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": (200, list)
+            case "GET /api/f/nel--c1/channels/chat": (200, page)
+            case "GET /api/f/nel--c1/manifest": (200, #"{"template":"chat","meta":{"title":"New chat"}}"#)
+            case "POST /api/f/nel--c1/files": (200, #"{"commit":"c1"}"#)
+            case "POST /api/f/nel--c1/deploy": (200, #"{"deployed":true}"#)
+            default: (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+        await Library().load(try stub.api())
+        let files = try #require(stub.seen.first { $0.route == "POST /api/f/nel--c1/files" }?.json)
+        let manifest = try JSONDecoder().decode(JSONValue.self, from: Data((files["files"].array.first?["text"].string ?? "").utf8))
+        #expect(manifest["meta"]["title"].string == "x\u{85}", "as the web writes it")
+    }
+
+    /// The web's semantics, code point for code point: lines split on LF
+    /// alone (a CRLF's CR is white space), JavaScript's white space trimmed
+    /// and collapsed, 48 code points kept.
+    @Test func aTitleIsItsFirstLineWithWordsCutAsTheWebCutsIt() {
+        #expect(Library.title(from: "\n \n  Two   words  \nnext") == "Two words")
+        #expect(Library.title(from: "First\r\nSecond") == "First", "a CRLF ends the line, as the web splits it")
+        #expect(Library.title(from: "\r\n\u{3000}\u{A0}Wide\u{2003}\u{3000}space\u{FEFF}\r\nnext") == "Wide space")
+        #expect(Library.title(from: "One\u{2028}two") == "One two", "a line separator is white space, not a line: the web splits on LF alone")
+        #expect(Library.title(from: "\u{85}x") == "\u{85}x", "NEL is no JavaScript white space")
+        #expect(Library.title(from: String(repeating: "é", count: 60)).unicodeScalars.count == 48)
+        #expect(Library.firstSaid([]) == nil)
+        #expect(Library.title(from: String(repeating: "a", count: 48)) == String(repeating: "a", count: 48))
+        #expect(Library.title(from: String(repeating: "a", count: 49)) == String(repeating: "a", count: 47) + "…")
+    }
+
+    /// The person's agents in their computer's order, as the web's sidebar
+    /// takes them: its first is their main agent, first everywhere here, and
+    /// its identities need no agent's status asked.
+    @Test func agentsFollowTheirComputersOrder() async throws {
+        let stub = Stub { seen, before in
+            if seen.route == "GET /api/computers" {
+                return (200, #"{"computers":[{"computer":"c1","phase":"awake","agents":[{"fragment":"juniper--a2","identity":"npub1juniper","label":"juniper"},{"fragment":"moss--a1","identity":"npub1moss","label":"moss"}]}],"support":null}"#)
+            }
+            return Self.platform(seen, before)
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        #expect(library.agents.map(\.name) == ["juniper--a2", "moss--a1"])
+        #expect(library.agent?.name == "juniper--a2", "new chats are with the main agent")
+        #expect(library.agentsByIdentity["npub1moss"]?.name == "moss--a1" && library.computerPhase == "awake")
+        // no agent's status for its identity; one read alone, the deployment's pages (`loadPages`)
+        #expect(stub.seen.filter { $0.path.hasSuffix("/status") }.count <= 1)
+        // a computer that cannot be read keeps the list's order
+        let plain = Library()
+        await plain.load(try Stub(Self.platform).api())
+        #expect(plain.agents.map(\.name) == ["moss--a1", "juniper--a2"])
+    }
+
+    /// The list read again saying the same tells nothing that draws from
+    /// it (a chat's rows, its agents' faces) to draw again.
+    @Test func aListReadAgainThatSaysTheSameRedrawsNothing() async throws {
+        let api = try Stub(Self.platform).api()
+        let library = Library()
+        await library.load(api)
+        let told = Mutex(false)
+        withObservationTracking { _ = library.fragments; _ = library.identities; _ = library.agentOrder; _ = library.computerPhase } onChange: { told.withLock { $0 = true } }
+        await library.load(api)
+        #expect(!told.withLock { $0 })
+    }
+
+    /// A picture is read once a session, however many places show it at once
+    /// or after: its URL names its version.
+    @Test func aPictureIsReadOnceASession() async throws {
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let stub = Stub { seen, _ in
+            seen.route == "GET /api/f/moss--a1/icon" ? (200, "base64:" + png.base64EncodedString()) : (404, "{}")
+        }
+        let api = try stub.api()
+        let url = URL(string: "https://\(stub.host)/api/f/moss--a1/icon?v=abc")!
+        async let one = ImageCache.shared.image(url, api: api)
+        async let two = ImageCache.shared.image(url, api: api)
+        let (a, b) = await (one, two)
+        let three = await ImageCache.shared.image(url, api: api)
+        #expect(a != nil && a === b && b === three && ImageCache.shared.cached(url) === a)
+        #expect(stub.seen.count == 1 && stub.seen[0].query == ["v": "abc"])
+        #expect(stub.seen[0].authorization?.hasPrefix("Nostr ") == true, "the platform's picture is read signed")
     }
 }
 

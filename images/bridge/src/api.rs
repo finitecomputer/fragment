@@ -11,8 +11,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
+use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::{Method, Request, StatusCode};
+use hyper::body::Incoming;
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -439,7 +441,14 @@ pub enum FileChange {
 #[derive(Clone)]
 pub struct Api {
     base: Base,
-    client: Client<HttpConnector, Full<Bytes>>,
+    client: Client<HttpConnector, ReqBody>,
+}
+
+/// A request's body: whole bytes, or a file streamed (`put_blob_file`).
+type ReqBody = UnsyncBoxBody<Bytes, std::io::Error>;
+
+fn whole(bytes: Bytes) -> ReqBody {
+    Full::new(bytes).map_err(|never| match never {}).boxed_unsync()
 }
 
 fn encode(s: &str) -> String {
@@ -452,6 +461,16 @@ fn encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// A refusal's answer: its status and `{error, message}`.
+fn refused(status: StatusCode, bytes: &[u8]) -> ApiError {
+    let v: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    ApiError::Refused {
+        status: status.as_u16(),
+        error: v["error"].as_str().unwrap_or("").to_string(),
+        message: v["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned()),
+    }
 }
 
 /// A fragment's name in a path: a name's characters only, so no name ever
@@ -492,7 +511,7 @@ impl Api {
             }
             None => Bytes::new(),
         };
-        let req = req.body(Full::new(body)).map_err(|e| ApiError::Transport(e.to_string()))?;
+        let req = req.body(whole(body)).map_err(|e| ApiError::Transport(e.to_string()))?;
         let call = async {
             let res = self.client.request(req).await.map_err(|e| ApiError::Transport(e.to_string()))?;
             let status = res.status();
@@ -512,12 +531,27 @@ impl Api {
         if status.is_success() {
             return Ok(bytes);
         }
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        Err(ApiError::Refused {
-            status: status.as_u16(),
-            error: v["error"].as_str().unwrap_or("").to_string(),
-            message: v["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned()),
-        })
+        Err(refused(status, &bytes))
+    }
+
+    /// A request whose answer's body is the caller's to read: its head
+    /// within `HTTP_TIMEOUT_MS`, a refusal read whole (at most
+    /// `ANSWER_MAX_BYTES`) as `Refused`.
+    async fn head_of(&self, req: Request<ReqBody>, path: &str) -> Result<Response<Incoming>, ApiError> {
+        let res = match tokio::time::timeout(Duration::from_millis(limits::HTTP_TIMEOUT_MS), self.client.request(req)).await {
+            Ok(r) => r.map_err(|e| ApiError::Transport(e.to_string()))?,
+            Err(_) => return Err(ApiError::Transport(format!("{path}: no answer in {} ms", limits::HTTP_TIMEOUT_MS))),
+        };
+        if res.status().is_success() {
+            return Ok(res);
+        }
+        let status = res.status();
+        let read = tokio::time::timeout(Duration::from_millis(limits::HTTP_TIMEOUT_MS), Limited::new(res.into_body(), limits::ANSWER_MAX_BYTES).collect()).await;
+        let bytes = match read {
+            Ok(Ok(b)) => b.to_bytes(),
+            _ => Bytes::new(),
+        };
+        Err(refused(status, &bytes))
     }
 
     async fn json<T: DeserializeOwned>(&self, method: Method, path: &str, agent: Option<&str>, body: Option<Value>) -> Result<T, ApiError> {
@@ -689,17 +723,50 @@ impl Api {
         Ok(())
     }
 
-    /// `PUT /api/f/{name}/blobs/{sha256}`, typed `content-type`.
-    pub async fn put_blob(&self, agent: &str, fragment: &str, sha256: &str, content_type: &str, bytes: Bytes) -> Result<(), ApiError> {
+    /// `PUT /api/f/{name}/blobs/{sha256}`, typed `content-type`: the file at
+    /// `path`, its first `size` bytes (whose hash is `sha256`), streamed with
+    /// its length declared. Cut when the platform takes no byte for
+    /// `TRANSFER_STALL_MS`, or does not answer within `HTTP_TIMEOUT_MS` of
+    /// the last (transfer.rs, `Paced`).
+    pub async fn put_blob_file(&self, agent: &str, fragment: &str, sha256: &str, content_type: &str, path: &std::path::Path, size: u64) -> Result<(), ApiError> {
         assert!(sha256.len() == 64, "a blob is named by its sha256");
-        self.call(Method::PUT, &format!("/api/f/{}/blobs/{sha256}", name(fragment)?), Some(agent), Some((content_type, bytes)), limits::ANSWER_MAX_BYTES).await?;
-        Ok(())
+        let route = format!("/api/f/{}/blobs/{sha256}", name(fragment)?);
+        let file = tokio::fs::File::open(path).await.map_err(|e| ApiError::Transport(format!("{}: {e}", path.display())))?;
+        let pace = crate::transfer::Pace::new();
+        let body = crate::transfer::file_body(file, size, pace.clone());
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(self.base.url(&route))
+            .header("host", self.base.authority())
+            .header(AGENT_HEADER, agent)
+            .header("content-type", content_type)
+            .header("content-length", size)
+            .body(body)
+            .map_err(|e| ApiError::Transport(e.to_string()))?;
+        let call = async {
+            let res = self.client.request(req).await.map_err(|e| ApiError::Transport(e.to_string()))?;
+            let status = res.status();
+            let bytes = Limited::new(res.into_body(), limits::ANSWER_MAX_BYTES).collect().await.map_err(|e| ApiError::Transport(e.to_string()))?.to_bytes();
+            Ok::<_, ApiError>((status, bytes))
+        };
+        let (status, bytes) = pace.watch(call).await.ok_or_else(|| ApiError::Transport(format!("{route}: stalled")))??;
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(refused(status, &bytes))
     }
 
-    /// `GET /api/f/{name}/blobs/{sha256}`, at most `ATTACHMENT_MAX_BYTES`.
-    pub async fn get_blob(&self, agent: &str, fragment: &str, sha256: &str) -> Result<Bytes, ApiError> {
-        let max = usize::try_from(limits::ATTACHMENT_MAX_BYTES).expect("25 MiB fits");
-        self.call(Method::GET, &format!("/api/f/{}/blobs/{}", name(fragment)?, encode(sha256)), Some(agent), None, max).await
+    /// `GET /api/f/{name}/blobs/{sha256}` from byte `from` on (`Range`, past
+    /// the first): the answer's head, its body streamed by the caller
+    /// (transfer.rs, `download`).
+    pub async fn blob_from(&self, agent: &str, fragment: &str, sha256: &str, from: u64) -> Result<Response<Incoming>, ApiError> {
+        let route = format!("/api/f/{}/blobs/{}", name(fragment)?, encode(sha256));
+        let mut req = Request::builder().method(Method::GET).uri(self.base.url(&route)).header("host", self.base.authority()).header(AGENT_HEADER, agent);
+        if from > 0 {
+            req = req.header("range", format!("bytes={from}-"));
+        }
+        let req = req.body(whole(Bytes::new())).map_err(|e| ApiError::Transport(e.to_string()))?;
+        self.head_of(req, &route).await
     }
 
     /// `GET /api/f/{name}/files`: the files at main.

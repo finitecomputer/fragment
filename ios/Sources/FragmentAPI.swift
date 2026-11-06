@@ -150,22 +150,35 @@ struct FragmentAPI: Sendable {
             method: "PUT", body: .object(["role": .string("editor")]))
     }
 
-    /// A chat's or an app's name, in its manifest. An agent's name is its
-    /// job's too, which only the shell and the CLI rewrite today.
+    /// A chat's or an app's name, in its manifest, as a person typed it
+    /// (trimmed). An agent's name is its job's too, which only the shell and
+    /// the CLI rewrite today.
     func rename(_ fragment: FragmentSummary, title: String) async throws {
-        precondition(fragment.kind != "agent", "an agent is renamed where its job is rewritten with it")
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { throw APIError.server("Enter a name.") }
+        try await retitle(fragment, exactly: clean)
+    }
+
+    /// A title written exactly as given, as the web's `retitle` writes it.
+    /// With `from`, only a manifest still titled so when read is renamed
+    /// (one renamed before the manifest read keeps its name; a rename after
+    /// it is overwritten, as `POST files` takes no expectation); whether it was.
+    @discardableResult
+    func retitle(_ fragment: FragmentSummary, exactly title: String, from: String? = nil, message: String = "Rename from Finite for iOS") async throws -> Bool {
+        precondition(fragment.kind != "agent", "an agent is renamed where its job is rewritten with it")
+        precondition(!title.isEmpty, "a title is never empty")
         let manifest: JSONValue = try await request("api/f/\(fragment.name)/manifest")
         guard case .object(var fields) = manifest else { throw APIError.invalidResponse }
         var meta: [String: JSONValue] = [:]
         if case .object(let existing) = fields["meta"] { meta = existing }
-        meta["title"] = .string(clean); fields["meta"] = .object(meta)
+        if let from, meta["title"]?.string != from { return false }
+        meta["title"] = .string(title); fields["meta"] = .object(meta)
         let text = String(decoding: try JSONEncoder().encode(JSONValue.object(fields)), as: UTF8.self)
         let _: JSONValue = try await request("api/f/\(fragment.name)/files", method: "POST", body: .object([
-            "message": .string("Rename from Finite for iOS"), "files": .array([.object(["path": .string("fragment.json"), "text": .string(text)])])
+            "message": .string(message), "files": .array([.object(["path": .string("fragment.json"), "text": .string(text)])])
         ]))
         let _: JSONValue = try await request("api/f/\(fragment.name)/deploy", method: "POST", body: .object([:]))
+        return true
     }
 
     func post(_ fragment: String, id: String, body: JSONValue) async throws -> ChannelRecord {
@@ -178,15 +191,27 @@ struct FragmentAPI: Sendable {
     /// A page of a channel's records just below `before` (at most
     /// `CHANNEL_PAGE`, 1000, and a MiB: docs/api.md).
     func history(_ fragment: String, channel: String = "chat", before: Int64, limit: Int = 50) async throws -> [ChannelRecord] {
+        try await historyPage(fragment, channel: channel, before: before, limit: limit).records
+    }
+    /// `history`, and the bytes its answer took (each at most `historyBytesMax`).
+    func historyPage(_ fragment: String, channel: String, before: Int64, limit: Int) async throws -> (records: [ChannelRecord], bytes: Int) {
+        try await channelPage(fragment, channel: channel, query: [URLQueryItem(name: "before", value: String(before)), URLQueryItem(name: "limit", value: String(limit))])
+    }
+    /// The page just after `after`, ascending (`after` reads forward).
+    func historyPage(_ fragment: String, channel: String, after: Int64, limit: Int) async throws -> (records: [ChannelRecord], bytes: Int) {
+        try await channelPage(fragment, channel: channel, query: [URLQueryItem(name: "after", value: String(after)), URLQueryItem(name: "limit", value: String(limit))])
+    }
+    private func channelPage(_ fragment: String, channel: String, query: [URLQueryItem]) async throws -> (records: [ChannelRecord], bytes: Int) {
         struct Page: Decodable { let records: [ChannelRecord] }
         var components = URLComponents(url: url("api/f/\(fragment)/channels/\(channel)"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "before", value: String(before)), URLQueryItem(name: "limit", value: String(limit))]
+        components.queryItems = query
         let (data, response) = try await self.data(for: URLRequest(url: components.url!))
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard http.statusCode == 200 else { throw APIError.answer(data, status: http.statusCode) }
-        guard data.count <= 4_194_304 else { throw APIError.limitExceeded }
-        return try JSONDecoder().decode(Page.self, from: data).records
+        guard data.count <= Self.historyBytesMax else { throw APIError.limitExceeded }
+        return (try JSONDecoder().decode(Page.self, from: data).records, data.count)
     }
+    static let historyBytesMax = 4_194_304
 
     func socket(_ fragment: String) throws -> LiveSocket { try webSocket("f/\(fragment)/__live") }
     func webSocket(_ path: String) throws -> LiveSocket {

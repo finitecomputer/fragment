@@ -106,6 +106,12 @@
 //!   agent's own (docs/chat-records.md, "An ask"). Its post id is the
 //!   turn's, so a turn read again asks once. The reply: `asked <its name>`,
 //!   or `ask refused: <why>`;
+//! - `sync <fragment> <MiB>`: a file of `<MiB>` MiB (`big.bin`, the same
+//!   bytes every time) synced into `<fragment>` with the fragment CLI,
+//!   `fragment sync`, as the agent acting for its owner, as its terminal
+//!   would: a large file's bytes go up through the egress as a blob, its
+//!   pointer to git. The reply: `synced <sha256> <bytes>`, or `sync
+//!   refused: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -468,6 +474,46 @@ async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest
     format!("asked {}", asked["title"].as_str().or(asked["name"].as_str()).unwrap_or(who))
 }
 
+/// A sync of a large file is the CLI hashing it, uploading its bytes and
+/// committing its pointer: at most this long.
+const SYNC_WAIT: Duration = Duration::from_secs(180);
+
+/// `sync <fragment> <MiB>`: the module's list.
+async fn sync_big(agent: &crate::runtime::Agent, turn: &str, rest: &str) -> String {
+    use sha2::Digest;
+    let mut words = rest.split_whitespace();
+    let (Some(fragment), Some(mib)) = (words.next(), words.next().and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=256).contains(n))) else {
+        return "say `sync <fragment> <MiB>`, at most 256".into();
+    };
+    let dir = std::env::temp_dir().join(format!("fragment-sync-{}", &crate::records::hex(&sha2::Sha256::digest(turn.as_bytes()))[..16]));
+    let bytes: Vec<u8> = (0..mib * 1024 * 1024).map(|i| (i as u32).wrapping_mul(2_654_435_761).rotate_right(13) as u8).collect();
+    let sha = crate::records::hex(&sha2::Sha256::digest(&bytes));
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    if let Err(e) = async {
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::write(dir.join("big.bin"), &bytes).await
+    }
+    .await
+    {
+        return format!("sync refused: {e}");
+    }
+    let run = tokio::process::Command::new(CLI)
+        .args(["sync", fragment, "--dir"])
+        .arg(&dir)
+        .env("FRAGMENT_AS_AGENT", &agent.fragment)
+        .env("FRAGMENT_FOR", &agent.owner)
+        .kill_on_drop(true)
+        .output();
+    let said = match tokio::time::timeout(SYNC_WAIT, run).await {
+        Ok(Ok(out)) if out.status.success() => format!("synced {sha} {}", bytes.len()),
+        Ok(Ok(out)) => format!("sync refused: {}", String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>()),
+        Ok(Err(e)) => format!("sync refused: the CLI did not run ({e})"),
+        Err(_) => format!("sync refused: not done in {} s", SYNC_WAIT.as_secs()),
+    };
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    said
+}
+
 /// The door keys `door link` made, by agent, for the process's life.
 static DOORS: std::sync::Mutex<BTreeMap<String, crate::simplex::door::Key>> = std::sync::Mutex::new(BTreeMap::new());
 
@@ -819,6 +865,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("ask ") {
         reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("sync ") {
+        reply = sync_big(&ts.agent, &id, rest).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("relay ") {
         reply = relay(&ts.agent.fragment, rest).await.unwrap_or_else(|e| format!("relay failed: {e}"));
     }
@@ -964,7 +1013,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let path = cfg.scratch.join(format!("{id}-drawing.txt"));
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
-            let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64 };
+            let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64, pin: Default::default() };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
@@ -972,7 +1021,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let path = cfg.scratch.join(format!("{id}-speech.mp3"));
         let body = crate::simplex::audio::silence_mp3(SPOKEN_SECS);
         if tokio::fs::write(&path, &body).await.is_ok() {
-            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64 };
+            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64, pin: Default::default() };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }

@@ -255,9 +255,15 @@ Making one for someone, go in this order:
 fragment.json      # operations, channels, triggers, meta
 app.mjs            # class App: one method per operation (at most 1 MiB)
 applib/            # modules app.mjs imports (at most 64 modules, 4 MiB with app.mjs)
-site/              # static files, served from live
+site/              # static files, served from live; revalidated on each load
 everything else    # files: notes, data, media; synced and versioned
 ```
+
+A bundler's output (Vite's `dist/`, published as `site/`) names its files
+by their bytes, in `site/assets/`: say so in `fragment.json`,
+`"immutable": ["assets/**"]`, and browsers keep them instead of asking
+again on every load. Name only such a folder: a file kept by mistake
+keeps its old bytes in browsers for a year.
 
 Code runs from `live`: a deploy changes what runs. Files the app reads
 come from `main`: a synced note is visible without a deploy.

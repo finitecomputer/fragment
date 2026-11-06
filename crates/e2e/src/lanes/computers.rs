@@ -1346,6 +1346,33 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     Ok(14)
 }
 
+/// A 40 MB file its agent syncs from its computer (FIN-405): `fragment
+/// sync` on the guest (the stub's `sync`), into an app its owner made it an
+/// editor of. Its bytes are a blob, streamed through the egress's `PUT
+/// …/blobs/{sha256}` (past the 32 MiB the egress reads whole: 413 before),
+/// its pointer in git. One reply.
+fn large_sync_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, identity: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let r = api.signed(owner, "POST", "/api/fragments", Some(&json!({ "label": "bigsync", "template": "blank", "title": "Big sync" })))?;
+    anyhow::ensure!(r.status == 200, "the app it syncs into: {r}");
+    let name = r.body["name"].as_str().unwrap_or("").to_string();
+    let joined = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(joined.status == 200, "its agent, an editor of it: {joined}");
+    let size = 40 * 1024 * 1024;
+    let said = fetched(s, 89, &format!("sync {name} 40"))?;
+    let sha = said.strip_prefix("synced ").and_then(|r| r.split_whitespace().next()).unwrap_or("").to_string();
+    let files = api.signed(owner, "GET", &format!("/api/f/{name}/files"), None)?;
+    let listed = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "big.bin").cloned()).unwrap_or(Value::Null);
+    let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
+    s.ok(
+        "a 40 MB file its agent syncs from its computer streams through its egress: its bytes the app's blob, its pointer in git",
+        said == format!("synced {sha} {size}") && listed["blob"] == true && listed["sha256"] == sha.as_str() && listed["size"] == size && blob.status == 200 && fragment_core::blob::sha256_hex(&blob.bytes) == sha,
+        json!({ "said": said, "listed": listed, "blob": blob.status, "bytes": blob.bytes.len() }),
+    );
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    anyhow::ensure!(r.status == 200, "{name} deleted: {r}");
+    Ok(1)
+}
+
 /// The route's models by their ids, through the intercept (Paul,
 /// 2026-10-16: "be able to run `/model` with hermes and see the real
 /// model"): `GET /v1/models` lists the ids the route takes, naming no agent
@@ -2018,6 +2045,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
+            replies_so_far += large_sync_through_egress(s, api, &owner, &identity, &fetched)?;
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
         replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;

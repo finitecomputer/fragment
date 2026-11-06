@@ -263,7 +263,9 @@ const _: () = assert!(HOLD_STEPS_MS + SAVE_STEPS_MS + MARK_EXEC_MS + DISK_READ_M
 const _: () = assert!(BACKUPS_MS >= 11 * 60_000, "a full disk's save (10.8 GB at 16.1 MB/s) is given eleven minutes at least");
 const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answers within 14 minutes");
 /// The largest request body the egress signs and hands on (it is hashed
-/// for NIP-98 first, so it is read whole).
+/// for NIP-98 first, so it is read whole). A blob's upload is not read: it
+/// streams through (`egress_api`), at most the router's
+/// `limits::BLOB_MAX_BYTES`.
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
@@ -3407,8 +3409,13 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
     let storage_token = method == Method::Get
         && matches!(segments.as_slice(), ["", "api", "f", _, endpoint] if crate::fragment::decode_segment(endpoint) == "storage-token");
     let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+    // A blob's bytes stream through, as the router takes them from the
+    // internet: their length declared, no payload hash. The signature binds
+    // the URL, which names their hash; the fragment checks it as they come.
+    let blob_put = method == Method::Put && matches!(segments.as_slice(), ["", "api", "f", _, "blobs", sha] if fragment_core::blob::valid_sha(sha));
     let body = match method {
         Method::Get | Method::Head => vec![],
+        _ if blob_put => vec![],
         _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
     };
     // a wake subscription is this computer's to ask for: the agent fragment
@@ -3461,13 +3468,19 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         }
     }
     headers.set("authorization", authorization)?;
-    if !body.is_empty() {
-        // a body made from bytes names no length, and a blob's upload needs one
+    if blob_put {
+        // the length it declared, which the router holds it to
+        let length = req.headers().get("content-length")?.ok_or_else(|| CellError::invalid("a blob upload declares its content-length"))?;
+        headers.set("content-length", &length)?;
+    } else if !body.is_empty() {
+        // a body made from bytes names no length
         headers.set("content-length", &body.len().to_string())?;
     }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers);
-    if !body.is_empty() {
+    if blob_put {
+        init.with_body(req.inner().body().map(JsValue::from));
+    } else if !body.is_empty() {
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;

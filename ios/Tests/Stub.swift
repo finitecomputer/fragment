@@ -18,7 +18,8 @@ struct Seen: Sendable {
 /// is a `ScriptedSocket` the test drives, and both are recorded. Answers
 /// are written by hand here; the wire they stand for is docs/api.md.
 final class Stub: Sendable {
-    /// The answer to a request, given every request this stub saw before it.
+    /// The answer to a request, given every request this stub saw before it
+    /// (a body of `base64:<bytes>` is those bytes).
     typealias Handler = @Sendable (Seen, [Seen]) -> (Int, String)
     private static let live = Mutex<[String: Stub]>([:])
     static func named(_ host: String) -> Stub? { live.withLock { $0[host] } }
@@ -73,7 +74,9 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             guard !stopped.withLock({ $0 }) else { return }
             let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            // `base64:` answers bytes that are not text (a picture)
+            let bytes = body.hasPrefix("base64:") ? Data(base64Encoded: String(body.dropFirst(7))) ?? Data() : Data(body.utf8)
+            client?.urlProtocol(self, didLoad: bytes)
             client?.urlProtocolDidFinishLoading(self)
         }
     }
@@ -100,8 +103,12 @@ final class ScriptedSocket: LiveSocket {
     private let state = Mutex<(queue: [Result<URLSessionWebSocketTask.Message, any Error>], waiting: CheckedContinuation<URLSessionWebSocketTask.Message, any Error>?, sent: [JSONValue], cancelled: Bool)>(([], nil, [], false))
     init(request: URLRequest) { self.request = request }
 
-    var response: URLResponse? { nil }
-    var closeCode: URLSessionWebSocketTask.CloseCode { .invalid }
+    private let answered = Mutex<Int?>(nil)
+    var response: URLResponse? {
+        answered.withLock { $0 }.flatMap { HTTPURLResponse(url: request.url!, statusCode: $0, httpVersion: "HTTP/1.1", headerFields: nil) }
+    }
+    private let code = Mutex(URLSessionWebSocketTask.CloseCode.invalid)
+    var closeCode: URLSessionWebSocketTask.CloseCode { code.withLock { $0 } }
     var sent: [JSONValue] { state.withLock { $0.sent } }
     var cancelled: Bool { state.withLock { $0.cancelled } }
     func resume() {}
@@ -127,6 +134,16 @@ final class ScriptedSocket: LiveSocket {
     }
     func push(_ frame: String) { deliver(.success(.string(frame))) }
     func drop() { deliver(.failure(URLError(.networkConnectionLost))) }
+    /// The server answers its upgrade with `status`, and no socket.
+    func refuse(_ status: Int) {
+        answered.withLock { $0 = status }
+        deliver(.failure(URLError(.badServerResponse)))
+    }
+    /// The server closes it with `code` (4001: its object slept).
+    func close(_ code: URLSessionWebSocketTask.CloseCode) {
+        self.code.withLock { $0 = code }
+        deliver(.failure(URLError(.networkConnectionLost)))
+    }
     private func deliver(_ result: Result<URLSessionWebSocketTask.Message, any Error>) {
         let waiting = state.withLock { s -> CheckedContinuation<URLSessionWebSocketTask.Message, any Error>? in
             guard let waiting = s.waiting else { s.queue.append(result); return nil }

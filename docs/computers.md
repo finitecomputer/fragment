@@ -444,7 +444,11 @@ sleep answers within 14 minutes.
   through it names the code.storage the guest can reach.
 - `x-fragment-agent: <agent fragment>` says which agent a request acts
   as. The intercept refuses an agent not assigned to this computer, then
-  signs the request (NIP-98) as that agent.
+  signs the request (NIP-98) as that agent. It reads a body whole to
+  sign its hash, at most 32 MiB, but a blob's upload (`PUT
+  /api/f/{name}/blobs/{sha256}`): that streams through with its declared
+  length and no payload hash, as from the internet (the signature binds
+  the URL, which names the hash), at most `BLOB_MAX_BYTES`.
 - Without the header only the computer's own routes answer:
   - `GET /api/computer`: its own view, proto's `ComputerView` without
     `notices` and with what only the guest is given: each agent's
