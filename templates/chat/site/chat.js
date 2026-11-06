@@ -57,6 +57,7 @@ import { renderAttachments as renderMessageAttachments } from "./media.js";
 import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
+import { moreOf } from "./pages.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -473,7 +474,7 @@ export function mount(root) {
       for (const record of page.records) onWork(record);
       // (the cursor moves past the page whatever it held)
       if (page.records.length) history.first.work = Math.min(history.first.work ?? Infinity, page.records[0].seq);
-      history.workDone = !page.more;
+      history.workDone = !moreOf(page, WORK_LAST);
     }
   }
   $("earlier").onclick = async () => {
@@ -488,7 +489,7 @@ export function mount(root) {
     try {
       const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
       for (const record of page.records) onChat(record, true);
-      button.hidden = !page.more;
+      button.hidden = !moreOf(page, CHAT_LAST);
       await earlierWork();
     } catch (err) {
       button.hidden = false;
