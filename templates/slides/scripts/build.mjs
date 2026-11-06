@@ -4,7 +4,7 @@
 // open-slide (package.json pins it) builds the deck with its own Vite
 // build. Its toolchain (about 250 MB) is installed once per pinned version
 // into a folder outside the deck, OPEN_SLIDE_HOME or the system's temporary
-// folder, and linked as node_modules; a node_modules the deck already holds
+// folder (npm's cache with it, deleted after), and linked as node_modules; a node_modules the deck already holds
 // (`npm install`) is used instead. The build's files then get what a
 // fragment's site needs: the deck's page at /, /s/<id>/ and
 // /s/<id>/presenter/ (a site has no fallback page), the live layer
@@ -84,7 +84,11 @@ function toolchain(pins) {
     fs.rmSync(staging, { recursive: true, force: true });
     fs.mkdirSync(staging, { recursive: true });
     fs.writeFileSync(path.join(staging, "package.json"), JSON.stringify({ private: true, dependencies: pins }));
-    run("npm", ["install", "--no-fund", "--no-audit", "--no-package-lock", "--loglevel=error"], { cwd: staging });
+    // npm's cache too stays out of the deck's home (a computer's home is on
+    // its saved disk): beside the install, and gone once it is done
+    const cache = path.join(staging, ".npm-cache");
+    run("npm", ["install", "--no-fund", "--no-audit", "--no-package-lock", "--loglevel=error", "--cache", cache], { cwd: staging });
+    fs.rmSync(cache, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
     try {
       fs.renameSync(staging, home);
