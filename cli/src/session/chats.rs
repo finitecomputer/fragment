@@ -137,7 +137,9 @@ fn regular(path: &Path) -> bool {
 /// The conversations of the export whose root is `root` (`root_of`), each
 /// into `spool` as it is read. What it could not read, each in a sentence
 /// (the rest is read); an import past an archive's limits stops, refused.
-pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
+/// A file past `upload_max` (one the platform takes from a person: its
+/// `limits`) is left out of its message, said.
+pub fn read(root: &Path, spool: &mut Spool, upload_max: u64) -> Result<Vec<String>> {
     let index_path = root.join("chats/index.json");
     let index: IndexFile = serde_json::from_reader(open_file(root, "chats/index.json", FILE_MAX_BYTES)?).with_context(|| format!("reading {}", index_path.display()))?;
     if index.format != FORMAT {
@@ -177,7 +179,7 @@ pub fn read(root: &Path, spool: &mut Spool) -> Result<Vec<String>> {
                 // a kind not asked for: none of its files are read
                 Ok((s, _)) if !spool.wants(&s.kind) => {}
                 Ok((mut s, files)) => {
-                    media(root, &mut s, files, spool, &mut problems)?;
+                    media(root, &mut s, files, spool, upload_max, &mut problems)?;
                     spool.add(s)?;
                 }
                 Err(e) => problems.push(format!("conversation {} in {file}: {e}", said_id(&listed.id))),
@@ -220,11 +222,15 @@ fn session(held: Record<Kept>, listed: &Listed, agent: Option<&str>) -> Result<(
 /// back in its message when its bytes are what its attachment names; one
 /// that is not (or is missing, too large, or no file an archive keeps) is
 /// left out of its message, said.
-fn media(root: &Path, s: &mut Session, files: Vec<(usize, Attachment)>, spool: &mut Spool, problems: &mut Vec<String>) -> Result<()> {
+fn media(root: &Path, s: &mut Session, files: Vec<(usize, Attachment)>, spool: &mut Spool, upload_max: u64, problems: &mut Vec<String>) -> Result<()> {
     for (i, a) in files {
+        if a.size > upload_max {
+            problems.push(format!("conversation {}: its file {} is {} bytes, past the {upload_max} this platform takes", said_id(&s.id), said_id(&a.name), a.size));
+            continue;
+        }
         let read = |p: String| -> Result<Vec<u8>> {
             let mut bytes = Vec::new();
-            open_file(root, &p, session::MEDIA_FILE_MAX_BYTES)?.read_to_end(&mut bytes)?;
+            open_file(root, &p, upload_max)?.read_to_end(&mut bytes)?;
             Ok(bytes)
         };
         let kept = match Some(format!("chats/{}", a.path)).filter(|p| a.valid() && inside_chats(p)).map(read) {
@@ -305,6 +311,8 @@ pub(crate) mod tests {
         Spool::new(BTreeSet::new()).unwrap()
     }
 
+    const UPLOAD_MAX: u64 = fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT;
+
     fn read_back(spool: &Spool, key: &str) -> Session {
         serde_json::from_slice(&std::fs::read(spool.path(key)).unwrap()).unwrap()
     }
@@ -320,7 +328,7 @@ pub(crate) mod tests {
         assert_eq!(root_of(&root.join("chats")).as_deref(), Some(&*root));
         assert_eq!(root_of(&root.join("chats/sessions")), None);
         let mut s = spool();
-        let problems = read(&root, &mut s).unwrap();
+        let problems = read(&root, &mut s, UPLOAD_MAX).unwrap();
         assert!(problems.is_empty(), "{problems:?}");
         let c = read_back(&s, "hermes-c1");
         assert_eq!((c.kind, c.title.as_str(), c.with.as_deref(), c.agent.as_deref(), c.reader, c.parts.len(), c.messages.len()), (Kind::Chat, "Beans", Some("Ann"), Some("Juniper"), READER, 2, 4));
@@ -351,7 +359,7 @@ pub(crate) mod tests {
         }
         std::fs::write(&index, v.to_string()).unwrap();
         let mut s = spool();
-        let problems = read(&root, &mut s).unwrap();
+        let problems = read(&root, &mut s, UPLOAD_MAX).unwrap();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("past the 512 MiB"), "{problems:?}");
         let p = read_back(&s, "hermes-p1");
@@ -379,7 +387,7 @@ pub(crate) mod tests {
         std::fs::write(chats.join("c1.json"), chat.to_string()).unwrap();
         std::fs::write(chats.join("index.json"), json!({ "format": FORMAT, "conversations": [{ "id": "c1", "file": "chats/c1.json" }] }).to_string()).unwrap();
         let mut s = spool();
-        let problems = read(&root, &mut s).unwrap();
+        let problems = read(&root, &mut s, UPLOAD_MAX).unwrap();
         assert_eq!(problems.len(), 3, "{problems:?}");
         let c = read_back(&s, "hermes-c1");
         assert_eq!(c.messages[0].attachments.len(), 1);
@@ -387,6 +395,16 @@ pub(crate) mod tests {
         assert_eq!(c.messages[1].attachments.len(), 1, "a file two messages hold");
         assert_eq!(s.media.len(), 1, "is kept once");
         assert_eq!(std::fs::read(&s.media[&format!("media/{sha}.png")]).unwrap(), png);
+
+        // the platform's bound decides, below the default or above it: a
+        // file past it is left out, said; one within it comes
+        let mut tight = spool();
+        let problems = read(&root, &mut tight, png.len() as u64 - 1).unwrap();
+        assert!(problems.iter().any(|p| p.contains(&format!("is {} bytes, past the {} this platform takes", png.len(), png.len() - 1))), "{problems:?}");
+        assert!(read_back(&tight, "hermes-c1").messages[0].attachments.is_empty() && tight.media.is_empty());
+        let mut roomy = spool();
+        read(&root, &mut roomy, 2 * UPLOAD_MAX).unwrap();
+        assert_eq!(roomy.media.len(), 1, "a deployment past the default takes it");
     }
 
     /// Goal: a conversation of a kind not asked for has none of its files
@@ -404,7 +422,7 @@ pub(crate) mod tests {
         chat["messages"][0]["attachments"] = json!([{ "name": "plot.png", "media_type": "image/png", "size": png.len(), "sha256": fragment_core::blob::sha256_hex(png), "path": "media/plot.png" }]);
         std::fs::write(&chat_path, chat.to_string()).unwrap();
         let mut s = Spool::new(BTreeSet::from([Kind::Cron])).unwrap();
-        let problems = read(&root, &mut s).unwrap();
+        let problems = read(&root, &mut s, UPLOAD_MAX).unwrap();
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(s.entries.keys().collect::<Vec<_>>(), ["hermes-r1"]);
         assert!(s.media.is_empty(), "the chat's picture is not read");
@@ -429,12 +447,12 @@ pub(crate) mod tests {
         }
         std::fs::write(&index, v.to_string()).unwrap();
         let mut s = spool();
-        let problems = read(&root, &mut s).unwrap();
+        let problems = read(&root, &mut s, UPLOAD_MAX).unwrap();
         assert_eq!(s.entries.len(), 2);
         assert_eq!(problems.len(), 5, "{problems:?}");
         assert!(problems.iter().filter(|p| p.contains("no regular file of the export's")).count() == 3, "{problems:?}");
         v["format"] = json!("finite-chat-archive/2");
         std::fs::write(&index, v.to_string()).unwrap();
-        assert!(format!("{:#}", read(&root, &mut spool()).unwrap_err()).contains("not the old Finite's export"));
+        assert!(format!("{:#}", read(&root, &mut spool(), UPLOAD_MAX).unwrap_err()).contains("not the old Finite's export"));
     }
 }

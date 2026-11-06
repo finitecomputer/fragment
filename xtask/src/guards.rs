@@ -206,19 +206,27 @@ mod tests {
 
     /// The sizes a file bound has been written as: 25 MiB (the old bound,
     /// copied by hand into every client until 2026-11), 100 MB (a zone's)
-    /// and 256 MiB (a blob's), as integer expressions with their spaces
-    /// and digit separators taken out. `100000000` is a common number
-    /// besides, so it counts only on a line that speaks of bytes.
-    const FILE_BOUNDS: [&str; 10] = ["25*1024*1024", "25<<20", "26214400", "100*1024*1024", "100<<20", "104857600", "100*1000*1000", "256*1024*1024", "256<<20", "268435456"];
+    /// and 256 MiB (a blob's), as integer expressions with their spaces,
+    /// parentheses and digit separators taken out. `100000000` is a common
+    /// number besides (a hundred megapixels, a hundred million neurons), so
+    /// it counts only on a line that speaks of what a file bound bounds.
+    const FILE_BOUNDS: [&str; 12] = ["25*1024*1024", "25<<20", "26214400", "100*1024*1024", "100<<20", "104857600", "100*1000*1000", "100e6", "1e8", "256*1024*1024", "256<<20", "268435456"];
     const ZONE_BOUND: &str = "100000000";
+    const ZONE_WORDS: [&str; 6] = ["byte", "size", "upload", "file", "attach", "blob"];
 
-    /// How many times `line` writes a file bound (`FILE_BOUNDS`).
+    /// How many times `line` writes a file bound (`FILE_BOUNDS`): each
+    /// whole, no digit, letter or point before it, and no digit after it
+    /// (nor a letter, after an exponent's: `1e8` in a hash is none).
     fn file_bounds(line: &str) -> usize {
-        let squeezed: String = line.chars().filter(|c| !c.is_whitespace() && *c != '_').collect();
+        let squeezed: String = line.chars().filter(|c| !c.is_whitespace() && !['_', '(', ')'].contains(c)).collect();
         let bytes = squeezed.as_bytes();
-        let digit = |i: Option<usize>| i.and_then(|i| bytes.get(i)).is_some_and(u8::is_ascii_digit);
-        let count = |needle: &str| squeezed.match_indices(needle).filter(|(at, n)| !digit(at.checked_sub(1)) && !digit(Some(at + n.len()))).count();
-        let zone = if squeezed.to_ascii_lowercase().contains("byte") { count(ZONE_BOUND) } else { 0 };
+        let at = |i: Option<usize>| i.and_then(|i| bytes.get(i)).copied();
+        let count = |needle: &str| {
+            let after_ok = |c: Option<u8>| !c.is_some_and(|c| c.is_ascii_digit() || (needle.contains('e') && c.is_ascii_alphanumeric()));
+            squeezed.match_indices(needle).filter(|(i, n)| !at(i.checked_sub(1)).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'.') && after_ok(at(Some(i + n.len())))).count()
+        };
+        let lower = squeezed.to_ascii_lowercase();
+        let zone = if ZONE_WORDS.iter().any(|w| lower.contains(w)) { count(ZONE_BOUND) } else { 0 };
         FILE_BOUNDS.iter().map(|b| count(b)).sum::<usize>() + zone
     }
 
@@ -269,5 +277,10 @@ mod tests {
         assert_eq!(file_bounds("pub const UPLOAD_MAX_BYTES_DEFAULT: u64 = 100_000_000;"), 1);
         assert_eq!(file_bounds("static let pixelsMax = 100_000_000"), 0, "not a byte count");
         assert_eq!(file_bounds("let size = 1_268_435_456; // bytes"), 0, "within a longer number");
+        assert_eq!(file_bounds("const FILE_MAX = 100e6;"), 1);
+        assert_eq!(file_bounds("let most = 25 * (1024 * 1024);"), 1);
+        assert_eq!(file_bounds("const UPLOAD_MOST = 100000000;"), 1, "a bare count, named for what it bounds");
+        assert_eq!(file_bounds("Usage::Neurons { milli: 100_000_000 }"), 0, "not a file's");
+        assert_eq!(file_bounds("let sha = \"9f1e8a\"; let x = \"1e8ab\";"), 0, "an exponent's spelling inside a hash");
     }
 }

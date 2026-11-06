@@ -741,9 +741,10 @@ unfinished design, not debt.
 
 ## A blob upload is one request, and the CLI holds whole files
 
-- **Shortcut:** a blob is one request of at most 256 MiB
-  (cell/src/blobs.rs), and the CLI reads files whole; Cloudflare refuses
-  bodies over 100 MB on Free and Pro zones.
+- **Shortcut:** a blob is one request of at most 256 MiB from a
+  computer, and of at most the deployment's `upload_max_bytes` (its
+  zone's limit: 100 MB on Free and Pro) from a person (cell/src/lib.rs
+  `blob_length`), and the CLI reads files whole.
 - **Risk:** large files fail whole, or cannot upload at all.
 - **Delete when:** uploads go in resumable parts (R2 multipart under the
   zone's limit, tested with a 150 MB file) or by signed URL, and the CLI

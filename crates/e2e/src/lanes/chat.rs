@@ -957,6 +957,9 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "limits": limits, "banner": chrome.eval(&page, "document.getElementById('banner-text').textContent")? }),
     );
     chrome.click(&page, "#banner-dismiss")?;
+    // and the page's own upload route refuses one past it, unread (413)
+    let page_put = chrome.eval(&page, &format!("fetch('./__blob/' + '0'.repeat(64), {{ method: 'PUT', body: new Uint8Array({most} + 1), credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    s.ok("the page's upload route (`__blob`) refuses a file past the platform's bound (413)", page_put == 413, &page_put);
 
     // Large pictures keep their aspect ratio, capped at 240px and at the
     // message's available width; each wrapper's content box hugs its image.

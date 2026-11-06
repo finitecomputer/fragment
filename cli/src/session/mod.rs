@@ -251,8 +251,12 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
         bail!(usage(format!("{} is no file or folder", path.display())));
     }
     let mut spool = Spool::new(kinds)?;
+    // what the platform takes from a person (its `limits`; an older one
+    // names none, and took a zone's)
+    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+    let upload_max = list.limits.map_or(fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT, |l| l.upload_max_bytes);
     let problems = match source(&path)? {
-        Source::Export(root) => chats::read(&root, &mut spool)?,
+        Source::Export(root) => chats::read(&root, &mut spool, upload_max)?,
         Source::Hermes(db) => {
             // on a platform computer (as its agent), its own Hermes home's
             // databases are its chats here already; a person's own Hermes is theirs
@@ -262,7 +266,7 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
             Vec::new()
         }
     };
-    let (archive, made) = archive(c)?;
+    let (archive, made) = archive(c, &list)?;
     let written = write(c, &archive, &spool)?;
     let mut holds: BTreeMap<String, usize> = Kind::KNOWN.iter().map(|k| (k.as_str().to_string(), 0)).collect();
     for e in written.entries.values() {
@@ -298,8 +302,7 @@ fn source(path: &std::path::Path) -> Result<Source> {
 /// imports at once have made one each), or made now. Asked only once what
 /// was read is within an archive's limits (`Spool::add`), so a refused
 /// import makes none.
-fn archive(c: &Client) -> Result<(String, bool)> {
-    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+fn archive(c: &Client, list: &FragmentList) -> Result<(String, bool)> {
     let theirs = list.fragments.iter().filter(|f| f.kind == FragmentKind::Sessions && (f.role == Role::Owner || f.owned)).map(|f| f.name.clone()).min();
     if let Some(name) = theirs {
         return Ok((name, false));

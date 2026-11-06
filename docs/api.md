@@ -38,8 +38,10 @@ Every answer of the platform's host names its release in
 verified a CLI for the release's inputs, that version in `x-fragment-cli`.
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
-on Free and Pro), below the `BLOB_MAX_BYTES` a blob route allows (debt
-ledger).
+on Free and Pro). A person's blob upload is refused past the deployment's
+`upload_max_bytes` (default that zone limit), which `GET /api/fragments`
+tells clients (`limits`); an agent's, from its computer, which never meets
+the zone, past `BLOB_MAX_BYTES` (debt ledger).
 
 ## Test levers
 
@@ -703,7 +705,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `sha256` is its blob. A blessed template's data from the release is listed beneath (`release: true`) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); with none of its own there, a blessed template's data file |
-| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes (`content-length` required, at most `BLOB_MAX_BYTES`), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
+| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges 206) |
 | `GET /api/f/{name}/card` | viewer | → the preview card: a 1280×800 JPEG, `ETag` its SHA-256, `private, no-cache`, `X-Fragment-Ref` the live it shows (an upload has none); `If-None-Match` 304; none yet 404 (Cards) |
 | `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again (Cards). A chat, agent or members-only fragment, or nothing deployed, 400; an owner who pays for nothing 402; within `card::AGAIN_EVERY_MS` of the last ask, 429 |
@@ -1659,7 +1661,7 @@ fragment's, `/api/…` included.
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
 | `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public; a blob's, or a file the size of a pointer, `no-cache`), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
-| `__blob/{sha256}` | `GET`, `HEAD`: one of this fragment's blobs, to viewers and up (not `public` alone), as its declared type (Blobs; ranges 206), `private, max-age=31536000, immutable`, `nosniff`, `ETag` the hash; another fragment's hash 404. `PUT` (editors, from the fragment's own page) uploads as `PUT /api/f/{name}/blobs/{sha256}` → `{ok, sha, size, stored}`; another fragment's page uploads as no one (401) |
+| `__blob/{sha256}` | `GET`, `HEAD`: one of this fragment's blobs, to viewers and up (not `public` alone), as its declared type (Blobs; ranges 206), `private, max-age=31536000, immutable`, `nosniff`, `ETag` the hash; another fragment's hash 404. `PUT` (editors, from the fragment's own page) uploads as a person's `PUT /api/f/{name}/blobs/{sha256}` → `{ok, sha, size, stored}`; another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): as `GET /api/f/{name}/members` |
 | `__schedules` | viewers and up (the share link too): as `GET /api/f/{name}/schedules` |
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: as `GET /api/f/{name}/channels/{channel}`, with this origin's session or share link |
