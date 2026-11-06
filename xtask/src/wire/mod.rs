@@ -43,11 +43,12 @@ pub struct Generated {
 
 pub fn generate() -> Result<Generated> {
     let doc = openapi::document()?;
+    let lock = lock::project(&doc)?;
     // each default it states is what serde reads of its field left out
-    defaults::hold(&doc)?;
+    defaults::hold(&doc, &lock)?;
     let mut openapi = serde_json::to_string_pretty(&doc).context("the document is JSON")?;
     openapi.push('\n');
-    Ok(Generated { lock: lock::project(&doc)?, reference: reference::render(&doc)?, openapi })
+    Ok(Generated { lock, reference: reference::render(&doc)?, openapi })
 }
 
 /// The files as the tree holds them; `None` for one it does not.

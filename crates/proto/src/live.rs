@@ -436,7 +436,8 @@ mod schema {
 
         fn json_schema(_: &mut SchemaGenerator) -> Schema {
             // its bounds besides its format: a validator need not assert a format
-            let cursor = |doc: &str| json!({ "type": ["integer", "null"], "format": "int64", "minimum": i64::MIN, "maximum": i64::MAX, "description": doc });
+            // left out where the other cursor is named, as null is: none
+            let cursor = |doc: &str| json!({ "type": ["integer", "null"], "format": "int64", "minimum": i64::MIN, "maximum": i64::MAX, "default": null, "description": doc });
             json_schema!({
                 "type": "object",
                 "properties": {
@@ -492,9 +493,10 @@ mod schema {
                 "properties": {
                     "id": { "type": "string" },
                     "result": { "description": "The query's answer, any JSON (`null` included), as the app gave it." },
-                    "error": { "anyOf": [g.subschema_for::<ErrorCode>(), { "type": "null" }] },
-                    "message": { "type": ["string", "null"] },
-                    "status": { "type": ["integer", "null"], "format": "uint16", "minimum": 0, "maximum": 65535 },
+                    // a result's refusal fields are left out, as null is: none
+                    "error": { "anyOf": [g.subschema_for::<ErrorCode>(), { "type": "null" }], "default": null },
+                    "message": { "type": ["string", "null"], "default": null },
+                    "status": { "type": ["integer", "null"], "format": "uint16", "minimum": 0, "maximum": 65535, "default": null },
                 },
                 "required": ["id"],
                 "additionalProperties": false,

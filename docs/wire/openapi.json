@@ -741,6 +741,7 @@
             ],
             "properties": {
               "after": {
+                "default": null,
                 "description": "The records with `seq` after this one (0: from the start).",
                 "format": "int64",
                 "maximum": 9223372036854775807,
@@ -754,6 +755,7 @@
                 "type": "string"
               },
               "last": {
+                "default": null,
                 "description": "The channel's last this many records (at most `limits::CHANNEL_PAGE`).",
                 "format": "int64",
                 "maximum": 9223372036854775807,
@@ -1229,12 +1231,14 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "default": null
               },
               "id": {
                 "type": "string"
               },
               "message": {
+                "default": null,
                 "type": [
                   "string",
                   "null"
@@ -1244,6 +1248,7 @@
                 "description": "The query's answer, any JSON (`null` included), as the app gave it."
               },
               "status": {
+                "default": null,
                 "format": "uint16",
                 "maximum": 65535,
                 "minimum": 0,

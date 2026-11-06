@@ -48,7 +48,7 @@
 //! be null, so such a field declares it (`schemars(extend("default" = …))`)
 //! and defaults.rs holds every stated default to what serde reads of its
 //! field left out. Spared are a route's parameters, a `never` field, one
-//! a condition beside it requires by name, and a condition branch's
+//! every condition beside it requires or forbids, and a condition branch's
 //! predicate on a field described above it: their absence is said where
 //! they are described. Integers' ranges compare
 //! exactly; a u128's would not, and is refused.
@@ -284,9 +284,13 @@ impl Projector<'_> {
             self.lines.insert(format!("extends {name} {}", base.strip_prefix(COMPONENTS).unwrap_or(base)));
         }
         let required: BTreeSet<&str> = map.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
-        // the names a condition beside these fields requires: their absence is the condition's
+        // the names every condition beside these fields requires or forbids:
+        // no branch lets them be left out, so their absence needs no default
         let conditioned: BTreeSet<&str> = union_of(map)
-            .map(|(_, branches)| branches.iter().flat_map(|b| b["required"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect())
+            .map(|(_, branches)| {
+                let named = |b: &Value, f: &str| b["required"].as_array().is_some_and(|r| r.iter().any(|x| x == f)) || b["properties"][f] == Value::Bool(false);
+                map.get("properties").and_then(Value::as_object).into_iter().flatten().map(|(k, _)| k.as_str()).filter(|f| branches.iter().all(|b| named(b, f))).collect()
+            })
             .unwrap_or_default();
         let predicates = self.predicates.last().cloned().unwrap_or_default();
         for (field, s) in map.get("properties").and_then(Value::as_object).into_iter().flatten() {
@@ -442,7 +446,7 @@ impl Projector<'_> {
 
 /// The tag every branch names itself by: a property each holds as a
 /// constant string or number, `type` first, each branch's its own.
-fn tag_of(branches: &[Value]) -> Option<String> {
+pub(super) fn tag_of(branches: &[Value]) -> Option<String> {
     let first = branches.first()?["properties"].as_object()?;
     let mut keys: Vec<&String> = first.keys().collect();
     keys.sort_by_key(|k| *k != "type");
@@ -455,7 +459,7 @@ fn tag_of(branches: &[Value]) -> Option<String> {
 }
 
 /// A branch's value of its tag, as its key.
-fn tag_value(branch: &Value, tag: &str) -> Option<String> {
+pub(super) fn tag_value(branch: &Value, tag: &str) -> Option<String> {
     match &branch["properties"][tag]["const"] {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),

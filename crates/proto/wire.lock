@@ -41,11 +41,16 @@ bound ListedRecord.at range i64
 bound ListedRecord.fields default {}
 bound LiveIn.presence.data default null
 bound LiveIn.query.input default null
+bound LiveIn.subscribe.after default null
 bound LiveIn.subscribe.after range i64
+bound LiveIn.subscribe.last default null
 bound LiveIn.subscribe.last range i64
 bound LiveOut.draft.at range i64
 bound LiveOut.draft.thinking default null
 bound LiveOut.draft.thinking range u64
+bound LiveOut.result.error default null
+bound LiveOut.result.message default null
+bound LiveOut.result.status default null
 bound LiveOut.result.status range u16
 bound LiveOut.subscribed.next range i64
 bound Member.addedAt range i64

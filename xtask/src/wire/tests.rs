@@ -761,8 +761,9 @@ fn doc_of<T: schemars::JsonSchema>(answers: bool) -> (Value, Value) {
     (json!({ "paths": { "/t": { "post": op } }, "components": { "schemas": schemas } }), root)
 }
 
-/// That `T`'s stated defaults are what serde reads of their fields left out.
-fn defaults_hold<T: schemars::JsonSchema + serde::Serialize + serde::de::DeserializeOwned>() -> anyhow::Result<usize> {
+/// That `T`'s stated defaults are what serde reads of their fields left
+/// out: the lock's fields it held.
+fn defaults_hold<T: schemars::JsonSchema + serde::Serialize + serde::de::DeserializeOwned>() -> anyhow::Result<BTreeSet<String>> {
     let (doc, root) = doc_of::<T>(true);
     super::defaults::check("t", &root, doc["components"]["schemas"].as_object().unwrap(), fragment_proto::routes::round_trip::<T>)
 }
@@ -883,7 +884,7 @@ fn hidden_defaults_are_said_held_and_locked() {
     assert_eq!(facts_of(&breaches(&lock_of::<on::Row>(true), &lock_of::<off::Row>(true), &none)), ["bound Row.flag default true"]);
     let refused = project(&doc_of::<unsaid::Row>(true).0).unwrap_err().to_string();
     assert!(refused.contains("Row.flag") && refused.contains("leaving it out"), "{refused}");
-    assert_eq!(defaults_hold::<on::Row>().unwrap(), 1);
+    assert_eq!(defaults_hold::<on::Row>().unwrap().into_iter().collect::<Vec<_>>(), ["Row.flag"]);
     let lie = defaults_hold::<lying::Row>().unwrap_err().to_string();
     assert!(lie.contains("`flag` left out is not its stated default null"), "{lie}");
     // a flattened branch's own field
@@ -891,14 +892,194 @@ fn hidden_defaults_are_said_held_and_locked() {
     let read: flat_on::Wrap = serde_json::from_value(written).unwrap();
     assert!(matches!(read.value, flat_on::Choice::Docked { dock: true, .. }), "an older reader reads it docked");
     assert_eq!(facts_of(&breaches(&lock_of::<flat_on::Wrap>(true), &lock_of::<flat_off::Wrap>(true), &none)), ["bound Wrap.#0.dock default true"]);
-    assert_eq!(defaults_hold::<flat_on::Wrap>().unwrap(), 1);
+    assert_eq!(defaults_hold::<flat_on::Wrap>().unwrap().into_iter().collect::<Vec<_>>(), ["Wrap.#0.dock"]);
     let lie = defaults_hold::<flat_lying::Wrap>().unwrap_err().to_string();
     assert!(lie.contains("`#0.dock` left out is not its stated default false"), "{lie}");
 }
 
-/// The wire's own defaults hold, every one reached from its routes.
+/// The wire's own defaults hold, and every optional field's default the
+/// lock records is reached from a route, so none goes unread.
 #[test]
-fn the_wires_defaults_hold() {
-    let held = super::defaults::hold(&super::openapi::document().unwrap()).unwrap();
-    assert!(held >= 30, "{held} defaults held");
+fn the_wires_defaults_hold_every_one() {
+    let doc = super::openapi::document().unwrap();
+    let lock = project(&doc).unwrap();
+    let held = super::defaults::hold(&doc, &lock).unwrap();
+    for field in ["ListedFragment.dock", "ListedFragment.unread", "OpDecl.ephemeral", "PageError.source", "ErrorBody.reason", "LiveIn.presence.data", "LiveOut.draft.thinking"] {
+        assert!(held.contains(field), "{field} held: {held:?}");
+    }
+    // one no sample reaches is named
+    let ops = || ["a.get"].into_iter();
+    let lock = "field X.f optional boolean\nbound X.f default true\nfield a.get.query.q optional string\nbound a.get.query.q default \"x\"\n";
+    assert_eq!(super::defaults::unheld(lock, &BTreeSet::new(), ops()), ["X.f"]);
+    assert!(super::defaults::unheld(lock, &BTreeSet::from(["X.f".to_string()]), ops()).is_empty());
+}
+
+#[allow(dead_code)]
+mod derived_nested {
+    macro_rules! nested {
+        ($m:ident, $flag:literal) => {
+            pub mod $m {
+                /// A nested struct inside a flattened untagged branch, its
+                /// stated default `true` whatever serde does.
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                pub struct Wrap {
+                    pub id: String,
+                    #[serde(flatten)]
+                    pub value: Choice,
+                }
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[serde(untagged)]
+                pub enum Choice {
+                    Row { inner: Inner },
+                    Other { other: u8 },
+                }
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                pub struct Inner {
+                    #[serde(default = "flag", skip_serializing_if = "skip_flag")]
+                    #[schemars(extend("default" = true))]
+                    pub dock: bool,
+                }
+                fn flag() -> bool {
+                    $flag
+                }
+                fn skip_flag(b: &bool) -> bool {
+                    *b == $flag
+                }
+            }
+        };
+    }
+    nested!(said, true);
+    nested!(stale, false);
+}
+
+/// A stale default inside a nested struct of a flattened branch: the lock
+/// cannot see it (the annotation did not change), so serde's reading of
+/// it is what fails, naming the nested field.
+#[test]
+fn a_nested_default_in_a_flattened_branch_is_held() {
+    use derived_nested::*;
+    let written = serde_json::to_value(stale::Wrap { id: "x".into(), value: stale::Choice::Row { inner: stale::Inner { dock: false } } }).unwrap();
+    assert_eq!(written, json!({ "id": "x", "inner": {} }));
+    assert!(matches!(serde_json::from_value::<said::Wrap>(written).unwrap().value, said::Choice::Row { inner: said::Inner { dock: true } }));
+    assert!(breaches(&lock_of::<said::Wrap>(true), &lock_of::<stale::Wrap>(true), &BTreeSet::new()).is_empty(), "the lock is the same");
+    assert_eq!(defaults_hold::<said::Wrap>().unwrap().into_iter().collect::<Vec<_>>(), ["Inner.dock"]);
+    let stale = defaults_hold::<stale::Wrap>().unwrap_err().to_string();
+    assert!(stale.contains("`#0.inner.dock` left out is not its stated default true"), "{stale}");
+}
+
+#[allow(dead_code)]
+mod derived_reach {
+    /// A list of children inside a flattened tagged variant.
+    macro_rules! listed {
+        ($m:ident, $flag:literal) => {
+            pub mod $m {
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                pub struct Wrap {
+                    pub id: String,
+                    #[serde(flatten)]
+                    pub value: Choice,
+                }
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[serde(tag = "kind")]
+                pub enum Choice {
+                    Row { children: Vec<Child> },
+                    Other { other: u8 },
+                }
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                pub struct Child {
+                    #[serde(default = "flag", skip_serializing_if = "skip_flag")]
+                    #[schemars(extend("default" = true))]
+                    pub dock: bool,
+                }
+                fn flag() -> bool {
+                    $flag
+                }
+                fn skip_flag(b: &bool) -> bool {
+                    *b == $flag
+                }
+            }
+        };
+    }
+    listed!(listed_said, true);
+    listed!(listed_stale, false);
+
+    /// A field one branch requires and the other lets be left out.
+    macro_rules! either {
+        ($m:ident, $flag:literal, $($said:tt)*) => {
+            pub mod $m {
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "required": ["id"] }]))]
+                pub struct Wrap {
+                    pub id: String,
+                    #[serde(default = "flag", skip_serializing_if = "skip_flag")]
+                    $($said)*
+                    pub dock: bool,
+                }
+                fn flag() -> bool {
+                    $flag
+                }
+                fn skip_flag(b: &bool) -> bool {
+                    *b == $flag
+                }
+            }
+        };
+    }
+    either!(either_unsaid, true,);
+    either!(either_stale, false, #[schemars(extend("default" = true))]);
+
+    #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+    #[serde(bound = "T: serde::Serialize + serde::de::DeserializeOwned")]
+    pub struct Layer<T> {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(extend("default" = null))]
+        pub next: Option<Box<T>>,
+    }
+    #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+    pub struct Leaf {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[schemars(extend("default" = true))]
+        pub dock: bool,
+    }
+    pub type Ten = Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Leaf>>>>>>>>>>;
+    pub type TwentyFive = Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>;
+
+    /// A recursive type: its walk stops where it meets itself.
+    #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+    pub struct Tree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(extend("default" = null))]
+        pub child: Option<Box<Tree>>,
+        #[serde(default = "yes", skip_serializing_if = "is_yes")]
+        #[schemars(extend("default" = true))]
+        pub flag: bool,
+    }
+    fn yes() -> bool {
+        true
+    }
+    fn is_yes(b: &bool) -> bool {
+        *b
+    }
+}
+
+/// Every default a type reaches is held, however it is reached: through a
+/// list in a flattened tagged branch, where one branch lets its field be
+/// left out though another requires it, ten layers down, or in a type
+/// that holds itself. A walk deeper than the checker reads is an error,
+/// never a pass.
+#[test]
+fn every_reachable_default_is_held() {
+    use derived_reach::*;
+    let stale = defaults_hold::<listed_stale::Wrap>().unwrap_err().to_string();
+    assert!(stale.contains("`Row.children.[].dock` left out is not its stated default true"), "{stale}");
+    assert_eq!(defaults_hold::<listed_said::Wrap>().unwrap().into_iter().collect::<Vec<_>>(), ["Child.dock"]);
+    let refused = project(&doc_of::<either_unsaid::Wrap>(true).0).unwrap_err().to_string();
+    assert!(refused.contains("Wrap.dock") && refused.contains("leaving it out"), "{refused}");
+    let stale = defaults_hold::<either_stale::Wrap>().unwrap_err().to_string();
+    assert!(stale.contains("`dock` left out is not its stated default true"), "{stale}");
+    let deep = defaults_hold::<Ten>().unwrap_err().to_string();
+    assert!(deep.contains("dock` left out is not its stated default true"), "{deep}");
+    let held = defaults_hold::<Tree>().unwrap();
+    assert_eq!(held.into_iter().collect::<Vec<_>>(), ["Tree.child", "Tree.flag"]);
+    let too_deep = defaults_hold::<TwentyFive>().unwrap_err().to_string();
+    assert!(too_deep.contains("deeper than the default checker reads"), "{too_deep}");
 }
