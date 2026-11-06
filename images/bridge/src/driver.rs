@@ -1501,7 +1501,8 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
     // its files refused here (an agent that is a viewer of a connector's
-    // chat may post there, not upload): its words go alone, saying so
+    // chat may post there, not upload; a file past what the platform takes
+    // through the egress, 413): its words go alone, saying so
     let mut files_refused = false;
     // its files, once uploaded: a retried post sends their refs again,
     // never the bytes (a file may be 256 MiB)
@@ -1513,8 +1514,8 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
             None => upload(api, fragment, agent, files).await,
         };
         let uploaded = match uploading {
-            Err(e) if e.status() == Some(403) && !files.is_empty() => {
-                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len() });
+            Err(e) if matches!(e.status(), Some(403 | 413)) && !files.is_empty() => {
+                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len(), "status": e.status() });
                 files_refused = true;
                 let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
                 body["text"] = json!(format!("{said}{}({} could not be attached here.)", if said.is_empty() { "" } else { "\n\n" }, if files.len() == 1 { "Its file" } else { "Its files" }));

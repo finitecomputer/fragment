@@ -92,6 +92,9 @@ pub struct World {
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
     pub fail_posts: u32,
+    /// A blob upload past this many bytes is refused 413, as a computer's
+    /// egress that reads a body whole refuses one past 32 MiB.
+    pub blob_put_max: Option<usize>,
     /// The next posts on this channel (any fragment's) that would append a
     /// record: refused 503 before it is appended (`false`), or appended
     /// and answered 503, the answer lost (`true`). A retry of one appended
@@ -839,6 +842,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             answer(StatusCode::OK, json!({ "ok": true }))
         }
+        (Method::PUT, ["blobs", _]) if w.blob_put_max.is_some_and(|max| body.len() > max) => refuse(StatusCode::PAYLOAD_TOO_LARGE, "past what the egress reads"),
         (Method::PUT, ["blobs", sha]) => {
             let got = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&body));
             if got != *sha {

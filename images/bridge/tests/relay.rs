@@ -835,6 +835,15 @@ async fn large_files_both_ways() {
         assert_eq!((&r["attachments"][0]["name"], &r["attachments"][0]["size"], &r["attachments"][0]["sha256"]), (&json!("film.mp4"), &json!(bytes.len()), &json!(sha)));
         assert_eq!(w.fragments[&chat].blobs[&sha].1, bytes, "the chat's blob is Hermes' file");
     });
+    // an upload the platform refuses as too large (413: an egress that
+    // reads a body whole) loses the reply's file, never its words
+    fake.with(|w| {
+        w.blob_put_max = Some(32 * 1024 * 1024);
+        w.fragments.get_mut(&chat).unwrap().blobs.clear();
+    });
+    let turn = turn_of(&fake.say(&chat, &person("paul"), json!({ "text": "send a film again" })));
+    fake.until(30_000, "the film's reply, its words alone", |w| replies(w, &chat).iter().any(|r| r["turn"] == turn.as_str() && r["text"].as_str().is_some_and(|t| t.contains("could not be attached here")))).await;
+    fake.with(|w| assert!(w.fragments[&chat].blobs.is_empty() && replies(w, &chat).iter().filter(|r| r["turn"] == turn.as_str()).all(|r| r.get("attachments").is_none())));
     bridge.stop().await;
 }
 
