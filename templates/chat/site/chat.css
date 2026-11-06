@@ -135,6 +135,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 /* older messages load as the reader nears #earlier (chat.js `earlier`) */
 .history { text-align: center; }
 #earlier { height: 1px; }
+/* the same, for a keyboard or a screen reader: seen once focused */
+.history { position: relative; }
+.history button[aria-disabled="true"] { cursor: wait; }
+#earlier-load:not(:focus) { position: absolute; top: 0; left: 0; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 #history-status:not(:empty) { display: block; padding-top: 12px; color: var(--text-secondary); font-size: 12px; }
 .history button { margin-top: 8px; font: inherit; font-size: 13px; border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; }
 .latest-wrap { position: relative; z-index: 2; height: 0; display: flex; justify-content: center; }

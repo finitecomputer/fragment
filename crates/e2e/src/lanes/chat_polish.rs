@@ -149,13 +149,35 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // off the page, measured at 0 (CI's "moved: 32.5" was that: the scroll
     // box's top less the message's offset). Scrolled to the top, the
     // reader's message is the first shown; the page above it comes in.
+    // a keyboard's way to the page above: the control at the top of the
+    // timeline, reached by Tab, seen once focused, and Enter loads the page
+    // above (a page the focus itself brought in by scrolling counts)
+    let mut reached = false;
+    for _ in 0..40 {
+        chrome.press(&page, "Tab", false)?;
+        if chrome.eval(&page, "document.activeElement?.id === 'earlier-load'")? == true {
+            reached = true;
+            break;
+        }
+    }
+    anyhow::ensure!(super::shows(chrome, &page, "document.getElementById('scroll').dataset.history === 'more'"), "no page in flight");
+    let shown = chrome.eval(&page, "(() => { const b = document.getElementById('earlier-load'); const r = b.getBoundingClientRect(); return { label: b.textContent, width: r.width, height: r.height, focused: document.activeElement === b, disabled: b.getAttribute('aria-disabled') }; })()")?;
+    let before = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
+    chrome.press(&page, "Enter", false)?;
+    let paged = super::shows(chrome, &page, &format!("document.querySelectorAll('.msg.user').length === {} && document.activeElement?.id === 'earlier-load' && document.getElementById('scroll').dataset.history === 'more'", before + 100));
+    s.ok(
+        "a keyboard reaches Load earlier messages at the top of the timeline (seen once focused), and Enter loads the page above, the focus kept on it",
+        reached && shown["label"] == "Load earlier messages" && shown["focused"] == true && shown["disabled"] == "false" && shown["width"].as_f64().is_some_and(|w| w > 20.0) && paged,
+        json!({ "reached": reached, "shown": shown, "before": before, "now": chrome.eval(&page, "document.querySelectorAll('.msg.user').length")? }),
+    );
+    let before = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
     let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); window.__offset = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; window.__placed = () => window.__offset(document.querySelector('.msg[data-seq=\"' + window.__historySeq + '\"]')); s.scrollTop = 0; const m = [...document.querySelectorAll('.msg[data-seq]')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historySeq = m.dataset.seq; window.__historyTop = window.__offset(m); return m.dataset.seq; })()")?;
-    let loaded = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 200 && document.getElementById('scroll').dataset.history === 'more'");
+    let loaded = super::shows(chrome, &page, &format!("document.querySelectorAll('.msg.user').length === {} && document.getElementById('scroll').dataset.history === 'more'", before + 100));
     let position = chrome.eval(&page, "Math.abs(window.__placed() - window.__historyTop)")?;
     let ordered = chrome.eval(&page, "(() => { const seqs = [...document.querySelectorAll('.msg[data-seq]')].map(m => Number(m.dataset.seq)); return seqs.every((seq, i) => !i || seq > seqs[i-1]); })()")?;
     s.ok("scrolled to the top, the page above comes in, the reader's message stays where it was, ascending, none twice", loaded && position.as_f64().is_some_and(|n| n < 2.0) && ordered == true, json!({ "anchor": anchor, "moved": position, "ordered": ordered }));
     // and on up, a page each time the top is reached, to the chat's start
-    let mut shown = 200;
+    let mut shown = before + 100;
     for _ in 0..5 {
         chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
         let more = format!("document.querySelectorAll('.msg.user').length > {shown} || document.getElementById('scroll').dataset.history === 'done'");

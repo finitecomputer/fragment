@@ -476,6 +476,9 @@ export function mount(root) {
   function historyStatus(text, again) {
     $("history-status").textContent = text;
     $("earlier-again").hidden = !again;
+    // (kept while a page loads, so a keyboard's focus stays on it)
+    $("earlier-load").hidden = history.done || history.failed || !caughtUp;
+    $("earlier-load").setAttribute("aria-disabled", String(history.loading));
     $("scroll").dataset.history = history.loading ? "loading" : history.failed ? "failed" : history.done ? "done" : "more";
   }
   async function earlier() {
@@ -512,6 +515,9 @@ export function mount(root) {
     earlierSeen.unobserve($("earlier"));
     earlierSeen.observe($("earlier"));
   }
+  // a keyboard's or a screen reader's way to the page above: the
+  // sentinel's loader (nothing while a page is in flight)
+  $("earlier-load").onclick = () => earlier();
   $("earlier-again").onclick = async () => {
     history.failed = false;
     historyStatus("", false);
