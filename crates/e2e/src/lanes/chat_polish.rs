@@ -957,3 +957,101 @@ pub(super) fn history_recovers(s: &mut Suite, api: &Api, owner: &Keys, session: 
     chrome.close(page)?;
     Ok(())
 }
+
+/// A chat longer than the page's window (`WINDOW_MAX`, 600 messages):
+/// scrolled up past it, the window lets its newest messages go while a
+/// message said meanwhile is counted, not drawn, and the turn running
+/// keeps its working line and Stop; scrolled back down, pages come in
+/// below as its oldest go, to the end, where the message said meanwhile
+/// shows; and Jump to latest, up the chat, starts the window again at the
+/// newest page. Valid: 800 messages and a turn that runs, on a quiet chat.
+pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "chat-window")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the window chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let me = api.identity(owner)?;
+    for i in 0..800 {
+        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("line-{i}"), "body": { "text": format!("Line {i:03}") } })))?;
+        anyhow::ensure!(r.status == 200, "posting line {i}: {r}");
+    }
+    let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "long", "body": { "kind": "turn.start", "turn": "long", "agent": agent, "asker": me } })))?;
+    anyhow::ensure!(r.status == 200, "starting a turn: {r}");
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let count = "document.querySelectorAll('.msg.user').length";
+    let window = "document.getElementById('scroll').dataset.window";
+    let opened = super::shows(chrome, &page, &format!("{count} === 100 && {window} === 'live' && document.getElementById('scroll').dataset.watching === '1'"));
+    anyhow::ensure!(opened, "the window chat opens on its newest page");
+    let running = "!!document.querySelector('.msg.working') && !document.getElementById('stop').hidden";
+    let seen = |chrome: &mut Browser| chrome.eval(&page, &format!("({{ count: {count}, window: {window}, first: document.querySelector('.msg[data-seq]')?.dataset.seq, last: [...document.querySelectorAll('.msg[data-seq]')].at(-1)?.dataset.seq, latest: document.getElementById('latest').textContent, most: window.__most }})"));
+    // the most messages drawn at once, as each draw ends
+    chrome.eval(&page, "(() => { window.__most = 0; new MutationObserver(() => { window.__most = Math.max(window.__most, document.querySelectorAll('.msg.user').length); }).observe(document.getElementById('messages'), { childList: true }); return true; })()")?;
+    // up, a page each time the top is reached, until the window lets go of its newest
+    for _ in 0..8 {
+        let before = chrome.eval(&page, count)?.as_u64().unwrap_or(0);
+        chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+        anyhow::ensure!(super::shows(chrome, &page, &format!("{count} !== {before} || {window} === 'up'")), "a page comes in above");
+        if chrome.eval(&page, window)? == "up" {
+            break;
+        }
+    }
+    // (the window's state is said as it moves; the timeline is drawn a frame after)
+    let drawn = |first: &str, last: &str| format!("{window} !== undefined && document.querySelector('.msg[data-seq]')?.dataset.seq === '{first}' && [...document.querySelectorAll('.msg[data-seq]')].at(-1)?.dataset.seq === '{last}'");
+    super::shows(chrome, &page, &drawn("101", "700"));
+    let up = seen(chrome)?;
+    s.ok(
+        "up the chat, the window holds 600 messages at most: past them its newest go",
+        up["window"] == "up" && up["count"] == 600 && up["first"] == "101" && up["last"] == "700" && up["most"].as_u64().is_some_and(|n| n <= 700),
+        &up,
+    );
+    s.ok("and the turn running keeps its working line and Stop", super::shows(chrome, &page, running), &up);
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg[data-seq]')].find((m) => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__seq = m.dataset.seq; window.__top = m.getBoundingClientRect().top; return true; })()")?;
+    let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "away", "body": { "text": "Said while away" } })))?;
+    anyhow::ensure!(r.status == 200, "posting while away: {r}");
+    let counted = super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('1 new message')");
+    let away = chrome.eval(&page, "({ drawn: [...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'Said while away'), moved: Math.abs(document.querySelector('.msg[data-seq=\"' + window.__seq + '\"]').getBoundingClientRect().top - window.__top) })")?;
+    s.ok(
+        "a message said meanwhile is counted on Jump to latest, not drawn past the window, and moves no one",
+        counted && away["drawn"] == false && away["moved"].as_f64().is_some_and(|n| n < 2.0),
+        &away,
+    );
+    // down, a page each time the bottom is reached, to the end
+    for _ in 0..8 {
+        let before = chrome.eval(&page, "[...document.querySelectorAll('.msg[data-seq]')].at(-1)?.dataset.seq")?;
+        chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
+        let moved = format!("[...document.querySelectorAll('.msg[data-seq]')].at(-1)?.dataset.seq !== {before} || {window} === 'live'");
+        anyhow::ensure!(super::shows(chrome, &page, &moved), "a page comes in below");
+        if chrome.eval(&page, window)? == "live" {
+            break;
+        }
+    }
+    super::shows(chrome, &page, &drawn("202", "801"));
+    let down = seen(chrome)?;
+    let shown = chrome.eval(&page, "[...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'Said while away')")?;
+    s.ok(
+        "back down, pages come in below as the oldest go, to the end, where the message said meanwhile shows",
+        down["window"] == "live" && down["count"] == 600 && down["last"] == "801" && shown == true && down["most"].as_u64().is_some_and(|n| n <= 700),
+        &down,
+    );
+    // up past the window again, then Jump to latest
+    for _ in 0..3 {
+        chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+        if super::shows(chrome, &page, &format!("{window} === 'up'")) {
+            break;
+        }
+    }
+    anyhow::ensure!(chrome.eval(&page, window)? == "up", "the window is up the chat again: {}", seen(chrome)?);
+    chrome.click(&page, "#latest")?;
+    let reset = super::shows(chrome, &page, &format!("{window} === 'live' && {count} === 100 && document.getElementById('latest').hidden && (() => {{ const s = document.getElementById('scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 2; }})()"));
+    let after = seen(chrome)?;
+    s.ok(
+        "Jump to latest, up the chat, starts the window again at the newest page, at the end",
+        reset && after["first"] == "702" && after["last"] == "801" && super::shows(chrome, &page, running),
+        &after,
+    );
+    chrome.close(page)?;
+    Ok(())
+}

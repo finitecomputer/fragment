@@ -72,8 +72,14 @@ const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // messages come a page of CHAT_LAST at a time as the reader scrolls up.
 const CHAT_LAST = 100;
 const WORK_LAST = 1000;
-// How far above the reader's view an older page starts loading.
+// How far above (or below) the reader's view the next page starts loading.
 const EARLIER_MARGIN_PX = 800;
+// The messages a page holds at most, a window over the chat: past it, the
+// side away from the reader goes, read again as the reader comes back.
+const WINDOW_MAX = 600;
+// Messages come while the reader is up the chat, kept aside for when the
+// window reaches the end (each counted when it comes); the newest kept.
+const ASIDE_MAX = 1000;
 // After a message of one's own, wait for the agent's turn. Past this long
 // the line says plainly that no reply has started; a wake can be slow.
 const PENDING_MS = 90000;
@@ -383,7 +389,8 @@ export function mount(root) {
   const state = {
     me: null, // { id, principal, role } once the socket said hello
     members: [], // the fragment's members (`__members`), the first added first
-    chat: [], // messages, commands and replies, in seq order: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    chat: [], // the window's messages, commands and replies (`windowed`), in the order read: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    spoke: new Map(), // speaker -> when they last said something not of a turn (`waitsOnWords`)
     history: null, // the chat's first `history` record, as its poster wrote it: { seq, principal, body } (shown only its owner's)
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
@@ -447,7 +454,10 @@ export function mount(root) {
   // Each channel's seq keeps history ordered even when a page arrives
   // backwards and several records have the same timestamp. `done`: the
   // chat's first record is read (no older page to ask for).
-  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false, done: false, failed: false, watch: false, anchor: null };
+  // `live`: the window reaches the chat's newest message (else `last` is
+  // the newest it holds, and `aside` what came past it); `gen` changes as
+  // Jump to latest starts the window again, so a page read before is let go.
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false, done: false, failed: false, watch: false, anchor: null, live: true, last: null, aside: [], gen: 0, laterFailed: false };
   const workSeen = new Set();
   const workLatest = new Map(); // each progress field's newest seq
   function remember(channel, record) {
@@ -485,6 +495,7 @@ export function mount(root) {
   }
   async function earlier() {
     if (history.loading || history.done || history.failed || !caughtUp) return;
+    const gen = history.gen;
     history.anchor = visibleAnchor();
     history.loading = true;
     historyStatus("Loading earlier messages…", false);
@@ -492,13 +503,17 @@ export function mount(root) {
     try {
       if (history.first.chat !== null) {
         const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
+        if (gen !== history.gen) return;
         for (const record of page.records) onChat(record, true);
         history.done = !moreOf(page, CHAT_LAST);
+        windowed("older");
       } else history.done = true;
       await earlierWork();
+      if (gen !== history.gen) return;
       history.loading = false;
       historyStatus("", false);
     } catch (err) {
+      if (gen !== history.gen) return;
       history.loading = false;
       history.failed = true;
       console.error("chat: earlier messages", err);
@@ -508,15 +523,104 @@ export function mount(root) {
       schedule();
     }
   }
+  // The window kept to WINDOW_MAX messages: reading `older`, its newest go
+  // (the reader is up the chat); reading newer, its oldest.
+  function windowed(reading) {
+    if (state.chat.length <= WINDOW_MAX) return;
+    state.chat.sort((a, b) => a.seq - b.seq);
+    const gone = reading === "older" ? state.chat.splice(WINDOW_MAX) : state.chat.splice(0, state.chat.length - WINDOW_MAX);
+    for (const m of gone) state.seen.delete(m.seq);
+    if (reading === "older") {
+      history.live = false;
+      history.last = state.chat.at(-1).seq;
+    } else {
+      history.done = false;
+      history.first.chat = state.chat[0].seq;
+    }
+    windowStatus();
+  }
+  function windowStatus() {
+    $("scroll").dataset.window = history.live ? "live" : "up";
+    $("later").hidden = history.live;
+  }
+  // The window reaches the chat's end: what came meanwhile joins it.
+  function reachedEnd() {
+    history.live = true;
+    history.last = null;
+    const aside = history.aside;
+    history.aside = [];
+    // (counted as each came)
+    for (const record of aside) onChat(record, true);
+    windowStatus();
+  }
+  // The page below the window, as the reader nears its bottom.
+  async function later() {
+    if (history.live || history.loading || history.laterFailed || !caughtUp) return;
+    const gen = history.gen;
+    history.loading = true;
+    schedule();
+    try {
+      const page = await fragment.read("chat", { after: history.last, limit: CHAT_LAST });
+      if (gen !== history.gen) return;
+      for (const record of page.records) onChat(record, true);
+      history.last = Math.max(history.last, page.next);
+      if (!moreOf(page, CHAT_LAST)) reachedEnd();
+      windowed("newer");
+      history.loading = false;
+    } catch (err) {
+      if (gen !== history.gen) return;
+      history.loading = false;
+      // (said where the reader is; Jump to latest reads again)
+      history.laterFailed = true;
+      console.error("chat: later messages", err);
+      problem("Couldn't load later messages. Jump to latest to try again.");
+    } finally {
+      history.watch = true;
+      schedule();
+    }
+  }
+  // Jump to latest, the window up the chat: it starts again at the newest page.
+  async function toLatest() {
+    const gen = ++history.gen;
+    history.loading = true;
+    history.failed = false;
+    history.laterFailed = false;
+    historyStatus("", false);
+    try {
+      const page = await fragment.read("chat", { before: Number.MAX_SAFE_INTEGER, limit: CHAT_LAST });
+      if (gen !== history.gen) return;
+      for (const m of state.chat) state.seen.delete(m.seq);
+      state.chat = [];
+      history.first.chat = null;
+      for (const record of page.records) onChat(record, true);
+      history.done = !moreOf(page, CHAT_LAST);
+      reachedEnd();
+    } catch (err) {
+      if (gen !== history.gen) return;
+      problem(`Could not show the latest messages: ${err.message}`);
+    } finally {
+      if (gen === history.gen) {
+        history.loading = false;
+        history.watch = true;
+        historyStatus("", false);
+      }
+      schedule();
+    }
+  }
   const earlierSeen = new IntersectionObserver((entries) => {
     if (entries.at(-1).isIntersecting) earlier();
     $("scroll").dataset.watching = "1";
   }, { root: $("scroll"), rootMargin: `${EARLIER_MARGIN_PX}px 0px 0px 0px` });
   // (again after a draw: an observer says only what changes, and a page
   // drawn while the sentinel stays in view changes nothing)
+  const laterSeen = new IntersectionObserver((entries) => {
+    if (entries.at(-1).isIntersecting) later();
+  }, { root: $("scroll"), rootMargin: `0px 0px ${EARLIER_MARGIN_PX}px 0px` });
   function watchEarlier() {
     earlierSeen.unobserve($("earlier"));
     earlierSeen.observe($("earlier"));
+    laterSeen.unobserve($("later"));
+    laterSeen.observe($("later"));
   }
   // a keyboard's or a screen reader's way to the page above: the
   // sentinel's loader (nothing while a page is in flight)
@@ -751,7 +855,7 @@ export function mount(root) {
     return !by || (by.kind === "agent" && by.owner === m.relayed.for) ? m.relayed.for : null;
   };
   const speaker = (m) => relayedOwner(m) ?? m.principal;
-  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => speaker(m) === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  const waitsOnWords = (t) => running(t) && !!t.asked && !((state.spoke.get(t.asked.asks) ?? -Infinity) >= t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
@@ -766,6 +870,21 @@ export function mount(root) {
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
   const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+
+  // A message the window holds; one past its newest end while the reader is
+  // up the chat is kept aside (and read again as the window reaches it).
+  // At the end, the window lets its oldest go as new ones come.
+  function keep(record, historical, m) {
+    if (!m.turn) state.spoke.set(speaker(m), Math.max(state.spoke.get(speaker(m)) ?? -Infinity, m.at));
+    if (!historical && !history.live && record.seq > history.last) {
+      state.seen.delete(record.seq);
+      history.aside.push(record);
+      if (history.aside.length > ASIDE_MAX) history.aside.shift();
+      return;
+    }
+    state.chat.push(m);
+    if (!historical && stuck) windowed("newer");
+  }
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -804,7 +923,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
+      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -823,7 +942,7 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -936,7 +1055,17 @@ export function mount(root) {
     const items = [];
     // the history its owner continued it from, before everything
     const h = state.history;
-    if (h && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
+    if (h && history.done && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
+    // the window's span: a turn shows when it runs (outside the window, so
+    // Stop and its working line stay), or when it meets the span
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const m of state.chat) {
+      lo = Math.min(lo, m.at);
+      hi = Math.max(hi, m.at);
+    }
+    if (history.done) lo = -Infinity;
+    if (history.live) hi = Infinity;
     // each turn's replies, by its agent: the words an older bridge kept on a
     // step that its turn also replied with show once, as the reply
     const replies = new Map();
@@ -955,6 +1084,7 @@ export function mount(root) {
     for (const t of state.turns.values()) {
       // a turn its agent never began here (no turn.start of its own) shows nothing
       if (!started(t)) continue;
+      if (!running(t) && (t.lastAt < lo || t.startAt > hi)) continue;
       for (const s of t.steps.values()) {
         // what an older bridge recorded as a step's `text`, the agent's words
         // before the call: they are its reply, shown whole just before the
@@ -2069,13 +2199,15 @@ export function mount(root) {
     newMessages = 0;
     showLatest();
   };
-  $("latest").onclick = () => {
+  $("latest").onclick = async () => {
+    if (!history.live) await toLatest();
     stuck = true;
     toEnd();
   };
   $("scroll").addEventListener("scroll", () => {
     const s = $("scroll");
-    if (s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
+    // (the window's bottom is the chat's end only once it reaches it)
+    if (history.live && s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
     else if (s.scrollTop < lastTop) stuck = false;
     lastTop = s.scrollTop;
     if (stuck) newMessages = 0;
@@ -2766,6 +2898,12 @@ export function mount(root) {
     for (const f of files) f.uploading = true;
     renderAttachments();
     try {
+      // said up the chat: the window goes to the end first, where it shows
+      if (!history.live) {
+        await toLatest();
+        stuck = true;
+        toEnd();
+      }
       if (command) {
         const body = { kind: "command", command: command.name, ...(command.args ? { args: command.args } : {}), to: [command.target] };
         const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
@@ -3043,7 +3181,9 @@ export function mount(root) {
     // connected again (a reconnect after a blip): a read that failed is
     // tried again as the sentinel is next seen, or from the button
     history.failed = false;
+    history.laterFailed = false;
     historyStatus("", false);
+    windowStatus();
     history.watch = true;
     arrive();
     schedule();
