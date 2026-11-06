@@ -345,16 +345,23 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         anyhow::ensure!(r.status == 200, "the burst's post {i}: {r}");
     }
     let burst = t0.elapsed();
-    let mut frames = 0;
-    while told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000)).is_some() {
-        frames += 1;
-    }
+    // the send that waits for the gap's end goes when the fragment's alarm
+    // runs, however late a loaded runner runs it (a fixed window after the
+    // gap failed while the alarm ran seconds late): the row ending on the
+    // newest, and the page told of it, each frame counted as it comes
+    let (mut frames, mut last) = (0, vec![]);
+    let ended = s.eventually(Duration::from_secs(60), || {
+        while told_within(&mut tab, Duration::from_millis(250)).is_some() {
+            frames += 1;
+        }
+        last = listed_of(api, &viewer, &name);
+        frames >= 1 && last.first().is_some_and(|r| r.2 == "turn.end")
+    });
     // a burst that outlasts a gap may take one send more a gap
     let allowed = 2 + burst.as_millis() as i64 / limits::LISTED_MIN_GAP_MS;
-    let last = listed_of(api, &viewer, &name);
     s.ok(
         &format!("a burst of {} moves within a gap is told at most twice, not once a record, and the row ends on the newest", kinds.len()),
-        frames >= 1 && frames <= allowed && last.first().is_some_and(|r| r.2 == "turn.end"),
+        ended && frames <= allowed,
         json!({ "frames": frames, "allowed": allowed, "burstMs": burst.as_millis() as u64, "listed": last }),
     );
 
