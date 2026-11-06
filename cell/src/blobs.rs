@@ -199,26 +199,25 @@ impl FragmentCell {
             .gathered())
     }
 
-    /// After a pin moved: re-reads the changed paths that could be pointers.
-    /// `sizes` is the new tree's size by path; a changed path absent from it was deleted.
-    pub(crate) async fn track_pointers(&self, which: &str, sha: &str, changed: &[String], sizes: &std::collections::HashMap<&str, u64>) -> CellResult<()> {
+    /// Before a pin moves: each changed path's pointer at `sha`, read and
+    /// nothing written (none: deleted, too small or large to be one, or not
+    /// one). `sizes` is the new tree's size by path; a changed path absent
+    /// from it was deleted. `refresh_pin` publishes them with the tree and
+    /// the pin, all or none (FIN-407): written path by path across these
+    /// reads, a reader saw one path's new bytes under the old tree, its
+    /// pin and its validator, and a crash between two reads kept that.
+    pub(crate) async fn read_pointers(&self, sha: &str, changed: &[String], sizes: &std::collections::HashMap<&str, u64>) -> CellResult<Vec<(String, Option<blob::Pointer>)>> {
         let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
+        let mut read = Vec::with_capacity(changed.len());
         for path in changed {
-            self.exec("DELETE FROM pointers WHERE ref = ? AND path = ?", vec![which.into(), path.as_str().into()])?;
-            let Some(size) = sizes.get(path.as_str()) else { continue };
-            if !maybe_pointer(*size) {
-                continue;
-            }
-            let Some(bytes) = cs.read(&repo, sha, path, blob::POINTER_MAX_BYTES).await? else { continue };
-            if let Some(p) = blob::parse(&bytes) {
-                self.exec(
-                    "INSERT INTO pointers (ref, path, sha, size) VALUES (?, ?, ?, ?)",
-                    vec![which.into(), path.as_str().into(), p.sha256.as_str().into(), SqlStorageValue::Integer(p.size as i64)],
-                )?;
-            }
+            let pointer = match sizes.get(path.as_str()) {
+                Some(size) if maybe_pointer(*size) => cs.read(&repo, sha, path, blob::POINTER_MAX_BYTES).await?.and_then(|bytes| blob::parse(&bytes)),
+                _ => None,
+            };
+            read.push((path.clone(), pointer));
         }
-        Ok(())
+        Ok(read)
     }
 
     /// From the alarm: deletes blobs no pointer at `main` or `live`, nor

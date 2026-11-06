@@ -6,7 +6,7 @@ const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "Open
 export const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 
 // Provider/account UI keeps failed removals for the current settings visit.
-export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, visitOf, isOpen, reopenSettings }) {
+export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, asks, isOpen, reopenSettings }) {
   // ---- connections (decisions 22, 37 and 44): every provider the platform
   // offers, one row each: what it is, its state, which of the person's agents
   // may use it (all by default; a list narrows one agent), and this month's
@@ -168,7 +168,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     if (mine && !theirs.some((c) => c.id === mine)) option(mine, "An account no longer connected (the default is used)");
     pick.value = mine ?? "";
     pick.onchange = async () => {
-      const visit = visitOf();
+      const visit = asks.now("settings");
       pick.disabled = true;
       // Default is no pick: the agent follows it
       const account = pick.value || null;
@@ -178,7 +178,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       } catch (e) {
         refused = e;
       }
-      await reopenSettings(refused && visit === visitOf() ? ["That was not changed", refused.message] : null);
+      await reopenSettings(refused && asks.current(visit) ? ["That was not changed", refused.message] : null);
     };
     return pick;
   }
@@ -317,7 +317,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     // Disconnect or Remove: settings then reload, and the row they show says
     // whether the key is still there; one that failed says so in it
     const removeKey = (button) => async () => {
-      const visit = visitOf();
+      const visit = asks.now("settings");
       button.disabled = true;
       unremoved.delete(p.provider);
       openSheet = null;
@@ -326,7 +326,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       } catch {
         // kept only while its visit is the one shown: an older visit's
         // answer never replaces a newer one's
-        if (visit === visitOf() && isOpen()) {
+        if (asks.current(visit) && isOpen()) {
           unremoved.set(p.provider, visit);
           openSheet = { provider: p.provider, visit };
         }
@@ -416,7 +416,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         actions.append(remove);
       }
     }
-    if (p.state === "set" && unremoved.get(p.provider) === visitOf()) {
+    if (p.state === "set" && asks.current(unremoved.get(p.provider))) {
       said.textContent = "That didn't go through. Try again.";
       details.push(said);
     } else unremoved.delete(p.provider);
@@ -449,7 +449,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         flip.setAttribute("aria-pressed", String(allowed));
         named(flip, a.fragment, (t) => `${t} may use ${name}`, "aria-label");
         flip.onclick = async () => {
-          const visit = visitOf();
+          const visit = asks.now("settings");
           flip.disabled = true;
           openSheet = { provider: p.provider, visit };
           const all = offered.map((x) => x.provider);
@@ -467,7 +467,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
           // have changed it since)
           const was = getAgents().get(a.identity) ?? a;
           const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-          const failed = refused && unchanged && visit === visitOf();
+          const failed = refused && unchanged && asks.current(visit);
           // said over settings, the sheet closed so it is seen
           if (failed) openSheet = null;
           await reopenSettings(failed ? ["That was not changed", refused.message] : null);
@@ -505,11 +505,11 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       if (openSheet?.provider === p.provider && sheet.isConnected) openSheet = null;
     });
     open.onclick = () => {
-      openSheet = { provider: p.provider, visit: visitOf() };
+      openSheet = { provider: p.provider, visit: asks.now("settings") };
       show();
     };
     // the sheet open before this reload, shown again once the page has it
-    if (openSheet?.provider === p.provider && openSheet.visit === visitOf()) {
+    if (openSheet?.provider === p.provider && asks.current(openSheet.visit)) {
       queueMicrotask(() => {
         if (sheet.isConnected && !sheet.open) show();
       });
