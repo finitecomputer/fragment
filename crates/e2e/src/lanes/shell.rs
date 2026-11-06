@@ -3347,10 +3347,13 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let said: Vec<String> = strings(&steps);
     let known = said.iter().all(|t| ["Restarting…", "Saving…", "Starting…", "Starting again…"].contains(&t.as_str()));
     let ordered = said.iter().position(|t| t == "Saving…").is_none_or(|saving| said.iter().position(|t| t == "Starting…").is_some_and(|starting| saving < starting));
+    // settings' State: a restart's save is Saving, never Going to sleep (Paul on #1053)
+    let states: Vec<String> = strings(&b.eval(page, "window.__stateSaid")?);
+    let state_said = !states.iter().any(|t| t == "Going to sleep") && (!said.iter().any(|t| t == "Saving…") || states.iter().any(|t| t == "Saving")) && states.iter().any(|t| t == "Starting");
     s.ok(
-        "Restart shows its progress where its buttons were, as the computer reports it (saving, then starting), in the band and in settings (its state too); past 30 s a calm line that a big restore can take a few minutes",
-        held.status == 200 && starting && slow && known && ordered && said.iter().any(|t| t == "Starting…"),
-        json!({ "steps": said, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
+        "Restart shows its progress where its buttons were, as the computer reports it (saving, then starting), in the band and in settings (its state too, Saving while it saves, never Going to sleep); past 30 s a calm line that a big restore can take a few minutes",
+        held.status == 200 && starting && slow && known && ordered && state_said && said.iter().any(|t| t == "Starting…"),
+        json!({ "steps": said, "states": states, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
     );
     let restarted = s.eventually(hold + std::time::Duration::from_secs(90), || {
         let v = view();
@@ -3398,8 +3401,10 @@ const FAIL_RESTART: &str = "(() => { if (window.__restartFails !== undefined) re
       return real(url, o); }; return true; })()";
 /// Each step a restart's status says (`.restart-status`, the band's and
 /// settings'), in order, a step said again in a row once:
-/// `window.__restartSaid`.
-const RESTART_STEPS: &str = "(() => { window.__restartSaid = []; const note = () => { for (const s of document.querySelectorAll('.restart-status')) { const t = s.textContent; if (window.__restartSaid.at(-1) !== t) window.__restartSaid.push(t); } }; \
+/// `window.__restartSaid`; and so settings' State: `window.__stateSaid`.
+const RESTART_STEPS: &str = "(() => { window.__restartSaid = []; window.__stateSaid = []; const note = () => { for (const s of document.querySelectorAll('.restart-status')) { const t = s.textContent; if (window.__restartSaid.at(-1) !== t) window.__restartSaid.push(t); } \
+    const st = [...document.querySelectorAll('#settings-page .settings-line')].find((l) => l.querySelector('.settings-key')?.textContent === 'State')?.querySelector('.settings-value')?.textContent; \
+    if (st && window.__stateSaid.at(-1) !== st) window.__stateSaid.push(st); }; \
     new MutationObserver(note).observe(document, { subtree: true, childList: true, characterData: true }); return true; })()";
 
 /// The shell's page with its reads of its person's computer (`GET

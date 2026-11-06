@@ -1,6 +1,12 @@
 import { icon } from "./icons.js";
 import { createRestartFollow, FAILED, READ_FAILED } from "./restart-follow.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
+// Settings' State: its phase, but a restart's save is Saving, not Going to
+// sleep (Paul on #1053), while a restart this page asked for runs
+// (`restarting`); any other sleep is going to sleep
+export function stateSaid(c, restarting) {
+  return c.phase === "sleeping" && restarting ? "Saving" : PHASE[c.phase] ?? c.phase;
+}
 
 const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
 
@@ -332,13 +338,13 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     return computer;
   }
   function stateLine(c) {
-    const l = line("State", PHASE[c.phase] ?? c.phase);
+    const l = line("State", stateSaid(c, !!follow.op()));
     shown.state = l.querySelector(".settings-value");
     return l;
   }
   function paintSettings() {
     const c = computer();
-    if (shown.state?.isConnected && c) shown.state.textContent = PHASE[c.phase] ?? c.phase;
+    if (shown.state?.isConnected && c) shown.state.textContent = stateSaid(c, !!follow.op());
     if (shown.asks?.isConnected && restartSaid() !== shown.painted) paintAsks(shown.asks);
   }
   // what settings' Restart says now: nothing but its button, the restart's

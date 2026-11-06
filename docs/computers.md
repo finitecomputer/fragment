@@ -210,7 +210,8 @@ every chat and Settings.
   sleep and fresh start above. It names the start its owner saw, so
   pressed twice it restarts once, and the ledger is asked first, as for a
   wake. While it runs, the shell shows its phase where the button was
-  (saving, then starting), read every two seconds while the page is shown
+  (saving, then starting; Settings' State says Saving, not Going to sleep,
+  while it saves), read every two seconds while the page is shown
   (`cell/shell/restart-follow.js`), and a line that a big save or restore
   can take a few minutes once it has run 30 seconds; awake on its new
   start, the notice goes. A read that fails says so, with Check again,
