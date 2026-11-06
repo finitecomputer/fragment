@@ -1,91 +1,157 @@
-// cell/shell/making.js: the chat a New chat is making, its one state and
-// its moves. Valid: started, it is the chat on screen; another view given,
-// it is away and its row stays; settled, it opens or restores only while
-// shown, or waits in its room for the list; no chat's messages are on
-// screen while its room is. Invalid: a settle or a leave with none is
-// nothing. Replayed: a second leave changes nothing; its row goes once the
-// list has its name.
+// cell/shell/making.js: the chat a New chat is making, one state and one
+// `step`. The table walks every phase with every event: each pair it takes
+// lands where the table says, and every other pair throws (the shell's
+// mistake, never silently nothing). Valid: started, answered, listed,
+// left, renamed. Invalid: an answer twice, a start over one in flight.
+// Replayed: a second leave, a list read without its chat. Restarted: a
+// reload is none, the list the truth.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { start, renamed, left, settled, listed, holdsView, shownChat, readChat, ownRow, drawName } from "../shell/making.js";
+import { step, PHASES, EVENTS, MakingError, owns, holdsView, shownChat, readChat, ownRow, drawName } from "../shell/making.js";
 
+const NAME = "reader-chat--bbbb";
 const before = { page: null, current: "talk--aaaa" };
-const made = () => start({ agent: "npub1reader", name: "reader-chat--bbbb", title: "New chat", before });
+// the New chat that started it (asks.js `hold("start")`'s token), and another
+const BY = Object.freeze({ kind: "start", key: "" });
+const OTHER = Object.freeze({ kind: "start", key: "" });
+const started = { type: "start", by: BY, agent: "npub1reader", name: NAME, title: "New chat", before };
+const at = {
+  none: null,
+  shown: step(null, started).next,
+  away: step(step(null, started).next, { type: "left" }).next,
+  made: step(step(null, started).next, { type: "answered", by: BY, outcome: "made", listed: false }).next,
+};
+// each event, with each payload it comes with
+const events = {
+  start: [started],
+  answered: [
+    { type: "answered", by: BY, outcome: "made", listed: true },
+    { type: "answered", by: BY, outcome: "made", listed: false },
+    { type: "answered", by: BY, outcome: "refused" },
+  ],
+  listed: [
+    { type: "listed", has: (name) => name === NAME },
+    { type: "listed", has: () => false },
+  ],
+  left: [{ type: "left" }],
+  renamed: [{ type: "renamed", by: BY, name: "reader-chat--dddd" }],
+  reload: [{ type: "reload" }],
+};
+const phase = (m) => m?.phase ?? "none";
+const key = (e) => [e.type, e.outcome, e.listed, e.type === "listed" ? e.has(NAME) : undefined].filter((x) => x !== undefined).join(" ");
+// phase → event → [next phase, then]; a pair not here throws
+const TABLE = {
+  none: { start: ["shown", "stay"], "listed true": ["none", "stay"], "listed false": ["none", "stay"], left: ["none", "stay"], reload: ["none", "stay"] },
+  shown: {
+    "answered made true": ["none", "open"],
+    "answered made false": ["made", "wait"],
+    "answered refused": ["none", "restore"],
+    "listed true": ["shown", "stay"],
+    "listed false": ["shown", "stay"],
+    left: ["away", "stay"],
+    renamed: ["shown", "stay"],
+    reload: ["none", "stay"],
+  },
+  away: {
+    "answered made true": ["none", "stay"],
+    "answered made false": ["none", "stay"],
+    "answered refused": ["none", "stay"],
+    "listed true": ["away", "stay"],
+    "listed false": ["away", "stay"],
+    left: ["away", "stay"],
+    renamed: ["away", "stay"],
+    reload: ["none", "stay"],
+  },
+  made: { "listed true": ["none", "open"], "listed false": ["made", "stay"], left: ["none", "stay"], reload: ["none", "stay"] },
+};
+
+test("every phase with every event: each pair lands where the table says, and every other pair throws", () => {
+  assert.deepEqual(PHASES, Object.keys(at));
+  assert.deepEqual(EVENTS.toSorted(), Object.keys(events).toSorted());
+  let walked = 0;
+  for (const p of PHASES) {
+    for (const e of Object.values(events).flat()) {
+      const want = TABLE[p][key(e)];
+      walked++;
+      if (!want) {
+        assert.throws(() => step(at[p], e), MakingError, `${key(e)} while ${p}`);
+        continue;
+      }
+      const { next, then } = step(at[p], e);
+      assert.deepEqual([phase(next), then], want, `${key(e)} while ${p}`);
+    }
+  }
+  assert.equal(walked, PHASES.length * Object.values(events).flat().length);
+});
 
 test("started, it is shown: its row is the active one, and no chat's messages are on screen", () => {
-  const m = made();
-  assert.equal(m.phase, "shown");
+  const m = at.shown;
   assert.equal(holdsView(m), true);
-  assert.equal(shownChat(m, "talk--aaaa", null), "reader-chat--bbbb");
-  assert.equal(shownChat(m, "talk--aaaa", "Settings"), "reader-chat--bbbb");
-  // its room shows no messages: neither the chat it covers nor its own
+  assert.equal(shownChat(m, "talk--aaaa", null), NAME);
+  assert.equal(shownChat(m, "talk--aaaa", "Settings"), NAME);
   assert.equal(readChat(m, "talk--aaaa", null), null);
   assert.deepEqual(m.before, before);
 });
 
-test("another view given, it is away: the chat on screen is that view's, and a second leave changes nothing", () => {
-  const away = left(made());
-  assert.equal(away.phase, "away");
-  assert.equal(holdsView(away), false);
-  assert.equal(shownChat(away, "other--cccc", null), "other--cccc");
-  assert.equal(readChat(away, "other--cccc", null), "other--cccc");
-  assert.equal(shownChat(away, "other--cccc", "Settings"), null);
-  assert.equal(readChat(away, "other--cccc", "Settings"), null);
-  assert.deepEqual(left(away), away);
+test("away, the view given since is the one on screen, read and active", () => {
+  const m = at.away;
+  assert.equal(holdsView(m), false);
+  assert.equal(shownChat(m, "other--cccc", null), "other--cccc");
+  assert.equal(readChat(m, "other--cccc", null), "other--cccc");
+  assert.equal(shownChat(m, "other--cccc", "Settings"), null);
+  assert.equal(readChat(m, "other--cccc", "Settings"), null);
 });
 
-test("settled while shown: made and listed opens its chat, refused brings the view before back", () => {
-  assert.deepEqual(settled(made(), "made", true), { next: null, then: "open" });
-  assert.deepEqual(settled(made(), "refused", true), { next: null, then: "restore" });
-  assert.deepEqual(settled(made(), "refused", false), { next: null, then: "restore" });
-});
-
-test("made before the list has its chat: its room waits, then the list's read that has it opens it", () => {
-  const { next, then } = settled(made(), "made", false);
-  assert.equal(then, "wait");
-  assert.equal(next.phase, "made");
-  assert.equal(holdsView(next), true);
-  assert.equal(shownChat(next, "talk--aaaa", null), "reader-chat--bbbb");
-  assert.equal(readChat(next, "talk--aaaa", null), null);
-  // a read without it (a deploy going out) changes nothing; one with it opens
-  assert.equal(listed(next, () => false), "stay");
-  assert.equal(listed(next, (name) => name === "reader-chat--bbbb"), "open");
-  // another view given meanwhile: nothing is left to wait for
-  assert.equal(left(next), null);
-});
-
-test("settled while away: nothing moves, made or refused, listed or not", () => {
-  for (const outcome of ["made", "refused"]) for (const isListed of [true, false]) assert.deepEqual(settled(left(made()), outcome, isListed), { next: null, then: "stay" });
-  assert.equal(listed(left(made()), () => true), "stay");
-});
-
-test("none: no chat being made shows, leaves, settles or draws a row", () => {
-  assert.equal(left(null), null);
-  assert.equal(renamed(null, "x--aaaa"), null);
-  assert.deepEqual(settled(null, "made", true), { next: null, then: "stay" });
-  assert.equal(listed(null, () => true), "stay");
-  assert.equal(holdsView(null), false);
-  assert.equal(shownChat(null, "talk--aaaa", null), "talk--aaaa");
-  assert.equal(readChat(null, "talk--aaaa", null), "talk--aaaa");
-  assert.equal(shownChat(null, "talk--aaaa", "Apps"), null);
-  assert.equal(ownRow(null, () => false), false);
-});
-
-test("its own row is drawn until the list has its name, whose row then stands in its place", () => {
-  const m = made();
-  assert.equal(ownRow(m, () => false), true);
-  assert.equal(ownRow(m, (name) => name === "reader-chat--bbbb"), false);
-  // another device's chat, made at the same time, is not it
-  assert.equal(ownRow(m, (name) => name === "reader-chat--zzzz"), true);
+test("made, waiting for its list: its room keeps the view and reads nothing; the read that has it opens it", () => {
+  const m = at.made;
+  assert.equal(holdsView(m), true);
+  assert.equal(shownChat(m, "talk--aaaa", null), NAME);
+  assert.equal(readChat(m, "talk--aaaa", null), null);
+  // replayed: a read without it, again and again, changes nothing
+  let again = m;
+  for (let i = 0; i < 3; i++) again = step(again, { type: "listed", has: () => false }).next;
+  assert.deepEqual(again, m);
+  assert.deepEqual(step(again, { type: "listed", has: (name) => name === NAME }), { next: null, then: "open" });
 });
 
 test("renamed (its name taken), it keeps its phase and its view before, under its new name", () => {
-  const r = renamed(left(made()), "reader-chat--dddd");
-  assert.equal(r.phase, "away");
-  assert.equal(r.name, "reader-chat--dddd");
-  assert.deepEqual(r.before, before);
+  for (const p of ["shown", "away"]) {
+    const { next } = step(at[p], { type: "renamed", by: BY, name: "reader-chat--dddd" });
+    assert.equal(next.phase, p);
+    assert.equal(next.name, "reader-chat--dddd");
+    assert.deepEqual(next.before, before);
+  }
+});
+
+test("each New chat owns its own: another's answer or rename never reaches it, and a start names its owner", () => {
+  for (const p of ["shown", "away"]) {
+    assert.equal(owns(at[p], BY), true);
+    assert.equal(owns(at[p], OTHER), false, "a token alike is not the same token");
+    for (const e of [
+      { type: "answered", by: OTHER, outcome: "made", listed: true },
+      { type: "answered", by: OTHER, outcome: "refused" },
+      { type: "answered", outcome: "made", listed: true },
+      { type: "renamed", by: OTHER, name: "reader-chat--eeee" },
+    ]) assert.throws(() => step(at[p], e), MakingError, `${e.type} from another New chat while ${p}`);
+  }
+  // an earlier one waiting for its list takes no answer at all, its own or
+  // another's: a later New chat ends it by giving the column a view (`left`)
+  assert.throws(() => step(at.made, { type: "answered", by: OTHER, outcome: "made", listed: true }), MakingError);
+  assert.deepEqual(step(at.made, { type: "left" }), { next: null, then: "stay" });
+  assert.equal(owns(null, BY), false);
+  assert.equal(owns(at.shown, null), false);
+  assert.throws(() => step(null, { ...started, by: null }), MakingError, "a start names its owner");
+});
+
+test("its own row is drawn until the list has its name; another device's chat is not it", () => {
+  assert.equal(ownRow(at.shown, () => false), true);
+  assert.equal(ownRow(at.shown, (name) => name === NAME), false);
+  assert.equal(ownRow(at.shown, (name) => name === "reader-chat--zzzz"), true);
+  assert.equal(ownRow(null, () => false), false);
+  assert.equal(readChat(null, "talk--aaaa", null), "talk--aaaa");
+  assert.equal(shownChat(null, "talk--aaaa", "Apps"), null);
 });
 
 test("a drawn name is its label, two dashes, and four of the platform's suffix letters", () => {
