@@ -39,16 +39,19 @@
 //! values of it, each with its shape: by its tag (a constant string or
 //! number each holds, still a field of its branch, read as any other) or
 //! by its place (`#<i>`); a branch may be open. A
-//! nullable inline shape is a field's `T|null`; `never` is a field a
-//! branch forbids; `null` one it holds only as null or absent.
+//! nullable inline shape is a field's `T|null`; `null` one a branch holds
+//! only as null or absent; `never` one a condition branch forbids (`false`)
+//! of the fields its object describes, which serde must refuse there
+//! (defaults.rs): else its reader fills it in, and the shape is refused.
+//! A `false` anywhere else is refused.
 //!
 //! An optional field says what leaving it out means, by its `default`;
 //! one that does not is refused. schemars drops a default its field's
 //! `skip_serializing_if` skips, and a nullable field's absence need not
 //! be null, so such a field declares it (`schemars(extend("default" = …))`)
 //! and defaults.rs holds every stated default to what serde reads of its
-//! field left out. Spared are a route's parameters, a `never` field, one
-//! every condition beside it requires or forbids, and a condition branch's
+//! field left out. Spared are a route's parameters, a field every
+//! condition beside it requires or forbids, and a condition branch's
 //! predicate on a field described above it: their absence is said where
 //! they are described. Integers' ranges compare
 //! exactly; a u128's would not, and is refused.
@@ -285,7 +288,9 @@ impl Projector<'_> {
         }
         let required: BTreeSet<&str> = map.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
         // the names every condition beside these fields requires or forbids:
-        // no branch lets them be left out, so their absence needs no default
+        // none is left out where its reader might fill it in. A forbidding
+        // branch is held to serde refusing the field there (defaults.rs), so
+        // its absence invents no value
         let conditioned: BTreeSet<&str> = union_of(map)
             .map(|(_, branches)| {
                 let named = |b: &Value, f: &str| b["required"].as_array().is_some_and(|r| r.iter().any(|x| x == f)) || b["properties"][f] == Value::Bool(false);
@@ -294,16 +299,24 @@ impl Projector<'_> {
             .unwrap_or_default();
         let predicates = self.predicates.last().cloned().unwrap_or_default();
         for (field, s) in map.get("properties").and_then(Value::as_object).into_iter().flatten() {
-            // a field's own shape is data again, whatever its object stands beside
-            self.predicates.push(BTreeSet::new());
-            let t = self.render(s, &format!("{name}.{field}"), direction);
-            self.predicates.pop();
-            let t = t?;
+            // a field's own shape is data again, whatever its object stands
+            // beside; `false` only as a condition's on a field described above
+            let t = if s == &Value::Bool(false) {
+                if !predicates.contains(field) {
+                    bail!("{name}.{field}: a schema that admits no value (`false`) on a field no object above describes: only a condition branch may forbid a field its object describes, and serde must refuse it there (xtask/src/wire/defaults.rs)");
+                }
+                "never".to_string()
+            } else {
+                self.predicates.push(BTreeSet::new());
+                let t = self.render(s, &format!("{name}.{field}"), direction);
+                self.predicates.pop();
+                t?
+            };
             let need = if required.contains(field.as_str()) { "required" } else { "optional" };
             // what leaving it out means is part of the wire, said by its
             // default: schemars drops one its `skip_serializing_if` skips, and
             // a null field's need not be null (wire/defaults.rs holds each to serde)
-            let said_elsewhere = self.params > 0 || t == "never" || conditioned.contains(field.as_str()) || predicates.contains(field);
+            let said_elsewhere = self.params > 0 || conditioned.contains(field.as_str()) || predicates.contains(field);
             if need == "optional" && !said_elsewhere && s.get("default").is_none() {
                 bail!("{name}.{field}: an optional field that says nothing of what leaving it out means: give it `#[cfg_attr(feature = \"schema\", schemars(extend(\"default\" = …)))]`, its serde default as JSON (schemars leaves out a default its `skip_serializing_if` skips; an `Option`'s is usually `null`)");
             }
@@ -343,8 +356,8 @@ impl Projector<'_> {
     fn render(&mut self, schema: &Value, at: &str, direction: Direction) -> Result<String> {
         match schema {
             Value::Bool(true) => return Ok("any".into()),
-            // no value: the field is absent
-            Value::Bool(false) => return Ok("never".into()),
+            // no value: only a condition's forbidding of a field (`object`)
+            Value::Bool(false) => bail!("{at}: a schema that admits no value (`false`): only a condition branch may forbid a field its object describes, and serde must refuse it there (xtask/src/wire/defaults.rs)"),
             _ => {}
         }
         let map = known(schema, at)?;

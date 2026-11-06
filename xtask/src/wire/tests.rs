@@ -1083,3 +1083,112 @@ fn every_reachable_default_is_held() {
     let too_deep = defaults_hold::<TwentyFive>().unwrap_err().to_string();
     assert!(too_deep.contains("deeper than the default checker reads"), "{too_deep}");
 }
+
+#[allow(dead_code)]
+mod derived_conditions {
+    /// A field one branch requires and the other forbids, though serde
+    /// reads it in both: left out there, its reader fills in its default.
+    macro_rules! forbidding {
+        ($m:ident, $flag:literal) => {
+            pub mod $m {
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
+                pub struct Wrap {
+                    pub id: String,
+                    #[serde(default = "flag", skip_serializing_if = "skip_flag")]
+                    pub dock: bool,
+                }
+                fn flag() -> bool {
+                    $flag
+                }
+                fn skip_flag(b: &bool) -> bool {
+                    *b == $flag
+                }
+            }
+        };
+    }
+    forbidding!(forbid_said, true);
+    forbidding!(forbid_stale, false);
+
+    /// A default its object states once, while its branches tell instances
+    /// apart by another field: each variant reads it its own way.
+    macro_rules! shared {
+        ($m:ident, $b:literal) => {
+            pub mod $m {
+                #[derive(serde::Serialize, serde::Deserialize)]
+                #[serde(tag = "kind")]
+                pub enum SharedDefault {
+                    #[serde(rename = "a")]
+                    A {
+                        #[serde(default = "yes", skip_serializing_if = "is_yes")]
+                        dock: bool,
+                    },
+                    #[serde(rename = "b")]
+                    B {
+                        #[serde(default = "b", skip_serializing_if = "is_b")]
+                        dock: bool,
+                    },
+                }
+                fn yes() -> bool {
+                    true
+                }
+                fn is_yes(d: &bool) -> bool {
+                    *d
+                }
+                fn b() -> bool {
+                    $b
+                }
+                fn is_b(d: &bool) -> bool {
+                    *d == $b
+                }
+                impl schemars::JsonSchema for SharedDefault {
+                    fn schema_name() -> std::borrow::Cow<'static, str> {
+                        "SharedDefault".into()
+                    }
+                    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                        schemars::json_schema!({
+                            "type": "object",
+                            "properties": { "kind": { "type": "string" }, "dock": { "type": "boolean", "default": true } },
+                            "required": ["kind"],
+                            "oneOf": [{ "properties": { "kind": { "const": "a" } } }, { "properties": { "kind": { "const": "b" } } }],
+                        })
+                    }
+                }
+            }
+        };
+    }
+    shared!(shared_said, true);
+    shared!(shared_stale, false);
+}
+
+/// The two ways a condition hid a default: a branch forbidding a field
+/// serde reads there anyway, and a default stated once beside branches
+/// that tell instances apart by another field. The lock is the same either
+/// way; serde's reading in each branch is what fails, or refuses.
+#[test]
+fn conditions_hide_no_default() {
+    use derived_conditions::*;
+    let none = BTreeSet::new();
+    // a forbidding branch serde does not refuse: refused, said or stale
+    let written = serde_json::to_value(forbid_stale::Wrap { id: "q".into(), dock: false }).unwrap();
+    assert_eq!(written, json!({ "id": "q" }));
+    assert!(serde_json::from_value::<forbid_said::Wrap>(written).unwrap().dock, "an older reader fills it in");
+    assert!(breaches(&lock_of::<forbid_said::Wrap>(true), &lock_of::<forbid_stale::Wrap>(true), &none).is_empty(), "the lock is the same");
+    for refused in [defaults_hold::<forbid_said::Wrap>().unwrap_err().to_string(), defaults_hold::<forbid_stale::Wrap>().unwrap_err().to_string()] {
+        assert!(refused.contains("forbids `#1.dock`") && refused.contains("serde reads it there"), "{refused}");
+    }
+    // a shared default, read in every branch
+    let written = serde_json::to_value(shared_stale::SharedDefault::B { dock: false }).unwrap();
+    assert_eq!(written, json!({ "kind": "b" }));
+    assert!(matches!(serde_json::from_value::<shared_said::SharedDefault>(written).unwrap(), shared_said::SharedDefault::B { dock: true }));
+    assert_eq!(defaults_hold::<shared_said::SharedDefault>().unwrap().into_iter().collect::<Vec<_>>(), ["SharedDefault.dock"]);
+    let stale = defaults_hold::<shared_stale::SharedDefault>().unwrap_err().to_string();
+    assert!(stale.contains("`dock` left out is not its stated default true") && stale.contains("\"kind\":\"b\""), "{stale}");
+    // `false` anywhere but a condition's forbidding of a described field
+    let doc = json!({ "paths": {}, "components": { "schemas": { "T": { "x-fragment-direction": "out", "type": "object", "properties": { "x": false } } } } });
+    let refused = project(&doc).unwrap_err().to_string();
+    assert!(refused.contains("T.x") && refused.contains("admits no value"), "{refused}");
+    // a forbidding no sample reaches is named
+    let lock = "type X out object\nfield X.#1.f optional never\n";
+    assert_eq!(super::defaults::unheld(lock, &BTreeSet::new(), [].into_iter()), ["X.#1.f"]);
+}

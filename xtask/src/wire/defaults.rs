@@ -66,18 +66,19 @@ pub fn hold(doc: &Value, lock: &str) -> Result<BTreeSet<String>> {
     Ok(held)
 }
 
-/// The fields `lock` records an optional field's default of that `held`
-/// does not name, but a route's parameters (`<op>.path`, `<op>.query`),
-/// which no type reads.
+/// The fields `lock` records an optional field's default of, or a
+/// condition's forbidding of (`never`), that `held` does not name, but a
+/// route's parameters (`<op>.path`, `<op>.query`), which no type reads.
 pub fn unheld<'o>(lock: &str, held: &BTreeSet<String>, operations: impl Iterator<Item = &'o str>) -> Vec<String> {
     let params: Vec<String> = operations.flat_map(|op| [format!("{op}.path."), format!("{op}.query.")]).collect();
     let optional: BTreeSet<&str> = lock.lines().filter_map(|l| l.strip_prefix("field ")).filter_map(|l| l.split_once(" optional ").map(|(p, _)| p)).collect();
-    lock.lines()
-        .filter_map(|l| l.strip_prefix("bound "))
-        .filter_map(|l| l.split_once(" default ").map(|(p, _)| p))
-        .filter(|p| optional.contains(p) && !params.iter().any(|q| p.starts_with(q.as_str())) && !held.contains(*p))
-        .map(str::to_string)
-        .collect()
+    let defaulted = lock.lines().filter_map(|l| l.strip_prefix("bound ")).filter_map(|l| l.split_once(" default ").map(|(p, _)| p)).filter(|p| optional.contains(p));
+    let forbidden = lock.lines().filter_map(|l| l.strip_prefix("field ")).filter_map(|l| l.strip_suffix(" optional never"));
+    let mut missed: Vec<String> =
+        defaulted.chain(forbidden).filter(|p| !params.iter().any(|q| p.starts_with(q.as_str())) && !held.contains(*p)).map(str::to_string).collect();
+    missed.sort();
+    missed.dedup();
+    missed
 }
 
 /// One field left out, and given its default, in a sample of the root.
@@ -90,6 +91,10 @@ struct Probe {
     /// The lock's name of the field (`<shape>.<field>`).
     site: String,
     default: Value,
+    /// A field a condition branch forbids: `with` holds it in a sample of
+    /// that branch, which serde must refuse (else leaving it out there
+    /// means a value its reader fills in).
+    forbidden: bool,
 }
 
 /// That each default under `schema` is what `round_trip` reads of its
@@ -97,6 +102,12 @@ struct Probe {
 pub fn check(label: &str, schema: &Value, defs: &Map<String, Value>, round_trip: RoundTrip) -> Result<BTreeSet<String>> {
     let probes = probes(schema, "", defs, &mut Walk::default())?;
     for p in &probes {
+        if p.forbidden {
+            if round_trip(p.with.clone()).is_ok() {
+                bail!("{label}: a condition branch forbids `{}`, but serde reads it there ({}): leaving it out there means a value its reader fills in, which no fact holds; give each branch its own fields (xtask/src/wire/defaults.rs)", p.path, p.with);
+            }
+            continue;
+        }
         let read = |v: &Value| round_trip(v.clone()).map_err(|e| anyhow!("{label}: a sample of it does not read ({v}): {e}; give its type an `examples` serde reads"));
         let (without, with) = (read(&p.without)?, read(&p.with)?);
         if without != with {
@@ -246,10 +257,10 @@ fn probes_ref(r: &str, defs: &Map<String, Value>, walk: &mut Walk) -> Result<Vec
     found
 }
 
-/// Whether a condition branch lets `field` be left out: it neither
-/// requires it nor forbids it (`false`).
+/// Whether a condition branch lets `field` be left out: it does not
+/// require it (one that forbids it is refused before: lock.rs).
 fn permits_absence(b: &Value, field: &str) -> bool {
-    !b["required"].as_array().is_some_and(|r| r.iter().any(|x| x == field)) && b["properties"][field] != Value::Bool(false)
+    !b["required"].as_array().is_some_and(|r| r.iter().any(|x| x == field))
 }
 
 fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk: &mut Walk) -> Result<Vec<Probe>> {
@@ -270,24 +281,25 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
         };
         for (name, ps) in props.into_iter().flatten() {
             if let (false, Some(d)) = (required.contains(name.as_str()), ps.get("default")) {
-                // left out wherever a branch lets it be: each such branch's sample
-                let mentioned = branches(m).into_iter().flatten().any(|b| !permits_absence(b, name) || b["properties"].get(name).is_some());
+                // left out wherever a branch lets it be, whether the branch names
+                // it or tells instances apart by another field: each such
+                // branch's sample, for each may read it its own way
                 let contexts: Vec<Map<String, Value>> = match branches(m) {
-                    Some(bs) if mentioned => bs.iter().filter(|b| permits_absence(b, name)).map(&in_branch).collect::<Result<_>>()?,
-                    _ => vec![base.clone()],
+                    Some(bs) => bs.iter().filter(|b| permits_absence(b, name)).map(&in_branch).collect::<Result<_>>()?,
+                    None => vec![base.clone()],
                 };
                 for ctx in contexts {
                     let (mut with, mut without) = (ctx.clone(), ctx);
                     with.insert(name.clone(), d.clone());
                     without.remove(name);
-                    out.push(Probe { with: Value::Object(with), without: Value::Object(without), path: name.clone(), site: format!("{site}.{name}"), default: d.clone() });
+                    out.push(Probe { with: Value::Object(with), without: Value::Object(without), path: name.clone(), site: format!("{site}.{name}"), default: d.clone(), forbidden: false });
                 }
             }
             for p in probes(ps, &format!("{site}.{name}"), defs, walk)? {
                 let (mut with, mut without) = (base.clone(), base.clone());
                 with.insert(name.clone(), p.with);
                 without.insert(name.clone(), p.without);
-                out.push(Probe { with: Value::Object(with), without: Value::Object(without), path: format!("{name}.{}", p.path), site: p.site, default: p.default });
+                out.push(Probe { with: Value::Object(with), without: Value::Object(without), path: format!("{name}.{}", p.path), site: p.site, default: p.default, forbidden: p.forbidden });
             }
         }
         // what it extends, its own fields beside each probe of it
@@ -299,7 +311,7 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
                     o.extend(own.clone());
                     Value::Object(o)
                 };
-                out.push(Probe { with: merge(p.with), without: merge(p.without), path: p.path, site: p.site, default: p.default });
+                out.push(Probe { with: merge(p.with), without: merge(p.without), path: p.path, site: p.site, default: p.default, forbidden: p.forbidden });
             }
         }
         // each condition branch's own data, nested shapes and all: each probe
@@ -324,7 +336,22 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
                         lifted.extend(o);
                         Value::Object(lifted)
                     };
-                    out.push(Probe { with: lift(p.with), without: lift(p.without), path: format!("{key}.{}", p.path), site: p.site, default: p.default });
+                    out.push(Probe { with: lift(p.with), without: lift(p.without), path: format!("{key}.{}", p.path), site: p.site, default: p.default, forbidden: p.forbidden });
+                }
+                // each field it forbids of those its object describes, held
+                // there by a sample serde must refuse
+                for (name, _) in b["properties"].as_object().into_iter().flatten().filter(|(_, ps)| **ps == Value::Bool(false)) {
+                    let described = props.and_then(|pp| pp.get(name)).with_context(|| format!("{site}.{key} forbids `{name}`, which its object does not describe"))?;
+                    let mut with = base_b.clone();
+                    with.insert(name.clone(), sample(described, defs, depth + 1)?);
+                    out.push(Probe {
+                        with: Value::Object(with),
+                        without: Value::Null,
+                        path: format!("{key}.{name}"),
+                        site: format!("{site}.{key}.{name}"),
+                        default: Value::Null,
+                        forbidden: true,
+                    });
                 }
             }
         }
@@ -344,12 +371,12 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
     }
     if let Some(items) = m.get("items") {
         for p in probes(items, &format!("{site}.item"), defs, walk)? {
-            out.push(Probe { with: json!([p.with]), without: json!([p.without]), path: format!("[].{}", p.path), site: p.site, default: p.default });
+            out.push(Probe { with: json!([p.with]), without: json!([p.without]), path: format!("[].{}", p.path), site: p.site, default: p.default, forbidden: p.forbidden });
         }
     }
     if let Some(value) = m.get("additionalProperties").filter(|v| v.is_object()) {
         for p in probes(value, &format!("{site}.value"), defs, walk)? {
-            out.push(Probe { with: json!({ "k": p.with }), without: json!({ "k": p.without }), path: format!("{{}}.{}", p.path), site: p.site, default: p.default });
+            out.push(Probe { with: json!({ "k": p.with }), without: json!({ "k": p.without }), path: format!("{{}}.{}", p.path), site: p.site, default: p.default, forbidden: p.forbidden });
         }
     }
     Ok(out)
