@@ -6031,6 +6031,20 @@ fn making_states(
                  const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posts++; return r; }; return true; })()";
     let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
     let no_refusal = "!(document.getElementById('action-notices')?.innerText ?? '').includes('not made')";
+    // the main agent's blank chats from before set aside (archived), so the
+    // one made here is its only one; given back after, as they were
+    let blanks_of_main = || -> Result<Vec<String>> {
+        let fragments = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
+        Ok(fragments.body["fragments"].as_array().into_iter().flatten()
+            .filter(|f| f["role"] == "owner" && f["title"] == "New chat" && f["preview"].is_null() && f["archived"] != true
+                && f["agents"].as_array().is_some_and(|a| a.len() == 1 && a[0] == json!(first_id)))
+            .filter_map(|f| f["name"].as_str().map(str::to_string))
+            .collect())
+    };
+    let parked = blanks_of_main()?;
+    for name in &parked {
+        archive(b, name)?;
+    }
     let blank = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "main-blank", "template": "chat", "title": "New chat", "agent": first_id })), &[])?;
     anyhow::ensure!(blank.status == 200, "a blank chat with the main agent: {blank}");
     let blank = blank.body["name"].as_str().unwrap_or("").to_string();
@@ -6058,13 +6072,7 @@ fn making_states(
     // ---- the same, the main agent with no blank chat: its New chat makes
     // one, its own room in place of the Reader's; the list back, the main
     // agent's chat opens there, the Reader's listed, not opened
-    let fragments = shell(api, me.session, "GET", "/api/fragments", None, &[])?;
-    for f in fragments.body["fragments"].as_array().into_iter().flatten() {
-        let alone = f["agents"].as_array().is_some_and(|a| a.len() == 1 && a[0] == json!(first_id));
-        if f["role"] == "owner" && f["title"] == "New chat" && f["preview"].is_null() && f["archived"] != true && alone {
-            archive(b, f["name"].as_str().unwrap_or(""))?;
-        }
-    }
+    anyhow::ensure!(blanks_of_main()?.is_empty(), "the main agent has no blank chat");
     let before = names();
     b.eval(page, fail_lists)?;
     let picked = new_chat(b, reader_hero)?;
@@ -6091,6 +6099,11 @@ fn making_states(
     );
     archive(b, &main_made)?;
     archive(b, &reader_made)?;
+    for name in &parked {
+        let r = shell(api, me.session, "PUT", &format!("/api/fragments/{name}/archived"), Some(&json!({ "archived": false })), &[])?;
+        anyhow::ensure!(r.status == 200, "{name} given back: {r}");
+    }
+    anyhow::ensure!(s.eventually(wait, || shell(api, me.session, "GET", "/api/fragments", None, &[]).is_ok_and(|l| parked.iter().all(|n| l.body["fragments"].as_array().into_iter().flatten().any(|f| f["name"] == n.as_str() && f["archived"] != true)))), "the blank chats given back");
 
     // ---- another chat opened meanwhile, then refused
     click_chat(b, page, &first_chat)?;
