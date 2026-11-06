@@ -416,7 +416,8 @@ fn records_after(c: &Client, chat: &str, channel: &str, after: i64) -> Result<(V
         let page = c.call(c.get(&format!("/api/f/{chat}/channels/{channel}?after={cursor}"))?)?;
         let records = page["records"].as_array().cloned().unwrap_or_default();
         let next = page["next"].as_i64().unwrap_or(cursor);
-        let full = records.len() >= 1000;
+        // a page cut by its bytes says `more` (an older platform's does not)
+        let full = page["more"].as_bool().unwrap_or(records.len() >= 1000);
         out.extend(records);
         if next <= cursor || !full {
             cursor = next.max(cursor);

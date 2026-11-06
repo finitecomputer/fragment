@@ -79,6 +79,9 @@ fn posted_key(channel: &str) -> String {
     format!("{}:{channel}", MetaKey::PostedBytes.key())
 }
 
+/// Records one read of a page takes from storage at a time (at most
+/// 6.4 MiB of bodies), so a page cut by its bytes reads little past them.
+const PAGE_READ_BATCH: usize = 100;
 /// Due pending mutations one sweep settles.
 const SWEEP_ROWS: i64 = 64;
 /// Mutations waiting for their effects; past this, new mutations are
@@ -701,17 +704,6 @@ impl FragmentCell {
         json_response(&json!({ "channels": out }))
     }
 
-    /// A bounded page before an exclusive cursor, returned in display order.
-    pub(crate) fn read_channel_before(&self, channel: &str, before: i64, limit: usize) -> CellResult<Vec<ChannelRecord>> {
-        let rows: Vec<RecordRow> = self.typed(
-            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
-            vec![channel.into(), SqlStorageValue::Integer(before), SqlStorageValue::Integer(limit.clamp(1, limits::CHANNEL_PAGE) as i64)],
-        )?;
-        let mut records: Vec<ChannelRecord> = rows.into_iter().map(RecordRow::record).collect::<CellResult<_>>()?;
-        records.reverse();
-        Ok(records)
-    }
-
     /// `GET /api/f/<name>/channels/<channel>?after=|before=&limit=`
     pub(crate) fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
         self.require(caller, false, Role::Public)?;
@@ -723,17 +715,59 @@ impl FragmentCell {
         json_response(&self.channel_page(channel, after, before, limit)?)
     }
 
+    /// A page of `channel` (`GET …/channels/{c}`, `__channel/{c}`): at most
+    /// `limit` records (1 to `CHANNEL_PAGE`) and, past the first, about
+    /// `CHANNEL_HTTP_PAGE_MAX_BYTES` of their bodies; read in batches, so
+    /// a page holds no more than one batch past its bound in memory.
+    /// `more` says whether records remain past it in the direction read.
     pub(crate) fn channel_page(&self, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<ChannelPage> {
-        let (records, next) = if let Some(before) = before {
-            let records = self.read_channel_before(channel, before, limit)?;
-            let next = records.first().map_or(before, |r| r.seq);
-            (records, next)
-        } else {
-            let records = self.read_channel(channel, after, limit)?;
-            let next = records.last().map_or(after, |r| r.seq);
-            (records, next)
+        let limit = limit.clamp(1, limits::CHANNEL_PAGE);
+        let (mut records, mut bytes, mut more) = (Vec::<ChannelRecord>::new(), 0usize, false);
+        let mut cursor = before.unwrap_or(after);
+        // bounded: each full batch adds PAGE_READ_BATCH records toward `limit`
+        'page: for _ in 0..=limits::CHANNEL_PAGE.div_ceil(PAGE_READ_BATCH) {
+            let want = (limit - records.len()).min(PAGE_READ_BATCH);
+            let batch = self.read_batch(channel, cursor, before.is_some(), want)?;
+            let end = batch.len() < want;
+            for r in batch {
+                let size = r.body.get().len();
+                if !records.is_empty() && bytes + size > limits::CHANNEL_HTTP_PAGE_MAX_BYTES {
+                    more = true;
+                    break 'page;
+                }
+                bytes += size;
+                cursor = r.seq;
+                records.push(r);
+            }
+            if end {
+                break;
+            }
+            if records.len() == limit {
+                more = !self.read_batch(channel, cursor, before.is_some(), 1)?.is_empty();
+                break;
+            }
+        }
+        assert!(!records.is_empty() || !more, "a page cut short holds a record");
+        if before.is_some() {
+            records.reverse();
+        }
+        let next = match before {
+            Some(b) => records.first().map_or(b, |r| r.seq),
+            None => records.last().map_or(after, |r| r.seq),
         };
-        Ok(ChannelPage { channel: channel.to_string(), records, next })
+        Ok(ChannelPage { channel: channel.to_string(), records, next, more })
+    }
+
+    /// Up to `n` records of `channel` past `cursor`: after it, ascending,
+    /// or before it, descending (`back`).
+    fn read_batch(&self, channel: &str, cursor: i64, back: bool, n: usize) -> CellResult<Vec<ChannelRecord>> {
+        let q = if back {
+            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq < ? ORDER BY seq DESC LIMIT ?"
+        } else {
+            "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?"
+        };
+        let rows: Vec<RecordRow> = self.typed(q, vec![channel.into(), SqlStorageValue::Integer(cursor), SqlStorageValue::Integer(n as i64)])?;
+        rows.into_iter().map(RecordRow::record).collect()
     }
 
     /// Waits for, then holds, one ledger id.
