@@ -1032,7 +1032,7 @@ impl ComputerCell {
             // isolate went, and its own report (why, and whether it is a
             // strike) went with it: one failure, its container destroyed
             let _ = self.destroy(generation, "its start failed").await;
-            return Ok(Some(Event::StartFailed { generation, why: format!("start {generation} failed, and the isolate that saw why went before it said so") }));
+            return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
         }
         let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);

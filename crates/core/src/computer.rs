@@ -291,10 +291,26 @@ impl Phase {
 /// A start due while asleep: at `at_ms`, and `owed` (made whether or not
 /// anything still wants it: a restart's, or a wake's after a sleep) or a
 /// failed start's retry (made only while something wants it).
+///
+/// Stored as `[at_ms, owed]`: a pair costs the cell's Wasm less than a
+/// struct of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(i64, bool)", into = "(i64, bool)")]
 pub struct Retry {
     pub at_ms: i64,
     pub owed: bool,
+}
+
+impl From<(i64, bool)> for Retry {
+    fn from((at_ms, owed): (i64, bool)) -> Retry {
+        Retry { at_ms, owed }
+    }
+}
+
+impl From<Retry> for (i64, bool) {
+    fn from(r: Retry) -> (i64, bool) {
+        (r.at_ms, r.owed)
+    }
 }
 
 /// The previous release's fields for what the phases now carry, written
