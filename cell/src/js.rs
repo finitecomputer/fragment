@@ -57,7 +57,7 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
         return Ok(serde_json::Value::Null);
     }
     let text = js_sys::JSON::stringify(v).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
-    serde_json::from_str(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
+    crate::json_text(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
 }
 
 /// `obj.method(...args)`, settled (a value, a promise, or an RPC

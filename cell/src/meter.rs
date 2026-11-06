@@ -243,7 +243,7 @@ impl FragmentCell {
         }
         // the same rows in the same order each time: the ledger knows a resend by its digest
         let rows: Vec<Row> = self.typed("SELECT row FROM meter_rows WHERE batch = ? ORDER BY ref", vec![SqlStorageValue::Integer(batch.id)])?;
-        let rows: Vec<MeterRow> = rows.iter().map(|r| serde_json::from_str(&r.row)).collect::<Result<_, _>>().map_err(|e| CellError::host(format!("a meter row: {e}")))?;
+        let rows: Vec<MeterRow> = rows.iter().map(|r| crate::json_text(&r.row)).collect::<Result<_, _>>().map_err(|e| CellError::host(format!("a meter row: {e}")))?;
         assert!(!rows.is_empty() && rows.len() <= BATCH_ROWS as usize, "a batch holds 1 to BATCH_ROWS rows");
         let message = MeterBatch { payer: self.must(MetaKey::Owner)?, source: self.name()?, seq: batch.id, meter: Meter { batch: format!("frag:{key}:{}", batch.id), rows } };
         let body = serde_json::to_value(&message).expect("a batch serializes");
@@ -289,7 +289,7 @@ impl FragmentCell {
         let rows: Vec<Value> = rows
             .into_iter()
             .map(|r| {
-                let row: MeterRow = serde_json::from_str(&r.row).expect("a meter row is JSON the fragment wrote");
+                let row: MeterRow = crate::json_text(&r.row).expect("a meter row is JSON the fragment wrote");
                 json!({ "ref": r.r#ref, "batch": r.batch, "usage": row.usage })
             })
             .collect();

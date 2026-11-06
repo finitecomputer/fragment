@@ -618,7 +618,7 @@ impl FragmentCell {
         if path.is_empty() && self.files_live()?.is_some_and(|f| f.page) {
             let mut page = files_page(name, &self.title_now(name)?);
             if let Some(meta) = self.meta(MetaKey::MetaLive)? {
-                let meta: fragment_core::manifest::Meta = serde_json::from_str(&meta).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
+                let meta: fragment_core::manifest::Meta = crate::json_text(&meta).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
                 page = site::inject_og(&page, name, &meta, &format!("{}__preview.svg", self.cfg.canonical(&caller.url, name)));
             }
             let h = headers("text/html; charset=utf-8", "no-store")?;
@@ -671,7 +671,7 @@ impl FragmentCell {
         let page = pointer.is_none() && mime.starts_with("text/html") && row.size <= OG_MAX_BYTES;
         let stored = if page { self.meta(MetaKey::MetaLive)? } else { None };
         let og: Option<fragment_core::manifest::Meta> = match stored {
-            Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
+            Some(text) => Some(crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
             None => None,
         };
         // Revalidation is answered here, before code.storage is asked for
@@ -733,7 +733,7 @@ impl FragmentCell {
         let cache = site::cache_control(site::hashed(path), public);
         let page = mime.starts_with("text/html");
         let og: Option<fragment_core::manifest::Meta> = match page.then(|| self.meta(MetaKey::MetaLive)).transpose()?.flatten() {
-            Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
+            Some(text) => Some(crate::json_text(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
             None => None,
         };
         let live = facts.pin_live.as_deref().unwrap_or("");
@@ -829,7 +829,7 @@ impl FragmentCell {
     /// What live's manifest says of the files view (`files`), if anything.
     fn files_live(&self) -> CellResult<Option<fragment_core::manifest::FilesDecl>> {
         self.meta(MetaKey::FilesLive)?
-            .map(|text| serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored files do not decode: {e}"))))
+            .map(|text| crate::json_text(&text).map_err(|e| CellError::host(format!("the stored files do not decode: {e}"))))
             .transpose()
     }
 
@@ -838,7 +838,7 @@ impl FragmentCell {
     fn title_now(&self, name: &str) -> CellResult<String> {
         let [main, live] = self.metas([MetaKey::ManifestMain, MetaKey::MetaLive])?;
         let at = |text: Option<String>, meta: fn(&Value) -> &Value| -> Option<String> {
-            let v: Value = serde_json::from_str(&text?).ok()?;
+            let v: Value = crate::json_text(&text?).ok()?;
             meta(&v)["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
         };
         Ok(at(main, |v| &v["meta"]).or_else(|| at(live, |v| v)).unwrap_or_else(|| name.to_string()))

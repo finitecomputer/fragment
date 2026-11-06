@@ -628,7 +628,7 @@ impl FragmentCell {
             self.typed("SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?;
         // the append conflicted on (op, idx), so a row holds them
         let record = rows.into_iter().next().ok_or_else(|| CellError::host(format!("post {key} conflicted, and no record holds it")))?.record()?;
-        let stored: Value = serde_json::from_str(record.body.get()).map_err(|e| CellError::host(format!("post {key}: its stored body is not JSON: {e}")))?;
+        let stored: Value = crate::json_text(record.body.get()).map_err(|e| CellError::host(format!("post {key}: its stored body is not JSON: {e}")))?;
         if record.channel != channel || stored != *body {
             return Err(CellError::new(ErrorCode::ConflictingBody, "this post id was already used with a different body (or on another channel)"));
         }
