@@ -47,7 +47,7 @@ impl Direction {
     }
 }
 
-fn generator(answers: bool) -> SchemaGenerator {
+pub(super) fn generator(answers: bool) -> SchemaGenerator {
     let mut settings = SchemaSettings::draft2020_12();
     settings.definitions_path = "/components/schemas".into();
     settings.meta_schema = None;
@@ -176,7 +176,7 @@ pub fn code_name(code: ErrorCode) -> String {
 }
 
 /// The components both generators made, each with who writes it.
-fn components(answers: Map<String, Value>, requests: Map<String, Value>) -> Result<Map<String, Value>> {
+pub(super) fn components(answers: Map<String, Value>, requests: Map<String, Value>) -> Result<Map<String, Value>> {
     let mut all = Map::new();
     let mut names: Vec<&String> = answers.keys().chain(requests.keys()).collect();
     names.sort();

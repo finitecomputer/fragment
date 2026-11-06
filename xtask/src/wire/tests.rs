@@ -3,15 +3,17 @@
 
 use std::collections::BTreeSet;
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
-use super::lock::{breaches, parse, Breach};
+use super::lock::{breaches, parse, project, Breach, Facts};
 use super::{generate, retired, verdict, write_files, Base, OnDisk, LOCK_PATH, RETIRED_HEADER, RETIRED_PATH};
 
-/// Master's facts: a shape each way, enums each way, an open union, and
-/// a closed shape each way.
+/// Master's facts: a shape each way, enums each way, an open union, a
+/// closed shape each way, bounds and defaults each way, and a flattened
+/// union each way.
 const BASE: &str = "\
 route a.get GET /api/a
+route a.get accepts session
 route a.get response A
 route a.put PUT /api/a
 route a.put request B
@@ -39,6 +41,64 @@ type KI in object closed
 field KI.x required string
 type KO in object
 field KO.x required string
+field A.z optional string|null
+field B.z optional string|null
+field A.r required X
+type O out object
+field O.* optional string
+type BO out object
+field BO.s optional string
+bound BO.s length 0..=64
+bound BO.s pattern ^[a-z]+$
+bound BO.s format date-time
+field BO.t optional string
+field BO.l optional array<string>
+bound BO.l items 0..=10
+bound BO.l unique
+field BO.n required integer
+bound BO.n range u32
+field BO.k optional integer
+bound BO.k multiple 2
+field BO.d optional string
+bound BO.d default \"x\"
+field BO.m optional map<string>
+bound BO.m props 0..=5
+type BI in object
+field BI.s optional string
+bound BI.s length 0..=64
+bound BI.s pattern ^[a-z]+$
+bound BI.s format date-time
+field BI.t optional string
+field BI.l optional array<string>
+bound BI.l items 0..=10
+bound BI.l unique
+field BI.n required integer
+bound BI.n range u32
+field BI.k optional integer
+bound BI.k multiple 2
+field BI.d optional string
+bound BI.d default \"x\"
+field BI.r required string
+bound BI.r default \"y\"
+field BI.m optional map<string>
+bound BI.m props 0..=5
+type BB both object
+field BB.n required integer
+bound BB.n range u32
+type F out object
+field F.id required string
+branches F anyOf
+value F #0
+value F #1
+type F.#0 out object
+field F.#0.extra required string
+type F.#1 out object
+field F.#1.extra required boolean
+type FI in object
+branches FI anyOf
+value FI #0
+type FI.#0 in object
+field FI.#0.extra required string
 ";
 
 /// What a change to master's facts breaks: `edits` are (master's line,
@@ -84,9 +144,11 @@ fn what_an_older_client_does_not_feel_passes() {
     passes(&[], &["value UO two", "type UO.two out object"]);
     passes(&[], &["value EI two"]);
     passes(&[], &["field KI.n optional string"]);
-    // a reader of a shape now reads past what it did not know
-    passes(&[("type K out object closed", Some("type K out object"))], &[]);
+    // the cell takes what it refused
+    passes(&[("type KI in object closed", Some("type KI in object"))], &[]);
     passes(&[("type EI in enum", Some("type EI in enum open"))], &[]);
+    // another credential
+    passes(&[], &["route a.get accepts nip98"]);
 }
 
 #[test]
@@ -119,11 +181,104 @@ fn what_an_older_client_feels_fails_naming_the_fact() {
     fails(&[], &["route a.get request B"], "route a.get request B");
     // a new field of a closed shape a client reads
     fails(&[], &["field K.n optional string"], "field K.n optional string");
+    // a credential an older client sends
+    fails(&[("route a.get accepts session", None)], &[], "route a.get accepts session");
+    // another component
+    fails(&[("field A.r required X", Some("field A.r required Y"))], &[], "field A.r required X");
     // a shape that refuses what it took, or opens where a client reads it closed
     fails(&[("type KO in object", Some("type KO in object closed"))], &[], "type KO in object closed");
     fails(&[("type EO out enum", Some("type EO out enum open"))], &[], "type EO out enum open");
     // a shape of another kind
     fails(&[("type EO out enum", Some("type EO out object"))], &[], "type EO out enum");
+}
+
+/// A bound's pass and fail cells: narrower where the cell reads it fails,
+/// wider where a client reads it fails, either way where both do.
+#[test]
+fn bounds_hold_by_who_reads_them() {
+    let (bo, bi) = ("bound BO.n range u32", "bound BI.n range u32");
+    passes(&[(bo, Some("bound BO.n range u16"))], &[]);
+    fails(&[(bo, Some("bound BO.n range u64"))], &[], bo);
+    fails(&[(bo, Some("bound BO.n range i32"))], &[], bo);
+    passes(&[(bi, Some("bound BI.n range u64"))], &[]);
+    passes(&[(bi, Some("bound BI.n range i64"))], &[]);
+    fails(&[(bi, Some("bound BI.n range u16"))], &[], bi);
+    fails(&[(bi, Some("bound BI.n range 1..=4294967295"))], &[], bi);
+    passes(&[(bo, Some("bound BO.n range 1..=100"))], &[]);
+    passes(&[(bi, Some("bound BI.n range ..=4294967296"))], &[]);
+    fails(&[("bound BB.n range u32", Some("bound BB.n range u16"))], &[], "bound BB.n range u32");
+    fails(&[("bound BB.n range u32", Some("bound BB.n range u64"))], &[], "bound BB.n range u32");
+    // lengths, list sizes and map sizes alike; none is 0..
+    for (field, kind, was, narrower, wider) in [("s", "length", "0..=64", "0..=32", "0..=128"), ("l", "items", "0..=10", "1..=10", "0.."), ("m", "props", "0..=5", "0..=4", "0..=9")] {
+        let line = |t: &str, v: &str| format!("bound {t}.{field} {kind} {v}");
+        passes(&[(&line("BO", was), Some(&line("BO", narrower)))], &[]);
+        fails(&[(&line("BO", was), Some(&line("BO", wider)))], &[], &line("BO", was));
+        fails(&[(&line("BO", was), None)], &[], &line("BO", was));
+        passes(&[(&line("BI", was), Some(&line("BI", wider)))], &[]);
+        passes(&[(&line("BI", was), None)], &[]);
+        fails(&[(&line("BI", was), Some(&line("BI", narrower)))], &[], &line("BI", was));
+    }
+    fails(&[], &["bound BI.t length 0..=8"], "bound BI.t length 0..=8");
+    passes(&[], &["bound BO.t length 0..=8"]);
+    // a pattern, a format, a multiple, uniqueness: none is the widest
+    for (field, kind, was, other) in [("s", "pattern", " ^[a-z]+$", " ^[a-z0-9]+$"), ("s", "format", " date-time", " uuid"), ("k", "multiple", " 2", " 4"), ("l", "unique", "", "")] {
+        let line = |t: &str, v: &str| format!("bound {t}.{field} {kind}{v}");
+        fails(&[(&line("BO", was), None)], &[], &line("BO", was));
+        passes(&[(&line("BI", was), None)], &[]);
+        if !other.is_empty() {
+            fails(&[(&line("BO", was), Some(&line("BO", other)))], &[], &line("BO", was));
+            fails(&[(&line("BI", was), Some(&line("BI", other)))], &[], &line("BI", was));
+        }
+        let new = |t: &str| format!("bound {t}.t {kind}{was}");
+        passes(&[], &[&new("BO")]);
+        fails(&[], &[&new("BI")], &new("BI"));
+    }
+    // a bound of a field no older client knows
+    passes(&[], &["field BI.new optional integer", "bound BI.new range i8", "bound BI.new default 1"]);
+}
+
+/// A default holds where a field may be left out, whoever writes it.
+#[test]
+fn a_default_holds_where_a_field_may_be_left_out() {
+    fails(&[("bound BI.d default \"x\"", Some("bound BI.d default \"z\""))], &[], "bound BI.d default \"x\"");
+    fails(&[("bound BO.d default \"x\"", Some("bound BO.d default \"z\""))], &[], "bound BO.d default \"x\"");
+    fails(&[("bound BI.d default \"x\"", None)], &[], "bound BI.d default \"x\"");
+    fails(&[], &["bound BI.t default \"q\""], "bound BI.t default \"q\"");
+    // a field every older client sends
+    passes(&[("bound BI.r default \"y\"", Some("bound BI.r default \"z\""))], &[]);
+}
+
+#[test]
+fn null_is_wider() {
+    fails(&[("field A.o optional string", Some("field A.o optional string|null"))], &[], "field A.o optional string");
+    passes(&[("field B.o optional string", Some("field B.o optional string|null"))], &[]);
+    passes(&[("field A.z optional string|null", Some("field A.z optional string"))], &[]);
+    fails(&[("field B.z optional string|null", Some("field B.z optional string"))], &[], "field B.z optional string|null");
+    fails(&[("field C.o optional string", Some("field C.o optional string|null"))], &[], "field C.o optional string");
+}
+
+#[test]
+fn the_fields_beyond_those_named_and_flattened_branches_are_facts() {
+    fails(&[("field O.* optional string", Some("field O.* optional integer"))], &[], "field O.* optional string");
+    passes(&[], &["field A.* optional string"]);
+    fails(&[], &["field K.* optional string"], "field K.* optional string");
+    let extra = "field F.#0.extra required string";
+    fails(&[(extra, Some("field F.#0.extra required integer"))], &[], extra);
+    fails(&[("value F #1", None)], &[], "value F #1");
+    fails(&[], &["value F #2", "type F.#2 out object"], "value F #2");
+    passes(&[], &["value FI #1", "type FI.#1 in object"]);
+    fails(&[("branches F anyOf", Some("branches F type"))], &[], "branches F anyOf");
+}
+
+/// An older reader of a closed shape refuses what it does not know until
+/// its line is retired, whatever this change says of it.
+#[test]
+fn a_closed_reader_holds_until_retired() {
+    let closed = "type K out object closed";
+    fails(&[(closed, Some("type K out object"))], &[], closed);
+    let found = check(&[(closed, Some("type K out object"))], &["field K.n optional string"], &[]);
+    assert_eq!(found.iter().map(|b| b.fact.as_str()).collect::<Vec<_>>(), [closed, "field K.n optional string"], "{found:?}");
+    assert!(check(&[(closed, Some("type K out object"))], &["field K.n optional string"], &[closed]).is_empty());
 }
 
 #[test]
@@ -256,4 +411,163 @@ fn the_document_is_whole() {
         }
     }
     walk(&doc, schemas);
+}
+
+/// The lock of one type as a route answers it (`answers`) or takes it, as
+/// `cargo xtask wire` makes it: schemars' schema, projected.
+fn lock_of<T: schemars::JsonSchema>(answers: bool) -> Facts {
+    let mut g = super::openapi::generator(answers);
+    let root = g.subschema_for::<T>().to_value();
+    let defs = g.take_definitions(true);
+    let schemas = if answers { super::openapi::components(defs, Map::new()) } else { super::openapi::components(Map::new(), defs) }.unwrap();
+    let mut op = if answers {
+        json!({ "responses": { "200": { "content": { "application/json": { "schema": root } } } } })
+    } else {
+        json!({ "requestBody": { "content": { "application/json": { "schema": root } } } })
+    };
+    op["operationId"] = json!("t.call");
+    parse(&project(&json!({ "paths": { "/t": { "post": op } }, "components": { "schemas": schemas } })).unwrap()).unwrap()
+}
+
+fn facts_of(found: &[Breach]) -> Vec<&str> {
+    found.iter().map(|b| b.fact.as_str()).collect()
+}
+
+/// Each of these was a break the lock once missed, shown with types as
+/// proto derives them: a flattened untagged union's branch, an integer's
+/// width, a default, and a reader that closes a shape.
+#[allow(dead_code)]
+mod derived {
+    use schemars::JsonSchema;
+    use serde_json::Value;
+
+    pub mod flat {
+        use super::JsonSchema;
+        #[derive(JsonSchema)]
+        pub struct Flat {
+            pub id: String,
+            #[serde(flatten)]
+            pub value: Union,
+        }
+        #[derive(JsonSchema)]
+        #[serde(untagged)]
+        pub enum Union {
+            S { extra: String },
+            B { extra: bool },
+        }
+    }
+    pub mod flat_retyped {
+        use super::JsonSchema;
+        #[derive(JsonSchema)]
+        pub struct Flat {
+            pub id: String,
+            #[serde(flatten)]
+            pub value: Union,
+        }
+        #[derive(JsonSchema)]
+        #[serde(untagged)]
+        pub enum Union {
+            S { extra: i64 },
+            B { extra: bool },
+        }
+    }
+    pub mod flat_fewer {
+        use super::JsonSchema;
+        #[derive(JsonSchema)]
+        pub struct Flat {
+            pub id: String,
+            #[serde(flatten)]
+            pub value: Union,
+        }
+        #[derive(JsonSchema)]
+        #[serde(untagged)]
+        pub enum Union {
+            S { extra: String },
+        }
+    }
+    macro_rules! sub {
+        ($m:ident, $t:ty) => {
+            pub mod $m {
+                #[derive(schemars::JsonSchema)]
+                pub struct Sub {
+                    pub after: $t,
+                }
+            }
+        };
+    }
+    sub!(i64s, i64);
+    sub!(i32s, i32);
+    sub!(u32s, u32);
+    sub!(u64s, u64);
+    pub mod cleared {
+        use super::{JsonSchema, Value};
+        #[derive(JsonSchema)]
+        pub struct Presence {
+            #[serde(default)]
+            pub data: Value,
+        }
+    }
+    pub mod kept {
+        use super::{JsonSchema, Value};
+        #[derive(JsonSchema)]
+        pub struct Presence {
+            #[serde(default = "kept")]
+            pub data: Value,
+        }
+        fn kept() -> Value {
+            serde_json::json!({ "kept": true })
+        }
+    }
+    pub mod closed {
+        use super::JsonSchema;
+        #[derive(JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        pub struct Frame {
+            pub id: String,
+        }
+    }
+    pub mod opened {
+        use super::JsonSchema;
+        #[derive(JsonSchema)]
+        pub struct Frame {
+            pub id: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub more: Option<String>,
+        }
+    }
+}
+
+#[test]
+fn derived_types_break_where_an_older_client_would() {
+    use derived::*;
+    let none = BTreeSet::new();
+    let (was, retyped, fewer) = (lock_of::<flat::Flat>(true), lock_of::<flat_retyped::Flat>(true), lock_of::<flat_fewer::Flat>(true));
+    assert_eq!(facts_of(&breaches(&was, &retyped, &none)), ["field Flat.#0.extra required string"]);
+    assert_eq!(facts_of(&breaches(&was, &fewer, &none)), ["value Flat #1"]);
+    assert!(breaches(&was, &lock_of::<flat::Flat>(true), &none).is_empty());
+    // an integer the cell reads, narrowed, and one a client reads, widened
+    assert_eq!(facts_of(&breaches(&lock_of::<i64s::Sub>(false), &lock_of::<i32s::Sub>(false), &none)), ["bound Sub.after range i64"]);
+    assert!(breaches(&lock_of::<i32s::Sub>(false), &lock_of::<i64s::Sub>(false), &none).is_empty());
+    assert_eq!(facts_of(&breaches(&lock_of::<u32s::Sub>(true), &lock_of::<u64s::Sub>(true), &none)), ["bound Sub.after range u32"]);
+    assert!(breaches(&lock_of::<u64s::Sub>(true), &lock_of::<u32s::Sub>(true), &none).is_empty());
+    // what leaving `data` out asks for
+    assert_eq!(facts_of(&breaches(&lock_of::<cleared::Presence>(false), &lock_of::<kept::Presence>(false), &none)), ["bound Presence.data default null"]);
+    // a reader built closed meets a new field
+    let found = breaches(&lock_of::<closed::Frame>(true), &lock_of::<opened::Frame>(true), &none);
+    assert_eq!(facts_of(&found), ["type Frame out object closed", "field Frame.more optional string|null"]);
+}
+
+/// A keyword the lock does not know is refused, never dropped; so is an
+/// integer as wide as its machine.
+#[test]
+fn what_the_lock_cannot_read_is_refused() {
+    let doc = |schema: Value| json!({ "paths": {}, "components": { "schemas": { "T": schema } } });
+    let refused = project(&doc(json!({ "x-fragment-direction": "out", "allOf": [{ "type": "string" }] }))).unwrap_err().to_string();
+    assert!(refused.contains("`allOf`") && refused.contains("lock.rs"), "{refused}");
+    let refused = project(&doc(json!({ "x-fragment-direction": "in", "type": "object", "properties": { "n": { "type": "integer", "format": "uint" } } })))
+        .unwrap_err()
+        .to_string();
+    assert!(format!("{refused:#}").contains("T.n"), "{refused}");
+    let refused = project(&doc(json!({ "x-fragment-direction": "in", "type": "object", "properties": { "n": { "type": "string", "not": { "const": "" } } } }))).unwrap_err().to_string();
+    assert!(refused.contains("`not`"), "{refused}");
 }
