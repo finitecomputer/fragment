@@ -42,7 +42,10 @@ use fragment_devstack::node::{Node, NODE_VERSION};
 
 /// Built or vendored JavaScript, each prefix with where it is recorded:
 /// never edited here, so never checked.
-pub const VENDORED: [(&str, &str); 1] = [("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)")];
+pub const VENDORED: [(&str, &str); 2] = [
+    ("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)"),
+    ("templates/slides/site/", "the slides template's open-slide build, made by its scripts/build.mjs; its own files are live/'s, checked there (crates/templates `the_slides_templates_build_is_its_decks`)"),
+];
 
 /// The `.js` files loaded as classic scripts, not modules.
 pub const CLASSIC: [(&str, &str); 2] = [

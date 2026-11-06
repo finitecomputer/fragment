@@ -1,0 +1,98 @@
+/* The deck's live layer (slides-live.js): a small bar at the bottom right,
+   and the notes panel above it. Light and dark follow open-slide's
+   `html.dark`. */
+.sl-bar,
+.sl-panel {
+  --sl-bg: #ffffff;
+  --sl-fg: #1c1b1a;
+  --sl-muted: #6b6762;
+  --sl-line: #e4e0da;
+  --sl-accent: #2f6fde;
+  --sl-live: #d23f31;
+  position: fixed;
+  right: 16px;
+  z-index: 2147483000;
+  font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--sl-fg);
+  background: var(--sl-bg);
+  border: 1px solid var(--sl-line);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px -10px rgba(0, 0, 0, 0.18);
+}
+html.dark .sl-bar,
+html.dark .sl-panel {
+  --sl-bg: #1f1e1d;
+  --sl-fg: #ecebe8;
+  --sl-muted: #a29e98;
+  --sl-line: #3a3836;
+  --sl-accent: #6f9ef0;
+}
+.sl-bar {
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 12px;
+  border-radius: 999px;
+  max-width: calc(100vw - 32px);
+  flex-wrap: wrap;
+}
+.sl-text { color: var(--sl-muted); white-space: nowrap; }
+.sl-live { color: var(--sl-live); font-weight: 600; }
+.sl-live::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--sl-live);
+  vertical-align: 1px;
+}
+.sl-error { color: var(--sl-live); padding-right: 8px; }
+.sl-btn {
+  font: inherit;
+  color: var(--sl-fg);
+  background: transparent;
+  border: 1px solid var(--sl-line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sl-btn:hover,
+.sl-btn.sl-on { background: color-mix(in srgb, var(--sl-fg) 7%, transparent); }
+.sl-btn.sl-primary { background: var(--sl-accent); border-color: var(--sl-accent); color: #fff; }
+.sl-btn.sl-quiet { border-color: transparent; padding: 2px 8px; color: var(--sl-muted); }
+.sl-panel {
+  bottom: 64px;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sl-panel[hidden] { display: none; }
+.sl-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+.sl-empty { margin: 0; color: var(--sl-muted); }
+.sl-thread { border-top: 1px solid var(--sl-line); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.sl-thread.sl-resolved .sl-say { color: var(--sl-muted); }
+.sl-note { display: flex; flex-direction: column; gap: 2px; }
+.sl-who { font-weight: 600; }
+.sl-say { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sl-actions { display: flex; gap: 4px; margin-left: -8px; }
+.sl-compose { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.sl-input {
+  box-sizing: border-box;
+  width: 100%;
+  font: inherit;
+  color: var(--sl-fg);
+  background: transparent;
+  border: 1px solid var(--sl-line);
+  border-radius: 8px;
+  padding: 8px;
+  resize: vertical;
+}
+.sl-signin { color: var(--sl-accent); }

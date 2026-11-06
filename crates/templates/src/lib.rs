@@ -584,4 +584,62 @@ pub(crate) mod tests {
         }
         assert!(page.contains("<html lang=\"en\">"), "cursors are off by default (the e2e turns them on by this tag)");
     }
+
+    /// Goal: the slides template's committed build is its deck's, so a deck
+    /// scaffolded with `fragment new` deploys as it is, and its notes are
+    /// the doc's. Method: `site/build.json` names the hash of the sources
+    /// it was built from (scripts/build.mjs `sourcesHash`: each of
+    /// package.json, open-slide.config.ts and slides/**, by path) and the
+    /// open-slide the package pins; the live layer the build copies is
+    /// live/'s; the deck's page is the same at each of its addresses, its
+    /// route ahead of the app; the mixin is the doc's, byte for byte; the
+    /// `present` channel takes editors' posts. Invalid: a deck edited and
+    /// not built again, a live file edited in one place.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_slides_templates_build_is_its_decks() {
+        use fragment_proto::Role;
+        let file = |path: &str| SLIDES.file(path).unwrap_or_else(|| panic!("slides has {path}")).bytes;
+        let text = |path: &str| std::str::from_utf8(file(path)).expect("utf-8");
+        let mut sources: Vec<&File> = SLIDES.files.iter().filter(|f| f.path.starts_with("slides/") || f.path == "package.json" || f.path == "open-slide.config.ts").collect();
+        sources.sort_by_key(|f| f.path);
+        let mut h = Sha256::new();
+        for f in &sources {
+            h.update(f.path.as_bytes());
+            h.update([0]);
+            h.update(f.bytes);
+            h.update([0]);
+        }
+        let stamp: serde_json::Value = serde_json::from_str(text("site/build.json")).expect("site/build.json");
+        assert_eq!(stamp["sources"], hex::encode(h.finalize()), "site/ is the build of the deck as it is: build it again (scripts/build.mjs)");
+        let pkg: serde_json::Value = serde_json::from_str(text("package.json")).expect("package.json");
+        assert_eq!(stamp["openSlide"], pkg["dependencies"]["@open-slide/core"], "built with the open-slide it pins");
+        for (dep, pin) in pkg["dependencies"].as_object().expect("its dependencies") {
+            assert!(pin.as_str().is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit() || b == b'.')), "{dep} is pinned to one version, not {pin}");
+        }
+        let decks: std::collections::BTreeSet<&str> = sources.iter().filter_map(|f| f.path.strip_prefix("slides/")?.split_once('/').map(|(d, _)| d)).collect();
+        assert_eq!(decks.into_iter().collect::<Vec<_>>(), [stamp["deck"].as_str().expect("its deck")], "one deck");
+        for live in ["slides-live.js", "slides-live.css", "slides-route.js"] {
+            assert_eq!(file(&format!("site/{live}")), file(&format!("live/{live}")), "site/{live} is live/{live}: build it again");
+        }
+        let page = text("site/index.html");
+        for at in ["site/s/deck/index.html", "site/s/deck/presenter/index.html"] {
+            assert_eq!(text(at), page, "{at} is the deck's page");
+        }
+        let route = page.find("/slides-route.js").expect("the route");
+        let app = page.find("/assets/index-").expect("the app's script");
+        assert!(route < app && page.contains("/slides-live.js"), "the route runs before the app, and the live layer is on the page");
+        for (at, _) in page.match_indices("\"/assets/") {
+            let asset = page[at + 2..].split('"').next().expect("a quoted path");
+            assert!(SLIDES.file(&format!("site/{asset}")).is_some(), "the page's {asset} is in site/");
+        }
+        assert_eq!(file("applib/notes.mjs"), DOC.file("applib/notes.mjs").expect("doc's notes").bytes, "the notes are the doc's, copied whole");
+        assert!(text("app.mjs").contains("extends withNotes(DurableObject)"), "app.mjs takes the mixin");
+        let m = fragment_core::manifest::parse(file("fragment.json")).expect("slides' fragment.json");
+        assert_eq!(m.operations.keys().map(String::as_str).collect::<Vec<_>>(), ["annotate", "notes", "remove_note", "resolve"]);
+        let present = m.channels.get("present").expect("the present channel");
+        assert!(present.read == Role::Public && present.post == Some(Role::Editor), "editors and up present, whoever sees the deck follows");
+        let raw: serde_json::Value = serde_json::from_slice(file("fragment.json")).expect("json");
+        assert_eq!(raw["immutable"], serde_json::json!(["assets/**"]), "its hashed assets are kept for good, and nothing else");
+    }
 }
