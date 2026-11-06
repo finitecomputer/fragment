@@ -101,8 +101,9 @@ pub mod limits {
     /// Records a channel people may post to keeps (a `post` role in
     /// fragment.json; the oldest go first, whoever appended them): at the
     /// public call limits a public chat would otherwise grow ~38 MB a
-    /// minute, for good.
-    pub const POSTED_KEPT: i64 = 10_000;
+    /// minute, for good. A chat's two channels at about 1.5 KB a record
+    /// hold about 300 MB at most (FIN-415).
+    pub const POSTED_KEPT: i64 = 100_000;
     /// `public`-role calls per minute by one principal that is not a member.
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;
     /// `public`-role calls per minute into one fragment by non-members.
@@ -286,10 +287,11 @@ pub mod limits {
     /// first 4 KiB (its record keeps all of it).
     pub const SEARCH_TEXT_MAX_BYTES: usize = 4 * 1024;
     /// Entries a person's list keeps for one fragment, its newest, and the
-    /// fragment's own log of what it sends: as many as a channel people
-    /// post to keeps records, so search finds every message a chat still
-    /// shows.
-    pub const SEARCH_ENTRIES_PER_FRAGMENT_MAX: i64 = POSTED_KEPT;
+    /// fragment's own log of what it sends: a tenth of what a chat keeps,
+    /// so one long chat leaves room in a person's list for nine others
+    /// (docs/technical-debt-ledger.md, "Search finds a chat's newest
+    /// messages only").
+    pub const SEARCH_ENTRIES_PER_FRAGMENT_MAX: i64 = 10_000;
     /// Entries a person's list keeps in all (ten full chats); past this
     /// the oldest go first, whichever fragment they came from.
     pub const SEARCH_ENTRIES_MAX: i64 = 100_000;
@@ -310,6 +312,7 @@ pub mod limits {
 // A person's list keeps every entry one fragment sends it, and room for
 // more than one fragment; one delivery is a small part of a fragment's.
 const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX < limits::SEARCH_ENTRIES_MAX);
+const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX <= limits::POSTED_KEPT);
 const _: () = assert!((limits::SEARCH_BATCH_MAX as i64) < limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX);
 const _: () = assert!(limits::SEARCH_BATCH_MAX * limits::SEARCH_TEXT_MAX_BYTES < limits::BODY_MAX_BYTES);
 // An editor's write through the API is an app's and more, in a body the

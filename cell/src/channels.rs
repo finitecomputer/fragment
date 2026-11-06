@@ -70,7 +70,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell};
+use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 
 /// Due pending mutations one sweep settles.
@@ -249,7 +249,8 @@ impl FragmentCell {
         let kept = match &declared {
             None if BUILTIN_CHANNELS.contains(&channel) => Some(limits::AUDIT_KEPT),
             None => None,
-            Some(d) => d.post.map(|_| limits::POSTED_KEPT),
+            Some(d) if d.post.is_some() => Some(self.posted_kept()?),
+            Some(_) => None,
         };
         // a message on an app channel goes to its people's search, in this
         // turn, as its read role says (`channel_read_role`, the one source)
@@ -270,6 +271,15 @@ impl FragmentCell {
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// Records a channel people may post to keeps: `limits::POSTED_KEPT`,
+    /// or fewer a test set (`posted-kept`, on fleets with test hooks only).
+    pub(crate) fn posted_kept(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(limits::POSTED_KEPT);
+        }
+        Ok(self.meta(MetaKey::TestPostedKept)?.and_then(|v| v.parse().ok()).unwrap_or(limits::POSTED_KEPT))
     }
 
     /// Appends a keyed record, or finds the one an earlier try of the same

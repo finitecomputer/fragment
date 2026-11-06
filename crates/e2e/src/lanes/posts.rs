@@ -571,7 +571,10 @@ fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// A channel people may post to keeps its newest `limits::POSTED_KEPT`
 /// records (the oldest go, whoever appended them), as `events` does: a
 /// public chat would otherwise grow for good. Filled by a mutation, 64
-/// records a call, then one post more.
+/// records a call. The trim is reached through the `posted-kept` lever
+/// (100,000 posts would take this lane most of an hour): a lower cap, as
+/// an older release's after a rollback, trims everything past it at the
+/// next append, then one record a post.
 fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = s.named(api, owner, "wall")?;
     let c = s.create(api, owner, &name)?;
@@ -579,8 +582,7 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let fill = |id: &str, n: i64| api.op(owner, &name, "fill", id, json!({ "n": n }));
     // the deploy lands: the first fill again until it has
     s.eventually(Duration::from_secs(15), || fill("f0", 64).is_ok_and(|r| r.status == 200));
-    let kept = limits::POSTED_KEPT;
-    let calls = kept / 64 + 1;
+    let calls = 11;
     let mut failed = None;
     for i in 1..calls {
         let r = fill(&format!("f{i}"), 64)?;
@@ -590,29 +592,40 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         }
     }
     let appended = calls * 64;
+    assert!(appended < limits::POSTED_KEPT, "the fill stays under the real cap");
     let first = |api: &Api| records(api, owner, &name, "wall").first().and_then(|r| r["seq"].as_i64());
     let newest = || -> Option<i64> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok()?;
         r.body["channels"].as_array()?.iter().find(|c| c["name"] == "wall")?["seq"].as_i64()
     };
-    // the oldest go as the fragment trims, as each post past them is applied:
-    // the fills' effects (10 048 records) are applied after their commits,
-    // which takes over a minute on a slow runner
-    // and the channel's listing names the newest, read in the same wait (a
-    // read of it once, after, saw a moment before the last fill had landed)
-    let trimmed = s.eventually(Duration::from_secs(180), || first(api) == Some(appended - kept + 1) && newest() == Some(appended));
+    // the fills' effects are applied after their commits; the channel's
+    // listing names the newest, read in the same wait (a read of it once,
+    // after, saw a moment before the last fill had landed)
+    let all = s.eventually(Duration::from_secs(60), || newest() == Some(appended) && first(api) == Some(1));
     s.ok(
-        &format!("a postable channel keeps its newest {kept} records: past them, the oldest go"),
-        failed.is_none() && trimmed,
+        &format!("under its cap ({}) a postable channel keeps every record", limits::POSTED_KEPT),
+        failed.is_none() && all,
         format!("{failed:?}; newest {:?}, oldest kept {:?}", newest(), first(api)),
     );
-    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
-    let trimmed = s.eventually(Duration::from_secs(60), || first(api) == Some(appended - kept + 2));
+    let kept = 640;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": kept })))?;
+    s.ok("(a test lever lowers the cap, as an older release's)", r.status == 200 && r.body["kept"] == kept, &r);
+    let r = post(api, owner, &name, "wall", "past", json!({ "text": "past the cap" }))?;
+    let trimmed = s.eventually(Duration::from_secs(30), || first(api) == Some(appended + 1 - kept + 1));
     s.ok(
-        "a post past them drops one more of the oldest",
+        &format!("a lower cap trims every record past its newest {kept} at the next append"),
         r.status == 200 && r.body["record"]["seq"] == appended + 1 && trimmed,
         format!("{} oldest kept {:?}", r.status, first(api)),
     );
+    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
+    let trimmed = s.eventually(Duration::from_secs(30), || first(api) == Some(appended + 2 - kept + 1));
+    s.ok(
+        "a post past them drops one more of the oldest",
+        r.status == 200 && r.body["record"]["seq"] == appended + 2 && trimmed,
+        format!("{} oldest kept {:?}", r.status, first(api)),
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": 0 })))?;
+    s.ok("(a cap of none is refused)", r.status == 400, &r);
     Ok(())
 }
 

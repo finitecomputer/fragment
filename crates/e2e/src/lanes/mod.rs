@@ -177,7 +177,6 @@ const LANES: &[Lane] = &[
 /// alone, and the other four each take about 455 s (they took 560 to 595
 /// in four shards, with `shell-ui` among them). A fifth shard is one more
 /// runner a run; the day's peak was 20 of the plan's 60.
-/// The slow ones vary: `channels` fills 10 000 records.
 /// Shard 3 holds `triggers` and the sections from the cron
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.

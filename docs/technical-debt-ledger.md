@@ -675,10 +675,25 @@ unfinished design, not debt.
 ## A channel's retention is not declarable
 
 - **Shortcut:** an app channel keeps every record, a postable one its
-  newest `limits::POSTED_KEPT` (cell/src/channels.rs `append`).
-- **Risk:** app channels grow without bound; long chats lose their start.
+  newest `limits::POSTED_KEPT`, 100,000 (cell/src/channels.rs `append`;
+  FIN-415). A chat keeps that many on each of `chat` and `work`.
+- **Risk:** app channels grow without bound; a chat past 100,000 records
+  on a channel loses its start (a tool-heavy turn writes 20 to 60 `work`
+  records, so old turns lose their steps first).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) under a platform ceiling, enforced and tested.
+
+## Search finds a chat's newest messages only
+
+- **Shortcut:** a fragment's search log and each person's list keep its
+  newest `limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX` (10,000) messages,
+  a tenth of what a chat keeps (cell/src/search.rs, principal.rs). A
+  person's list holds `limits::SEARCH_ENTRIES_MAX` (100,000) in all, so
+  one chat as long as it may be would push every other out.
+- **Risk:** a message a long chat still shows is not found by search.
+- **Delete when:** a person's search reads each fragment's own index
+  (no copy bounded by the person's total), or Paul states the limit as
+  policy.
 
 ## A draft past its pace has no e2e
 

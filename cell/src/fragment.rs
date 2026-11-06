@@ -404,6 +404,9 @@ pub(crate) enum MetaKey {
     /// Test fleets only: the capability calls each start of the app facet
     /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
     TestFacetCalls,
+    /// Test fleets only: fewer records a postable channel keeps
+    /// (`posted-kept`), so a lane reaches the trim without 100,000 posts.
+    TestPostedKept,
     TestAdvanceHeld,
     /// Test fleets: while set, a wake with something due waits before it
     /// reads the ledger (jobs.rs `held_woke`), at most `TEST_HOLD_MAX_MS`.
@@ -523,6 +526,7 @@ impl MetaKey {
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestHoldRows => "test_hold_rows",
             MetaKey::TestFacetCalls => "test_facet_calls",
+            MetaKey::TestPostedKept => "test_posted_kept",
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::TestHoldWoke => "test_hold_woke",
             MetaKey::TestWokeHeld => "test_woke_held",
