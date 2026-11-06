@@ -127,10 +127,16 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let bad = api.signed(owner, "GET", &format!("/api/f/{name}/channels/chat?after=0&before=20"), None)?;
     let malformed = api.signed(owner, "GET", &format!("/api/f/{name}/channels/chat?before=no"), None)?;
     s.ok("ambiguous and malformed history cursors are refused", bad.status == 400 && malformed.status == 400, format!("{bad} | {malformed}"));
-    let page = chrome.open(&api.site_url(&name, ""))?;
+    // every read of an older page, from the page's first moment
+    let older = "window.__older = []; const real = window.fetch.bind(window); window.fetch = (url, o) => { const u = String(url); if (u.includes('__channel/') && u.includes('before=')) window.__older.push(u.replace(/^.*__channel\\//, '')); return real(url, o); };";
+    let page = chrome.open_with_script(&api.site_url(&name, ""), older)?;
     super::fit(chrome, &page, 1280, 860, false)?;
-    s.ok("the initial backlog is bounded to 400 and offers earlier messages", super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 400 && !document.getElementById('earlier').hidden"), "");
-    s.ok("a quote outside the initial history has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
+    // (`watching`: the sentinel above the timeline has been seen once, so a
+    // read it would start has started)
+    let opened = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 100 && document.getElementById('scroll').dataset.watching === '1' && document.getElementById('scroll').dataset.history === 'more'");
+    let reads = chrome.eval(&page, "window.__older")?;
+    s.ok("opening a chat past one page reads only its newest page: 100 messages, no older page asked for", opened && reads == json!([]), &reads);
+    s.ok("a quote outside the first page has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
     // The reader's place is the anchor's offset from the top of the scroll
     // box, so the header above it settling (the chat's agent, its name and
     // picture, read after the page opens) moves no one's place; and the
@@ -141,19 +147,36 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // a message is drawn again as a new node when what it shows changes
     // (its poster's name come, say), and a node held from before is then
     // off the page, measured at 0 (CI's "moved: 32.5" was that: the scroll
-    // box's top less the message's offset)
-    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); window.__offset = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; window.__placed = () => window.__offset(document.querySelector('.msg[data-seq=\"' + window.__historySeq + '\"]')); s.scrollTop = 100; return true; })()")?;
-    super::shows(chrome, &page, "document.getElementById('scroll').scrollTop === 100");
-    let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg[data-seq]')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historySeq = m.dataset.seq; window.__historyTop = window.__offset(m); document.getElementById('earlier').click(); return m.dataset.seq; })()")?;
-    let loaded = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 416 && !document.getElementById('earlier').disabled");
+    // box's top less the message's offset). Scrolled to the top, the
+    // reader's message is the first shown; the page above it comes in.
+    let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); window.__offset = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; window.__placed = () => window.__offset(document.querySelector('.msg[data-seq=\"' + window.__historySeq + '\"]')); s.scrollTop = 0; const m = [...document.querySelectorAll('.msg[data-seq]')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historySeq = m.dataset.seq; window.__historyTop = window.__offset(m); return m.dataset.seq; })()")?;
+    let loaded = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 200 && document.getElementById('scroll').dataset.history === 'more'");
     let position = chrome.eval(&page, "Math.abs(window.__placed() - window.__historyTop)")?;
     let ordered = chrome.eval(&page, "(() => { const seqs = [...document.querySelectorAll('.msg[data-seq]')].map(m => Number(m.dataset.seq)); return seqs.every((seq, i) => !i || seq > seqs[i-1]); })()")?;
-    s.ok("loading earlier messages preserves the visible message, ascending order, and no duplicates", loaded && position.as_f64().is_some_and(|n| n < 2.0) && ordered == true, json!({ "anchor": anchor, "moved": position, "ordered": ordered }));
+    s.ok("scrolled to the top, the page above comes in, the reader's message stays where it was, ascending, none twice", loaded && position.as_f64().is_some_and(|n| n < 2.0) && ordered == true, json!({ "anchor": anchor, "moved": position, "ordered": ordered }));
+    // and on up, a page each time the top is reached, to the chat's start
+    let mut shown = 200;
+    for _ in 0..5 {
+        chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+        let more = format!("document.querySelectorAll('.msg.user').length > {shown} || document.getElementById('scroll').dataset.history === 'done'");
+        anyhow::ensure!(super::shows(chrome, &page, &more), "a page more comes in at the top");
+        shown = chrome.eval(&page, "document.querySelectorAll('.msg.user').length")?.as_u64().unwrap_or(0);
+        if chrome.eval(&page, "document.getElementById('scroll').dataset.history")? == "done" {
+            break;
+        }
+    }
+    let reads = chrome.eval(&page, "window.__older.filter((u) => u.startsWith('chat?'))")?;
+    s.ok(
+        "at the chat's first message no more is asked for: every message once, one read a page, nothing said at the top",
+        shown == 416 && reads.as_array().is_some_and(|r| r.len() == 4) && chrome.eval(&page, "document.getElementById('history-status').textContent === '' && document.getElementById('earlier-again').hidden")? == true,
+        json!({ "shown": shown, "reads": reads }),
+    );
     s.ok("loading earlier history fills the quote above its message", super::shows(chrome, &page, "document.querySelector('.msg[data-seq=\"416\"] .quote .quote-text')?.textContent === 'History 000' && !document.querySelector('.msg[data-seq=\"416\"] .quote').disabled"), "");
-    s.ok("the earlier control disappears at the beginning of retained history", chrome.eval(&page, "document.getElementById('earlier').hidden")? == true, "");
     s.ok("earlier messages also bring their older work records beyond the initial 1000", super::shows(chrome, &page, "!!document.querySelector('.notice.stopped[data-turn=\"old-progress\"]')"), "");
     chrome.screenshot(&page, &shots.join("history-desktop.png"))?;
     s.ok("jump to latest appears while reading earlier messages", super::shows(chrome, &page, "!document.getElementById('latest').hidden"), "");
+    // the reader's message where they are now, at the chat's start
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg[data-seq]')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historySeq = m.dataset.seq; window.__historyTop = window.__offset(m); return true; })()")?;
     for i in 0..2 {
         let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("new-{i}"), "body": { "text": format!("New message {i}") } })))?;
         anyhow::ensure!(r.status == 200, "posting a new message: {r}");
@@ -284,8 +307,8 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
 /// reader's message, found by its key, not the node it had: kept by its
 /// node, a node gone was no place, and the earlier messages pushed the
 /// reader down by their height. Method: the chat's page with its
-/// `__people` held, and its earlier messages' read once asked; Load
-/// earlier pressed, the names let come (the reader's message is a new
+/// `__people` held, and its earlier messages' read once asked; scrolled
+/// near the top, the names let come (the reader's message is a new
 /// node), then the earlier messages. As Safari, which has no scroll
 /// anchoring of its own (`overflow-anchor: none`), so what holds the place
 /// is the page's keeping.
@@ -298,21 +321,19 @@ fn place_through_redraw(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &s
           return real(url, o); }; }";
     let page = chrome.open_with_script(&api.site_url(name, ""), hold)?;
     super::fit(chrome, &page, 1280, 860, false)?;
-    let ready = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 400 && !document.getElementById('earlier').hidden && window.__held.people.length > 0");
-    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.style.overflowAnchor = 'none'; s.scrollTop = 100; return true; })()")?;
-    super::shows(chrome, &page, "document.getElementById('scroll').scrollTop === 100");
+    let ready = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 100 && document.getElementById('scroll').dataset.watching === '1' && window.__held.people.length > 0");
     chrome.eval(
         &page,
-        "(() => { const s = document.getElementById('scroll'); const off = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; \
+        "(() => { const s = document.getElementById('scroll'); s.style.overflowAnchor = 'none'; window.__holdEarlier = true; s.scrollTop = 100; \
+         const off = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; \
          const m = [...document.querySelectorAll('.msg[data-seq]')].find((m) => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); \
-         window.__placed = () => off(document.querySelector('.msg[data-seq=\"' + m.dataset.seq + '\"]')); window.__top = off(m); window.__node = m; \
-         window.__holdEarlier = true; document.getElementById('earlier').click(); return true; })()",
+         window.__placed = () => off(document.querySelector('.msg[data-seq=\"' + m.dataset.seq + '\"]')); window.__top = off(m); window.__node = m; return true; })()",
     )?;
     let held = super::shows(chrome, &page, "window.__held.earlier.length === 1");
     chrome.eval(&page, "(window.__peopleLet = true, window.__held.people.forEach((r) => r()), true)")?;
     let redrawn = super::shows(chrome, &page, "!window.__node.isConnected && !!document.querySelector('.msg[data-seq=\"' + window.__node.dataset.seq + '\"]')");
     chrome.eval(&page, "(window.__held.earlier.forEach((r) => r()), true)")?;
-    let loaded = super::shows(chrome, &page, "document.getElementById('earlier').hidden && !document.getElementById('earlier').disabled && document.querySelectorAll('.msg.user').length > 400");
+    let loaded = super::shows(chrome, &page, "document.getElementById('scroll').dataset.history === 'more' && document.querySelectorAll('.msg.user').length > 100");
     let moved = chrome.eval(&page, "Math.abs(window.__placed() - window.__top)")?;
     s.ok(
         "the reader's place holds while earlier messages load though every message is drawn again meanwhile (its poster's name come), with no scroll anchoring of the browser's (as Safari)",
@@ -840,10 +861,10 @@ pub(super) fn work_backfill(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let shown = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 3 && !!document.querySelector('.notice.stopped[data-turn=\"deep-progress\"]')");
-    let seen = chrome.eval(&page, "({ messages: document.querySelectorAll('.msg.user').length, stopped: [...document.querySelectorAll('.notice.stopped')].map((n) => n.dataset.turn), earlier: document.getElementById('earlier').hidden, error: document.getElementById('history-error').textContent })")?;
+    let seen = chrome.eval(&page, "({ messages: document.querySelectorAll('.msg.user').length, stopped: [...document.querySelectorAll('.notice.stopped')].map((n) => n.dataset.turn), history: document.getElementById('scroll').dataset.history, said: document.getElementById('history-status').textContent })")?;
     s.ok(
-        "a chat of few messages and 11,100 records of work after its first: the turn just after that message shows (its work read back page after page), with no earlier messages offered",
-        shown && seen["earlier"] == true && seen["error"] == "",
+        "a chat of few messages and 11,100 records of work after its first: the turn just after that message shows (its work read back page after page), with no earlier messages to read",
+        shown && seen["history"] == "done" && seen["said"] == "",
         &seen,
     );
     chrome.close(page)?;

@@ -46,7 +46,7 @@ ws.addEventListener("message",keep);ws.addEventListener("close",drop);window.__f
        a slot its icon fills -->
   <template id="chat-page">
     <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
-    <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>
+    <div class="scroll" id="scroll"><div class="history"><div id="earlier"></div><span id="history-status" role="status"></span><button type="button" id="earlier-again" hidden>Try again</button></div><div class="column" id="messages"></div></div>
     <div class="latest-wrap"><button type="button" id="latest" hidden>Jump to latest</button></div>
     <div class="composer-wrap">
       <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
