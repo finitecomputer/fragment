@@ -55,12 +55,14 @@ for:
 `node scripts/build.mjs` builds the deck into `site/`, and the fragment
 serves `site/`. Never edit `site/` by hand: the next build replaces it.
 
-- The first build on a computer installs open-slide (about 250 MB, about
-  15 s) from the deck's lockfile into `/tmp/open-slide/`, outside your
-  saved disk, and links it as `node_modules`. After a restart the first
-  build installs it again. Later builds take about a second.
-- Never `npm install` in the deck's folder: a `node_modules` there is
-  saved with your disk.
+- The first build installs open-slide (about 250 MB, about 15 s) from the
+  deck's lockfile into `~/.local/share/open-slide/`, and keeps it there:
+  every deck you build reuses it, so later builds take about a second and
+  need no network. It is linked into the deck as `node_modules`. When a
+  deck's lockfile is newer, its first build installs that version and
+  removes the old one. npm's download cache is removed after each install.
+- Never `npm install` in the deck's folder: it would put a second copy of
+  the toolchain there.
 - Keep `package.json` and `package-lock.json` as they are. Your computer
   installs only npm releases at least 14 days old, so a newer open-slide
   may not install yet.
