@@ -36,6 +36,107 @@ struct WorkingIndicatorTests {
         #expect(WorkingActivity(timeline).cards[first.id]?.until == 6000)
     }
 
+    @Test func resultsConsumeCallsOnceWithIDsBeforeArguments() throws {
+        struct Pairing {
+            let calls: [(id: String, args: String, response: String)]
+            let ends: [(id: String, args: String, response: String?)]
+            let open: [Int]
+        }
+        let cases: [Pairing] = [
+            .init(calls: [("c1", "ls", "r1"), ("c2", "ls", "r1")], ends: [("c1", "ls", "r1")], open: [1]),
+            .init(calls: [("c1", "ls", "r1"), ("c2", "ls", "r1")], ends: [("c2", "ls", "r1")], open: [0]),
+            .init(calls: [("c0", "ls", "r1"), ("c0", "ls", "r1")], ends: [("c0", "ls", "r1")], open: [1]),
+            .init(calls: [("c0", "first", "r1"), ("c0", "second", "r1")], ends: [("c0", "second", "r1")], open: [1]),
+            .init(calls: [("c1", "ls", "r1"), ("c2", "ls", "r1")], ends: [("renamed", "ls", "r1")], open: [1]),
+            // Reserve the later exact ID before the earlier fallback result.
+            .init(calls: [("c1", "first", "r1"), ("c2", "second", "r1")], ends: [("renamed", "first", "r1"), ("c1", "second", "r1")], open: [1]),
+            .init(calls: [("c0", "ls", "r1"), ("c0", "ls", "r2")], ends: [("c0", "ls", "r2")], open: [0]),
+            .init(calls: [("c0", "ls", "r1"), ("c0", "ls", "r2")], ends: [("c0", "ls", nil)], open: [1]),
+            .init(calls: [("c0", "ls", "r1"), ("c0", "ls", "r2")], ends: [("renamed", "ls", nil)], open: [1]),
+            .init(calls: [("c0", "ls", "r1")], ends: [("c0", "ls", "another-response")], open: [0])
+        ]
+        for fixture in cases {
+            var records = [try work(1, #"{"kind":"turn.start","turn":"paired"}"#)]
+            for (index, call) in fixture.calls.enumerated() {
+                records.append(activityRecord(Int64(index + 2), kind: "turn.call", id: call.id, args: call.args, response: .string(call.response)))
+            }
+            for (index, end) in fixture.ends.enumerated() {
+                records.append(activityRecord(Int64(index + 10), kind: "turn.step", id: end.id, args: end.args, response: end.response.map(JSONValue.string)))
+            }
+            // Neither another agent nor another turn can consume our calls.
+            records.append(activityRecord(30, kind: "turn.step", id: fixture.calls[0].id, args: fixture.calls[0].args, response: .string(fixture.calls[0].response), agent: "npub1other"))
+            records.append(activityRecord(31, kind: "turn.step", id: fixture.calls[0].id, args: fixture.calls[0].args, response: .string(fixture.calls[0].response), turn: "other"))
+            var timeline = Timeline()
+            for record in records { timeline.insert(record) }
+            let expected = fixture.open.map { records[$0 + 1].id }.sorted()
+            func calls(_ activity: WorkingActivity) -> [ToolStep] {
+                activity.cards.values.filter { $0.turn == TurnKey(agent: "npub1preview", id: "paired") }
+                    .flatMap(\.steps).filter { $0.record.body["kind"].string == "turn.call" }
+            }
+            let initial = WorkingActivity(timeline)
+            #expect(calls(initial).map(\.id).sorted() == expected)
+            var replay = Timeline()
+            for record in records.reversed() { replay.insert(record); replay.insert(record) }
+            #expect(WorkingActivity(replay) == initial)
+            // Interruption retains exactly the unended calls as uncertain.
+            let stop = try work(40, #"{"kind":"turn.end","turn":"paired","outcome":"stopped"}"#)
+            timeline.insert(stop); replay.insert(stop); replay.insert(stop)
+            let interrupted = WorkingActivity(timeline)
+            #expect(calls(interrupted).map(\.id).sorted() == expected)
+            #expect(calls(interrupted).allSatisfy { $0.maybe && !$0.running })
+            #expect(WorkingActivity(replay) == interrupted)
+        }
+        // Explicit null is not the legacy omitted field.
+        var nullResponse = Timeline()
+        nullResponse.insert(try work(1, #"{"kind":"turn.start","turn":"paired"}"#))
+        nullResponse.insert(activityRecord(2, kind: "turn.call", id: "c1", args: "ls", response: .string("r1")))
+        nullResponse.insert(activityRecord(3, kind: "turn.step", id: "c1", args: "ls", response: .null))
+        #expect(WorkingActivity(nullResponse).cards.values.flatMap(\.steps).contains { $0.id == "work:2" && $0.running })
+    }
+
+    private func activityRecord(_ seq: Int64, kind: String, id: String, args: String, response: JSONValue?, agent: String = "npub1preview", turn: String = "paired") -> ChannelRecord {
+        var body: [String: JSONValue] = ["kind": .string(kind), "turn": .string(turn), "tool_call_id": .string(id), "tool": .string("terminal"), "category": .string("shell"), "args": .string(args)]
+        if let response { body["response"] = response }
+        if kind == "turn.step" { body["step"] = .number(Double(seq)); body["status"] = .string("completed"); body["ok"] = .bool(true) }
+        return .init(channel: "work", seq: seq, at: seq * 1000, principal: agent, kind: "message", body: .object(body))
+    }
+
+    @Test func anIntermediateReplyClosesTheCardButNotAnUnendedCall() throws {
+        let start = try work(1, #"{"kind":"turn.start","turn":"paired"}"#)
+        let step = activityRecord(2, kind: "turn.step", id: "done", args: "ls", response: .string("r1"))
+        let reply = ChannelRecord(channel: "chat", seq: 1, at: 3000, principal: "npub1preview", kind: "message", body: .object(["turn": .string("paired"), "text": .string("Checking the next thing")]))
+        var timeline = Timeline()
+        timeline.insert(start); timeline.insert(step)
+        #expect(WorkingActivity(timeline).cards[step.id]?.running == true)
+        timeline.insert(reply); timeline.insert(reply)
+        let afterReply = WorkingActivity(timeline)
+        #expect(afterReply.cards[step.id]?.running == false)
+        #expect(afterReply.cards[step.id]?.until == 3000)
+        #expect(afterReply.rows.map(\.id) == [step.id, reply.id])
+        #expect(afterReply.hints.map(\.kind) == [.working(asker: nil)])
+        var replay = Timeline()
+        for record in [reply, step, reply, start, step] { replay.insert(record) }
+        #expect(WorkingActivity(replay) == afterReply)
+        // A later unended call remains live after the reply, in its own card.
+        let call = activityRecord(4, kind: "turn.call", id: "next", args: "pwd", response: .string("r2"))
+        timeline.insert(call); replay.insert(call)
+        let next = WorkingActivity(timeline)
+        #expect(next.cards[step.id]?.until == 3000)
+        #expect(next.cards[call.id]?.running == true)
+        #expect(next.hints.isEmpty)
+        #expect(WorkingActivity(replay) == next)
+        // A replayed reply later than an open call does not end that call.
+        let laterReply = ChannelRecord(channel: "chat", seq: 2, at: 5000, principal: reply.principal, kind: reply.kind, body: reply.body)
+        timeline.insert(laterReply); replay.insert(laterReply); replay.insert(laterReply)
+        #expect(WorkingActivity(timeline).cards[call.id]?.running == true)
+        #expect(WorkingActivity(timeline) == WorkingActivity(replay))
+        let end = try work(6, #"{"kind":"turn.end","turn":"paired","outcome":"idle"}"#)
+        timeline.insert(end); replay.insert(end)
+        #expect(WorkingActivity(timeline).cards[step.id]?.until == 3000)
+        #expect(WorkingActivity(timeline).cards.values.allSatisfy { !$0.running })
+        #expect(WorkingActivity(timeline) == WorkingActivity(replay))
+    }
+
     @Test func completedCallsCountFromTheTurnStartAndDoNotEndAnEarlierCard() throws {
         var timeline = Timeline()
         for (seq, body) in [

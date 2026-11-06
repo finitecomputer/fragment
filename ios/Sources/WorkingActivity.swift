@@ -124,16 +124,28 @@ struct WorkingActivity: Equatable {
                 default: break
                 }
             }
-            let after = max(own.last?.at ?? 0, replies[key]?.last?.at ?? 0)
-            for (callIndex, call) in calls.enumerated() {
-                // A provider reusing call_0 in another response never ends
-                // this call; a renamed id may still match tool + arguments.
-                let ended = steps.contains { step in
-                    guard step.body["response"] == call.body["response"] else { return false }
-                    return (call.body["tool_call_id"].string != nil && step.body["tool_call_id"] == call.body["tool_call_id"])
-                        || (step.body["tool"] == call.body["tool"] && step.body["args"] == call.body["args"])
+            // Match one result to one call, reserving all exact IDs before
+            // falling back to tool/arguments (chat.js unended / bridge note.rs).
+            // Only an omitted response permits legacy cross-response matching.
+            var open = Set(calls.indices)
+            var paired = Set<Int>()
+            for byID in [true, false] {
+                for index in steps.indices where !paired.contains(index) {
+                    let step = steps[index]
+                    if let match = calls.indices.first(where: { candidate in
+                        guard open.contains(candidate) else { return false }
+                        let call = calls[candidate]
+                        if case .object(let body) = step.body, let response = body["response"], response != call.body["response"] { return false }
+                        if byID { return step.body["tool_call_id"].string != nil && step.body["tool_call_id"] == call.body["tool_call_id"] }
+                        return step.body["tool"] == call.body["tool"] && step.body["args"] == call.body["args"]
+                    }) {
+                        open.remove(match)
+                        paired.insert(index)
+                    }
                 }
-                if ended { continue }
+            }
+            let after = max(own.last?.at ?? 0, replies[key]?.last?.at ?? 0)
+            for (callIndex, call) in calls.enumerated() where open.contains(callIndex) {
                 let live = ready && state.running && call.body["response"].string == latestResponse
                 if live && (waiting.contains(key) || asked[key] != nil) { continue }
                 items.append(Item(record: call, at: live ? after : call.at, order: live ? Int64.max - Int64(calls.count) + Int64(callIndex) : call.seq,
@@ -176,8 +188,9 @@ struct WorkingActivity: Equatable {
                 return $0.channel == "work" && ["turn.step", "turn.prompt", "turn.notice"].contains($0.body["kind"].string ?? "")
                     && ($0.at > last.at || ($0.at == last.at && $0.seq > last.seq))
             }
+            let replyAfter = (replies[key]?.last?.at ?? Int64.min) > last.at
             let runs = ready && timeline.turns[key]?.running == true
-                && (last.seq == own.last?.seq || (last.body["kind"].string == "turn.call" && !card.steps.last!.maybe))
+                && ((last.seq == own.last?.seq && !replyAfter) || (last.body["kind"].string == "turn.call" && !card.steps.last!.maybe))
             if !runs {
                 let end = own.last { $0.body["kind"].string == "turn.end" }?.at
                 card.until = [subsequent?.at, end].compactMap { $0 }.min() ?? own.last?.at ?? last.at
