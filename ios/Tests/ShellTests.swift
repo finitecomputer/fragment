@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import UIKit
+import ImageIO
 import UniformTypeIdentifiers
 import Synchronization
 import Testing
@@ -315,9 +316,17 @@ struct ShellTests {
         let png = try #require(picture.pngData())
         let kept = try AttachmentInput.image(png, type: .png, name: "photo-1")
         #expect(kept == OutgoingFile(data: png, name: "photo-1.png", type: "image/png"))
-        let heic = try #require(picture.heicData())
-        let made = try AttachmentInput.image(heic, type: .heic, name: "photo-2.heic")
-        #expect(made.type == "image/jpeg" && made.name == "photo-2.jpg" && UIImage(data: made.data) != nil && made.data != heic)
+        // a photo's HEIC, turned (orientation 6), becomes a JPEG that keeps its turn
+        let heic = NSMutableData()
+        let out = try #require(CGImageDestinationCreateWithData(heic, UTType.heic.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(out, try #require(picture.cgImage), [kCGImagePropertyOrientation: 6] as CFDictionary)
+        #expect(CGImageDestinationFinalize(out))
+        let made = try AttachmentInput.image(heic as Data, type: .heic, name: "photo-2.heic")
+        #expect(made.type == "image/jpeg" && made.name == "photo-2.jpg" && UIImage(data: made.data) != nil)
+        let source = try #require(CGImageSourceCreateWithData(made.data as CFData, nil))
+        #expect(CGImageSourceGetType(source) as String? == UTType.jpeg.identifier)
+        let header = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        #expect(header?[kCGImagePropertyOrientation] as? Int == 6, "its metadata goes with it, as the web's upload keeps a file's")
         #expect(throws: APIError.self) { try AttachmentInput.image(Data("not a picture".utf8), type: .heic, name: "x") }
         #expect(throws: APIError.self) { try AttachmentInput.image(Data(), type: .png, name: "empty") }
         #expect(throws: APIError.self) { try AttachmentInput.file(Data(count: ChatAttachment.bytesMax + 1), name: "big.bin", type: nil) }
@@ -335,12 +344,43 @@ struct ShellTests {
         let board = UIPasteboard.withUniqueName()
         defer { UIPasteboard.remove(withName: board.name) }
         board.items = [[UTType.png.identifier: png], [UTType.plainText.identifier: "just words"], [UTType.heic.identifier: heic]]
-        let files = AttachmentInput.pasted(board)
-        #expect(files.map(\.name) == ["pasted-image-1.png", "pasted-image-3.jpg"])
+        let files = AttachmentInput.pasted(AttachmentInput.snapshot(board))
+        #expect(files.map(\.name) == ["pasted-image-1.png", "pasted-image-2.jpg"])
         // the pasteboard hands a PNG back as it holds it, a picture all the same
         #expect(files.map(\.type) == ["image/png", "image/jpeg"] && files.allSatisfy { UIImage(data: $0.data) != nil })
         board.items = [[UTType.plainText.identifier: "only words"]]
-        #expect(AttachmentInput.pasted(board).isEmpty)
+        #expect(AttachmentInput.snapshot(board).isEmpty)
+    }
+
+    /// Attaching is one at a time, reserved before anything is read: while
+    /// a chosen photo still loads, nothing sends and nothing more attaches;
+    /// once it is put, it goes with the message.
+    @Test func attachingHoldsTheComposerUntilItsFilesArePut() async throws {
+        let stub = Stub { seen, _ in
+            seen.method == "PUT" ? (200, #"{"ok":true,"stored":true}"#) : (404, #"{"error":"not_found","message":"no route"}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        session.edit("A caption")
+        let loading = Gate()
+        #expect(session.beginAttaching(1) && session.attaching)
+        let attach = Task {
+            await session.attach {
+                await Task.detached { loading.pass() }.value
+                return [OutgoingFile(data: Data("photo".utf8), name: "photo-1.jpg", type: "image/jpeg")]
+            }
+        }
+        // the photo still loading: Send waits, and another paste is refused
+        await session.send()
+        #expect(session.pending.isEmpty && session.composer == "A caption" && session.error == "Wait for the files being attached.")
+        #expect(!session.beginAttaching(1) && session.error == "Wait for the files being attached, then add more.")
+        loading.open()
+        await attach.value
+        #expect(!session.attaching && session.attachments.map(\.name) == ["photo-1.jpg"])
+        #expect(stub.seen.filter { $0.method == "PUT" }.count == 1)
+        // a reservation past eight a message is refused before anything is read
+        #expect(!session.beginAttaching(ChatAttachment.countMax) && !session.attaching)
     }
 
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {

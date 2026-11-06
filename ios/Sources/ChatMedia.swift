@@ -2,6 +2,7 @@ import SwiftUI
 import CryptoKit
 import AVFoundation
 import UniformTypeIdentifiers
+import ImageIO
 
 struct ChatAttachment: Codable, Identifiable, Equatable, Sendable {
     let sha256: String
@@ -32,10 +33,16 @@ struct OutgoingFile: Equatable, Sendable {
 /// (templates/chat/site/chat.js `addFiles`): any file, from 1 byte to
 /// `ChatAttachment.bytesMax`, at most `countMax` a message. A picture the
 /// web shows as one (media.js `IMAGE`: PNG, JPEG, WebP, GIF) goes as it is;
-/// any other picture (a photo's HEIC) as JPEG, which the web and agents read.
-enum AttachmentInput {
+/// any other picture (a photo's HEIC) as JPEG, which the web and agents read,
+/// its metadata (orientation and all) carried over as the web's upload
+/// carries a file's. Pictures are converted off the main actor (callers run
+/// these in a task of their own), within `pixelsMax` read before decoding.
+nonisolated enum AttachmentInput {
     static let shownImages: [UTType] = [.png, .jpeg, .webP, .gif]
     static let jpegQuality = 0.9
+    /// Pixels a picture converted holds at most, read from its header before
+    /// any decoding: a bound on the memory a conversion takes.
+    static let pixelsMax = 100_000_000
 
     /// A file as picked, its type from its name's extension.
     static func file(_ data: Data, name: String, type: UTType?) throws -> OutgoingFile {
@@ -48,32 +55,54 @@ enum AttachmentInput {
         if let shown = shownImages.first(where: { type.conforms(to: $0) }), let mime = shown.preferredMIMEType {
             return try bounded(OutgoingFile(data: data, name: named(name, shown), type: mime))
         }
-        guard type.conforms(to: .image), let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: jpegQuality) else {
+        guard type.conforms(to: .image), !data.isEmpty, data.count <= 4 * ChatAttachment.bytesMax,
+              let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
+              let header = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = header[kCGImagePropertyPixelWidth] as? Int, let height = header[kCGImagePropertyPixelHeight] as? Int else {
             throw APIError.server("This picture could not be read.")
         }
-        return try bounded(OutgoingFile(data: jpeg, name: named(name, .jpeg), type: "image/jpeg"))
+        guard width * height <= pixelsMax else { throw APIError.server("This picture is too large to attach.") }
+        let jpeg = NSMutableData()
+        guard let out = CGImageDestinationCreateWithData(jpeg, UTType.jpeg.identifier as CFString, 1, nil) else {
+            throw APIError.server("This picture could not be read.")
+        }
+        CGImageDestinationAddImageFromSource(out, source, 0, [kCGImageDestinationLossyCompressionQuality: jpegQuality] as CFDictionary)
+        guard CGImageDestinationFinalize(out) else { throw APIError.server("This picture could not be read.") }
+        return try bounded(OutgoingFile(data: jpeg as Data, name: named(name, .jpeg), type: "image/jpeg"))
     }
 
-    /// The pictures on a pasteboard, each as `image` makes it: a type the
-    /// web shows first, then any picture's data, then an image object (as
-    /// PNG, or JPEG past the bound). At most `countMax`.
-    static func pasted(_ pasteboard: UIPasteboard) -> [OutgoingFile] {
-        var files: [OutgoingFile] = []
-        for (index, item) in pasteboard.items.prefix(ChatAttachment.countMax).enumerated() {
-            let name = "pasted-image-\(index + 1)"
-            let types = item.keys.compactMap { UTType($0) }.filter { $0.conforms(to: .image) }
-            let ordered = types.sorted { a, b in rank(a) < rank(b) }
-            var made: OutgoingFile?
-            for type in ordered {
-                if let data = item[type.identifier] as? Data, let file = try? image(data, type: type, name: name) { made = file; break }
-                if let picture = item[type.identifier] as? UIImage { made = try? fromImage(picture, name: name); if made != nil { break } }
+    /// A pasteboard's pictures, read on the main actor (where a pasteboard
+    /// is read) as they are held: for each item its best representation, a
+    /// type the web shows first, then any picture's data, then an image
+    /// object. At most `countMax`. `pasted` converts them, off it.
+    @MainActor static func snapshot(_ pasteboard: UIPasteboard) -> [PastedPicture] {
+        pasteboard.items.prefix(ChatAttachment.countMax).compactMap { item in
+            let types = item.keys.compactMap { UTType($0) }.filter { $0.conforms(to: .image) }.sorted { rank($0) < rank($1) }
+            for type in types {
+                if let data = item[type.identifier] as? Data { return PastedPicture(data: data, type: type, image: nil) }
             }
-            if let made { files.append(made) }
+            for type in types {
+                if let image = item[type.identifier] as? UIImage { return PastedPicture(data: nil, type: nil, image: image) }
+            }
+            return nil
         }
-        return files
+    }
+
+    /// The pictures pasted, each as `image` makes it (an image object as
+    /// PNG, or JPEG past the bound); one that cannot be made is left out.
+    static func pasted(_ pictures: [PastedPicture]) -> [OutgoingFile] {
+        pictures.enumerated().compactMap { index, picture in
+            let name = "pasted-image-\(index + 1)"
+            if let data = picture.data, let type = picture.type { return try? image(data, type: type, name: name) }
+            if let object = picture.image { return try? fromImage(object, name: name) }
+            return nil
+        }
     }
 
     static func fromImage(_ picture: UIImage, name: String) throws -> OutgoingFile {
+        guard picture.size.width * picture.scale * picture.size.height * picture.scale <= CGFloat(pixelsMax) else {
+            throw APIError.server("This picture is too large to attach.")
+        }
         if let png = picture.pngData(), png.count <= ChatAttachment.bytesMax { return try image(png, type: .png, name: name) }
         guard let jpeg = picture.jpegData(compressionQuality: jpegQuality) else { throw APIError.server("This picture could not be read.") }
         return try image(jpeg, type: .jpeg, name: name)
@@ -90,6 +119,15 @@ enum AttachmentInput {
         guard !file.data.isEmpty, file.data.count <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
         return file
     }
+}
+
+/// A picture on the pasteboard, as it was held: its data and type, or an
+/// image object.
+struct PastedPicture: @unchecked Sendable {
+    let data: Data?
+    let type: UTType?
+    /// UIImage is immutable, and read here only to be encoded.
+    let image: UIImage?
 }
 
 extension FragmentAPI {
