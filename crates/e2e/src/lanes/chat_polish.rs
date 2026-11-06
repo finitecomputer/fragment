@@ -1079,14 +1079,15 @@ pub(super) fn history_overlaps(s: &mut Suite, api: &Api, owner: &Keys, session: 
     let hooks = |fail: u32, hold: bool| {
         format!(
             "if (window === window.top) {{ window.__failWork = {fail}; window.__holdWork = {hold}; window.__heldWork = false; let go; const gate = new Promise((r) => {{ go = r; }}); window.__letWork = () => go(); \
-             const real = window.fetch.bind(window); window.fetch = async (url, o) => {{ const u = String(url); if (u.includes('__channel/work') && u.includes('before=')) {{ \
+             window.__workReads = []; const real = window.fetch.bind(window); window.fetch = async (url, o) => {{ const u = String(url); if (u.includes('__channel/work') && u.includes('before=')) {{ window.__workReads.push(u.replace(/^.*before=/, '')); \
              if (window.__failWork > 0) {{ window.__failWork -= 1; throw new TypeError('Failed to fetch'); }} if (window.__holdWork) {{ window.__holdWork = false; window.__heldWork = true; await gate; }} }} return real(url, o); }}; }}"
         )
     };
     let to_start = |chrome: &mut Browser, page: &crate::browser::Page| -> Result<bool> {
         for _ in 0..3 {
             chrome.eval(page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
-            if super::shows(chrome, page, &format!("{history} === 'done' && {count} === 160")) {
+            // (every message drawn; the history says done once their work is in)
+            if super::shows(chrome, page, &format!("{count} === 160")) {
                 return Ok(true);
             }
         }
@@ -1103,7 +1104,7 @@ pub(super) fn history_overlaps(s: &mut Suite, api: &Api, owner: &Keys, session: 
     s.ok(
         "the first read of work back held while the reader reads up to the chat's start: let go, it goes on to the start's work",
         held && started && came,
-        json!({ "held": held, "started": started, "seen": chrome.eval(&page, &format!("({{ deep: {deep}, near: {near}, history: {history}, said: document.getElementById('history-status').textContent }})"))? }),
+        json!({ "held": held, "started": started, "seen": chrome.eval(&page, &format!("({{ deep: {deep}, near: {near}, history: {history}, said: document.getElementById('history-status').textContent, reads: window.__workReads }})"))? }),
     );
     chrome.close(page)?;
 
@@ -1123,7 +1124,7 @@ pub(super) fn history_overlaps(s: &mut Suite, api: &Api, owner: &Keys, session: 
     s.ok(
         "the same during a read of work tried again after one failed: let go, it goes on to the start's work",
         held && started && came,
-        json!({ "held": held, "started": started, "seen": chrome.eval(&page, &format!("({{ deep: {deep}, near: {near}, history: {history}, said: document.getElementById('history-status').textContent }})"))? }),
+        json!({ "held": held, "started": started, "seen": chrome.eval(&page, &format!("({{ deep: {deep}, near: {near}, history: {history}, said: document.getElementById('history-status').textContent, reads: window.__workReads }})"))? }),
     );
     chrome.close(page)?;
 
