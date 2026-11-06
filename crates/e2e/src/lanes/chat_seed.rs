@@ -8,7 +8,8 @@
 //! answering, and a writer of the repo while code.storage is down fails
 //! as code.storage does, leaving the chat as it was. Replay: the alarm's
 //! pass again changes nothing. Races: a writer racing the seed after the
-//! answer, and a delete racing it.
+//! answer, and a delete racing it; and the name made again over its kept
+//! repo, whose old live a refresh never takes for the new life's.
 
 use std::time::Duration;
 
@@ -304,6 +305,51 @@ fn unfinished_seeds(s: &mut Suite, api: &Api, owner: &crate::Keys, session: &str
         first.status == 200 && deploying && deleted.status == 200 && read && again == "200" && healed
             && manifest == json!({ "template": "chat", "meta": { "title": "Seeded after its deploy" } }) && events(&gone, "template").len() == 1,
         format!("{deleted} {again} {st} {manifest}"),
+    );
+    // ---- a deleted chat's repo kept with its live, the name made again by
+    // its owner, its template's commit failing (#1072): a refresh lands its
+    // template first, as any writer does, and never pins the deleted life's
+    // live for this one's, so no later pass takes that live for its template
+    // landed; with commits back, the alarm's pass lands its own
+    let kept = chat(s, "seed-kept", "The first life")?;
+    let first_landed = s.eventually(wait, || status(&kept)["pins"]["live"].is_string());
+    let old_live = status(&kept)["pins"]["live"].as_str().unwrap_or("").to_string();
+    let url = repo_url(s, &kept).unwrap_or_default();
+    let packs = s.fake.requests(&url, "POST commit-pack");
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{kept}"), None)?;
+    s.fake.fail_commit_packs(true);
+    let again = api.create_with(owner, json!({ "name": kept, "template": "chat", "title": "The second life" }));
+    let again = match again {
+        Ok(r) => r,
+        Err(e) => {
+            s.fake.fail_commit_packs(false);
+            return Err(e);
+        }
+    };
+    s.owned(&again.body, owner);
+    // its seed found the kept repo, and its commit was refused
+    let tried = s.eventually(wait, || s.fake.requests(&url, "POST commit-pack") > packs);
+    let refreshed = api.signed(owner, "POST", &format!("/api/f/{kept}/refresh"), Some(&json!({})))?;
+    poll_now(&kept)?;
+    let pending_st = status(&kept);
+    let landed_while_down = events(&kept, "template");
+    s.fake.fail_commit_packs(false);
+    s.ok(
+        "a deleted chat's name made again by its owner, its repo kept with its live and its own template's commit refused: a refresh fails as that commit does (502), and nothing pins the old live as this life's or lands its template",
+        first_landed && deleted.status == 200 && again.status == 200 && tried && refreshed.status == 502
+            && pending_st["pins"]["live"].is_null() && landed_while_down.is_empty(),
+        format!("{refreshed} / {pending_st} / {landed_while_down:?}"),
+    );
+    poll_now(&kept)?;
+    let healed = s.eventually(wait, || {
+        let st = status(&kept);
+        st["pins"]["live"].as_str().is_some_and(|live| live != old_live) && st["code"]["sha"] == st["pins"]["live"]
+    });
+    let st = status(&kept);
+    s.ok(
+        "commits back, its own template lands: committed and deployed in this life, its title on main, live past the old one and installed from it",
+        healed && manifest_at(s, &url) == json!({ "template": "chat", "meta": { "title": "The second life" } }) && events(&kept, "template").len() == 1,
+        format!("{st} {}", manifest_at(s, &url)),
     );
     pending_install_held(s, api, owner)
 }

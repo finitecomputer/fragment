@@ -247,15 +247,13 @@ impl FragmentCell {
     }
 
     /// Its repo, for a writer of it (a commit, a deploy, a storage token's
-    /// push): while its template is still to land, the same seed the
-    /// answer and the alarm run (one at a time: `seeding`) lands it first,
-    /// its repo, commit, deploy and install, so a write lands on top of
-    /// its template, never under it. Its repo alone is not enough: the
-    /// seed makes it before it commits (publish.rs `seeds_later`), and a
-    /// commit or deploy may have failed after. A seed that cannot land
-    /// fails the writer as code.storage failed it.
+    /// push): while its template is still to land (`Stage::waits_template`),
+    /// the same seed the create and the alarm run (one at a time:
+    /// `seeding`) lands it first, its repo, commit, deploy and install, so a
+    /// write lands on top of its template, never under it. A seed that
+    /// cannot land fails the writer as code.storage failed it.
     pub(crate) async fn repo_ready(&self) -> CellResult<String> {
-        if self.meta(MetaKey::TemplatePending)?.is_some() {
+        if self.stage()?.waits_template() {
             self.seed().await?;
         }
         self.must(MetaKey::Repo)
@@ -739,8 +737,8 @@ impl FragmentCell {
             }
             match self.meta(MetaKey::PinLive)? {
                 Some(live) => self.install_code(Some(&live)).await?,
-                // before its first commit (publish.rs `seeds_later`): its template from the release again
-                None if self.meta(MetaKey::TemplatePending)?.is_some() => self.install_pending().await?,
+                // before its first deploy (publish.rs `seeds_later`): its template from the release again
+                None if self.stage()?.waits_template() => self.install_pending().await?,
                 None => self.install_code(None).await?,
             }
             self.search_fence()?;
@@ -813,7 +811,7 @@ impl FragmentCell {
         // code.storage, whose outage then leaves a chat serving its
         // template from the release (`install_pending`), repo made or not;
         // asked once the seed has landed
-        if facts.pins_checked || facts.repo.is_none() || self.meta(MetaKey::TemplatePending)?.is_some() {
+        if facts.pins_checked || self.stage()?.waits_template() {
             return Ok(());
         }
         let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();
@@ -839,7 +837,15 @@ impl FragmentCell {
     /// move was followed when it was made or refreshed, so a quiet pass
     /// asks code.storage nothing.
     pub(crate) async fn poll(&self) {
-        if let Err(e) = self.interpret(&REFS).await {
+        let polled = match self.stage() {
+            // its template still to land: only its seed moves its pins
+            // (`ensure_pins`), and a branch there now is a deleted life's,
+            // its repo kept (fragment_core::seed)
+            Ok(stage) if stage.waits_template() => return,
+            Ok(_) => self.interpret(&REFS).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = polled {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
         }
     }
@@ -852,18 +858,8 @@ impl FragmentCell {
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
-        #[derive(Deserialize)]
-        struct Busy {
-            pending: i64,
-            running: i64,
-        }
-        let rows: Vec<Busy> = self.typed(
-            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?) AS pending,
-               EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running",
-            vec![MetaKey::TemplatePending.key().into()],
-        )?;
-        let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        Ok(self.pins_may_lag()? || b.pending != 0 || b.running != 0)
+        let running = self.count("SELECT EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS n")? != 0;
+        Ok(self.pins_may_lag()? || self.stage()?.waits_template() || running)
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token
@@ -882,9 +878,13 @@ impl FragmentCell {
     }
 
     /// `POST /api/refresh`: `refs` read again (the one its writer moved,
-    /// or both), their moves taken before it answers.
+    /// or both), their moves taken before it answers. Its template still to
+    /// land, that lands first, as for any writer (`repo_ready`): till then
+    /// nothing this life wrote is there, and a branch there is a deleted
+    /// life's, its repo kept, which pinned would be served as this one's.
     pub(crate) async fn refresh(&self, caller: &Caller, refs: &[&str]) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.repo_ready().await?;
         let moved = self.interpret(refs).await?;
         let refs: serde_json::Map<String, Value> = moved
             .into_iter()
