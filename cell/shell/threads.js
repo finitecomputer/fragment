@@ -67,20 +67,36 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
   // their agents asked another (its `to`, and its `return_to`), its turn's
   // start and end when they are among them.
   async function threadsOf(name) {
-    const [said, work] = await Promise.all([
-      api("GET", `/api/f/${seg(name)}/channels/chat?before=${NEWEST}&limit=${CHAT_RECORDS}`),
-      api("GET", `/api/f/${seg(name)}/channels/work?before=${NEWEST}&limit=${WORK_RECORDS}`),
-    ]);
+    const [said, work] = await Promise.all([newest(name, "chat", CHAT_RECORDS), newest(name, "work", WORK_RECORDS)]);
     const mine = new Set(ownAgents().map((a) => a.identity));
-    const turns = (work.records ?? []).map((r) => ({ at: r.at, principal: r.principal, ...r.body }));
+    const turns = work.map((r) => ({ at: r.at, principal: r.principal, ...r.body }));
     const out = [];
-    for (const r of said.records ?? []) {
+    for (const r of said) {
       const b = r.body ?? {};
       const asked = Array.isArray(b.to) ? b.to[0] : null;
       if (!mine.has(r.principal) || !mine.has(asked) || typeof b.return_to !== "string" || typeof b.text !== "string") continue;
       const start = turns.find((t) => t.kind === "turn.start" && t.principal === asked && t.cause?.channel === "chat" && t.cause?.seq === r.seq);
       const end = start && turns.find((t) => t.kind === "turn.end" && t.principal === asked && t.turn === start.turn);
       out.push({ pair: name, seq: r.seq, asker: r.principal, asked, text: b.text.trim().split("\n")[0], returnTo: b.return_to, at: r.at, turn: start?.turn ?? null, startAt: start?.at ?? null, end: end ? { outcome: end.outcome, error: end.error ?? null, at: end.at } : null });
+    }
+    return out;
+  }
+
+  // A channel's newest `n` records, oldest first, page after page: a page
+  // ends at its bytes as well as its count (docs/api.md), so one may hold
+  // fewer than asked while more remain; an older release's page says no
+  // `more`, and a short one was its last. Bounded: each page moves its
+  // cursor back, `n` records in all at most.
+  async function newest(name, channel, n) {
+    const out = [];
+    let before = NEWEST;
+    while (out.length < n) {
+      const want = n - out.length;
+      const page = await api("GET", `/api/f/${seg(name)}/channels/${channel}?before=${before}&limit=${want}`);
+      const records = page.records ?? [];
+      out.unshift(...records);
+      if (!records.length || !(page.more ?? records.length >= want)) break;
+      before = page.next;
     }
     return out;
   }
@@ -114,15 +130,15 @@ export function createThreads({ $, el, patch, api, seg, avatar, data, navigation
     await Promise.all(chatsOf.map(async (name) => {
       const check = checkOf(name);
       const ours = waiting.filter((t) => t.returnTo === name);
-      const work = await api("GET", `/api/f/${seg(name)}/channels/work?before=${NEWEST}&limit=${WORK_RECORDS}`);
+      const work = await newest(name, "work", WORK_RECORDS);
       for (const asker of new Set(ours.map((t) => t.asker))) {
         const agent = agentNamed(asker);
         if (!agent) continue;
-        const tasks = await api("GET", `/api/f/${seg(agent.fragment)}/channels/tasks?before=${NEWEST}&limit=${TASK_RECORDS}`);
+        const tasks = await newest(agent.fragment, "tasks", TASK_RECORDS);
         for (const t of ours.filter((x) => x.asker === asker)) {
-          const answer = (tasks.records ?? []).find((r) => r.principal === asker && r.body?.kind === "answer" && r.body?.turn === t.turn);
-          const start = answer && (work.records ?? []).find((r) => r.principal === asker && r.body?.kind === "turn.start" && r.body?.cause?.fragment === agent.fragment && r.body?.cause?.channel === "tasks" && r.body?.cause?.seq === answer.seq);
-          if (start && (work.records ?? []).some((r) => r.principal === asker && r.body?.kind === "turn.end" && r.body?.turn === start.body.turn)) answeredTurns.add(t.turn);
+          const answer = tasks.find((r) => r.principal === asker && r.body?.kind === "answer" && r.body?.turn === t.turn);
+          const start = answer && work.find((r) => r.principal === asker && r.body?.kind === "turn.start" && r.body?.cause?.fragment === agent.fragment && r.body?.cause?.channel === "tasks" && r.body?.cause?.seq === answer.seq);
+          if (start && work.some((r) => r.principal === asker && r.body?.kind === "turn.end" && r.body?.turn === start.body.turn)) answeredTurns.add(t.turn);
         }
       }
       answerChecks.set(name, check);

@@ -57,6 +57,7 @@ import { renderAttachments as renderMessageAttachments } from "./media.js";
 import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
+import { moreOf } from "./pages.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -467,7 +468,7 @@ export function mount(root) {
       for (const record of page.records) onWork(record);
       // (the cursor moves past the page whatever it held)
       if (page.records.length) history.first.work = Math.min(history.first.work ?? Infinity, page.records[0].seq);
-      history.workDone = !page.more;
+      history.workDone = !moreOf(page, WORK_LAST);
     }
   }
   // Older messages come as the reader nears the top: a sentinel above the
@@ -492,7 +493,7 @@ export function mount(root) {
       if (history.first.chat !== null) {
         const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
         for (const record of page.records) onChat(record, true);
-        history.done = !page.more;
+        history.done = !moreOf(page, CHAT_LAST);
       } else history.done = true;
       await earlierWork();
       history.loading = false;
