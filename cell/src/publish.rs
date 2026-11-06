@@ -101,10 +101,11 @@ async fn stamped(env: &Env, t: &'static Template, name: &str, title: Option<&str
 impl FragmentCell {
     /// The rows the stage of its making is read from (`seed::Rows`): its
     /// template's commit is the one keyed by its life, asked only while a
-    /// template is to land.
+    /// template is to land. Not live's pin: a deleted life's repo keeps its
+    /// live, which proves nothing of this life's deploy.
     fn seed_rows(&self) -> CellResult<seed::Rows> {
-        let keys = [MetaKey::ClaimedAt, MetaKey::CreatedAt, MetaKey::TemplatePending, MetaKey::Repo, MetaKey::PinLive, MetaKey::LiveReadAt, MetaKey::Blessed];
-        let [claimed_at, created_at, pending, repo, live, live_read_at, blessed] = self.metas(keys)?;
+        let keys = [MetaKey::ClaimedAt, MetaKey::CreatedAt, MetaKey::TemplatePending, MetaKey::Repo, MetaKey::Blessed];
+        let [claimed_at, created_at, pending, repo, blessed] = self.metas(keys)?;
         let created_at = created_at.map(|at| at.parse::<i64>().map_err(|_| CellError::host(format!("its created_at is not a time: {at:?}")))).transpose()?;
         let committed = match (created_at, &pending) {
             (Some(life), Some(_)) => !self.rows("SELECT 1 FROM file_commits WHERE key = ?", vec![format!("template:{life}").into()])?.is_empty(),
@@ -112,7 +113,7 @@ impl FragmentCell {
         };
         // a claim that is not a time holds nothing, as a lapsed one
         let claimed_at = claimed_at.and_then(|at| at.parse().ok());
-        Ok(seed::Rows { now_ms: js::now_ms(), claimed_at, created_at, template_pending: pending.is_some(), repo: repo.is_some(), committed, live, live_read_at, blessed: blessed.is_some() })
+        Ok(seed::Rows { now_ms: js::now_ms(), claimed_at, created_at, template_pending: pending.is_some(), repo: repo.is_some(), committed, blessed: blessed.is_some() })
     }
 
     /// How far its making has got (`fragment_core::seed`), read from its
@@ -131,7 +132,9 @@ impl FragmentCell {
     /// step of `fragment_core::seed` at a time from the stage its rows
     /// say: its repo, its commit (keyed by its life, so a retry commits
     /// nothing twice), its deploy and install, and its landing. A pass
-    /// after a failure or a restart takes the step that is next.
+    /// after a failure or a restart takes the step that is next; past its
+    /// commit, that is its deploy again (live already at main's tip, it
+    /// moves nothing), for only its own deploy's install lands it.
     ///
     /// One at a time: the create seeds, and the alarm it arms meanwhile
     /// (its index flush) seeds too. On code.storage, a round trip away, the
@@ -145,7 +148,7 @@ impl FragmentCell {
     /// later one.
     pub(crate) async fn seed(&self) -> CellResult<()> {
         for effect in self.seed_locked().await? {
-            assert_eq!(effect, Effect::TellJoined, "only its agents' notice follows a seed's lock");
+            assert!(effect == Effect::TellJoined, "only its agents' notice follows a seed's lock");
             self.flush_joined().await;
         }
         Ok(())
@@ -153,8 +156,8 @@ impl FragmentCell {
 
     /// [`Self::seed`] under its lock: each step carried out, its outcome
     /// stepped, and the rows read back, which must say the step the
-    /// machine said (a life that ended meanwhile goes no further). Answers
-    /// what is left for after the lock.
+    /// machine said as far as rows can (`Stage::durable`; a life that ended
+    /// meanwhile goes no further). Answers what is left for after the lock.
     async fn seed_locked(&self) -> CellResult<Vec<Effect>> {
         let _seeding = self.seeding.lock().await;
         let Some(life) = self.seed_rows()?.created_at else { return Ok(vec![]) };
@@ -173,7 +176,7 @@ impl FragmentCell {
                 continue;
             }
             steps += 1;
-            assert!(steps <= seed::SEED_STEPS_MAX, "a seed takes each of its steps once: {effect:?} is step {steps}");
+            assert!(steps <= seed::SEED_STEPS_MAX, "a seed takes each of its steps once");
             let events = self.seed_step(effect, life, &name, &owner).await?;
             let mut want = stage.clone();
             for event in &events {
@@ -186,7 +189,7 @@ impl FragmentCell {
             // seed's), and the machine's step must be theirs
             let read = self.stage_in(life)?;
             if read == Stage::Ended {
-                return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended during its template's {effect:?}")));
+                return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended during its template's {}", effect.name())));
             }
             // deployed is not installed: an install its deploy left to the
             // poll keeps it pending, and the next seed's deploy, from the
@@ -195,11 +198,13 @@ impl FragmentCell {
                 return Err(CellError::host(format!("{name}'s template is deployed (live {live}) but not installed yet")));
             }
             if !read.same_step(&want) {
-                return Err(CellError::host(format!("{name}'s template: after {effect:?} its rows say {read:?}, not {want:?}")));
+                return Err(CellError::host(format!("{name}'s template: after its {} its rows say {}, not {}", effect.name(), read.name(), want.durable().name())));
             }
-            stage = read;
+            // the machine's own stage goes on (a deploy installed is a
+            // seed's own; its rows say committed)
+            stage = want;
         }
-        assert_eq!(stage, Stage::Landed, "a seed whose every step passed lands its template");
+        assert!(stage == Stage::Landed, "a seed whose every step passed lands its template");
         Ok(after)
     }
 
@@ -257,7 +262,7 @@ impl FragmentCell {
                 self.del_meta(MetaKey::TemplatePending)?;
                 Ok(vec![Event::Landed])
             }
-            Effect::InstallFromRelease | Effect::FlushIndex | Effect::TellJoined | Effect::Arm { .. } => unreachable!("{effect:?} is not a seed step"),
+            Effect::InstallFromRelease | Effect::FlushIndex | Effect::TellJoined | Effect::Arm { .. } => unreachable!("not a seed step"),
         }
     }
 
@@ -374,5 +379,5 @@ fn contradiction(c: seed::Contradiction) -> CellError {
 
 /// The machine refused a step the cell took: the cell's mistake.
 pub(crate) fn refused(r: seed::Refused) -> CellError {
-    CellError::host(format!("its making's machine refused a step: {r:?}"))
+    CellError::host(format!("its making's machine refused a step: {}", r.why()))
 }

@@ -4,11 +4,20 @@
 //!
 //! Its stage is read from the rows its making writes, and from nothing
 //! else (`stage`): `claimed_at`, `created_at`, `template_pending`, `repo`,
-//! the template's commit (`file_commits`, keyed by its life), `pin_live`,
-//! `live_read_at` and `blessed`. Nothing of it lives in memory, so a
-//! restart or an eviction finds it where its last step left it, and an
-//! older release reading the same rows (a rollback) agrees: a stage stored
-//! of its own would be a second truth.
+//! the template's commit (`file_commits`, keyed by its life) and `blessed`.
+//! Nothing of it lives in memory, so a restart or an eviction finds it
+//! where its last step left it, and an older release reading the same rows
+//! (a rollback) agrees: a stage stored of its own would be a second truth.
+//!
+//! The rows prove a step only when they are this life's own. Its template's
+//! commit is (its key names the life); live's pin and what was installed
+//! from it are not: a deleted life's repo is kept, with its `live`, and a
+//! refresh or a poll of the next life could pin and install that (#1072).
+//! So deployed and installed are a seed's own, in flight, known only from
+//! its own deploy's answer; read from rows, a template committed is at
+//! most `Committed`, and its next seed deploys again (live already at
+//! main's tip, that moves nothing) and lands it only once its own deploy
+//! is installed.
 //!
 //! The stages, in order:
 //!
@@ -18,7 +27,8 @@
 //!   claim lapses (`CLAIM_TTL_MS`: a create that crashed mid-flight).
 //! - **Pending**: made (its owner and its agent members, its facts), its
 //!   template still to land, at one of its seed's steps (`Step`): made, its
-//!   repo made, its template committed, deployed, installed from live.
+//!   repo made, its template committed; and, within a seed, deployed and
+//!   installed from live.
 //!   Meanwhile a blessed template whose create answers first runs from the
 //!   release (`release_installed`: a chat's).
 //! - **Landed**: its template is in, or it had none.
@@ -27,10 +37,11 @@
 //!
 //! `step` takes a stage and what happened (`Event`) to the next stage and
 //! what to do (`Effect`). The cell carries the effects out, then reads the
-//! rows again, which must say the stage `step` said. Every pending stage
-//! keeps the fragment busy, so its alarm is always due within the poll
-//! interval (plane.rs `busy`), and each pass steps it on from the stage the
-//! rows say: what a restart cut short, the next pass does.
+//! rows again, which must say the stage `step` said, as far as rows can
+//! (`Stage::durable`). Every pending stage keeps the fragment busy, so its
+//! alarm is always due within the poll interval (plane.rs `busy`), and
+//! each pass steps it on from the stage the rows say: what a restart cut
+//! short, the next pass does.
 
 /// How long a create in progress holds its name: past it, a claim whose
 /// create crashed mid-flight lapses, and the name is free again.
@@ -40,8 +51,9 @@ pub const CLAIM_TTL_MS: i64 = 120_000;
 /// commit, its deploy (its install with it), and its landing.
 pub const SEED_STEPS_MAX: u32 = 4;
 
-/// The rows a fragment's stage is read from, in one statement (cell
-/// publish.rs `seed_rows`).
+/// The rows a fragment's stage is read from (cell publish.rs
+/// `seed_rows`): not live's pin, nor what was installed from it, which may
+/// be a deleted life's (the module's doc).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rows {
     pub now_ms: i64,
@@ -53,12 +65,9 @@ pub struct Rows {
     pub template_pending: bool,
     /// Its repo is made (`repo`).
     pub repo: bool,
-    /// Its template is main's commit (`file_commits`, `template:<life>`).
+    /// This life's template is main's commit (`file_commits`,
+    /// `template:<life>`).
     pub committed: bool,
-    /// Live's pin (`pin_live`).
-    pub live: Option<String>,
-    /// The live commit its code was last installed from (`live_read_at`).
-    pub live_read_at: Option<String>,
     /// A blessed template's install stands (`blessed`): the release's
     /// manifest and code run it.
     pub blessed: bool,
@@ -82,12 +91,13 @@ pub enum Step {
     Made,
     /// Its repo is made, its template not committed yet.
     RepoMade,
-    /// Its template is main's commit, not deployed yet.
+    /// Its template is main's commit, not deployed yet: the most rows say.
     Committed,
-    /// Live is at `live`, and what follows it is not installed from it
-    /// yet: deployed is not installed.
+    /// This seed's deploy put live at `live`, and what follows it is not
+    /// installed from it yet: deployed is not installed. A seed's own.
     Deployed { live: String },
-    /// Installed from `live`: all that is left is to say it landed.
+    /// Installed from this seed's deploy, `live`: all that is left is to
+    /// say it landed. A seed's own.
     Installed { live: String },
 }
 
@@ -187,6 +197,21 @@ impl Effect {
     pub fn is_seed_step(self) -> bool {
         matches!(self, Effect::EnsureRepo | Effect::Commit | Effect::Deploy | Effect::Land)
     }
+
+    /// Its name in an error (the cell formats none of these types: their
+    /// `Debug` is the tests', and kept out of the Wasm).
+    pub fn name(self) -> &'static str {
+        match self {
+            Effect::InstallFromRelease => "install from the release",
+            Effect::EnsureRepo => "repo",
+            Effect::Commit => "commit",
+            Effect::Deploy => "deploy",
+            Effect::Land => "landing",
+            Effect::FlushIndex => "list rows",
+            Effect::TellJoined => "joined notices",
+            Effect::Arm { .. } => "alarm",
+        }
+    }
 }
 
 /// Why `step` refused an event.
@@ -200,6 +225,17 @@ pub enum Refused {
     /// (a commit before its repo, an install before its deploy), or a
     /// making written twice.
     OutOfOrder { stage: Stage, event: Event },
+}
+
+impl Refused {
+    /// Why, in an error.
+    pub fn why(&self) -> &'static str {
+        match self {
+            Refused::Taken => "its name is taken",
+            Refused::NoLife => "it has no life",
+            Refused::OutOfOrder { .. } => "a step out of order",
+        }
+    }
 }
 
 /// Rows that no making leaves: their fragment's stage cannot be read.
@@ -225,19 +261,16 @@ pub fn stage(rows: &Rows) -> Result<Stage, Contradiction> {
     if !rows.template_pending {
         return Ok(Stage::Landed);
     }
-    // a commit and a pin are a repo's: the seed makes it first
+    // a commit is a repo's: the seed makes it first
     if !rows.repo && rows.committed {
         return Err(Contradiction("its template is committed, but it has no repo"));
     }
-    if !rows.repo && rows.live.is_some() {
-        return Err(Contradiction("live is pinned, but it has no repo"));
-    }
-    let step = match &rows.live {
-        Some(live) if rows.live_read_at.as_deref() == Some(live.as_str()) => Step::Installed { live: live.clone() },
-        Some(live) => Step::Deployed { live: live.clone() },
-        None if rows.committed => Step::Committed,
-        None if rows.repo => Step::RepoMade,
-        None => Step::Made,
+    // no further than this life's commit: live's pin, and what is installed
+    // from it, may be a deleted life's (the module's doc)
+    let step = match (rows.committed, rows.repo) {
+        (true, _) => Step::Committed,
+        (false, true) => Step::RepoMade,
+        (false, false) => Step::Made,
     };
     Ok(Stage::Pending { step, release_installed: rows.blessed })
 }
@@ -271,14 +304,40 @@ impl Stage {
         matches!(self, Stage::Pending { release_installed: true, .. })
     }
 
-    /// Whether `self` is at the step `other` is, whatever runs meanwhile:
+    /// The stage as its rows can say it: a seed's own deploy and install
+    /// are, in rows, its template committed (`stage`).
+    pub fn durable(&self) -> Stage {
+        match self {
+            Stage::Pending { step: Step::Deployed { .. } | Step::Installed { .. }, release_installed } => {
+                Stage::Pending { step: Step::Committed, release_installed: *release_installed }
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Whether `self`, read from rows, is at the step `other` is, as far as
+    /// rows can say (`durable`), whatever runs meanwhile:
     /// `release_installed` is an install's to say (the create's from the
-    /// release, a live one of a blessed template), never a seed step's, so
-    /// a seed reading its rows back takes theirs.
+    /// release, a live one of a blessed template), never a seed step's.
     pub fn same_step(&self, other: &Stage) -> bool {
-        match (self, other) {
+        match (self.durable(), other.durable()) {
             (Stage::Pending { step: mine, .. }, Stage::Pending { step: theirs, .. }) => mine == theirs,
             (mine, theirs) => mine == theirs,
+        }
+    }
+
+    /// Its name in an error (`Effect::name`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Stage::Free => "free",
+            Stage::Claimed { .. } => "claimed",
+            Stage::Pending { step: Step::Made, .. } => "made",
+            Stage::Pending { step: Step::RepoMade, .. } => "its repo made",
+            Stage::Pending { step: Step::Committed, .. } => "committed",
+            Stage::Pending { step: Step::Deployed { .. }, .. } => "deployed",
+            Stage::Pending { step: Step::Installed { .. }, .. } => "installed",
+            Stage::Landed => "landed",
+            Stage::Ended => "ended",
         }
     }
 
@@ -423,14 +482,22 @@ mod tests {
     //! the steps that cannot happen; each step replayed; and a restart
     //! after each step, the rows alone carrying it on to landed.
     //!
-    //! `World` stands in for the cell: rows, and the effects as the cell
-    //! carries them out on those rows, code.storage up or down.
+    //! `World` stands in for the cell and code.storage: the rows the machine
+    //! reads, and beside them what it never reads (code.storage's `live`,
+    //! a deleted life's kept with its repo; what is installed; an agent's
+    //! joined notice in its outbox), each effect carried out on them as the
+    //! cell does, any of the seed's steps failing as code.storage fails it.
 
     use super::*;
 
     const NOW: i64 = 1_000_000;
     const LIFE: i64 = 999_000;
-    const LIVE: &str = "a1b2c3";
+    /// The live a deleted life left at code.storage, its repo kept (#1072).
+    const OLD_LIVE: &str = "old-live";
+    /// This life's own deploy.
+    const NEW_LIVE: &str = "new-live";
+    /// The seed's steps code.storage answers (the alarm's own lands them).
+    const SEED_STEPS: [Effect; 3] = [Effect::EnsureRepo, Effect::Commit, Effect::Deploy];
 
     fn pending(step: Step, release_installed: bool) -> Stage {
         Stage::Pending { step, release_installed }
@@ -452,48 +519,89 @@ mod tests {
         }
     }
 
-    /// The cell, as far as the machine sees it: its rows, and whether
-    /// code.storage answers.
+    /// The cell and code.storage, as far as the machine's making goes.
     struct World {
         rows: Rows,
-        code_storage_up: bool,
-        /// Its deploy installs what follows live (else it is left to the poll).
+        /// The seed's steps code.storage fails now.
+        down: Vec<Effect>,
+        /// Whether a deploy installs what follows live (else the poll would).
         installs: bool,
+        /// code.storage's `live`: a deleted life's, or this life's deploy.
+        remote_live: Option<String>,
+        /// The live commit what is installed was read from.
+        installed: Option<String>,
+        /// An agent's joined notice waits in the outbox (a restart keeps it).
+        outbox: bool,
+        told: u32,
+    }
+
+    /// How a seed's activation ended: its steps all taken, one that failed,
+    /// or cut short (a restart, an eviction) after its persisted steps.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Ran {
+        Done,
+        Failed,
+        Cut,
     }
 
     impl World {
-        fn new(rows: Rows) -> World {
-            World { rows, code_storage_up: true, installs: true }
+        fn new(making: Making) -> World {
+            World { rows: made_rows(making), down: vec![], installs: true, remote_live: None, installed: None, outbox: true, told: 0 }
         }
 
         fn stage(&self) -> Stage {
             stage(&self.rows).expect("a making's rows say its stage")
         }
 
-        /// Carries out a seed step, as publish.rs does: the events it
-        /// leads to, none when code.storage fails it.
+        /// The joined outbox's flush (runs_on.rs `flush_joined`): only once
+        /// nothing waits, and a notice told goes from the outbox.
+        fn flush_joined(&mut self) {
+            if self.outbox && !self.stage().joins_wait() {
+                self.told += 1;
+                self.outbox = false;
+            }
+        }
+
+        /// A refresh or a poll that pins and installs whatever live is at
+        /// code.storage, a deleted life's included (#1072: the cell no
+        /// longer does while a template is pending; the machine must not be
+        /// fooled if one did).
+        fn refresh(&mut self) {
+            if let Some(live) = self.remote_live.clone() {
+                self.installed = Some(live);
+                self.rows.blessed = true;
+            }
+        }
+
+        /// Carries out an effect as the cell does: what happened, none when
+        /// code.storage failed it.
         fn carry(&mut self, effect: Effect) -> Vec<Event> {
+            if self.down.contains(&effect) {
+                return vec![];
+            }
             match effect {
                 Effect::InstallFromRelease => {
-                    // the release, not code.storage
                     self.rows.blessed = true;
                     vec![Event::ReleaseInstalled]
                 }
-                Effect::EnsureRepo if self.code_storage_up => {
+                Effect::EnsureRepo => {
                     self.rows.repo = true;
                     vec![Event::RepoMade]
                 }
-                Effect::Commit if self.code_storage_up => {
+                Effect::Commit => {
+                    assert!(self.rows.repo, "a commit is to a repo made");
                     self.rows.committed = true;
                     vec![Event::Committed]
                 }
-                Effect::Deploy if self.code_storage_up => {
-                    self.rows.live = Some(live(LIVE));
-                    let mut events = vec![Event::Deployed { live: live(LIVE) }];
+                // live to main's tip: this life's commit on it
+                Effect::Deploy => {
+                    assert!(self.rows.committed, "a deploy moves live to a main with this life's template on it");
+                    self.remote_live = Some(live(NEW_LIVE));
+                    let mut events = vec![Event::Deployed { live: live(NEW_LIVE) }];
                     if self.installs {
-                        self.rows.live_read_at = Some(live(LIVE));
+                        self.installed = Some(live(NEW_LIVE));
                         self.rows.blessed = true;
-                        events.push(Event::Installed { live: live(LIVE) });
+                        events.push(Event::Installed { live: live(NEW_LIVE) });
                     }
                     events
                 }
@@ -501,41 +609,64 @@ mod tests {
                     self.rows.template_pending = false;
                     vec![Event::Landed]
                 }
-                Effect::EnsureRepo | Effect::Commit | Effect::Deploy => vec![],
-                Effect::FlushIndex | Effect::TellJoined | Effect::Arm { .. } => vec![],
+                Effect::FlushIndex | Effect::Arm { .. } => vec![],
+                Effect::TellJoined => {
+                    self.flush_joined();
+                    vec![]
+                }
             }
         }
 
-        /// One seed, as publish.rs `seed` runs it: from the stage the rows
-        /// say, each step carried out, its events stepped, and the rows
-        /// read back agreeing. Answers the effects left for after it.
-        fn seed(&mut self) -> Vec<Effect> {
+        /// One alarm pass, as on_alarm runs it: its seed (publish.rs
+        /// `seed`), then the joined outbox's flush. `budget` is how many
+        /// persisted steps this activation lives through: past it, it is
+        /// cut short, before the next effect, joined notices included.
+        fn pass(&mut self, budget: u32) -> Ran {
+            let ran = self.seed(budget);
+            if ran != Ran::Cut {
+                self.flush_joined();
+            }
+            ran
+        }
+
+        fn seed(&mut self, mut budget: u32) -> Ran {
             let mut stage = self.stage();
+            if !stage.waits_template() {
+                return Ran::Done;
+            }
             let (_, mut queue) = step(&stage, &Event::Alarm).expect("an alarm is never refused");
-            let mut after = vec![];
             let mut steps = 0;
             while !queue.is_empty() {
+                if budget == 0 {
+                    return Ran::Cut;
+                }
                 let effect = queue.remove(0);
                 if !effect.is_seed_step() {
-                    after.push(effect);
+                    self.carry(effect);
                     continue;
                 }
                 steps += 1;
                 assert!(steps <= SEED_STEPS_MAX, "a seed takes at most {SEED_STEPS_MAX} steps");
                 let events = self.carry(effect);
+                budget -= 1;
                 if events.is_empty() {
-                    break;
+                    return Ran::Failed;
                 }
+                let mut want = stage.clone();
                 for event in &events {
-                    let (next, more) = step(&stage, event).expect("a step's own outcome follows it");
-                    stage = next;
+                    let (next, more) = step(&want, event).expect("a step's own outcome follows it");
+                    want = next;
                     queue.extend(more);
                 }
                 let read = self.stage();
-                assert!(read.same_step(&stage), "the rows say the step the machine said, after {effect:?}: {read:?}, not {stage:?}");
-                stage = read;
+                assert!(read.same_step(&want), "the rows say the step the machine said, after {effect:?}: {read:?}, not {want:?}");
+                // deployed is not installed: the next seed deploys again
+                if matches!(want, Stage::Pending { step: Step::Deployed { .. }, .. }) {
+                    return Ran::Failed;
+                }
+                stage = want;
             }
-            after
+            Ran::Done
         }
     }
 
@@ -555,10 +686,14 @@ mod tests {
         assert_eq!((s.clone(), e), (pending(Step::RepoMade, true), vec![Effect::Commit]));
         let (s, e) = step(&s, &Event::Committed).unwrap();
         assert_eq!((s.clone(), e), (pending(Step::Committed, true), vec![Effect::Deploy]));
-        let (s, e) = step(&s, &Event::Deployed { live: live(LIVE) }).unwrap();
-        assert_eq!((s.clone(), e), (pending(Step::Deployed { live: live(LIVE) }, true), vec![]));
-        let (s, e) = step(&s, &Event::Installed { live: live(LIVE) }).unwrap();
-        assert_eq!((s.clone(), e), (pending(Step::Installed { live: live(LIVE) }, true), vec![Effect::Land]));
+        assert_eq!(step(&s, &Event::Alarm).unwrap().1, vec![Effect::Deploy]);
+        let (s, e) = step(&s, &Event::Deployed { live: live(NEW_LIVE) }).unwrap();
+        assert_eq!((s.clone(), e), (pending(Step::Deployed { live: live(NEW_LIVE) }, true), vec![]));
+        let (s, e) = step(&s, &Event::Installed { live: live(NEW_LIVE) }).unwrap();
+        assert_eq!((s.clone(), e), (pending(Step::Installed { live: live(NEW_LIVE) }, true), vec![Effect::Land]));
+        // what rows can say of a seed's own deploy and install: committed
+        assert_eq!(s.durable(), pending(Step::Committed, true));
+        assert!(s.same_step(&pending(Step::Committed, false)) && !s.same_step(&pending(Step::RepoMade, true)));
         let (s, e) = step(&s, &Event::Landed).unwrap();
         assert_eq!((s.clone(), e), (Stage::Landed, vec![Effect::TellJoined]));
         assert_eq!(step(&s, &Event::Alarm).unwrap(), (Stage::Landed, vec![]));
@@ -592,7 +727,8 @@ mod tests {
         }
     }
 
-    /// Valid: the stage the rows say, row by row.
+    /// Valid: the stage the rows say, row by row; never further than this
+    /// life's commit.
     #[test]
     fn stage_from_rows() {
         let mut rows = Rows { now_ms: NOW, ..Rows::default() };
@@ -614,14 +750,10 @@ mod tests {
         assert_eq!(stage(&rows), Ok(pending(Step::RepoMade, true)));
         rows.committed = true;
         assert_eq!(stage(&rows), Ok(pending(Step::Committed, true)));
-        rows.live = Some(live(LIVE));
-        rows.live_read_at = Some(live("older"));
-        assert_eq!(stage(&rows), Ok(pending(Step::Deployed { live: live(LIVE) }, true)));
-        // deployed, its commit's key trimmed since (`trim_writes`): still deployed
+        // its commit's key trimmed since (`trim_writes`, a week on): its
+        // next seed commits again, and code.storage finds main holds it
         rows.committed = false;
-        assert_eq!(stage(&rows), Ok(pending(Step::Deployed { live: live(LIVE) }, true)));
-        rows.live_read_at = Some(live(LIVE));
-        assert_eq!(stage(&rows), Ok(pending(Step::Installed { live: live(LIVE) }, true)));
+        assert_eq!(stage(&rows), Ok(pending(Step::RepoMade, true)));
         rows.template_pending = false;
         assert_eq!(stage(&rows), Ok(Stage::Landed));
         assert_eq!(stage_in(&rows, LIFE), Ok(Stage::Landed));
@@ -634,9 +766,8 @@ mod tests {
     fn contradictions() {
         let base = Rows { now_ms: NOW, created_at: Some(LIFE), template_pending: true, ..Rows::default() };
         assert!(stage(&Rows { committed: true, ..base.clone() }).is_err(), "a commit with no repo");
-        assert!(stage(&Rows { live: Some(live(LIVE)), ..base.clone() }).is_err(), "live with no repo");
         // no life: whatever else is there is not a fragment's
-        assert_eq!(stage(&Rows { created_at: None, repo: true, ..base }), Ok(Stage::Free));
+        assert_eq!(stage(&Rows { created_at: None, repo: true, committed: true, ..base }), Ok(Stage::Free));
     }
 
     /// Invalid: a step before the one it follows, and the making written
@@ -647,16 +778,16 @@ mod tests {
         let made = pending(Step::Made, true);
         // a commit before its repo
         assert!(refused(&made, Event::Committed));
-        assert!(refused(&made, Event::Deployed { live: live(LIVE) }));
-        assert!(refused(&pending(Step::RepoMade, false), Event::Deployed { live: live(LIVE) }));
+        assert!(refused(&made, Event::Deployed { live: live(NEW_LIVE) }));
+        assert!(refused(&pending(Step::RepoMade, false), Event::Deployed { live: live(NEW_LIVE) }));
         // installed from a live it never deployed, and landed before it
         // was installed
-        assert!(refused(&pending(Step::Committed, true), Event::Installed { live: live(LIVE) }));
-        for s in [Step::Made, Step::RepoMade, Step::Committed, Step::Deployed { live: live(LIVE) }] {
+        assert!(refused(&pending(Step::Committed, true), Event::Installed { live: live(NEW_LIVE) }));
+        for s in [Step::Made, Step::RepoMade, Step::Committed, Step::Deployed { live: live(NEW_LIVE) }] {
             assert!(refused(&pending(s, true), Event::Landed));
         }
         // a step's outcome before its making is written
-        for e in [Event::ReleaseInstalled, Event::RepoMade, Event::Committed, Event::Installed { live: live(LIVE) }, Event::Landed] {
+        for e in [Event::ReleaseInstalled, Event::RepoMade, Event::Committed, Event::Installed { live: live(NEW_LIVE) }, Event::Landed] {
             assert!(refused(&Stage::Free, e.clone()), "{e:?}");
             assert!(refused(&Stage::Claimed { at: NOW }, e.clone()), "{e:?}");
         }
@@ -668,6 +799,8 @@ mod tests {
         // a delete of no life
         assert_eq!(step(&Stage::Free, &Event::Delete), Err(Refused::NoLife));
         assert_eq!(step(&Stage::Claimed { at: NOW }, &Event::Delete), Err(Refused::NoLife));
+        // each refusal says why without formatting the machine's types
+        assert_eq!(step(&Stage::Landed, &Event::Claim { at: NOW }).unwrap_err().why(), "its name is taken");
     }
 
     /// Invalid (#1041): no list row before its making is written (its
@@ -681,8 +814,8 @@ mod tests {
             Event::ReleaseFailed,
             Event::RepoMade,
             Event::Committed,
-            Event::Deployed { live: live(LIVE) },
-            Event::Installed { live: live(LIVE) },
+            Event::Deployed { live: live(NEW_LIVE) },
+            Event::Installed { live: live(NEW_LIVE) },
             Event::Landed,
             Event::Alarm,
             Event::Activation,
@@ -697,7 +830,7 @@ mod tests {
         }
         // every pending stage with nothing installed: its agents wait, and
         // no step from it tells them
-        for s in [Step::Made, Step::RepoMade, Step::Committed, Step::Deployed { live: live(LIVE) }] {
+        for s in [Step::Made, Step::RepoMade, Step::Committed, Step::Deployed { live: live(NEW_LIVE) }] {
             let s = pending(s, false);
             assert!(s.joins_wait(), "{s:?}");
             for e in &events {
@@ -709,7 +842,7 @@ mod tests {
         // a chat runs its template from the release: its agents follow it
         // there before its first commit lands
         assert!(!pending(Step::Made, true).joins_wait());
-        assert!(!pending(Step::Installed { live: live(LIVE) }, false).joins_wait());
+        assert!(!pending(Step::Installed { live: live(NEW_LIVE) }, false).joins_wait());
         assert!(!Stage::Landed.joins_wait());
     }
 
@@ -718,13 +851,45 @@ mod tests {
     /// never writes under it.
     #[test]
     fn writers_wait_for_the_template() {
-        for s in [Step::Made, Step::RepoMade, Step::Committed, Step::Deployed { live: live(LIVE) }, Step::Installed { live: live(LIVE) }] {
+        for s in [Step::Made, Step::RepoMade, Step::Committed, Step::Deployed { live: live(NEW_LIVE) }, Step::Installed { live: live(NEW_LIVE) }] {
             for release_installed in [false, true] {
                 assert!(pending(s.clone(), release_installed).waits_template(), "{s:?}");
             }
         }
         for s in [Stage::Free, Stage::Claimed { at: NOW }, Stage::Landed, Stage::Ended] {
             assert!(!s.waits_template(), "{s:?}");
+        }
+    }
+
+    /// Invalid (#1072): a deleted life's repo is kept with its `live`. The
+    /// name made again, its repo found and its template's commit failed, or
+    /// committed and its deploy failed, a refresh that pins and installs
+    /// that old live does not make it this life's: its rows still say
+    /// where its own seed got to, and the seeds after land its own template,
+    /// installed from its own deploy.
+    #[test]
+    fn a_deleted_lifes_live_is_not_this_lifes() {
+        for (failing, at) in [(Effect::Commit, Step::RepoMade), (Effect::Deploy, Step::Committed)] {
+            for making in [Making::SeedsNow, Making::SeedsLater] {
+                let mut world = World::new(making);
+                world.remote_live = Some(live(OLD_LIVE));
+                if making == Making::SeedsLater {
+                    world.carry(Effect::InstallFromRelease);
+                }
+                world.down = vec![failing];
+                assert_eq!(world.pass(u32::MAX), Ran::Failed, "{making:?}: its {failing:?} fails");
+                world.refresh();
+                assert_eq!(world.installed.as_deref(), Some(OLD_LIVE), "the old live is installed");
+                assert_eq!(world.stage().durable(), pending(at.clone(), true), "{making:?}: its rows are no further than its own {failing:?} failed");
+                // and stay so while that step fails
+                assert_eq!(world.pass(u32::MAX), Ran::Failed);
+                assert!(world.stage().waits_template());
+                world.down = vec![];
+                assert_eq!(world.pass(u32::MAX), Ran::Done);
+                assert_eq!(world.stage(), Stage::Landed);
+                assert_eq!(world.installed.as_deref(), Some(NEW_LIVE), "{making:?}: landed from its own deploy");
+                assert_eq!(world.told, 1);
+            }
         }
     }
 
@@ -735,22 +900,25 @@ mod tests {
         // a second seed, run after the first landed it (the 412 race
         // publish.rs names): nothing to do
         assert_eq!(step(&Stage::Landed, &Event::Alarm), Ok((Stage::Landed, vec![])));
-        let mut world = World::new(made_rows(Making::SeedsLater));
-        assert_eq!(world.seed(), vec![Effect::TellJoined]);
+        let mut world = World::new(Making::SeedsLater);
+        assert_eq!(world.pass(u32::MAX), Ran::Done);
+        assert_eq!((world.stage(), world.told), (Stage::Landed, 1));
         let rows = world.rows.clone();
-        assert_eq!(world.seed(), vec![]);
-        assert_eq!(world.rows, rows, "the second seed writes nothing");
+        assert_eq!(world.pass(u32::MAX), Ran::Done);
+        assert_eq!((&world.rows, world.told), (&rows, 1), "the second seed writes nothing, and tells no one again");
         // each outcome again, at the stage it led to
-        let installed = pending(Step::Installed { live: live(LIVE) }, true);
-        assert_eq!(step(&installed, &Event::Installed { live: live(LIVE) }), Ok((installed.clone(), vec![])));
-        assert_eq!(step(&installed, &Event::Deployed { live: live(LIVE) }), Ok((installed.clone(), vec![])));
+        let installed = pending(Step::Installed { live: live(NEW_LIVE) }, true);
+        assert_eq!(step(&installed, &Event::Installed { live: live(NEW_LIVE) }), Ok((installed.clone(), vec![])));
+        assert_eq!(step(&installed, &Event::Deployed { live: live(NEW_LIVE) }), Ok((installed.clone(), vec![])));
         assert_eq!(step(&pending(Step::Committed, false), &Event::RepoMade), Ok((pending(Step::Committed, false), vec![])));
         assert_eq!(step(&pending(Step::RepoMade, false), &Event::RepoMade), Ok((pending(Step::RepoMade, false), vec![])));
-        for e in [Event::Installed { live: live(LIVE) }, Event::Landed, Event::ReleaseInstalled, Event::Committed] {
+        // an install of a live it is not at changes nothing
+        let deployed = pending(Step::Deployed { live: live(NEW_LIVE) }, false);
+        assert_eq!(step(&deployed, &Event::Installed { live: live(OLD_LIVE) }), Ok((deployed.clone(), vec![])));
+        for e in [Event::Installed { live: live(NEW_LIVE) }, Event::Landed, Event::ReleaseInstalled, Event::Committed] {
             assert_eq!(step(&Stage::Landed, &e), Ok((Stage::Landed, vec![])), "{e:?}");
         }
         // an install over live installs nothing of the release's
-        let deployed = pending(Step::Deployed { live: live(LIVE) }, false);
         assert_eq!(step(&deployed, &Event::ReleaseInstalled), Ok((deployed.clone(), vec![])));
         // a create retried under the same name, as it is made and after
         let retry = Event::Claim { at: NOW + 1 };
@@ -762,35 +930,46 @@ mod tests {
         assert_eq!(step(&stage(&lapsed).unwrap(), &retry).map(|(s, _)| s), Ok(Stage::Claimed { at: NOW + 1 }));
     }
 
-    /// Restart: whatever memory held is dropped after each step (a fresh
-    /// activation); the rows alone say where it is, an alarm is due, and
-    /// alarm passes carry it on to landed. Each way of making, with
-    /// code.storage down for its first passes, and a deploy whose install
-    /// is left to the poll.
+    /// Restart: an activation cut short after each persisted step (its
+    /// repo, its commit, its deploy, its landing, and after landing before
+    /// its agent is told), memory dropped; the rows and the outbox alone
+    /// say where it is, an alarm is due, and alarm passes carry it on to
+    /// landed, installed from its own deploy, its agent told once and only
+    /// once nothing waits. Each way of making, with code.storage down for
+    /// its first passes, and a deploy whose install is left to the poll.
     #[test]
     fn restart_after_each_step() {
         for making in [Making::SeedsNow, Making::SeedsLater] {
             for outage_passes in 0..3 {
                 for installs_on_first_deploy in [false, true] {
-                    let mut world = World::new(made_rows(making));
-                    if making == Making::SeedsLater {
-                        world.carry(Effect::InstallFromRelease);
-                    }
-                    let mut told = 0;
-                    for pass in 0..12 {
-                        // a new activation: nothing but the rows
-                        let at = world.stage();
-                        assert_eq!(step(&at, &Event::Activation), Ok((at.clone(), vec![])));
-                        if at == Stage::Landed {
-                            break;
+                    for cut_after in 0..=SEED_STEPS_MAX {
+                        let case = format!("{making:?}, {outage_passes} passes down, installs {installs_on_first_deploy}, cut after {cut_after}");
+                        let mut world = World::new(making);
+                        if making == Making::SeedsLater {
+                            world.carry(Effect::InstallFromRelease);
                         }
-                        assert!(at.waits_template(), "a pending template keeps its alarm due (`busy`): {at:?}");
-                        world.code_storage_up = pass >= outage_passes;
-                        world.installs = installs_on_first_deploy || pass > outage_passes;
-                        told += world.seed().iter().filter(|e| **e == Effect::TellJoined).count();
+                        let mut cut = false;
+                        for pass in 0..16 {
+                            // a new activation: nothing but the rows and the outbox
+                            let at = world.stage();
+                            assert_eq!(step(&at, &Event::Activation), Ok((at.clone(), vec![])));
+                            if at == Stage::Landed && !world.outbox {
+                                break;
+                            }
+                            // not landed, it keeps its alarm due (`busy` asks this)
+                            assert!(at == Stage::Landed || at.waits_template(), "{at:?}, {case}");
+                            world.down = if pass < outage_passes { SEED_STEPS.to_vec() } else { vec![] };
+                            world.installs = installs_on_first_deploy || pass > outage_passes;
+                            // the first pass with code.storage back is cut short once
+                            let budget = if pass >= outage_passes && !cut { cut_after } else { u32::MAX };
+                            if world.pass(budget) == Ran::Cut {
+                                cut = true;
+                            }
+                        }
+                        assert_eq!(world.stage(), Stage::Landed, "{case}");
+                        assert_eq!(world.installed.as_deref(), Some(NEW_LIVE), "{case}: installed from its own deploy");
+                        assert_eq!((world.told, world.outbox), (1, false), "{case}: its agent told once");
                     }
-                    assert_eq!(world.stage(), Stage::Landed, "{making:?}, {outage_passes} passes down, installs {installs_on_first_deploy}");
-                    assert_eq!(told, 1, "its agents are told once, by the seed that lands it");
                 }
             }
         }
@@ -803,7 +982,7 @@ mod tests {
         let rows = Rows { now_ms: NOW, created_at: Some(LIFE + 1), template_pending: true, ..Rows::default() };
         let older = stage_in(&rows, LIFE).unwrap();
         assert_eq!(older, Stage::Ended);
-        for e in [Event::Installed { live: live(LIVE) }, Event::RepoMade, Event::Committed, Event::Landed, Event::Alarm, Event::Delete] {
+        for e in [Event::Installed { live: live(NEW_LIVE) }, Event::RepoMade, Event::Committed, Event::Landed, Event::Alarm, Event::Delete] {
             assert_eq!(step(&older, &e), Ok((Stage::Ended, vec![])), "{e:?}");
         }
         // and the next life's own stage is its own
@@ -815,28 +994,19 @@ mod tests {
     /// code.storage is down, asking it nothing for its pins.
     #[test]
     fn a_pending_page_serves_through_an_outage() {
-        let mut world = World::new(made_rows(Making::SeedsLater));
+        let mut world = World::new(Making::SeedsLater);
         world.carry(Effect::InstallFromRelease);
         world.carry(Effect::EnsureRepo);
-        world.code_storage_up = false;
+        world.down = SEED_STEPS.to_vec();
         for _ in 0..3 {
-            world.seed();
+            assert_eq!(world.pass(u32::MAX), Ran::Failed);
             let at = world.stage();
             assert_eq!(at, pending(Step::RepoMade, true));
             assert!(at.runs_release() && at.waits_template() && !at.joins_wait(), "{at:?}");
         }
         // the release's install that failed leaves it waiting for its seed's
-        let failed = World::new(made_rows(Making::SeedsLater)).stage();
+        let failed = World::new(Making::SeedsLater).stage();
         assert_eq!(step(&failed, &Event::ReleaseFailed), Ok((failed.clone(), vec![])));
         assert!(!failed.runs_release() && failed.joins_wait());
-    }
-
-    /// The bound: a seed takes each of its steps once.
-    #[test]
-    fn a_seed_is_bounded() {
-        let mut world = World::new(made_rows(Making::SeedsLater));
-        world.carry(Effect::InstallFromRelease);
-        assert_eq!(world.seed(), vec![Effect::TellJoined]);
-        assert_eq!(world.stage(), Stage::Landed);
     }
 }

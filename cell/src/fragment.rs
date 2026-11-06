@@ -1423,7 +1423,7 @@ impl FragmentCell {
         // its making is written: the stage its rows say is the one its
         // machine says, and what follows is that step's effects, in order
         let (made, effects) = seed::step(&claimed, &seed::Event::Made { making, agent: agent.is_some() }).map_err(crate::publish::refused)?;
-        assert_eq!(self.stage()?, made, "a making's rows say the stage it made");
+        assert!(self.stage()? == made, "a making's rows say the stage it made");
         let shown = repo.as_deref().unwrap_or("made after this answer");
         self.event("create", &format!("fragment {} created by {owner} (repo {shown})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         for effect in effects {
@@ -1476,7 +1476,7 @@ impl FragmentCell {
                     }
                     laps.lap("alarm");
                 }
-                seed::Effect::EnsureRepo | seed::Effect::Deploy | seed::Effect::Land => unreachable!("a making's own effects never begin its seed at {effect:?}"),
+                seed::Effect::EnsureRepo | seed::Effect::Deploy | seed::Effect::Land => unreachable!("a making's own effects begin its seed at its commit"),
             }
         }
         let created = json_response(&Created {

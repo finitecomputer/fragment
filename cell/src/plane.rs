@@ -837,7 +837,15 @@ impl FragmentCell {
     /// move was followed when it was made or refreshed, so a quiet pass
     /// asks code.storage nothing.
     pub(crate) async fn poll(&self) {
-        if let Err(e) = self.interpret(&REFS).await {
+        let polled = match self.stage() {
+            // its template still to land: only its seed moves its pins
+            // (`ensure_pins`), and a branch there now is a deleted life's,
+            // its repo kept (fragment_core::seed)
+            Ok(stage) if stage.waits_template() => return,
+            Ok(_) => self.interpret(&REFS).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = polled {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
         }
     }
@@ -870,9 +878,13 @@ impl FragmentCell {
     }
 
     /// `POST /api/refresh`: `refs` read again (the one its writer moved,
-    /// or both), their moves taken before it answers.
+    /// or both), their moves taken before it answers. Its template still to
+    /// land, that lands first, as for any writer (`repo_ready`): till then
+    /// nothing this life wrote is there, and a branch there is a deleted
+    /// life's, its repo kept, which pinned would be served as this one's.
     pub(crate) async fn refresh(&self, caller: &Caller, refs: &[&str]) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.repo_ready().await?;
         let moved = self.interpret(refs).await?;
         let refs: serde_json::Map<String, Value> = moved
             .into_iter()
