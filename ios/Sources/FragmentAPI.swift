@@ -191,15 +191,27 @@ struct FragmentAPI: Sendable {
     /// A page of a channel's records just below `before` (at most
     /// `CHANNEL_PAGE`, 1000, and a MiB: docs/api.md).
     func history(_ fragment: String, channel: String = "chat", before: Int64, limit: Int = 50) async throws -> [ChannelRecord] {
+        try await historyPage(fragment, channel: channel, before: before, limit: limit).records
+    }
+    /// `history`, and the bytes its answer took (each at most `historyBytesMax`).
+    func historyPage(_ fragment: String, channel: String, before: Int64, limit: Int) async throws -> (records: [ChannelRecord], bytes: Int) {
+        try await channelPage(fragment, channel: channel, query: [URLQueryItem(name: "before", value: String(before)), URLQueryItem(name: "limit", value: String(limit))])
+    }
+    /// The page just after `after`, ascending (`after` reads forward).
+    func historyPage(_ fragment: String, channel: String, after: Int64, limit: Int) async throws -> (records: [ChannelRecord], bytes: Int) {
+        try await channelPage(fragment, channel: channel, query: [URLQueryItem(name: "after", value: String(after)), URLQueryItem(name: "limit", value: String(limit))])
+    }
+    private func channelPage(_ fragment: String, channel: String, query: [URLQueryItem]) async throws -> (records: [ChannelRecord], bytes: Int) {
         struct Page: Decodable { let records: [ChannelRecord] }
         var components = URLComponents(url: url("api/f/\(fragment)/channels/\(channel)"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "before", value: String(before)), URLQueryItem(name: "limit", value: String(limit))]
+        components.queryItems = query
         let (data, response) = try await self.data(for: URLRequest(url: components.url!))
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard http.statusCode == 200 else { throw APIError.answer(data, status: http.statusCode) }
-        guard data.count <= 4_194_304 else { throw APIError.limitExceeded }
-        return try JSONDecoder().decode(Page.self, from: data).records
+        guard data.count <= Self.historyBytesMax else { throw APIError.limitExceeded }
+        return (try JSONDecoder().decode(Page.self, from: data).records, data.count)
     }
+    static let historyBytesMax = 4_194_304
 
     func socket(_ fragment: String) throws -> LiveSocket { try webSocket("f/\(fragment)/__live") }
     func webSocket(_ path: String) throws -> LiveSocket {

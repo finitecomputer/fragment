@@ -877,6 +877,42 @@ async fn chat_attachments_have_tool_usable_paths_with_native_images() {
     assert!(!text.contains("[New message]"), "the file note creates no empty new-message section: {text}");
 }
 
+/// Goal (FIN-405): a 64 MiB file, past Hermes' own 25 MiB, reaches real
+/// Hermes by its path alone. The bridge streams it to disk (its peak memory
+/// stays well under the file's size), Hermes is handed no media to read
+/// whole, and the agent's terminal reads the original bytes at the path.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_large_attachment_reaches_hermes_by_its_path() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 120_000, "the bridge follows the chat", |w| w.live_sockets() >= 2).await;
+    let size = 64 * 1024 * 1024;
+    let bytes = bytes::Bytes::from(support::big(size));
+    let sha = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("video/mp4".into(), bytes.clone())));
+    let path = format!("/tmp/bridge-media/{sha}");
+    let before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "text": format!("run: sha256sum {path}"), "attachments": [{ "name": "film.mp4", "type": "video/mp4", "size": size, "sha256": sha }] }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 180_000, "the large file's turn ends", |w| w.bodies(&chat, "work", "turn.end").iter().any(|r| r["turn"] == turn)).await;
+    fake.with(|w| {
+        let said: Vec<String> = w.bodies(&chat, "chat", "reply").iter().filter(|r| r["turn"] == turn).filter_map(|r| r["text"].as_str().map(str::to_string)).collect();
+        assert!(said.iter().any(|t| t.contains(&format!("{sha}  {path}"))), "the agent's terminal read the original at its path: {said:?}");
+    });
+    let calls = model.calls.lock().unwrap()[before..].to_vec();
+    let inbound = calls.iter().find_map(|call| call.body["messages"].as_array()?.iter().find(|m| m["role"] == "user" && content_text(m).contains("run: sha256sum")).cloned()).expect("the turn reached the model");
+    assert!(content_text(&inbound).contains(&format!("[paul sent a file: 'film.mp4' (video/mp4). It is on your computer at: {path}]")), "{inbound}");
+    assert!(inbound["content"].as_array().is_none_or(|parts| parts.iter().all(|p| p["type"] == "text")), "nothing but words reach the model: {inbound}");
+    let peak = c.exec_out(&["sh", "-c", "grep VmHWM /proc/$(pgrep -o -x fragment-bridge)/status"]);
+    let kib: u64 = peak.split_whitespace().nth(1).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("the bridge's peak memory: {peak:?}"));
+    eprintln!("the bridge's peak memory: {kib} KiB, for a {} KiB file", size / 1024);
+    assert!(kib * 1024 < size as u64 / 2, "streamed, never whole in memory: {kib} KiB");
+}
+
 async fn hermes_running_with_modes(tier: Option<&str>) -> (Fake, Model, String, Container) {
     build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
@@ -5044,4 +5080,68 @@ async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
     assert!(store.lines().any(|l| l == "chromium-1208") && store.lines().any(|l| l.starts_with("ffmpeg-9")), "Hermes' Chrome for Testing and FFmpeg are kept: {store}");
     let browsers = c.exec_out(&["sh", "-c", "ls /opt/hermes/tools | grep chromium"]);
     assert_eq!(browsers.lines().count(), 3, "Chrome for Testing's, and Playwright's two names for the system Chromium; none downloaded: {browsers}");
+}
+
+/// Goal: a deck builds in an agent's own terminal on the Hermes image as
+/// the slides skill says (templates/skills/skills/creative/slides-finite),
+/// with the environment Hermes gives that terminal (its `HOME` and its
+/// `TMPDIR`, both its work under `/data/work`), and its build is the one the
+/// e2e serves. Method: juniper's terminal (the scripted model's `run:`), in
+/// a deck folder in its work whose `site/` is the e2e's prebuilt starter
+/// deck (crates/e2e/fixtures/slides-site): `node scripts/build.mjs --check`
+/// installs the locked toolchain (`npm ci`, through the image's npm and its
+/// 14-day release cooldown) where the skill says it is kept,
+/// `~/.local/share/open-slide/<lock hash>` (Paul: kept on purpose, so the
+/// next build needs no install), links it, builds the deck aside, and finds
+/// `site/` that build byte for byte; npm's download cache is gone, and
+/// nothing of the install is in `TMPDIR`; then a build, of another deck in
+/// the work, installs nothing and writes its page. Invalid: a fixture its
+/// inputs no longer make, a toolchain in `TMPDIR` or not where the skill
+/// says, a cache left behind, a lock the cooldown refuses, a second
+/// install. It needs npm's registry, so it runs by name only, never in the
+/// queue's Docker lane: skipped without `FRAGMENT_DOCKER_SLIDES=1`.
+#[tokio::test]
+#[ignore = "needs Docker and npm's registry: FRAGMENT_DOCKER_SLIDES=1 cargo test -p fragment-bridge --test docker -- --ignored --exact a_slides_deck_builds_in_an_agents_terminal"]
+async fn a_slides_deck_builds_in_an_agents_terminal() {
+    if std::env::var("FRAGMENT_DOCKER_SLIDES").is_err() {
+        eprintln!("skip: FRAGMENT_DOCKER_SLIDES=1 installs open-slide from npm's registry");
+        return;
+    }
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("slides", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // two decks in its work, as `fragment new` puts them there, the first's
+    // site the e2e's prebuilt deck
+    let work = "/data/work/juniper--k3x9";
+    for (from, to) in [("templates/slides", "/tmp/deck-src"), ("crates/e2e/fixtures/slides-site", "/tmp/site-src")] {
+        let cp = Command::new(docker()).args(["cp", &format!("{}/.", repo_dir().join(from).display()), &format!("{}:{to}", c.id)]).output().expect("docker runs");
+        assert!(cp.status.success(), "docker cp {from}: {}", String::from_utf8_lossy(&cp.stderr));
+    }
+    let setup = format!("cp -r /tmp/deck-src {work}/deck && rm -rf {work}/deck/site && cp -r /tmp/site-src {work}/deck/site && cp -r /tmp/deck-src {work}/second && chown -R hermes {work}/deck {work}/second");
+    let (code, out) = c.exec_code(&["sh", "-c", &setup]);
+    assert_eq!(code, 0, "the decks in its work: {out}");
+    let checked = tool_said(&fake, &chat, &c, &format!("run: echo tmpdir=$TMPDIR home=$HOME; cd {work}/deck && node scripts/build.mjs --check > check.log 2>&1; echo exit=$?")).await;
+    let log = c.exec_out(&["cat", &format!("{work}/deck/check.log")]);
+    let (tmpdir, home) = (said(&checked, "tmpdir"), said(&checked, "home"));
+    let real = |p: &str| c.exec_out(&["realpath", "-e", p]).trim().to_string();
+    assert_eq!((real(&tmpdir), real(&home)), (format!("{work}/tmp"), format!("{work}/home")), "the terminal's own TMPDIR and HOME, as Hermes gives them: {checked}");
+    assert!(said(&checked, "exit") == "0" && log.contains("byte for byte"), "the e2e's prebuilt deck is the template's build, made again in the terminal: {checked} {log}");
+    assert!(log.contains("installing open-slide"), "the first build installs: {log}");
+    let kept = format!("{work}/home/.local/share/open-slide");
+    let link = real(&format!("{work}/deck/node_modules"));
+    assert!(link.starts_with(&format!("{kept}/")) && link.ends_with("/node_modules"), "the toolchain is kept where the skill says, {kept}: {link}");
+    assert_eq!(c.exec_out(&["ls", "-A", &kept]).split_whitespace().count(), 1, "one version kept, no staging left");
+    let caches = c.exec_out(&["sh", "-c", &format!("find {kept} {work}/tmp -name .npm-cache -o -name _cacache | head")]);
+    assert!(caches.trim().is_empty(), "npm's download cache is gone: {caches}");
+    let in_tmp = c.exec_out(&["sh", "-c", &format!("du -sm {work}/tmp | cut -f1")]).trim().parse::<u64>().unwrap_or(u64::MAX);
+    assert!(in_tmp < 10, "nothing of the install is in TMPDIR: {in_tmp} MB");
+    let kept_mb = c.exec_out(&["sh", "-c", &format!("du -sm {kept} | cut -f1")]);
+    let built = tool_said(&fake, &chat, &c, &format!("run: cd {work}/second && node scripts/build.mjs > build.log 2>&1; echo exit=$?")).await;
+    let log = c.exec_out(&["cat", &format!("{work}/second/build.log")]);
+    let page = c.exec_out(&["cat", &format!("{work}/second/site/index.html")]);
+    assert!(said(&built, "exit") == "0" && !log.contains("installing") && page.contains("/slides-live.js"), "another deck builds with the kept toolchain, installing nothing: {built} {log}");
+    eprintln!("slides: kept toolchain {} MB, TMPDIR {in_tmp} MB", kept_mb.trim());
 }

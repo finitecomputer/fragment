@@ -438,6 +438,42 @@ fn a_photo(fake: &Fake, chat: &str, dir: &std::path::Path) -> (Value, std::path:
     (json!({ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }), at, told)
 }
 
+/// Goal (FIN-405): a running turn's files are never let go for another's
+/// room. In a scratch of 100 bytes, a turn waiting on its asker holds its
+/// 60-byte file: another chat's 60-byte file finds no room and is told as
+/// unread, never taking the first's; once that turn ends, its file goes
+/// for the next.
+#[tokio::test]
+async fn a_running_turns_files_are_never_let_go_for_room() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let (a, b) = (fake.chat("one", &["juniper"]), fake.chat("two", &["juniper"]));
+    let dir = support::dir("scratch-turns");
+    let file = |chat: &str, fill: u8, name: &str| {
+        let bytes = bytes::Bytes::from(vec![fill; 60]);
+        let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        fake.with(|w| w.fragments.get_mut(chat).unwrap().blobs.insert(sha.clone(), ("text/plain".into(), bytes.clone())));
+        (json!({ "sha256": sha, "size": 60, "type": "text/plain", "name": name }), dir.join("media").join(&sha))
+    };
+    let ((fa, at_a), (fb, at_b)) = (file(&a, 1, "a.txt"), file(&b, 2, "b.txt"));
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.media_max_bytes = 100;
+    let bridge = support::start(cfg, support::script());
+    following(&fake, 3).await;
+    let asking = turn_of("juniper", &a, seq(&fake.say(&a, &person("paul"), json!({ "text": "keep this, ask-me", "attachments": [fa] }))));
+    fake.until(WAIT, "the first turn asks, holding its file", |w| replies(w, &a).iter().any(|r| r["turn"] == asking.as_str() && r["text"] == "What should I call it?")).await;
+    let other = turn_of("juniper", &b, seq(&fake.say(&b, &person("paul"), json!({ "text": "and this", "attachments": [fb.clone()] }))));
+    fake.until(WAIT, "the other chat's reply", |w| replies(w, &b).iter().any(|r| r["turn"] == other.as_str())).await;
+    fake.with(|w| assert_eq!(replies(w, &b).iter().find(|r| r["turn"] == other.as_str()).unwrap()["text"], "echo: [paul] and this", "its file had no room: told as unread, none named"));
+    assert!(at_a.exists() && !at_b.exists(), "the running turn's file stayed");
+    fake.say(&a, &person("paul"), json!({ "text": "Basil" }));
+    fake.until(WAIT, "the first turn's end", |w| w.bodies(&a, "work", "turn.end").iter().any(|e| e["turn"] == asking.as_str())).await;
+    let again = turn_of("juniper", &b, seq(&fake.say(&b, &person("paul"), json!({ "text": "now this", "attachments": [fb] }))));
+    fake.until(WAIT, "the other chat's next reply", |w| replies(w, &b).iter().any(|r| r["turn"] == again.as_str())).await;
+    fake.with(|w| assert_eq!(replies(w, &b).iter().find(|r| r["turn"] == again.as_str()).unwrap()["text"], "echo: [paul] now this [got 1: b.txt]"));
+    assert!(!at_a.exists() && at_b.exists(), "the ended turn's file went for it");
+    bridge.stop().await;
+}
+
 /// Goal: a question in words is answered with files too (photos sent as
 /// the answer), with words or none: the asker's message is its answer,
 /// mid-turn, its files downloaded to the computer as a turn's are and

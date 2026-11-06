@@ -90,6 +90,7 @@ fn runtime() -> Box<dyn Runtime> {
                 gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
                 secret,
                 media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
+                media_max_bytes: limits::SCRATCH_MAX_BYTES,
                 // a test's fake servers, local and plain http (runtime/relay/fetch.rs)
                 media_local: match env("BRIDGE_MEDIA_LOCAL").as_deref() {
                     None | Some("") => false,
@@ -186,6 +187,7 @@ async fn main() {
                 api,
                 state_dir: PathBuf::from(env_or("BRIDGE_STATE_DIR", "/data/bridge")),
                 media_dir: PathBuf::from(env_or("BRIDGE_MEDIA_DIR", "/tmp/bridge-media")),
+                media_max_bytes: limits::SCRATCH_MAX_BYTES,
                 restore_pending: env("RESTORE_PENDING").is_some_and(|v| v == "1"),
                 restored: PathBuf::from(env_or("BRIDGE_RESTORED", "/run/computer/restored")),
                 hold: PathBuf::from(env_or("BRIDGE_HOLD", "/run/computer/hold")),

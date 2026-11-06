@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Sixteen skills. Seven are Fragment platform contracts:
+Seventeen skills. Eight are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -47,6 +47,7 @@ Sixteen skills. Seven are Fragment platform contracts:
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
+| slides-finite | The slides template: a deck's build, its notes and presenting live |
 
 And six are integrations Paul retains:
 

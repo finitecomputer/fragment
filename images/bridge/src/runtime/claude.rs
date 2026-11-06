@@ -1560,7 +1560,7 @@ mod tests {
             attachments: vec![],
             attachments_in: None,
             late: None,
-            files: vec![super::super::LocalFile { path: "/tmp/m/a.png".into(), media_type: "image/png".into(), name: "a.png".into(), size: 1 }],
+            files: vec![super::super::LocalFile { path: "/tmp/m/a.png".into(), media_type: "image/png".into(), name: "a.png".into(), size: 1, pin: Default::default() }],
             routine: false,
             claim_seq: None,
             note: Some("the turn before was cut".into()),

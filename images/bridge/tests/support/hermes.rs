@@ -706,7 +706,12 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         gw.act(react("✅", false)).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if text.contains("media") {
+    if text.contains("send a film") {
+        // past Hermes' own 25 MiB, as a file of its own it sends may be
+        if let Some(url) = upload(gw, &super::big(super::BIG_BYTES)).await {
+            gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "video", "source_url": url, "content": "a film", "reply_to": mid, "filename": "film.mp4", "metadata": {} })).await;
+        }
+    } else if text.contains("media") {
         if let Some(url) = upload(gw, b"a picture of a cat").await {
             gw.act(json!({ "op": "send_media", "chat_id": chat, "media_kind": "image", "source_url": url, "content": "a cat", "reply_to": mid, "filename": "cat.png", "metadata": {} })).await;
         }
@@ -729,9 +734,19 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
 }
 
 async fn http(gw: &Gateway, method: &str, path: &str, content_type: Option<&str>, body: &[u8]) -> Option<Vec<u8>> {
+    http_to(gw.addr, &gw.id, &gw.secret, method, path, content_type, body).await
+}
+
+/// An upload to a relay's `/relay/media` as Hermes makes one, its token
+/// that of `id` and `secret`: whether it was taken.
+pub async fn upload_to(addr: std::net::SocketAddr, id: &str, secret: &str, bytes: &[u8]) -> bool {
+    http_to(addr, id, secret, "POST", "/relay/media", Some("image/png"), bytes).await.is_some()
+}
+
+async fn http_to(addr: std::net::SocketAddr, id: &str, secret: &str, method: &str, path: &str, content_type: Option<&str>, body: &[u8]) -> Option<Vec<u8>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut s = tokio::net::TcpStream::connect(gw.addr).await.ok()?;
-    let mut head = format!("{method} {path} HTTP/1.1\r\nhost: {}\r\nauthorization: {}\r\ncontent-length: {}\r\nconnection: close\r\n", gw.addr, bearer(&gw.id, &gw.secret), body.len());
+    let mut s = tokio::net::TcpStream::connect(addr).await.ok()?;
+    let mut head = format!("{method} {path} HTTP/1.1\r\nhost: {addr}\r\nauthorization: {}\r\ncontent-length: {}\r\nconnection: close\r\n", bearer(id, secret), body.len());
     if let Some(t) = content_type {
         head.push_str(&format!("content-type: {t}\r\nx-media-filename: cat.png\r\n"));
     }

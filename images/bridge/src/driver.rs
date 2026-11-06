@@ -27,10 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -42,7 +40,15 @@ use crate::net::Backoff;
 use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::runtime::{Agent, Command, Event, Kept, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
+use crate::scratch::Scratch;
+
+/// Each running turn's files (its message's, its answers'), by turn: their
+/// pins (`LocalFile::pin`) held until the engine ends the turn (`act`), so
+/// no other download makes room with them while its runtime may still read
+/// them by path. Any other copy of the file (a reply that sends it on)
+/// holds the same pin, as long as it lives.
+type TurnFiles = Arc<Mutex<HashMap<String, Vec<Kept>>>>;
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -54,6 +60,8 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// Scratch for attachments, never kept across a sleep.
     pub media_dir: PathBuf,
+    /// Its bytes, at most (`limits::SCRATCH_MAX_BYTES`; a test's fewer).
+    pub media_max_bytes: u64,
     /// `RESTORE_PENDING=1`: wait for `restored` before reading `/data`.
     pub restore_pending: bool,
     pub restored: PathBuf,
@@ -298,7 +306,9 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // never before: a restore swaps `/data` into place.
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
-    std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
+    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), cfg.media_max_bytes).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?);
+    // each running turn's files, in use until the engine ends it (scratch.rs)
+    let turn_files: TurnFiles = Arc::new(Mutex::new(HashMap::new()));
     // its answer to the platform's holds, for its whole life (none claims
     // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
@@ -383,13 +393,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, cfg.media_dir.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
         if step.dirty {
             save(&cfg.state_dir, engine.state())?;
+            // a turn over lets its files go (bounded: the turns open)
+            turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
             *shared.cursors.lock().expect("cursors") = engine.state().cursors.clone();
             *shared.held.lock().expect("held") = engine.held();
         }
@@ -1502,15 +1514,39 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
     // its files refused here (an agent that is a viewer of a connector's
-    // chat may post there, not upload): its words go alone, saying so
+    // chat may post there, not upload; a file past what the platform takes
+    // through the egress, 413): its words go alone, saying so
     let mut files_refused = false;
+    // its files, once uploaded: a retried post sends their refs again,
+    // never the bytes (a file may be 256 MiB)
+    // (the files stay in their scratch while `files` lives: `LocalFile::pin`)
+    let mut done: Option<Vec<AttachmentRef>> = None;
     for attempt in 1..=tries {
-        let uploaded = match if files_refused { Ok(Vec::new()) } else { upload(api, fragment, agent, files).await } {
-            Err(e) if e.status() == Some(403) && !files.is_empty() => {
-                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len() });
+        let uploading = match &done {
+            _ if files_refused => Ok(Vec::new()),
+            Some(refs) => Ok(refs.clone()),
+            None => match upload(api, fragment, agent, files).await {
+                // a file that could not be read goes unattached, never
+                // unsaid (once: a retry sends the same record)
+                Ok((refs, unread)) => {
+                    if unread > 0 {
+                        let which = match (unread, files.len()) {
+                            (1, 1) => "Its file".to_string(),
+                            (n, all) if n == all => "Its files".to_string(),
+                            (n, _) => format!("{n} of its files"),
+                        };
+                        say_unattached(&mut body, &format!("{which} could not be attached."));
+                    }
+                    Ok(refs)
+                }
+                Err(e) => Err(e),
+            },
+        };
+        let uploaded = match uploading {
+            Err(e) if matches!(e.status(), Some(403 | 413)) && !files.is_empty() => {
+                crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len(), "status": e.status() });
                 files_refused = true;
-                let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
-                body["text"] = json!(format!("{said}{}({} could not be attached here.)", if said.is_empty() { "" } else { "\n\n" }, if files.len() == 1 { "Its file" } else { "Its files" }));
+                say_unattached(&mut body, &format!("{} could not be attached here.", if files.len() == 1 { "Its file" } else { "Its files" }));
                 Ok(Vec::new())
             }
             other => other,
@@ -1518,6 +1554,7 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
         let mut attached = Vec::new();
         let result = match uploaded {
             Ok(refs) => {
+                done = Some(refs.clone());
                 if !refs.is_empty() {
                     body["attachments"] = json!(refs);
                 }
@@ -1558,27 +1595,31 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     unreachable!("the last try returns")
 }
 
-/// Uploads a reply's files as the fragment's blobs: their refs.
-async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<Vec<AttachmentRef>, ApiError> {
-    let mut refs = Vec::new();
+/// A reply's words, and a line in parentheses after them saying why it
+/// carries fewer files than it was sent with.
+fn say_unattached(body: &mut Value, why: &str) {
+    let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
+    body["text"] = json!(format!("{said}{}({why})", if said.is_empty() { "" } else { "\n\n" }));
+}
+
+/// Uploads a reply's files as the fragment's blobs, each streamed from
+/// disk (transfer.rs): their refs, and how many could not be read (gone,
+/// empty, or past the bound), which its post says.
+async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<(Vec<AttachmentRef>, usize), ApiError> {
+    let (mut refs, mut unread) = (Vec::new(), 0);
     for f in files.iter().take(limits::ATTACHMENTS_MAX) {
-        let bytes = match tokio::fs::read(&f.path).await {
-            Ok(b) if !b.is_empty() && b.len() as u64 <= limits::ATTACHMENT_MAX_BYTES => Bytes::from(b),
-            Ok(_) => {
-                crate::ev!("attachment.skipped", { "name": f.name, "why": "empty, or past the bound" });
-                continue;
-            }
+        let (sha, size) = match crate::transfer::hash_file(&f.path).await {
+            Ok(hashed) => hashed,
             Err(e) => {
-                crate::ev!("attachment.skipped", { "name": f.name, "why": e.to_string() });
+                crate::ev!("attachment.unattached", { "name": f.name, "why": e.to_string() });
+                unread += 1;
                 continue;
             }
         };
-        let sha = records::hex(&Sha256::digest(&bytes));
-        let size = bytes.len() as u64;
-        api.put_blob(agent, fragment, &sha, &f.media_type, bytes).await?;
+        api.put_blob_file(agent, fragment, &sha, &f.media_type, &f.path, size).await?;
         refs.push(AttachmentRef { sha256: sha, size, media_type: f.media_type.clone(), name: f.name.clone() });
     }
-    Ok(refs)
+    Ok((refs, unread))
 }
 
 // ---- the runtime's commands ----
@@ -1594,23 +1635,26 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, media_dir: PathBuf) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
             while let Some(mut c) = rx.recv().await {
                 // an answer's files, downloaded as a turn's are, then named
                 // in its words with where each is (`with_files`)
+                let keep = |turn: &str, files: &[LocalFile]| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(files.iter().map(|f| f.pin.clone()));
                 match &mut c {
-                    Command::Tell { text, attached, .. } => {
+                    Command::Tell { turn, text, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, &files);
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
                         }
                     }
-                    Command::Answer { words, attached, .. } => {
+                    Command::Answer { turn, words, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, &files);
                             *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a.by_name, a.refs.len(), &files));
                         }
                     }
@@ -1632,7 +1676,8 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &media_dir), note, quote);
+                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    keep(&ts.turn, &files);
                     ts.files = files;
                     // its age first (a late message's), then a late card
                     // answer's turn's own note (engine.rs `hand`)
@@ -1687,31 +1732,17 @@ fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bo
     principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
 }
 
-/// A message's attachments, from the chat's blobs to scratch files.
-async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], dir: &Path) -> Vec<LocalFile> {
+/// A message's attachments, from the chat's blobs to scratch files, each
+/// streamed (transfer.rs), and each pinned while any copy of it lives (so
+/// one downloaded never goes for the next); one that does not download is
+/// left out, and the runtime is told how many (`with_files`).
+async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> Vec<LocalFile> {
     let mut out = Vec::new();
     for r in refs.iter().take(limits::ATTACHMENTS_MAX) {
-        let path = dir.join(&r.sha256);
-        let have = tokio::fs::metadata(&path).await.is_ok_and(|m| m.len() == r.size);
-        if !have {
-            match api.get_blob(agent, fragment, &r.sha256).await {
-                Ok(bytes) if records::hex(&Sha256::digest(&bytes)) == r.sha256 => {
-                    if let Err(e) = tokio::fs::write(&path, &bytes).await {
-                        crate::ev!("attachment.unsaved", { "sha256": r.sha256, "error": e.to_string() });
-                        continue;
-                    }
-                }
-                Ok(_) => {
-                    crate::ev!("attachment.refused", { "sha256": r.sha256, "why": "its bytes are not its hash" });
-                    continue;
-                }
-                Err(e) => {
-                    crate::ev!("attachment.unread", { "sha256": r.sha256, "error": e.to_string() });
-                    continue;
-                }
-            }
+        match crate::transfer::download(api, agent, fragment, r, scratch).await {
+            Ok((path, used)) => out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size, pin: Kept(Some(Arc::new(used))) }),
+            Err(e) => crate::ev!("attachment.unread", { "sha256": r.sha256, "size": r.size, "error": e.to_string() }),
         }
-        out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
     }
     out
 }
