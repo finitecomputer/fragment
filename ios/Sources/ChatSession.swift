@@ -53,6 +53,12 @@ final class ChatSession {
     /// Messages heard live since the chat was read, counted whether or not
     /// they are in the window: what the Latest pill counts from.
     private(set) var heard = 0
+    /// The newest message counted toward `heard` (from the chat's first
+    /// read on): a catch-up's replay counts as live, and nothing twice.
+    @ObservationIgnored private var heardThrough: Int64?
+    /// The window's oldest message as last seen: when it moves on (its
+    /// oldest end evicted), there are older messages again.
+    @ObservationIgnored private var oldestSeq: Int64?
     var error: String?
     /// Files being attached, from their choosing until their upload: the
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
@@ -103,6 +109,9 @@ final class ChatSession {
         if timeline.detached != detached { detached = timeline.detached }
         let oldest = timeline.oldestChat?.id
         if oldest != oldestMessage { oldestMessage = oldest }
+        let oldestNow = timeline.oldestChat?.seq
+        if let was = oldestSeq, let now = oldestNow, now > was, !hasOlder { hasOlder = true }
+        oldestSeq = oldestNow
         // What else a view draws from the timeline is made here the same
         // way: projected from it, and set only when it changes.
     }
@@ -185,8 +194,10 @@ final class ChatSession {
                             if frame.data == nil || frame.data == .null { presence.removeValue(forKey: id) }
                             else if let principal = frame.principal, presence.count < 256 || presence[id] != nil { presence[id] = principal }
                         }
-                        if caughtUp, frame.type == "record", let record = frame.record, record.isMessage,
-                           !timeline.records.contains(where: { $0.id == record.id }) { heard += 1 }
+                        if frame.type == "record", let record = frame.record, record.isMessage, let through = heardThrough, record.seq > through {
+                            heard += 1
+                            heardThrough = record.seq
+                        }
                         try timeline.apply(frame)
                         if let clientID = frame.body?["client_id"].string, frame.principal == principal {
                             pending.removeAll { $0.id == clientID }
@@ -197,6 +208,7 @@ final class ChatSession {
                             } else if channel == "chat" {
                                 caughtUp = true
                                 chatReadNow = true
+                                if heardThrough == nil { heardThrough = timeline.cursors["chat"] ?? 0 }
                                 if workRead && !read { read = true }
                                 if timeline.chatCount < Self.chatLast && !timeline.detached { hasOlder = false }
                             } else if channel == "work" {
@@ -423,11 +435,16 @@ final class ChatSession {
         defer { paging = false }
         do {
             let page = try await api.historyPage(fragment.name, channel: "chat", after: newest.seq, limit: Self.page).records
-            let reaches = page.count < Self.page || (page.last?.seq ?? 0) >= (timeline.cursors["chat"] ?? 0)
             var work: [ChannelRecord] = []
-            if let last = page.last?.at, let from = timeline.records.last(where: { $0.channel == "work" })?.seq {
-                work = await readWork(after: from, upTo: reaches ? .max : last)
+            if let last = page.last?.at {
+                // its work from the newest learned at the window's end, whether
+                // or not the window holds any
+                let from = timeline.workSeq(atOrBefore: newest.at) ?? 0
+                work = await readWork(after: from, upTo: last).filter { $0.at > newest.at }
             }
+            // whether it reaches the newest, decided after the reads: a message
+            // heard meanwhile waits outside the window, and is read next
+            let reaches = page.count < Self.page && (page.last?.seq ?? newest.seq) >= (timeline.cursors["chat"] ?? 0)
             timeline.insertNewer(page + work, reachesNewest: reaches)
         } catch { self.error = error.localizedDescription }
     }
@@ -439,19 +456,28 @@ final class ChatSession {
         paging = true
         defer { paging = false }
         do {
-            let page = try await api.history(fragment.name, before: (timeline.cursors["chat"] ?? 0) + 1, limit: Self.chatLast)
+            // read again while messages come meanwhile, so none heard is left out
+            var page: [ChannelRecord] = []
+            for _ in 0..<3 {
+                let cursor = timeline.cursors["chat"] ?? 0
+                page = try await api.history(fragment.name, before: cursor + 1, limit: Self.chatLast)
+                if (timeline.cursors["chat"] ?? 0) == cursor { break }
+            }
             timeline.reset(page)
             hasOlder = page.count == Self.chatLast
             if let from = timeline.oldestChat?.at { await readWork(back: from) }
         } catch { self.error = error.localizedDescription }
     }
 
-    /// `work` before the window's oldest held (or from the newest heard, if it
-    /// holds none), back to `from`: kept in the window from `from` on, and
-    /// learned before it. Batches as `earlierWork` sizes them; at most
+    /// `work` before the window's oldest held (or from the newest learned at
+    /// its end, if it holds none), back to `from`: kept in the window between
+    /// `from` and its newest message, learned otherwise. Batches as `earlierWork` sizes them; at most
     /// `earlierWorkMax`.
     private func readWork(back from: Int64) async {
-        var before = (timeline.records.first { $0.channel == "work" }?.seq ?? (timeline.cursors["work"] ?? 0) + 1)
+        // from the window's oldest work, else the newest learned at its end (it may hold none)
+        let end = timeline.newestChat?.at ?? .max
+        var before = timeline.records.first { $0.channel == "work" }?.seq
+            ?? (timeline.workSeq(atOrBefore: end) ?? (timeline.cursors["work"] ?? 0)) + 1
         var read = 0, batch = Self.workBatch
         while read < Self.earlierWorkMax, before > 1 {
             let limit = min(batch, Self.earlierWorkMax - read)
@@ -459,8 +485,9 @@ final class ChatSession {
             do { page = try await api.historyPage(fragment.name, channel: "work", before: before, limit: limit) }
             catch APIError.limitExceeded where limit > Self.workBatch { batch = Self.workBatch; continue }
             catch { self.error = "Earlier progress could not be read: " + error.localizedDescription; return }
-            timeline.insertOlder(page.records.filter { $0.at >= from })
-            for record in page.records where record.at < from { timeline.learn(record) }
+            // the window's own stretch kept; the rest only says which turns run
+            timeline.insertOlder(page.records.filter { $0.at >= from && $0.at <= end })
+            for record in page.records where record.at < from || record.at > end { timeline.learn(record) }
             read += page.records.count
             guard let first = page.records.first, page.records.count == limit, first.at >= from else { return }
             before = first.seq

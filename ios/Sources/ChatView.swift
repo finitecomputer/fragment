@@ -163,8 +163,11 @@ struct ChatView: View {
             guard session.beginAttaching(items.count) else { return }
             Task { await session.attach { try await Self.read(items) } }
         }
-        .task(id: "\(session.caughtUp)|\(session.chatCursor)|\(scenePhase)") {
-            guard scenePhase == .active, session.caughtUp else { return }
+        // Seen only once its newest messages are on screen: read, the window
+        // the chat's own (not paged back), following its end; and again on
+        // coming back there. Caught up on the socket is not seen.
+        .task(id: "\(session.caughtUp)|\(session.chatCursor)|\(scenePhase)|\(session.read)|\(session.detached)|\(followsBottom)") {
+            guard scenePhase == .active, session.caughtUp, session.read, !session.detached, followsBottom else { return }
             do { let _: JSONValue = try await session.api.request("api/fragments/\(session.fragment.name)/seen", method: "PUT") }
             catch { /* A later live cursor or foreground visit retries the read marker. */ }
         }

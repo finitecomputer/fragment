@@ -158,8 +158,10 @@ the chat reads the 50 messages before (and the work their turns show), keeping
 the row in view in place; past 600, the window's newest end goes, and live
 messages then say which turns run and are counted on the Latest pill ("3 new")
 without entering it. Scrolled back down, it reads the 50 after, until it reaches
-the newest; Latest reads the newest page at once, and so does a send. The chat
-follows its newest record, never a count. Which turns run follows
+the newest; Latest reads the newest page at once, and so does a send. A chat is
+marked seen only while its newest messages are on screen (read, not paged back,
+following its end), and again on coming back there; a reconnect's catch-up counts
+on the pill as live messages do. The chat follows its newest record, never a count. Which turns run follows
 the web's chat page (`templates/chat/site/chat.js`): a turn is its agent's and its
 id, a record counts only toward its own poster's turn, and a turn runs once its
 start is read and until its end is, in either order; this is kept apart from the

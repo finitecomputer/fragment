@@ -180,6 +180,7 @@ struct Timeline {
     mutating func learn(_ record: ChannelRecord) {
         guard record.channel == "work" else { return }
         if oldestWork.map({ record.seq < $0.seq }) ?? true { oldestWork = (record.seq, record.at) }
+        indexWork(record)
         guard let id = record.turn else { return }
         let key = TurnKey(agent: record.principal, id: id)
         var state = turns[key] ?? TurnState()
@@ -255,6 +256,27 @@ struct Timeline {
         if record.channel == "work", record.body["kind"].string == "turn.end", let turn = record.turn {
             drafts.removeValue(forKey: turn)
         }
+    }
+
+    /// Each `work` record learned, its seq and time, in seq order: where a
+    /// page of messages' work begins, whatever the window holds (a stretch
+    /// paged back to may hold none). At most `workIndexMax`, the oldest let go.
+    private(set) var workIndex: [(seq: Int64, at: Int64)] = []
+    static let workIndexMax = 100_000
+    private mutating func indexWork(_ record: ChannelRecord) {
+        var low = 0, high = workIndex.count
+        if let last = workIndex.last, last.seq < record.seq { low = high }
+        while low < high {
+            let mid = (low + high) / 2
+            if workIndex[mid].seq < record.seq { low = mid + 1 } else { high = mid }
+        }
+        if low < workIndex.count, workIndex[low].seq == record.seq { return }
+        workIndex.insert((record.seq, record.at), at: low)
+        if workIndex.count > Self.workIndexMax { workIndex.removeFirst(workIndex.count - Self.workIndexMax) }
+    }
+    /// The newest `work` seq learned at or before `time`, to read on from.
+    func workSeq(atOrBefore time: Int64) -> Int64? {
+        workIndex.last { $0.at <= time }?.seq
     }
 
     /// An older page, scrolled up to: kept whole, and past `chatMax` the
