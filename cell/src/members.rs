@@ -560,7 +560,7 @@ impl FragmentCell {
     /// request's flush, `after_answer`'s, the alarm's) names no agent. Its
     /// rows and its computer's notice are sent as its owner's `PUT
     /// members/{agent}` sends them (`write_member`), the notice once its
-    /// template is in (`joins_wait`).
+    /// template is in (`fragment_core::seed::Stage::joins_wait`).
     pub(crate) fn join_own_agent(&self, target: &Identity) -> CellResult<Member> {
         let owner = self.must(MetaKey::Owner)?;
         let actor = Actor { role: Some(Role::Owner), by: owner, for_owner: None };

@@ -57,7 +57,9 @@ an image may rely on this:
 - **A restart** (its owner's) is a sleep that saves if it can and stops
   whether or not it did, then a fresh start: from the image and the
   newest good save, never the snapshot, which could carry what broke it
-  outside `/data`.
+  outside `/data`. That start is owed, made by its alarm (asleep or
+  won't wake, the start alone), so the restart answers `starting` on
+  every path, and its owner's page follows it to awake.
 - **A crash** (the container stopped on its own) starts it again while
   something wants it; a guest that died holding its keepalive is started
   again however long its turn ran, and its next life ends what was cut.
@@ -73,7 +75,8 @@ an image may rely on this:
   deadline; one that does not fit is set aside, not waited for.
 - **A start owed after its container goes** (a sleep's end with a wake
   or a restart asked, a crash while wanted, a start that fell back past a
-  bad save) is due at once: the request that saw it go makes it, and each
+  bad save) is due at once, told as `starting`: the request that saw it go
+  (a restart's aside) makes it, and each
   one after it as a start falls back (`STARTS_OWED_MAX` at most), or, in
   an alarm, the alarm it asks for, never the rest of the alarm that ran
   the sleep (see Bounds). Its owner's sleep before it is made lets it go,
@@ -206,7 +209,18 @@ every chat and Settings.
 - **One way back: Restart** (`POST /api/computers/{id}/restart`): the
   sleep and fresh start above. It names the start its owner saw, so
   pressed twice it restarts once, and the ledger is asked first, as for a
-  wake.
+  wake. While it runs, the shell shows its phase where the button was
+  (saving, then starting; Settings' State says Saving, not Going to sleep,
+  while a restart asked in that page saves: one asked elsewhere, by
+  another tab, the CLI or the app, still reads Going to sleep there), read
+  every two seconds while the page is shown
+  (`cell/shell/restart-follow.js`), and a line that a big save or restore
+  can take a few minutes once it has run 30 seconds; awake on its new
+  start (or, pressed while a start was under way, which the restart
+  adopts, on that start, read after its answer), the notice goes. A read that fails says so, with Check again,
+  never that the restart failed; an ask that fails is decided by the next
+  read that works (none while the page is hidden or waits for Check
+  again): no restart under way says it didn't restart, with Try again.
 - **An update is told, never forced** (Paul, 2026-10-09). A deploy that
   changes an image pushes it under the same name: asleep, a computer takes
   it at its next wake; awake, it runs the image it started on until it

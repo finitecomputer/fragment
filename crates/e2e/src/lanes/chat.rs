@@ -1276,14 +1276,14 @@ const MADE_WITH_AGENT_CHECKS: [&str; 4] = [
 /// A fragment made with its agent in it (its create's `agent`, as the
 /// shell's New chat makes one) while code.storage refuses commits: its
 /// agent's computer is told it joined once the fragment's template is
-/// installed (runs_on.rs `joins_wait`), never before. Told before, it would
+/// installed (`fragment_core::seed::Stage::joins_wait`), never before. Told before, it would
 /// find no channel to follow, take the notice as done, and look again only
 /// at its rediscovery, minutes off (images/bridge `limits.rs`). Both
 /// orders: an app's seed is its create's, and its template is installed
 /// only by the seed that lands it, the alarm's, across a restart; a chat
 /// runs its template from the release as its create answers (publish.rs
-/// `seeds_later`), and is told after the seed that follows the answer,
-/// whether that lands or not.
+/// `seeds_later`), and is told after the seed its alarm takes right after
+/// the answer, whether that lands or not.
 fn made_with_agent(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity: &str) -> Result<()> {
     if s.hosted() {
         for label in MADE_WITH_AGENT_CHECKS {
