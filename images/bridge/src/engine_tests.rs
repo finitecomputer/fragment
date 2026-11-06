@@ -205,7 +205,7 @@ fn any_runtimes_work_holds_the_computer() {
 fn a_background_file_is_posted_without_a_caption() {
     let a = agent("juniper");
     let mut e = engine(std::slice::from_ref(&a));
-    let file = LocalFile { path: "/data/result.txt".into(), media_type: "text/plain".into(), name: "result.txt".into(), size: 27 };
+    let file = LocalFile { path: "/data/result.txt".into(), media_type: "text/plain".into(), name: "result.txt".into(), size: 27, pin: Default::default() };
     let event = |agent: &str, files: Vec<LocalFile>| Event::Say { agent: agent.into(), fragment: "talk--k3x9".into(), text: String::new(), files };
     assert!(posts(&ev(&mut e, event("unknown--k3x9", vec![file.clone()]), T0)).is_empty());
     assert!(posts(&ev(&mut e, event(&a.fragment, Vec::new()), T0)).is_empty());
@@ -1148,7 +1148,7 @@ fn attachments_ride_along() {
     let s = said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "see", "attachments": [{ "sha256": sha, "size": 4, "type": "image/png", "name": "a.png" }] }), T0);
     let t = started(&s).expect("started");
     assert_eq!(t.attachments.len(), 1);
-    let file = LocalFile { path: "/tmp/x.png".into(), media_type: "image/png".into(), name: "x.png".into(), size: 4 };
+    let file = LocalFile { path: "/tmp/x.png".into(), media_type: "image/png".into(), name: "x.png".into(), size: 4, pin: Default::default() };
     ev(&mut e, Event::Attachment { turn: t.turn.clone(), part: 1, file: file.clone() }, T0);
     let end = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0);
     let files = end.effects.iter().find_map(|e| match e { Effect::Post { files, .. } if !files.is_empty() => Some(files.clone()), _ => None });
@@ -1917,7 +1917,7 @@ fn a_question_is_answered_back_where_it_was_asked() {
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 1, text: "Let me look.".into() }, T0 + 3);
     let step = ToolStep { tool: "search".into(), args: "weather".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Web, evidence: None };
     ev(&mut e, Event::Step { turn: t.turn.clone(), step }, T0 + 4);
-    let file = LocalFile { path: "/data/map.png".into(), media_type: "image/png".into(), name: "map.png".into(), size: 9 };
+    let file = LocalFile { path: "/data/map.png".into(), media_type: "image/png".into(), name: "map.png".into(), size: 9, pin: Default::default() };
     ev(&mut e, Event::Reply { turn: t.turn.clone(), part: 2, text: "Sunny, 21°C.".into() }, T0 + 5);
     ev(&mut e, Event::Attachment { turn: t.turn.clone(), part: 2, file }, T0 + 5);
     let end = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 6);

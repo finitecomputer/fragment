@@ -584,4 +584,39 @@ pub(crate) mod tests {
         }
         assert!(page.contains("<html lang=\"en\">"), "cursors are off by default (the e2e turns them on by this tag)");
     }
+
+    /// Goal: the slides template holds its sources and no build, so the
+    /// CLI and every image that carries it pay for no deck's toolchain or
+    /// output (the e2e's prebuilt deck is crates/e2e/fixtures/slides-site,
+    /// checked beside it); its pins are exact and its lockfile is theirs;
+    /// one deck; its notes are the doc's. Invalid: a built file in the
+    /// template, a range pin, a lockfile for other pins.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_slides_template_is_its_sources() {
+        use fragment_proto::Role;
+        let file = |path: &str| SLIDES.file(path).unwrap_or_else(|| panic!("slides has {path}")).bytes;
+        let text = |path: &str| std::str::from_utf8(file(path)).expect("utf-8");
+        let site: Vec<&str> = SLIDES.files.iter().filter_map(|f| f.path.strip_prefix("site/")).collect();
+        assert_eq!(site, ["index.html"], "no build in the template: only the page that says to build it");
+        assert!(text("site/index.html").contains("node scripts/build.mjs") && !text("site/index.html").contains("<script"), "a page with no code, saying how to build");
+        let total: u64 = SLIDES.files.iter().map(|f| f.size).sum();
+        assert!(total < 256 * 1024, "the template's sources are small: {total} bytes");
+        let pkg: serde_json::Value = serde_json::from_str(text("package.json")).expect("package.json");
+        for (dep, pin) in pkg["dependencies"].as_object().expect("its dependencies") {
+            assert!(pin.as_str().is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit() || b == b'.')), "{dep} is pinned to one version, not {pin}");
+        }
+        let lock: serde_json::Value = serde_json::from_str(text("package-lock.json")).expect("package-lock.json");
+        assert_eq!(lock["packages"][""]["dependencies"], pkg["dependencies"], "the lockfile is package.json's");
+        let decks: std::collections::BTreeSet<&str> = SLIDES.files.iter().filter_map(|f| f.path.strip_prefix("slides/")?.split_once('/').map(|(d, _)| d)).collect();
+        assert_eq!(decks.into_iter().collect::<Vec<_>>(), ["deck"], "one deck");
+        assert_eq!(file("applib/notes.mjs"), DOC.file("applib/notes.mjs").expect("doc's notes").bytes, "the notes are the doc's, copied whole");
+        assert!(text("app.mjs").contains("extends withNotes(DurableObject)"), "app.mjs takes the mixin");
+        let m = fragment_core::manifest::parse(file("fragment.json")).expect("slides' fragment.json");
+        assert_eq!(m.operations.keys().map(String::as_str).collect::<Vec<_>>(), ["annotate", "notes", "remove_note", "resolve"]);
+        let present = m.channels.get("present").expect("the present channel");
+        assert!(present.read == Role::Public && present.post == Some(Role::Editor), "editors and up present, whoever sees the deck follows");
+        let raw: serde_json::Value = serde_json::from_slice(file("fragment.json")).expect("json");
+        assert_eq!(raw["immutable"], serde_json::json!(["assets/**"]), "its hashed assets are kept for good, and nothing else");
+    }
 }

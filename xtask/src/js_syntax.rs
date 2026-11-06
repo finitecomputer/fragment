@@ -42,7 +42,10 @@ use fragment_devstack::node::{Node, NODE_VERSION};
 
 /// Built or vendored JavaScript, each prefix with where it is recorded:
 /// never edited here, so never checked.
-pub const VENDORED: [(&str, &str); 1] = [("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)")];
+pub const VENDORED: [(&str, &str); 2] = [
+    ("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)"),
+    ("crates/e2e/fixtures/slides-site/", "the slides template's starter deck, built by its scripts/build.mjs for the e2e; its own files are templates/slides/live/'s, checked there (crates/e2e `the_slides_fixture_is_the_templates_build`)"),
+];
 
 /// The `.js` files loaded as classic scripts, not modules.
 pub const CLASSIC: [(&str, &str); 2] = [
@@ -304,9 +307,9 @@ mod tests {
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         // the Worker's restore reads (beside the module it tests), the shell's
-        // tests, and the brain app's (beside the templates crate: a file under
-        // templates/brain would ship with the template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs"]].concat());
+        // tests, and the brain app's and the slides' build's and presenter's (beside the
+        // templates crate: a file under templates/ would ship with its template)
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");
@@ -328,7 +331,7 @@ mod tests {
     #[test]
     fn a_stale_list_or_a_walk_without_the_shell_is_refused() {
         let paths = |extra: &[&str]| {
-            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
+            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js", "crates/e2e/fixtures/slides-site/assets/index-C_sEAvZ8.js"].map(String::from).to_vec();
             all.extend(extra.iter().map(|p| p.to_string()));
             all
         };
