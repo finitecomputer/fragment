@@ -5,15 +5,15 @@
 //
 // open-slide (package.json pins it, package-lock.json locks all it needs)
 // builds the deck with its own Vite build. Its toolchain (about 250 MB) is
-// installed once per lockfile (`npm ci`) into a folder outside the deck and
-// linked as node_modules; a node_modules the deck already holds (`npm ci`)
-// is used instead. That folder is OPEN_SLIDE_HOME, else /tmp/open-slide:
-// named, never the temporary folder TMPDIR names, which on a computer is
-// the agent's work and saved with it (images/hermes/boot/src/hermes.rs
-// `tmp_dir`), while the container's /tmp is in no save (docs/computers.md).
-// A folder under /data, the computer's saved disk, is refused. npm's cache,
-// the install's staging and the build's own output are made there too, and
-// removed on every way out, a failure's included. The build's files then get
+// installed once per lockfile (`npm ci`) and kept, so the next build, of
+// any deck there, needs no install and no network; it is linked into the
+// deck as node_modules (a node_modules the deck already holds, `npm ci`, is
+// used instead). It is kept in one folder per home: OPEN_SLIDE_HOME, else
+// $XDG_DATA_HOME/open-slide, else ~/.local/share/open-slide, never the
+// temporary folder TMPDIR names (scratch). A folder per lockfile's hash;
+// installing one removes the others, so one version takes the disk. npm's
+// download cache (about 300 MB) and the install's staging go away on every
+// way out, a failure's included; the toolchain is kept on purpose. The build's files then get
 // what a fragment's site needs: the deck's page at /, /s/<id>/ and
 // /s/<id>/presenter/ (a site has no fallback page), the live layer (live/:
 // following a presenter, who is watching, notes), and site/build.json,
@@ -44,18 +44,32 @@ function run(cmd, args, opts) {
   if (r.status !== 0) fail(`${cmd} ${args.join(" ")} failed (exit ${r.status})`);
 }
 
-// Where the toolchain, its staging and the build's output go: never under
-// /data, however the path gets there (a link is followed).
+// Where the kept toolchain goes (above).
 function installRoot() {
-  const root = path.resolve(process.env.OPEN_SLIDE_HOME || (process.platform === "win32" ? path.join(os.tmpdir(), "open-slide") : "/tmp/open-slide"));
-  // where it really is, before anything is made there: its nearest folder
-  // that exists, links followed, and the rest of its path
-  let at = root;
-  while (!fs.existsSync(at)) at = path.dirname(at);
-  const real = path.join(fs.realpathSync(at), path.relative(at, root));
-  if (real === "/data" || real.startsWith("/data/")) fail(`${root} is on /data, the computer's saved disk: name another with OPEN_SLIDE_HOME`);
-  fs.mkdirSync(real, { recursive: true });
-  return real;
+  const data = process.env.XDG_DATA_HOME || (process.platform === "win32" ? process.env.LOCALAPPDATA : null) || path.join(os.homedir(), ".local", "share");
+  const root = path.resolve(process.env.OPEN_SLIDE_HOME || path.join(data, "open-slide"));
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+// What an earlier install left in `base` beside `key`: another lockfile's
+// toolchain, or the staging of a build that is no longer running. Only
+// names this script makes: a 12-hex key, or one with a process id.
+function others(base, key) {
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return e.code === "EPERM";
+    }
+  };
+  return fs.readdirSync(base).filter((name) => {
+    const m = /^([0-9a-f]{12})(?:\.(\d+))?$/.exec(name);
+    if (!m) return false;
+    if (m[2] !== undefined) return Number(m[2]) !== process.pid && !alive(Number(m[2]));
+    return m[1] !== key;
+  });
 }
 
 // Folders to remove on the way out, whatever the way.
@@ -114,14 +128,14 @@ function toolchain(pins, base) {
   const home = path.join(base, key);
   const installed = path.join(home, "node_modules");
   if (version(installed) !== pins["@open-slide/core"]) {
-    console.log(`slides: installing open-slide ${pins["@open-slide/core"]} into ${home} (once)`);
+    console.log(`slides: installing open-slide ${pins["@open-slide/core"]} into ${home}, kept for the next build`);
     const staging = `${home}.${process.pid}`;
     scratch.add(staging);
     fs.rmSync(staging, { recursive: true, force: true });
     fs.mkdirSync(staging, { recursive: true });
     for (const f of ["package.json", "package-lock.json"]) fs.copyFileSync(path.join(root, f), path.join(staging, f));
-    // npm's cache too stays out of the deck's home (a computer's home is on
-    // its saved disk): beside the install, and gone once it is done
+    // npm's download cache is waste once installed: beside the install, and
+    // removed after it, or with the staging on a failure
     const cache = path.join(staging, ".npm-cache");
     run("npm", ["ci", "--no-fund", "--no-audit", "--ignore-scripts", "--loglevel=error", "--update-notifier=false", "--cache", cache], { cwd: staging });
     fs.rmSync(cache, { recursive: true, force: true });
@@ -133,6 +147,8 @@ function toolchain(pins, base) {
       fs.rmSync(staging, { recursive: true, force: true });
       if (version(installed) !== pins["@open-slide/core"]) fail(`installing into ${home}: ${e.message}`);
     }
+    // installed: the others go, so one version takes the disk
+    for (const old of others(base, key)) fs.rmSync(path.join(base, old), { recursive: true, force: true });
   }
   if (stat) fs.unlinkSync(own);
   fs.symlinkSync(installed, own, "junction");
@@ -168,7 +184,7 @@ try {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const id = theDeck();
   const base = installRoot();
-  const out = fs.mkdtempSync(path.join(base, "build-"));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "slides-build-"));
   scratch.add(out);
   build(out, pkg, id, base);
   const site = path.join(root, "site");
