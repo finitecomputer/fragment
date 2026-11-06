@@ -41,6 +41,15 @@
 //! nullable inline shape is a field's `T|null`; `never` is a field a
 //! branch forbids; `null` one it holds only as null or absent.
 //!
+//! An optional field says what leaving it out means: its `default`, or
+//! it is nullable (left out is none). One that says neither is refused:
+//! schemars drops a default its field's `skip_serializing_if` skips, so
+//! such a field declares it (`schemars(extend("default" = …))`, which
+//! proto's tests hold to serde), else a change of its meaning would pass.
+//! A route's parameters and a condition's fields are spared: their
+//! absence is said where they are described. Integers' ranges compare
+//! exactly; a u128's would not, and is refused.
+//!
 //! The projection is closed: every keyword of every schema is a fact
 //! (`STRUCTURAL`, `BOUNDS`) or says nothing a reader decodes by
 //! (`DOCUMENTARY`), and a schema with any other is refused, so a
@@ -99,7 +108,7 @@ pub fn project(doc: &Value) -> Result<String> {
                 let scheme = requirement.as_object().and_then(|m| m.keys().next()).map_or("none", String::as_str);
                 lines.insert(format!("route {name} accepts {scheme}"));
             }
-            let mut p = Projector { lines: &mut lines };
+            let mut p = Projector { lines: &mut lines, lenient: 0 };
             // its inputs beside its body, each an `in` shape every route has
             // (empty when it takes none), so a first optional one is a new
             // optional field: a path's and a query's
@@ -114,7 +123,9 @@ pub fn project(doc: &Value) -> Result<String> {
                     }
                 }
                 let pseudo = format!("{name}.{at}");
+                p.lenient += 1;
                 p.object(&pseudo, &serde_json::json!({ "type": "object", "properties": fields, "required": required }), Direction::In, false)?;
+                p.lenient -= 1;
                 p.lines.insert(format!("route {name} {at} {pseudo}"));
             }
             if let Some(body) = op.pointer("/requestBody/content/application~1json/schema") {
@@ -138,7 +149,7 @@ pub fn project(doc: &Value) -> Result<String> {
     let schemas = doc["components"]["schemas"].as_object().context("the document has components")?;
     for (name, schema) in schemas {
         let direction = schema["x-fragment-direction"].as_str().and_then(Direction::parse).with_context(|| format!("{name} names its direction"))?;
-        Projector { lines: &mut lines }.node(name, schema, direction, schema["x-fragment-open"] == true)?;
+        Projector { lines: &mut lines, lenient: 0 }.node(name, schema, direction, schema["x-fragment-open"] == true)?;
     }
     let mut out = HEADER.to_string();
     out.push('\n');
@@ -151,6 +162,10 @@ pub fn project(doc: &Value) -> Result<String> {
 
 struct Projector<'a> {
     lines: &'a mut BTreeSet<String>,
+    /// Inside a route's parameters, or a condition beside an object's
+    /// fields (`branches` of `object`): an optional field there says what
+    /// leaving it out means elsewhere (its parameter's doc, its parent).
+    lenient: usize,
 }
 
 /// A schema's keywords, every one of them known.
@@ -271,6 +286,12 @@ impl Projector<'_> {
         for (field, s) in map.get("properties").and_then(Value::as_object).into_iter().flatten() {
             let t = self.render(s, &format!("{name}.{field}"), direction)?;
             let need = if required.contains(field.as_str()) { "required" } else { "optional" };
+            // what leaving it out means is part of the wire; schemars drops a
+            // default its field's `skip_serializing_if` would skip, so it is said
+            let absent_is_none = t.ends_with("|null") || matches!(t.as_str(), "any" | "never" | "null");
+            if need == "optional" && !absent_is_none && self.lenient == 0 && s.get("default").is_none() {
+                bail!("{name}.{field}: an optional field that says nothing of what leaving it out means: give it `#[cfg_attr(feature = \"schema\", schemars(extend(\"default\" = …)))]` beside its serde default (schemars leaves out a default its `skip_serializing_if` skips), or make it an `Option`");
+            }
             self.lines.insert(format!("field {name}.{field} {need} {t}"));
         }
         // a condition's names it requires present, whatever they hold
@@ -286,11 +307,14 @@ impl Projector<'_> {
                 self.lines.insert(format!("field {name}.* optional {t}"));
             }
         }
-        // a flattened union beside its fields
+        // a flattened union beside its fields: conditions on them
         if let Some((keyword, branches)) = union_of(map) {
             let tag = tag_of(branches);
             self.lines.insert(format!("branches {name} {}", tag.clone().unwrap_or_else(|| keyword.to_string())));
-            self.branches(name, branches, tag.as_deref(), direction)?;
+            self.lenient += 1;
+            let done = self.branches(name, branches, tag.as_deref(), direction);
+            self.lenient -= 1;
+            done?;
         }
         Ok(())
     }
@@ -425,8 +449,9 @@ fn tag_value(branch: &Value, tag: &str) -> Option<String> {
     }
 }
 
-/// The sized integer formats schemars writes, and their ranges.
-const INTEGER_FORMATS: [(&str, i128, i128); 10] = [
+/// The sized integer formats schemars writes, and their ranges: as i128,
+/// which holds each exactly but a u128's (refused: `numeric_range`).
+const INTEGER_FORMATS: [(&str, i128, i128); 9] = [
     ("int8", i8::MIN as i128, i8::MAX as i128),
     ("int16", i16::MIN as i128, i16::MAX as i128),
     ("int32", i32::MIN as i128, i32::MAX as i128),
@@ -436,7 +461,6 @@ const INTEGER_FORMATS: [(&str, i128, i128); 10] = [
     ("uint16", 0, u16::MAX as i128),
     ("uint32", 0, u32::MAX as i128),
     ("uint64", 0, u64::MAX as i128),
-    ("uint128", 0, i128::MAX),
 ];
 
 /// A range of numbers, either end open (`None`), as the lock writes it:
@@ -447,7 +471,7 @@ pub struct Range {
     hi: Option<String>,
 }
 
-const NAMED: [(&str, &str); 12] = [
+const NAMED: [(&str, &str); 11] = [
     ("i8", "int8"),
     ("i16", "int16"),
     ("i32", "int32"),
@@ -457,7 +481,6 @@ const NAMED: [(&str, &str); 12] = [
     ("u16", "uint16"),
     ("u32", "uint32"),
     ("u64", "uint64"),
-    ("u128", "uint128"),
     ("f32", "float"),
     ("f64", "double"),
 ];
@@ -522,6 +545,7 @@ impl Range {
 /// number's are refused (no float this wire carries has one yet).
 fn numeric_range(map: &Map<String, Value>, integer: bool) -> Result<Option<Range>> {
     let mut range = match map.get("format").map(|f| f.as_str().context("a format is a string")).transpose()? {
+        Some("uint128") => bail!("a u128's range is wider than the wire lock compares exactly: use a narrower integer"),
         Some(f) => Range::of_format(f).with_context(|| format!("`{f}` is no sized number: use a sized integer (an isize or usize is as wide as its machine)"))?,
         None => Range { lo: None, hi: None },
     };
@@ -929,7 +953,7 @@ fn field_of<'f>(path: &str, facts: &'f Facts) -> Option<&'f (bool, String)> {
 /// A schema as the lock writes a field's type (the reference's).
 pub fn type_of(schema: &Value, at: &str) -> String {
     let mut scratch = BTreeSet::new();
-    Projector { lines: &mut scratch }.render(schema, at, Direction::Both).unwrap_or_else(|_| "any".into())
+    Projector { lines: &mut scratch, lenient: 1 }.render(schema, at, Direction::Both).unwrap_or_else(|_| "any".into())
 }
 
 /// A component's string values, if it is an enum (the reference's).

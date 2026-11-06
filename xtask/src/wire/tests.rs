@@ -217,6 +217,10 @@ fn bounds_hold_by_who_reads_them() {
     fails(&[(bi, Some("bound BI.n range 1..=4294967295"))], &[], bi);
     passes(&[(bo, Some("bound BO.n range 1..=100"))], &[]);
     passes(&[(bi, Some("bound BI.n range ..=4294967296"))], &[]);
+    // a 128-bit integer's whole range, exactly
+    passes(&[(bi, Some("bound BI.n range i128"))], &[]);
+    fails(&[(bo, Some("bound BO.n range i128"))], &[], bo);
+    fails(&[("bound BB.n range u32", Some("bound BB.n range i128"))], &[], "bound BB.n range u32");
     fails(&[("bound BB.n range u32", Some("bound BB.n range u16"))], &[], "bound BB.n range u32");
     fails(&[("bound BB.n range u32", Some("bound BB.n range u64"))], &[], "bound BB.n range u32");
     // lengths, list sizes and map sizes alike; none is 0..
@@ -654,4 +658,73 @@ fn inline_nullability_and_enum_branches_are_read() {
     let bounded = json!({ "paths": {}, "components": { "schemas": { "T": { "x-fragment-direction": "out", "oneOf": [{ "const": "a", "type": "string", "maxLength": 1 }, { "const": "bb", "type": "string" }] } } } });
     let lock = project(&bounded).unwrap();
     assert!(lock.lines().any(|l| l == "bound T.#0 length 0..=1"), "{lock}");
+}
+
+#[allow(dead_code)]
+mod derived_absence {
+    /// A row on the dock until it is taken off: left out while true.
+    pub mod on_unless_off {
+        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        pub struct Row {
+            #[serde(default = "yes", skip_serializing_if = "is_yes")]
+            #[schemars(extend("default" = true))]
+            pub dock: bool,
+        }
+        fn yes() -> bool {
+            true
+        }
+        fn is_yes(b: &bool) -> bool {
+            *b
+        }
+    }
+    /// The same field, off until it is put on: left out while false.
+    pub mod off_unless_on {
+        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        pub struct Row {
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            #[schemars(extend("default" = false))]
+            pub dock: bool,
+        }
+    }
+    /// It, saying nothing of what leaving it out means.
+    pub mod unsaid {
+        #[derive(schemars::JsonSchema)]
+        pub struct Row {
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            pub dock: bool,
+        }
+    }
+    pub mod wide {
+        #[derive(schemars::JsonSchema)]
+        pub struct Big {
+            pub n: u128,
+        }
+    }
+}
+
+/// What leaving a field out means is a fact: an older reader fills it in
+/// with the default it was built with. One the schema cannot see is
+/// refused; so is a u128, whose range the lock cannot compare exactly.
+#[test]
+fn absence_is_said_and_held() {
+    use derived_absence::*;
+    // the change a reader feels: off is written as nothing, and read as on
+    let written = serde_json::to_value(off_unless_on::Row { dock: false }).unwrap();
+    assert_eq!(written, json!({}));
+    assert!(serde_json::from_value::<on_unless_off::Row>(written).unwrap().dock);
+    let none = BTreeSet::new();
+    let found = breaches(&lock_of::<on_unless_off::Row>(true), &lock_of::<off_unless_on::Row>(true), &none);
+    assert_eq!(facts_of(&found), ["bound Row.dock default true"]);
+    let refuse = |doc: Value| project(&doc).unwrap_err().to_string();
+    let mut g = super::openapi::generator(true);
+    let root = g.subschema_for::<unsaid::Row>().to_value();
+    let schemas = super::openapi::components(g.take_definitions(true), Map::new()).unwrap();
+    let op = json!({ "operationId": "t.get", "responses": { "200": { "content": { "application/json": { "schema": root } } } } });
+    let refused = refuse(json!({ "paths": { "/t": { "get": op } }, "components": { "schemas": schemas } }));
+    assert!(refused.contains("Row.dock") && refused.contains("leaving it out"), "{refused}");
+    let mut g = super::openapi::generator(false);
+    g.subschema_for::<wide::Big>();
+    let schemas = super::openapi::components(Map::new(), g.take_definitions(true)).unwrap();
+    let refused = refuse(json!({ "paths": {}, "components": { "schemas": schemas } }));
+    assert!(format!("{refused:#}").contains("Big.n"), "{refused}");
 }

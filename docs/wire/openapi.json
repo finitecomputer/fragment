@@ -439,6 +439,7 @@
             "$ref": "#/components/schemas/Pins"
           },
           "reach": {
+            "default": false,
             "description": "It holds a secret or a door, so it is shared with no one but its\nowner and their own agents (FIN-352, `Sharing::reach`): the share\nsheet says so. Add-only: left out when false.",
             "type": "boolean"
           },
@@ -554,6 +555,7 @@
             ]
           },
           "agents": {
+            "default": [],
             "description": "Its agent members, the first added (a chat's lead) first, at most\n`limits::LISTED_AGENTS_MAX`, as the fragment last said.",
             "items": {
               "type": "string"
@@ -561,10 +563,12 @@
             "type": "array"
           },
           "archived": {
+            "default": false,
             "description": "The signer archived it: their own view, not the fragment's (the\nshell's sidebar leaves it out; search still finds it).",
             "type": "boolean"
           },
           "dock": {
+            "default": true,
             "description": "On the signer's dock: their own choice, not the fragment's (`PUT\n/api/fragments/{name}/dock`), true until they take it off (the\nshell's dock shows apps and brains, less these and the archived).\nLeft out while true, so a row from before the choice, or from an\nolder platform, reads as on it.",
             "type": "boolean"
           },
@@ -574,6 +578,7 @@
             "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
           },
           "listed": {
+            "default": [],
             "description": "What its members are doing, as its channels that declare `listed`\nlast said (each member's newest such record, the newest first, at\nmost `limits::LISTED_POSTERS_MAX`): only those of channels this\nrow's role may read; none when there are none.",
             "items": {
               "$ref": "#/components/schemas/ListedRecord"
@@ -584,6 +589,7 @@
             "type": "string"
           },
           "owned": {
+            "default": false,
             "description": "An agent's list `for` someone: whether that someone owns it (beside\nthe role the agent acts with there), as no name says any more.",
             "type": "boolean"
           },
@@ -595,6 +601,7 @@
             ]
           },
           "pinned": {
+            "default": false,
             "description": "The signer pinned it: their own view, not the fragment's (`PUT\n/api/fragments/{name}/pinned`; the shell's sidebar shows it first in\nits section). Left out while false, so a row from an older platform\nreads as not pinned.",
             "type": "boolean"
           },
@@ -634,6 +641,7 @@
             ]
           },
           "unread": {
+            "default": 0,
             "description": "A chat's messages the signer's search holds that came after the\nlast they saw (`PUT /api/fragments/{name}/seen`), at most\n`limits::LISTED_UNREAD_MAX`; left out at 0.",
             "format": "uint32",
             "minimum": 0,
@@ -663,6 +671,7 @@
             "additionalProperties": {
               "type": "string"
             },
+            "default": {},
             "description": "Its body's listed fields that are strings, each cut to\n`limits::LISTED_VALUE_MAX_CHARS` characters.",
             "type": "object"
           },
@@ -1375,6 +1384,7 @@
             ]
           },
           "ephemeral": {
+            "default": false,
             "description": "A mutation whose calls leave no ledger row (`\"ephemeral\": true`):\nno replay (the same id runs again) and no effects (docs/api.md, Apps).",
             "type": "boolean"
           },
@@ -1763,6 +1773,7 @@
             "type": "integer"
           },
           "reach": {
+            "default": false,
             "description": "It holds a secret or a door, so it is shared with no one but its\nowner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,\n`Reason::UnshareFirst`). Add-only: left out when false, and a row\nfrom before it reads none.",
             "type": "boolean"
           },
