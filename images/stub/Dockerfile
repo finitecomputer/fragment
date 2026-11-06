@@ -62,6 +62,7 @@ COPY templates/calories templates/calories
 COPY templates/doc templates/doc
 COPY templates/inbox templates/inbox
 COPY templates/notes templates/notes
+COPY templates/slides templates/slides
 COPY templates/todo templates/todo
 RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
     find cli crates templates -type f -exec touch {} + \

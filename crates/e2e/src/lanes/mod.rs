@@ -54,6 +54,7 @@ mod share;
 mod shell;
 mod signin;
 mod site;
+mod slides;
 mod sync;
 mod templates;
 mod trials;
@@ -129,6 +130,7 @@ const LANES: &[Lane] = &[
     brain::brain,
     brain::brain_release,
     doc::doc,
+    slides::slides,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
@@ -188,7 +190,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
-        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "export", "search", "search-across",
+        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "slides", "export", "search", "search-across",
         "sync", "migrations", "capability-cost",
     ],
     &[

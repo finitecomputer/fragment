@@ -123,6 +123,7 @@ jobs:
               - templates/doc/**
               - templates/inbox/**
               - templates/notes/**
+              - templates/slides/**
               - templates/todo/**
               - crates/devstack/Cargo.toml
               - crates/e2e/Cargo.toml
