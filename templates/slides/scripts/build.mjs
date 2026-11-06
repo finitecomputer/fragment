@@ -5,10 +5,15 @@
 //
 // open-slide (package.json pins it, package-lock.json locks all it needs)
 // builds the deck with its own Vite build. Its toolchain (about 250 MB) is
-// installed once per lockfile (`npm ci`) into a folder outside the deck,
-// OPEN_SLIDE_HOME or the system's temporary folder, npm's cache beside it
-// and deleted after, and linked as node_modules; a node_modules the deck
-// already holds (`npm install`) is used instead. The build's files then get
+// installed once per lockfile (`npm ci`) and kept, so the next build, of
+// any deck there, needs no install and no network; it is linked into the
+// deck as node_modules (a node_modules the deck already holds, `npm ci`, is
+// used instead). It is kept in one folder per home: OPEN_SLIDE_HOME, else
+// $XDG_DATA_HOME/open-slide, else ~/.local/share/open-slide, never the
+// temporary folder TMPDIR names (scratch). A folder per lockfile's hash;
+// installing one removes the others, so one version takes the disk. npm's
+// download cache (about 300 MB) and the install's staging go away on every
+// way out, a failure's included; the toolchain is kept on purpose. The build's files then get
 // what a fragment's site needs: the deck's page at /, /s/<id>/ and
 // /s/<id>/presenter/ (a site has no fallback page), the live layer (live/:
 // following a presenter, who is watching, notes), and site/build.json,
@@ -27,9 +32,10 @@ const LIVE = ["slides-live.css", "slides-live.js", "slides-present.js", "slides-
 // test (crates/templates) hashes the same, as `inputsHash` does.
 const INPUTS = ["live", "open-slide.config.ts", "package-lock.json", "package.json", "scripts", "slides"];
 
+// A refusal: thrown, so every folder this made is removed on the way out.
+class Refused extends Error {}
 function fail(message) {
-  console.error(`slides: ${message}`);
-  process.exit(1);
+  throw new Refused(message);
 }
 
 function run(cmd, args, opts) {
@@ -37,6 +43,37 @@ function run(cmd, args, opts) {
   if (r.error) fail(`${cmd} did not run: ${r.error.message}`);
   if (r.status !== 0) fail(`${cmd} ${args.join(" ")} failed (exit ${r.status})`);
 }
+
+// Where the kept toolchain goes (above).
+function installRoot() {
+  const data = process.env.XDG_DATA_HOME || (process.platform === "win32" ? process.env.LOCALAPPDATA : null) || path.join(os.homedir(), ".local", "share");
+  const root = path.resolve(process.env.OPEN_SLIDE_HOME || path.join(data, "open-slide"));
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+// What an earlier install left in `base` beside `key`: another lockfile's
+// toolchain, or the staging of a build that is no longer running. Only
+// names this script makes: a 12-hex key, or one with a process id.
+function others(base, key) {
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return e.code === "EPERM";
+    }
+  };
+  return fs.readdirSync(base).filter((name) => {
+    const m = /^([0-9a-f]{12})(?:\.(\d+))?$/.exec(name);
+    if (!m) return false;
+    if (m[2] !== undefined) return Number(m[2]) !== process.pid && !alive(Number(m[2]));
+    return m[1] !== key;
+  });
+}
+
+// Folders to remove on the way out, whatever the way.
+const scratch = new Set();
 
 // Each file under `dir` at the paths `names` (a file, or a folder whole),
 // by path, `/`-separated, sorted.
@@ -76,7 +113,7 @@ function theDeck() {
 }
 
 // The toolchain's node_modules: the deck's own, or one installed outside it.
-function toolchain(pins) {
+function toolchain(pins, base) {
   const own = path.join(root, "node_modules");
   const core = (nm) => path.join(nm, "@open-slide", "core", "package.json");
   const version = (nm) => (fs.existsSync(core(nm)) ? JSON.parse(fs.readFileSync(core(nm), "utf8")).version : null);
@@ -88,18 +125,19 @@ function toolchain(pins) {
   }
   const lock = fs.readFileSync(path.join(root, "package-lock.json"));
   const key = createHash("sha256").update(fs.readFileSync(path.join(root, "package.json"))).update(lock).digest("hex").slice(0, 12);
-  const home = path.join(process.env.OPEN_SLIDE_HOME || path.join(os.tmpdir(), "open-slide"), key);
+  const home = path.join(base, key);
   const installed = path.join(home, "node_modules");
   if (version(installed) !== pins["@open-slide/core"]) {
-    console.log(`slides: installing open-slide ${pins["@open-slide/core"]} into ${home} (once)`);
+    console.log(`slides: installing open-slide ${pins["@open-slide/core"]} into ${home}, kept for the next build`);
     const staging = `${home}.${process.pid}`;
+    scratch.add(staging);
     fs.rmSync(staging, { recursive: true, force: true });
     fs.mkdirSync(staging, { recursive: true });
     for (const f of ["package.json", "package-lock.json"]) fs.copyFileSync(path.join(root, f), path.join(staging, f));
-    // npm's cache too stays out of the deck's home (a computer's home is on
-    // its saved disk): beside the install, and gone once it is done
+    // npm's download cache is waste once installed: beside the install, and
+    // removed after it, or with the staging on a failure
     const cache = path.join(staging, ".npm-cache");
-    run("npm", ["ci", "--no-fund", "--no-audit", "--ignore-scripts", "--loglevel=error", "--cache", cache], { cwd: staging });
+    run("npm", ["ci", "--no-fund", "--no-audit", "--ignore-scripts", "--loglevel=error", "--update-notifier=false", "--cache", cache], { cwd: staging });
     fs.rmSync(cache, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
     try {
@@ -109,6 +147,8 @@ function toolchain(pins) {
       fs.rmSync(staging, { recursive: true, force: true });
       if (version(installed) !== pins["@open-slide/core"]) fail(`installing into ${home}: ${e.message}`);
     }
+    // installed: the others go, so one version takes the disk
+    for (const old of others(base, key)) fs.rmSync(path.join(base, old), { recursive: true, force: true });
   }
   if (stat) fs.unlinkSync(own);
   fs.symlinkSync(installed, own, "junction");
@@ -125,8 +165,8 @@ function page(html, id) {
 }
 
 // The whole site, built into `out`.
-function build(out, pkg, id) {
-  const nm = toolchain(pkg.dependencies);
+function build(out, pkg, id, base) {
+  const nm = toolchain(pkg.dependencies, base);
   run(process.execPath, [path.join(nm, "@open-slide", "core", "bin.js"), "build", "--out-dir", out], { cwd: root, shell: false });
   const html = page(fs.readFileSync(path.join(out, "index.html"), "utf8"), id);
   fs.writeFileSync(path.join(out, "index.html"), html);
@@ -140,11 +180,13 @@ function build(out, pkg, id) {
 }
 
 const check = process.argv.includes("--check");
-const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const id = theDeck();
-const out = fs.mkdtempSync(path.join(os.tmpdir(), "slides-build-"));
 try {
-  build(out, pkg, id);
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const id = theDeck();
+  const base = installRoot();
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "slides-build-"));
+  scratch.add(out);
+  build(out, pkg, id, base);
   const site = path.join(root, "site");
   if (check) {
     const made = filesOf(out, fs.readdirSync(out));
@@ -157,6 +199,10 @@ try {
     fs.cpSync(out, site, { recursive: true });
     console.log(`slides: built ${id} into site/. Deploy it: fragment deploy <name> --dir ${path.relative(process.cwd(), root) || "."}`);
   }
+} catch (e) {
+  if (!(e instanceof Refused)) throw e;
+  console.error(`slides: ${e.message}`);
+  process.exitCode = 1;
 } finally {
-  fs.rmSync(out, { recursive: true, force: true });
+  for (const dir of scratch) fs.rmSync(dir, { recursive: true, force: true });
 }
