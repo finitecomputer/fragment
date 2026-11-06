@@ -144,11 +144,14 @@ struct ComposerView: View {
     let enabled: Bool
     var busy = false
     var recording = false
-    let attach: () -> Void
+    /// The + menu's two ways to attach: the photo library, or Files.
+    let attachPhotos: () -> Void
+    let attachFiles: () -> Void
+    /// Pictures pasted into the field (`ComposerField`).
+    let pasteImages: (UIPasteboard) -> Void
     let record: () -> Void
     let send: () async -> Void
     let stop: () async -> Void
-    @FocusState private var focused: Bool
     @State private var submitting = false
     var hasAttachments = false
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -157,11 +160,14 @@ struct ComposerView: View {
         // A single glass surface, with equal hit targets and no nested glass
         // button padding, keeps the single-line and growing field aligned.
         HStack(alignment: .bottom, spacing: 0) {
-            Button(action: attach) {
+            Menu {
+                Button("Photos", systemImage: "photo.on.rectangle", action: attachPhotos)
+                Button("Files", systemImage: "folder", action: attachFiles)
+            } label: {
                 Image(systemName: "plus").font(.system(size: 20))
                     .frame(width: 44, height: 44).contentShape(Rectangle())
             }
-            .accessibilityLabel("Attach files").disabled(busy || recording)
+            .accessibilityLabel("Attach").accessibilityIdentifier("attach").disabled(busy || recording)
             Button(action: record) {
                 Image(systemName: recording ? "stop.circle.fill" : "mic")
                     .font(.system(size: 20))
@@ -170,10 +176,8 @@ struct ComposerView: View {
             }
             .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
             .disabled(busy)
-            TextField("Message your agent", text: $text, axis: .vertical)
-                .font(.body).lineLimit(1...6)
-                .padding(.vertical, 10).padding(.horizontal, 6)
-                .frame(minHeight: 44).focused($focused).accessibilityIdentifier("composer")
+            ComposerField(text: $text, placeholder: "Message your agent", pasteImages: pasteImages)
+                .frame(minHeight: 44)
             Button {
                 submitting = true
                 Task { await (working ? stop() : send()); submitting = false }
@@ -204,5 +208,86 @@ struct ComposerView: View {
         .frame(maxWidth: 660)
         .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// The composer's words: a text view of UIKit's, as a SwiftUI field takes no
+/// pasted picture. Long-pressing with a picture on the clipboard offers
+/// Paste, which hands the pictures to `pasteImages` (and pastes no text, as
+/// the web's chat takes a paste of files); text pastes as before. It grows
+/// to six lines, then scrolls; Return is a new line; dictation is the
+/// system's.
+struct ComposerField: UIViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let pasteImages: (UIPasteboard) -> Void
+    static let linesMax = 6
+
+    func makeUIView(context: Context) -> PastingTextView {
+        let view = PastingTextView()
+        view.delegate = context.coordinator
+        view.font = .preferredFont(forTextStyle: .body)
+        view.adjustsFontForContentSizeCategory = true
+        view.backgroundColor = .clear
+        view.tintColor = .label
+        view.isScrollEnabled = false
+        view.textContainerInset = UIEdgeInsets(top: 11, left: 2, bottom: 11, right: 2)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.accessibilityIdentifier = "composer"
+        view.placeholder.text = placeholder
+        view.placeholder.isAccessibilityElement = false
+        view.accessibilityLabel = placeholder
+        return view
+    }
+    func updateUIView(_ view: PastingTextView, context: Context) {
+        context.coordinator.text = $text
+        view.pasteImages = pasteImages
+        if view.text != text { view.text = text }
+        view.placeholder.isHidden = !text.isEmpty
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView view: PastingTextView, context: Context) -> CGSize? {
+        let width = proposal.width ?? 240
+        let fitting = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        let most = (view.font?.lineHeight ?? 22) * CGFloat(Self.linesMax) + view.textContainerInset.top + view.textContainerInset.bottom
+        let scrolls = fitting > most
+        if view.isScrollEnabled != scrolls { view.isScrollEnabled = scrolls }
+        return CGSize(width: width, height: min(fitting, most))
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var text: Binding<String>
+        init(text: Binding<String>) { self.text = text }
+        func textViewDidChange(_ view: UITextView) {
+            text.wrappedValue = view.text
+            (view as? PastingTextView)?.placeholder.isHidden = !view.text.isEmpty
+        }
+    }
+}
+
+final class PastingTextView: UITextView {
+    var pasteImages: ((UIPasteboard) -> Void)?
+    let placeholder = UILabel()
+
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        placeholder.font = .preferredFont(forTextStyle: .body)
+        placeholder.adjustsFontForContentSizeCategory = true
+        placeholder.textColor = .placeholderText
+        addSubview(placeholder)
+    }
+    required init?(coder: NSCoder) { fatalError("made in code") }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let left = textContainerInset.left + textContainer.lineFragmentPadding
+        placeholder.frame = CGRect(x: left, y: textContainerInset.top, width: bounds.width - left - textContainerInset.right, height: placeholder.font.lineHeight)
+    }
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), pasteImages != nil, UIPasteboard.general.hasImages { return true }
+        return super.canPerformAction(action, withSender: sender)
+    }
+    override func paste(_ sender: Any?) {
+        if let pasteImages, UIPasteboard.general.hasImages { pasteImages(UIPasteboard.general); return }
+        super.paste(sender)
     }
 }

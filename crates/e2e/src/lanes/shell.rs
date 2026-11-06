@@ -3287,15 +3287,85 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.eval(page, to_computer)?;
     let _ = b.screenshot(page, &shots.join("settings-update.png"));
     s.ok("settings says the version it runs, and the latest, ready", versions && text.contains(&running) && text.contains(&latest), &text[..text.len().min(800)]);
-    // Restart, in the notice: it takes the update, and nothing more is told
+    // Restart, in the notice, its ask refused (injected at fetch, as a
+    // ledger at zero credit answers): said plainly where its buttons were,
+    // with Try again, in the band and in settings
+    b.eval(page, FAIL_RESTART)?;
     b.eval(page, &format!("({shown}.querySelector('button[data-action=restart]').click(), true)"))?;
-    let restarted = s.eventually(std::time::Duration::from_secs(90), || {
+    let failed = b.until(page, &format!("{RESTART_ROW}?.innerText.includes(\"Your computer didn't restart\") && {RESTART_ROW}.innerText.includes('the credit is used up') && {RESTART_ROW}.querySelector('button[data-action=restart]')?.textContent === 'Try again'"), wait);
+    let in_settings = b.eval(page, "({ said: document.querySelector('#settings-page .form-error')?.textContent ?? null, button: document.querySelector('#settings-page [data-action=restart-ask]')?.textContent ?? null, update: !!document.querySelector('.computer-notice[data-kind=update]'), status: !!document.querySelector('.restart-status') })")?;
+    let _ = b.screenshot(page, &shots.join("computer-restart-failed.png"));
+    s.ok(
+        "a restart whose ask fails says so plainly where its buttons were, with Try again, in the band and in settings: nothing left saying Restarting",
+        failed && in_settings["said"].as_str().is_some_and(|t| t.contains("It didn't restart") && t.contains("the credit is used up")) && in_settings["button"] == "Try again" && in_settings["update"] == false && in_settings["status"] == false,
+        json!({ "band": b.eval(page, "document.getElementById('computer-notices').innerText")?, "settings": in_settings }),
+    );
+    // Try again, the ask let through, its start held (the lever's
+    // alive-check: its guest frozen, never heard, then started again; its
+    // save is the stub's second or so, said when a read catches it, and no
+    // lever holds it without failing it, which would leave its note for
+    // the checks after): the band shows the step the computer reports
+    // where its buttons were, and settings too, never a stuck Restarting;
+    // a calm line once it has run 30 s; then, awake on the new start, the
+    // notice goes by itself, with no reload
+    let hold = std::time::Duration::from_secs(40);
+    idle(s);
+    let held = super::computers::lever_with(api, &id, json!({ "op": "alive-check", "ms": hold.as_millis() as u64, "freeze": true }))?;
+    let before = view()["generation"].as_u64().unwrap_or(0);
+    b.eval(page, RESTART_STEPS)?;
+    b.eval(page, &format!("(window.__restartFails = false, {RESTART_ROW}.querySelector('button[data-action=restart]').click(), true)"))?;
+    let starting = b.until(
+        page,
+        &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…' && document.querySelector('#settings-page .restart-status')?.textContent === 'Starting…' && !document.querySelector('#settings-page [data-action=restart-ask]') && document.getElementById('settings-page').innerText.includes('Starting')"),
+        hold,
+    );
+    let _ = b.screenshot(page, &shots.join("computer-restart-starting.png"));
+    // its progress reads failing (injected at fetch, as a blip's): said as
+    // the read's failure, never the restart's, with Check again (Codex on
+    // #1053: it said Starting… over them); let through, Check again goes on
+    // following. That nothing is read until it is pressed is the
+    // follower's own tests' (cell/shell-tests/restart-follow.test.mjs), on a
+    // fake clock rather than a wait here
+    b.eval(page, "(window.__restartReads = 0, window.__failRestartReads = true)")?;
+    let unread = b.until(
+        page,
+        &format!("{RESTART_ROW}?.innerText.includes(\"Couldn't check on the restart\") && !!{RESTART_ROW}.querySelector('button[data-action=restart-read]') && !!document.querySelector('#settings-page [data-action=restart-read]') && !{RESTART_ROW}.innerText.includes(\"didn't restart\") && !document.querySelector('.restart-status')"),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("computer-restart-unread.png"));
+    b.eval(page, &format!("(window.__failRestartReads = false, {RESTART_ROW}.querySelector('button[data-action=restart-read]').click(), true)"))?;
+    let again = b.until(page, &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…'"), wait);
+    s.ok(
+        "its progress reads failing are said as such, with Check again, never as a restart that failed; pressed, it follows again",
+        unread && again,
+        json!({ "reads": b.eval(page, "window.__restartReads")?, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
+    );
+    let slow = b.until(page, &format!("{RESTART_ROW}?.innerText.includes('A big restore can take a few minutes.')"), hold);
+    let _ = b.screenshot(page, &shots.join("computer-restart-slow.png"));
+    let steps = b.eval(page, "window.__restartSaid")?;
+    let said: Vec<String> = strings(&steps);
+    let known = said.iter().all(|t| ["Restarting…", "Saving…", "Starting…", "Starting again…"].contains(&t.as_str()));
+    let ordered = said.iter().position(|t| t == "Saving…").is_none_or(|saving| said.iter().position(|t| t == "Starting…").is_some_and(|starting| saving < starting));
+    // settings' State: a restart's save is Saving, never Going to sleep (Paul on #1053)
+    let states: Vec<String> = strings(&b.eval(page, "window.__stateSaid")?);
+    let state_said = !states.iter().any(|t| t == "Going to sleep") && (!said.iter().any(|t| t == "Saving…") || states.iter().any(|t| t == "Saving")) && states.iter().any(|t| t == "Starting");
+    s.ok(
+        "Restart shows its progress where its buttons were, as the computer reports it (saving, then starting), in the band and in settings (its state too, Saving while it saves, never Going to sleep); past 30 s a calm line that a big restore can take a few minutes",
+        held.status == 200 && starting && slow && known && ordered && state_said && said.iter().any(|t| t == "Starting…"),
+        json!({ "steps": said, "states": states, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
+    );
+    let restarted = s.eventually(hold + std::time::Duration::from_secs(90), || {
         let v = view();
-        v["phase"] == "awake" && v["version"] == latest.as_str()
+        v["phase"] == "awake" && v["version"] == latest.as_str() && v["generation"].as_u64().is_some_and(|g| g > before)
     });
     let settled = b.until(page, "document.getElementById('computer-notices').hidden && !!document.querySelector('#settings-page [data-action=restart-ask]') && !document.getElementById('settings-page').innerText.includes('Latest version')", wait);
+    let stuck = b.eval(page, "document.body.innerText.includes('Restarting') || !!document.querySelector('.restart-status')")?;
     let v = view();
-    s.ok("Restart in the notice takes it: it runs the latest, and nothing more is told", restarted && settled && v["latest"] == latest.as_str() && v["notices"].as_array().is_none_or(|l| l.is_empty()), &v);
+    s.ok(
+        "Restart in the notice takes it: awake on the new start, the notice goes by itself, with no reload; it runs the latest, nothing more is told, and nothing says Restarting",
+        restarted && settled && stuck == false && v["latest"] == latest.as_str() && v["notices"].as_array().is_none_or(|l| l.is_empty()),
+        &v,
+    );
     // pinned back, another version is ready; Later puts it off, here and after a reload
     idle(s);
     shell(api, session, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })), &[])?;
@@ -3315,6 +3385,26 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     );
     Ok(())
 }
+
+/// The band's row of a restart the person asked for (computer.js), or null.
+const RESTART_ROW: &str = "document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=restart]')";
+/// The page's restarts refused as a ledger at zero credit refuses one (402,
+/// its words), while `window.__restartFails` (from here on, `true`); and
+/// its reads of its computer's view (a restart's progress) failing as a
+/// blip's do while `window.__failRestartReads`, each counted
+/// (`__restartReads`).
+const FAIL_RESTART: &str = "(() => { if (window.__restartFails !== undefined) return (window.__restartFails = true); const real = window.fetch.bind(window); window.__restartFails = true; \
+    window.fetch = async (url, o) => { if (window.__restartFails && o?.method === 'POST' && /^\\/api\\/computers\\/[^/]+\\/restart$/.test(url)) \
+      return new Response(JSON.stringify({ error: 'payment_required', message: 'agents are stopped: the credit is used up; adding credit starts them again' }), { status: 402, headers: { 'content-type': 'application/json' } }); \
+      if ((o?.method ?? 'GET') === 'GET' && /^\\/api\\/computers\\/[^/]+$/.test(url)) { window.__restartReads = (window.__restartReads ?? 0) + 1; if (window.__failRestartReads) throw new TypeError('Failed to fetch'); } \
+      return real(url, o); }; return true; })()";
+/// Each step a restart's status says (`.restart-status`, the band's and
+/// settings'), in order, a step said again in a row once:
+/// `window.__restartSaid`; and so settings' State: `window.__stateSaid`.
+const RESTART_STEPS: &str = "(() => { window.__restartSaid = []; window.__stateSaid = []; const note = () => { for (const s of document.querySelectorAll('.restart-status')) { const t = s.textContent; if (window.__restartSaid.at(-1) !== t) window.__restartSaid.push(t); } \
+    const st = [...document.querySelectorAll('#settings-page .settings-line')].find((l) => l.querySelector('.settings-key')?.textContent === 'State')?.querySelector('.settings-value')?.textContent; \
+    if (st && window.__stateSaid.at(-1) !== st) window.__stateSaid.push(st); }; \
+    new MutationObserver(note).observe(document, { subtree: true, childList: true, characterData: true }); return true; })()";
 
 /// The shell's page with its reads of its person's computer (`GET
 /// /api/computers`) failing as a blip's do (counted: `__computerReads`):

@@ -334,22 +334,14 @@ impl FragmentCell {
     }
 
     /// When the joined outbox next has a row due (for the alarm): none
-    /// while its joins wait (`joins_wait`), whose end tells them.
+    /// while its joins wait (`Stage::joins_wait`), whose end tells them:
+    /// the seed that installs it (publish.rs `seed`), else the alarm's pass
+    /// after its seed.
     pub(crate) fn joined_due_at(&self) -> CellResult<Option<i64>> {
-        if self.joins_wait()? {
+        if self.stage()?.joins_wait() {
             return Ok(None);
         }
         Ok(self.rows("SELECT MIN(next_at) AS at FROM joined_outbox", vec![])?.first().and_then(|r| r["at"].as_i64()))
-    }
-
-    /// Whether its agents' notices wait: its template is still to land,
-    /// and nothing is installed. A computer told now would find no channel
-    /// to follow, take the notice as done, and look again only at its
-    /// rediscovery. They stay in the outbox (a restart keeps them) and go
-    /// once that ends: from the seed that installs it (publish.rs `seed`),
-    /// else from the alarm's pass after its seed.
-    pub(crate) fn joins_wait(&self) -> CellResult<bool> {
-        Ok(self.meta(MetaKey::TemplatePending)?.is_some() && self.installed_code()?.is_none())
     }
 
     /// Sends the due notices, oldest first: each agent's owner's computer
@@ -361,8 +353,8 @@ impl FragmentCell {
     /// an event (never silently).
     pub(crate) async fn flush_joined(&self) {
         let Ok(name) = self.name() else { return };
-        // a template still to land: told once it is in (`joins_wait`)
-        if self.joins_wait().unwrap_or(true) {
+        // a template still to land: told once it is in (`Stage::joins_wait`)
+        if self.stage().map_or(true, |s| s.joins_wait()) {
             return;
         }
         let Ok(due) = self.typed::<Notice>(

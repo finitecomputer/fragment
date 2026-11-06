@@ -5,7 +5,8 @@
 //! has made ready, when it says; `note` what a turn after a cut one is told,
 //! from the journal; `screen` each agent's screen, `screens` the image's
 //! map of their displays, `lease` who drives one; `simplex` an agent's link
-//! to its owner's SimpleX app (groundwork: nothing runs it yet).
+//! to its owner's SimpleX app (groundwork: nothing runs it yet); `transfer`
+//! a file's bytes, streamed, through a bounded `scratch` folder.
 
 pub mod answer;
 pub mod api;
@@ -21,6 +22,8 @@ pub mod note;
 pub mod ready;
 pub mod records;
 pub mod runtime;
+pub mod scratch;
 pub mod screen;
 pub mod screens;
 pub mod simplex;
+pub mod transfer;

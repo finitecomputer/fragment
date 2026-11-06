@@ -41,8 +41,9 @@
 //!   last strike.
 //! - **Restarting.** Its owner's restart (`Event::Restart`) is the way back
 //!   to working: a sleep that saves if it can and stops whether or not it
-//!   did, then a start at once (asleep, or won't wake: a start). It names
-//!   the start it restarts, so asked twice it is made once.
+//!   did, then a start owed at once (asleep, or won't wake: the start owed
+//!   alone), which its alarm makes. It names the start it restarts, so
+//!   asked twice it is made once.
 //! - **Metering.** Awake time, in intervals that never overlap, every
 //!   `METER_EVERY_MS` while awake and at sleep.
 //!
@@ -981,6 +982,15 @@ impl Lifecycle {
         matches!(self.phase, Phase::Asleep) && self.retry_at_ms.is_some_and(|at| now_ms >= at)
     }
 
+    /// Whether its owner is told it is starting at `now_ms`: a start under
+    /// way, or one owed and due (`start_due`), which its alarm makes at once
+    /// (or a request before it). An owner's restart answers once its save is
+    /// done or failed and its start is owed: `starting`, on every path, its
+    /// generation the start it restarted until the alarm's start is made.
+    pub fn starting(&self, now_ms: i64) -> bool {
+        matches!(self.phase, Phase::Starting { .. }) || (self.start_due(now_ms) && (self.wake_after_sleep || self.wanted(now_ms)))
+    }
+
     fn next_alarm(&self) -> Option<i64> {
         match &self.phase {
             Phase::Asleep => self.retry_at_ms,
@@ -1058,10 +1068,16 @@ impl Lifecycle {
                 self.hold(now_ms + IDLE_MS);
                 match phase {
                     Phase::Asleep | Phase::Failed { .. } => {
-                        // as its owner's wake: a won't-wake computer tries again
+                        // as its owner's wake: a won't-wake computer tries
+                        // again. Its start is owed, as after the stop of one
+                        // awake: made by the alarm it asks for, never by the
+                        // restart's own request, so a restart answers
+                        // `starting` whatever it restarted (`starting`)
                         self.failures = 0;
                         self.restore_fallbacks = 0;
-                        self.start(now_ms, &mut step);
+                        self.phase = Phase::Asleep;
+                        self.wake_after_sleep = true;
+                        self.retry_at_ms = Some(now_ms);
                     }
                     // the start under way is the restart's
                     Phase::Starting { .. } => {}
@@ -4059,11 +4075,14 @@ mod tests {
     }
 
     /// Goal: its owner's restart of a running computer is a sleep that
-    /// saves, then a start at once, held as its owner's wake holds it; a
-    /// keepalive does not cancel it. Asked twice (the same start named), it
-    /// is made once; an earlier start's restart is nothing; 0 restarts
-    /// whatever runs. Valid, invalid (stale), replay. Method: the lifecycle's
-    /// steps, as the DO would report them.
+    /// saves, then a start owed at once (its alarm's), held as its owner's
+    /// wake holds it; a keepalive does not cancel it. Its owner is told it
+    /// is starting from the stop's end on, whatever it restarted (FIN-399:
+    /// the restart answers so on every path, never awake on one and
+    /// starting on another). Asked twice (the same start named), it is made
+    /// once; an earlier start's restart is nothing; 0 restarts whatever
+    /// runs. Valid, invalid (stale), replay. Method: the lifecycle's steps,
+    /// as the DO would report them.
     #[test]
     fn a_restart_saves_then_starts_again_once() {
         let mut l = Lifecycle::new();
@@ -4081,8 +4100,10 @@ mod tests {
         assert_eq!(l.apply(Event::Saved { generation: g, seq }, T + 12_000).actions, vec![Action::Stop { generation: g, saved: true }]);
         let s = l.apply(Event::Asleep { generation: g }, T + 15_000);
         assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: T + 15_000, restart: true, quiet: false }), "saved: no rollback");
+        assert!(l.starting(T + 15_000) && l.generation() == g, "told starting once its start is owed, before it is made");
         let s = owed(&mut l, &s, T + 15_000);
         assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "then a start, at once: {s:?}");
+        assert!(l.starting(T + 15_000) && l.generation() == g + 1);
         l.apply(Event::Ready { generation: g + 1 }, T + 18_000);
         assert!(!l.restarting && matches!(l.phase, Phase::Awake { .. }));
         assert_eq!(l.held_until_ms(), T + 10_100 + IDLE_MS, "held as its owner's wake holds it, from the last press");
@@ -4100,8 +4121,14 @@ mod tests {
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })) && l.phase == Phase::Asleep, "{s:?}");
         assert!(s.ended.is_some_and(|e| !e.restart), "a sleep, not a restart");
 
-        // asleep, a restart is a start; won't wake, it lifts it, as its owner's wake does
+        assert!(!l.starting(T + 24_000), "asleep, nothing owed");
+        // asleep, a restart is a start owed, told as starting at once; won't
+        // wake, it lifts it, as its owner's wake does
         let s = l.apply(Event::Restart { generation: g + 1 }, T + 30_000);
+        assert!(l.starting(T + 30_000) && l.generation() == g + 1, "{l:?}");
+        let again = l.apply(Event::Restart { generation: g + 1 }, T + 30_000);
+        assert!(again.actions.is_empty() && l.starting(T + 30_000), "pressed again before its alarm, the same start owed");
+        let s = owed(&mut l, &s, T + 30_000);
         assert_eq!(s.actions, vec![Action::Start { generation: g + 2 }]);
         assert!(l.apply(Event::Restart { generation: g + 2 }, T + 30_100).actions.is_empty(), "starting, the start under way is the restart's");
         let mut l = Lifecycle::new();
@@ -4113,21 +4140,21 @@ mod tests {
         assert!(l.apply(Event::Wake { why: Wake::Record }, T + 2_000).refused.is_some(), "a record does not lift it");
         assert!(l.apply(Event::Restart { generation: generation + 1 }, T + 2_500).actions.is_empty(), "a start it never made is restarted by no one");
         let s = l.apply(Event::Restart { generation }, T + 3_000);
-        assert_eq!((s.actions, l.failures), (vec![Action::Start { generation: generation + 1 }], 0), "its owner's restart lifts it");
+        assert!(l.failures == 0 && l.starting(T + 3_000), "its owner's restart lifts it: {l:?}");
+        assert_eq!(owed(&mut l, &s, T + 3_000).actions, vec![Action::Start { generation: generation + 1 }]);
         // what it knows survives a restart of its Durable Object
         let back: Lifecycle = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back, l);
     }
 
-    /// Goal (docs/self-host.md, found 21): its owner's restart answers once
-    /// its start is up. The DO performs the restart's sleep and the start
-    /// after it in the restart's own request, and answers with the view at
-    /// its end; the container's exit report is a request of its own, which
-    /// comes in as the stop signals it, before the stop's own end. That
-    /// report starts nothing: the stop's `Asleep` does, in the request that
-    /// waits on it. Before, the report ended the sleep and made the start,
-    /// so the restart answered `starting` with its start under way
-    /// elsewhere. Valid (saved, and its save failing), replay (the exit
+    /// Goal (docs/self-host.md, found 21): the restart's sleep ends at its
+    /// stop's end, never at the container's exit report, a request of its
+    /// own, which comes in as the stop signals it, before the stop's own
+    /// end. That report starts nothing: the stop's `Asleep` owes the start
+    /// (its alarm makes it; the restart's request answers `starting`
+    /// once the stop ended). Before, the report ended the sleep and made
+    /// the start while the stop still watched the container that exited.
+    /// Valid (saved, and its save failing), replay (the exit
     /// reported again, or after the start), and an exit before the stop (a
     /// crash as it was held) that still starts it. Method: the lifecycle's
     /// steps, the exit report applied before the stop's own end.
@@ -4152,7 +4179,7 @@ mod tests {
             let s = l.apply(Event::Asleep { generation: g }, T + 12_300);
             assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved, at_ms: T + 12_300, restart: true, quiet: true }));
             let s = owed(&mut l, &s, T + 12_300);
-            assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "the stop's end owes it, made in the restart's request: {s:?}");
+            assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "the stop's end owes it, made by its alarm: {s:?}");
             // a report of the stopped one, late, changes nothing
             let before = l.clone();
             assert!(l.apply(Event::Exited { generation: g }, T + 12_400).actions.is_empty() && l == before);
@@ -4512,6 +4539,8 @@ mod tests {
         }
         assert_eq!(notices(&c.life, &c.saves, &c.images, &rules), vec![ComputerNotice::WontWake { why: "the image would not pull".into() }]);
         let s = c.apply(Event::Restart { generation });
+        assert!(notices(&c.life, &c.saves, &c.images, &rules).is_empty() && c.life.starting(c.now), "starting again, its start owed");
+        let s = c.owed(&s);
         assert!(matches!(s.actions.first(), Some(Action::Start { .. })), "{s:?}");
         assert!(notices(&c.life, &c.saves, &c.images, &rules).is_empty(), "starting again");
     }

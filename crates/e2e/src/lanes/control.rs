@@ -170,8 +170,8 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     // what it waited on, in its answer (docs/api.md): the router's parts, then its object's
     let waited = crate::api::timing_parts(&r.header("server-timing"));
     s.ok(
-        "its answer says what it waited on (Server-Timing): the ledger and its object, then the object's repo, key, list, seed and alarm",
-        ["ledger", "object", "repo", "key", "list", "seed", "alarm"].iter().all(|p| waited.iter().any(|w| w == p)),
+        "its answer says what it waited on (Server-Timing): the ledger and its object, then the object's repo, key, list and alarm, and no seed (it has no template to land)",
+        ["ledger", "object", "repo", "key", "list", "alarm"].iter().all(|p| waited.iter().any(|w| w == p)) && !waited.iter().any(|w| w == "seed"),
         r.header("server-timing"),
     );
     s.ok("a label is made a name: the label, and a random suffix", fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label), &r);

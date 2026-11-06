@@ -217,6 +217,8 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .computer-notice .notice-actions button, .computer-notice .notice-actions a { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/26px var(--font-sans); text-decoration: none; }
 .computer-notice .notice-actions .primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
 .computer-notice .notice-actions button:disabled { opacity: .6; cursor: default; }
+/* a restart's step, where its buttons were (computer.js `restartStep`) */
+.restart-status { color: var(--text-secondary); font: 600 13px/28px var(--font-sans); white-space: nowrap; }
 @media (max-width: 640px) { .computer-notice { flex-direction: column; } }
 /* the way on from a frame that could not sign in (shell.js `BLOCKED`) */
 .notice .allow { display: inline-block; margin-top: 12px; background: none; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-primary); text-decoration: none; font-weight: 600; }
