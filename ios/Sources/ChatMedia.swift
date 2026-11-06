@@ -17,6 +17,79 @@ extension ChatAttachment {
     /// and sent over a phone's network. The server takes up to
     /// `limits::BLOB_MAX_BYTES` (crates/proto).
     static let bytesMax = 25 * 1_024 * 1_024
+    /// Files a message carries at most, as the web's chat (`ATTACHMENTS_MAX`).
+    static let countMax = 8
+}
+
+/// A file about to be attached, read whole: its bytes, name and type.
+struct OutgoingFile: Equatable, Sendable {
+    let data: Data
+    let name: String
+    let type: String
+}
+
+/// What the composer attaches, as the web's chat takes it
+/// (templates/chat/site/chat.js `addFiles`): any file, from 1 byte to
+/// `ChatAttachment.bytesMax`, at most `countMax` a message. A picture the
+/// web shows as one (media.js `IMAGE`: PNG, JPEG, WebP, GIF) goes as it is;
+/// any other picture (a photo's HEIC) as JPEG, which the web and agents read.
+enum AttachmentInput {
+    static let shownImages: [UTType] = [.png, .jpeg, .webP, .gif]
+    static let jpegQuality = 0.9
+
+    /// A file as picked, its type from its name's extension.
+    static func file(_ data: Data, name: String, type: UTType?) throws -> OutgoingFile {
+        try bounded(OutgoingFile(data: data, name: name, type: type?.preferredMIMEType ?? "application/octet-stream"))
+    }
+
+    /// A picture (from Photos, or pasted): as it is if the web shows its
+    /// type, else as JPEG, its name's extension to match.
+    static func image(_ data: Data, type: UTType, name: String) throws -> OutgoingFile {
+        if let shown = shownImages.first(where: { type.conforms(to: $0) }), let mime = shown.preferredMIMEType {
+            return try bounded(OutgoingFile(data: data, name: named(name, shown), type: mime))
+        }
+        guard type.conforms(to: .image), let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: jpegQuality) else {
+            throw APIError.server("This picture could not be read.")
+        }
+        return try bounded(OutgoingFile(data: jpeg, name: named(name, .jpeg), type: "image/jpeg"))
+    }
+
+    /// The pictures on a pasteboard, each as `image` makes it: a type the
+    /// web shows first, then any picture's data, then an image object (as
+    /// PNG, or JPEG past the bound). At most `countMax`.
+    static func pasted(_ pasteboard: UIPasteboard) -> [OutgoingFile] {
+        var files: [OutgoingFile] = []
+        for (index, item) in pasteboard.items.prefix(ChatAttachment.countMax).enumerated() {
+            let name = "pasted-image-\(index + 1)"
+            let types = item.keys.compactMap { UTType($0) }.filter { $0.conforms(to: .image) }
+            let ordered = types.sorted { a, b in rank(a) < rank(b) }
+            var made: OutgoingFile?
+            for type in ordered {
+                if let data = item[type.identifier] as? Data, let file = try? image(data, type: type, name: name) { made = file; break }
+                if let picture = item[type.identifier] as? UIImage { made = try? fromImage(picture, name: name); if made != nil { break } }
+            }
+            if let made { files.append(made) }
+        }
+        return files
+    }
+
+    static func fromImage(_ picture: UIImage, name: String) throws -> OutgoingFile {
+        if let png = picture.pngData(), png.count <= ChatAttachment.bytesMax { return try image(png, type: .png, name: name) }
+        guard let jpeg = picture.jpegData(compressionQuality: jpegQuality) else { throw APIError.server("This picture could not be read.") }
+        return try image(jpeg, type: .jpeg, name: name)
+    }
+
+    private static func rank(_ type: UTType) -> Int { shownImages.firstIndex { type.conforms(to: $0) } ?? shownImages.count }
+    private static func named(_ name: String, _ type: UTType) -> String {
+        // a photo's usual name, not UTType's "jpeg"
+        guard let ext = type == .jpeg ? "jpg" : type.preferredFilenameExtension else { return name }
+        let base = (name as NSString).deletingPathExtension
+        return (base.isEmpty ? name : base) + "." + ext
+    }
+    private static func bounded(_ file: OutgoingFile) throws -> OutgoingFile {
+        guard !file.data.isEmpty, file.data.count <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
+        return file
+    }
 }
 
 extension FragmentAPI {

@@ -187,7 +187,12 @@ each, the very URL its words link. A page of a fragment is told as the web's
 fragments, on its scheme and port, as a fragment's canonical URL says (read once
 a session); a lookalike opens as typed. Your Apps is pushed
 onto the page it was opened from, so Back returns there; a chat's top bar has no
-New chat (the sidebar's starts one). Jumping to the latest holds scrolling off
+New chat (the sidebar's starts one). The composer's + offers Photos (the system's picker,
+several at once) or Files; a picture pasted into its field attaches too (a long
+press offers Paste when one is on the clipboard), as the web's chat takes a
+pasted file. Any file goes, 1 byte to 25 MB, eight a message, as the web's; a
+picture the web shows (PNG, JPEG, WebP, GIF) goes as it is, any other (a photo's
+HEIC) as JPEG. Jumping to the latest holds scrolling off
 for the jump, which stops a fling's momentum, and while following the latest the
 bottom stays pinned as rows are drawn taller than the lazy stack's guess. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket

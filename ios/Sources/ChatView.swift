@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -15,6 +16,8 @@ struct ChatView: View {
     /// Opens a fragment of the person's (a chat, or an app at a page).
     let open: (FragmentSummary) -> Void
     @State private var importer = false
+    @State private var photos = false
+    @State private var picked: [PhotosPickerItem] = []
     @State private var uploading = false
     @State private var voice = VoiceMemo()
 
@@ -116,7 +119,9 @@ struct ChatView: View {
                 composerAccessories
                 ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
                     enabled: session.connected && session.caughtUp, busy: uploading, recording: voice.recording,
-                    attach: { importer = true }, record: { Task { await recordVoice() } },
+                    attachPhotos: { photos = true }, attachFiles: { importer = true },
+                    pasteImages: { pasteboard in Task { await upload(AttachmentInput.pasted(pasteboard)) } },
+                    record: { Task { await recordVoice() } },
                     send: { await session.send() }, stop: { await session.stop() }, hasAttachments: !session.attachments.isEmpty)
             }.background(FragmentStyle.background)
         }
@@ -125,6 +130,15 @@ struct ChatView: View {
             case .success(let urls): Task { await uploadFiles(urls) }
             case .failure(let error): session.error = error.localizedDescription
             }
+        }
+        // Photos as the system's picker gives them, its most compatible
+        // encoding: a picture the web shows goes as it is, any other as JPEG
+        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - session.attachments.count),
+                      matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
+        .onChange(of: picked) { _, items in
+            guard !items.isEmpty else { return }
+            picked = []
+            Task { await uploadPicked(items) }
         }
         .task(id: "\(session.caughtUp)|\(session.chatCursor)|\(scenePhase)") {
             guard scenePhase == .active, session.caughtUp else { return }
@@ -158,17 +172,44 @@ struct ChatView: View {
     }
 
     private func uploadFiles(_ urls: [URL]) async {
-        guard urls.count + session.attachments.count <= 8 else { session.error = "Attach at most eight files per message."; return }
-        uploading = true; defer { uploading = false }
+        guard urls.count + session.attachments.count <= ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
+        var files: [OutgoingFile] = []
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                 guard size > 0, size <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
-                let type = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-                let file = try await session.api.upload(Data(contentsOf: url), name: url.lastPathComponent, type: type, to: session.fragment.name)
-                if !session.attachments.contains(where: { $0.id == file.id }) { session.attachments.append(file) }
+                files.append(try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension)))
+            } catch { session.error = error.localizedDescription; return }
+        }
+        await upload(files)
+    }
+    /// Photos picked: each read in the picker's most compatible encoding,
+    /// a picture made one the web shows (`AttachmentInput.image`).
+    private func uploadPicked(_ items: [PhotosPickerItem]) async {
+        var files: [OutgoingFile] = []
+        for (index, item) in items.enumerated() {
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else { throw APIError.server("This item could not be read.") }
+                let type = item.supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) } ?? .data
+                files.append(type.conforms(to: .image)
+                    ? try AttachmentInput.image(data, type: type, name: "photo-\(index + 1)")
+                    : try AttachmentInput.file(data, name: "video-\(index + 1).\(type.preferredFilenameExtension ?? "mov")", type: type))
+            } catch { session.error = error.localizedDescription; return }
+        }
+        await upload(files)
+    }
+    /// Files put by their hash and held as the message's attachments,
+    /// at most `ChatAttachment.countMax` a message.
+    private func upload(_ files: [OutgoingFile]) async {
+        guard !files.isEmpty else { return }
+        guard files.count + session.attachments.count <= ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
+        uploading = true; defer { uploading = false }
+        for file in files {
+            do {
+                let put = try await session.api.upload(file.data, name: file.name, type: file.type, to: session.fragment.name)
+                if !session.attachments.contains(where: { $0.id == put.id }) { session.attachments.append(put) }
             } catch { session.error = error.localizedDescription; return }
         }
     }
@@ -176,7 +217,7 @@ struct ChatView: View {
         if voice.recording {
             if let url = voice.stop() { await uploadFiles([url]); try? FileManager.default.removeItem(at: url) }
         } else {
-            guard session.attachments.count < 8 else { session.error = "Attach at most eight files per message."; return }
+            guard session.attachments.count < ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
             await voice.start { url in Task { await uploadFiles([url]); try? FileManager.default.removeItem(at: url) } }
         }
     }

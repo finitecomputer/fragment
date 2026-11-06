@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import UIKit
+import UniformTypeIdentifiers
 import Synchronization
 import Testing
 @testable import Fragment
@@ -302,6 +303,44 @@ struct ShellTests {
         let routed = try #require(library.fragment(linkedBy: URL(string: "https://sports-schedule--ugzb.finite.place/#/week/2")!))
         await WebSheetModel(fragment: routed, api: api).load()
         #expect(stub.seen.last { $0.route == "POST /api/f/sports-schedule--ugzb/session" }?.json["returnTo"].string == "/#/week/2")
+    }
+
+    /// Pictures attach as the web's chat shows them: PNG, JPEG, WebP and GIF
+    /// as they are, any other (a photo's HEIC) as JPEG; files by their
+    /// extension's type; nothing empty or past 25 MB.
+    @Test func aPictureOrFileAttachesAsTheWebTakesIt() throws {
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let png = try #require(picture.pngData())
+        let kept = try AttachmentInput.image(png, type: .png, name: "photo-1")
+        #expect(kept == OutgoingFile(data: png, name: "photo-1.png", type: "image/png"))
+        let heic = try #require(picture.heicData())
+        let made = try AttachmentInput.image(heic, type: .heic, name: "photo-2.heic")
+        #expect(made.type == "image/jpeg" && made.name == "photo-2.jpg" && UIImage(data: made.data) != nil && made.data != heic)
+        #expect(throws: APIError.self) { try AttachmentInput.image(Data("not a picture".utf8), type: .heic, name: "x") }
+        #expect(throws: APIError.self) { try AttachmentInput.image(Data(), type: .png, name: "empty") }
+        #expect(throws: APIError.self) { try AttachmentInput.file(Data(count: ChatAttachment.bytesMax + 1), name: "big.bin", type: nil) }
+        #expect(try AttachmentInput.file(Data("a,b".utf8), name: "t.csv", type: UTType(filenameExtension: "csv")).type == "text/csv")
+        #expect(try AttachmentInput.file(Data([1]), name: "x.unknownext", type: UTType(filenameExtension: "unknownext")).type == "application/octet-stream")
+    }
+
+    /// A paste of pictures attaches each, as `image` makes it; words on the
+    /// clipboard are no picture.
+    @Test func pastedPicturesAttachAndWordsDoNot() throws {
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            UIColor.systemPink.setFill(); context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let png = try #require(picture.pngData()), heic = try #require(picture.heicData())
+        let board = UIPasteboard.withUniqueName()
+        defer { UIPasteboard.remove(withName: board.name) }
+        board.items = [[UTType.png.identifier: png], [UTType.plainText.identifier: "just words"], [UTType.heic.identifier: heic]]
+        let files = AttachmentInput.pasted(board)
+        #expect(files.map(\.name) == ["pasted-image-1.png", "pasted-image-3.jpg"])
+        // the pasteboard hands a PNG back as it holds it, a picture all the same
+        #expect(files.map(\.type) == ["image/png", "image/jpeg"] && files.allSatisfy { UIImage(data: $0.data) != nil })
+        board.items = [[UTType.plainText.identifier: "only words"]]
+        #expect(AttachmentInput.pasted(board).isEmpty)
     }
 
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
