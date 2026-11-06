@@ -79,6 +79,9 @@ pub fn render(doc: &Value) -> Result<String> {
                 .map(|s| match s.as_object().and_then(|m| m.keys().next()).map(String::as_str) {
                     Some("nip98") => "NIP-98",
                     Some("session") => "the shell's session",
+                    Some("site") => "its page's session",
+                    Some("frame") => "its framed page's session",
+                    Some("link") => "its share link",
                     _ => "none",
                 })
                 .collect();
@@ -155,5 +158,31 @@ fn fields(md: &mut String, schema: &Value, tag: Option<&String>, at: &str, names
     for (field, s) in props {
         let need = if required.contains(&field.as_str()) { "required" } else { "optional" };
         let _ = writeln!(md, "| `{field}` | {} | {need} | {} |", linked(&type_of(s, &format!("{at}.{field}")), names), about(s));
+    }
+    conditions(md, schema);
+}
+
+/// The conditions a `oneOf` or `anyOf` beside an object's fields puts on
+/// them (a subscribe's one cursor, a result's result or refusal).
+fn conditions(md: &mut String, schema: &Value) {
+    let (lead, branches) = match (schema["oneOf"].as_array(), schema["anyOf"].as_array()) {
+        (Some(b), _) => ("Exactly one of these holds", b),
+        (None, Some(b)) => ("At least one of these holds", b),
+        _ => return,
+    };
+    let _ = writeln!(md, "\n{lead}:\n");
+    for branch in branches {
+        let mut said: Vec<String> = branch["required"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|r| format!("`{r}` is there")).collect();
+        for (field, s) in branch["properties"].as_object().into_iter().flatten() {
+            said.push(match s {
+                Value::Bool(false) => format!("no `{field}`"),
+                s if s["type"] == "null" => format!("`{field}` is null or absent"),
+                s => format!("`{field}` is {}", type_of(s, field).replace('|', " or ")),
+            });
+        }
+        if let Some(inner) = branch["anyOf"].as_array().or(branch["oneOf"].as_array()) {
+            said.push(format!("one of {} shapes beside (openapi.json)", inner.len()));
+        }
+        let _ = writeln!(md, "- {}", said.join("; "));
     }
 }

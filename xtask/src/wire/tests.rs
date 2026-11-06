@@ -14,7 +14,12 @@ use super::{generate, retired, verdict, write_files, Base, OnDisk, LOCK_PATH, RE
 const BASE: &str = "\
 route a.get GET /api/a
 route a.get accepts session
+route a.get path a.get.path
+route a.get query a.get.query
 route a.get response A
+type a.get.path in object
+field a.get.path.name required string
+type a.get.query in object
 route a.put PUT /api/a
 route a.put request B
 type A out object
@@ -149,6 +154,8 @@ fn what_an_older_client_does_not_feel_passes() {
     passes(&[("type EI in enum", Some("type EI in enum open"))], &[]);
     // another credential
     passes(&[], &["route a.get accepts nip98"]);
+    // a route's first query parameter, left out by every older client
+    passes(&[], &["field a.get.query.q optional string"]);
 }
 
 #[test]
@@ -185,6 +192,10 @@ fn what_an_older_client_feels_fails_naming_the_fact() {
     fails(&[("route a.get accepts session", None)], &[], "route a.get accepts session");
     // another component
     fails(&[("field A.r required X", Some("field A.r required Y"))], &[], "field A.r required X");
+    // a path's parameter of another type, its route's template the same
+    fails(&[("field a.get.path.name required string", Some("field a.get.path.name required integer"))], &[], "field a.get.path.name required string");
+    // a query parameter an older client does not send
+    fails(&[], &["field a.get.query.q required string"], "field a.get.query.q required string");
     // a shape that refuses what it took, or opens where a client reads it closed
     fails(&[("type KO in object", Some("type KO in object closed"))], &[], "type KO in object closed");
     fails(&[("type EO out enum", Some("type EO out enum open"))], &[], "type EO out enum open");
@@ -585,4 +596,62 @@ fn shapes_compare_by_what_they_hold_not_how_they_are_written() {
     let closed = parse("type R out object closed\nfield R.id required string\n").unwrap();
     let more = parse("type R out object\nextends R Q\ntype Q out object\nfield Q.id required string\nfield Q.more optional string\n").unwrap();
     assert_eq!(facts_of(&breaches(&closed, &more, &none)), ["type R out object closed", "field R.more optional string"]);
+}
+
+#[allow(dead_code)]
+mod derived_inline {
+    pub mod plain {
+        #[derive(schemars::JsonSchema)]
+        #[schemars(inline)]
+        pub struct Inner {
+            pub v: String,
+        }
+        #[derive(schemars::JsonSchema)]
+        pub struct Wrap {
+            pub inner: Inner,
+        }
+    }
+    pub mod nullable {
+        #[derive(schemars::JsonSchema)]
+        #[schemars(inline)]
+        pub struct Inner {
+            pub v: String,
+        }
+        #[derive(schemars::JsonSchema)]
+        pub struct Wrap {
+            pub inner: Option<Inner>,
+        }
+    }
+    /// A documented variant beside one that is not.
+    pub mod narrowed {
+        #[derive(schemars::JsonSchema)]
+        pub enum E {
+            /// The first.
+            #[schemars(extend("not" = { "const": "A" }))]
+            A,
+            B,
+        }
+    }
+}
+
+/// An inline shape that may be null now is wider; an enum's branch that
+/// says more than its value is read as a union's, so a keyword the lock
+/// cannot read is refused there too.
+#[test]
+fn inline_nullability_and_enum_branches_are_read() {
+    use derived_inline::*;
+    let none = BTreeSet::new();
+    let (plain_out, nullable_out) = (lock_of::<plain::Wrap>(true), lock_of::<nullable::Wrap>(true));
+    assert_eq!(facts_of(&breaches(&plain_out, &nullable_out, &none)), ["field Wrap.inner required Wrap.inner"]);
+    assert!(breaches(&lock_of::<plain::Wrap>(false), &lock_of::<nullable::Wrap>(false), &none).is_empty());
+    let mut g = super::openapi::generator(true);
+    let root = g.subschema_for::<narrowed::E>().to_value();
+    let schemas = super::openapi::components(g.take_definitions(true), Map::new()).unwrap();
+    let doc = json!({ "paths": { "/t": { "get": { "operationId": "t.get", "responses": { "200": { "content": { "application/json": { "schema": root } } } } } } }, "components": { "schemas": schemas } });
+    let refused = project(&doc).unwrap_err().to_string();
+    assert!(refused.contains("`not`"), "{refused}");
+    // a bound on a branch is the branch's fact
+    let bounded = json!({ "paths": {}, "components": { "schemas": { "T": { "x-fragment-direction": "out", "oneOf": [{ "const": "a", "type": "string", "maxLength": 1 }, { "const": "bb", "type": "string" }] } } } });
+    let lock = project(&bounded).unwrap();
+    assert!(lock.lines().any(|l| l == "bound T.#0 length 0..=1"), "{lock}");
 }

@@ -94,7 +94,25 @@ pub fn document() -> Result<Value> {
                     "type": "apiKey",
                     "in": "cookie",
                     "name": "__Host-fragment_session",
-                    "description": "The shell's session (docs/api.md, Sign-in); `fragment_session` over plain http.",
+                    "description": "The shell's session, from the platform's own page (docs/api.md, Sign-in); `fragment_session` over plain http.",
+                },
+                "site": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "__Host-fragment_site",
+                    "description": "A fragment's own page's session, on its origin (docs/api.md, Sign-in); `fragment_site` over plain http.",
+                },
+                "frame": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "__Host-fragment_frame",
+                    "description": "The session of a fragment's page framed by another page (docs/api.md, Frame sessions); `fragment_frame` over plain http.",
+                },
+                "link": {
+                    "type": "apiKey",
+                    "in": "query",
+                    "name": "view",
+                    "description": "A fragment's share link's token (docs/api.md, Sharing); its page keeps it in a cookie of its origin after.",
                 },
             },
         },
@@ -110,6 +128,9 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
         "security": route.auth.iter().map(|a| match a {
             Auth::Nip98 => json!({ "nip98": [] }),
             Auth::Session => json!({ "session": [] }),
+            Auth::Site => json!({ "site": [] }),
+            Auth::Frame => json!({ "frame": [] }),
+            Auth::Link => json!({ "link": [] }),
             Auth::Anyone => json!({}),
         }).collect::<Vec<_>>(),
     });

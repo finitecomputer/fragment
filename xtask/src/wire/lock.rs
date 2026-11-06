@@ -33,10 +33,20 @@
 //! those it names (mod.rs); retiring a closed type's line also lets it
 //! gain fields.
 //!
+//! A route's path and query parameters are an `in` shape of its own
+//! (`<op>.path`, `<op>.query`, empty when it takes none), so its first
+//! optional parameter is a new optional field. A union's branches are
+//! values of it, each with its shape: by its tag (a constant string or
+//! number each holds) or by its place (`#<i>`); a branch may be open. A
+//! nullable inline shape is a field's `T|null`; `never` is a field a
+//! branch forbids; `null` one it holds only as null or absent.
+//!
 //! The projection is closed: every keyword of every schema is a fact
 //! (`STRUCTURAL`, `BOUNDS`) or says nothing a reader decodes by
 //! (`DOCUMENTARY`), and a schema with any other is refused, so a
-//! constraint never goes missing from the lock unseen.
+//! constraint never goes missing from the lock unseen. An enum's branch
+//! that says more than its value is read as a union's branch, and held to
+//! the same.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -89,23 +99,23 @@ pub fn project(doc: &Value) -> Result<String> {
                 let scheme = requirement.as_object().and_then(|m| m.keys().next()).map_or("none", String::as_str);
                 lines.insert(format!("route {name} accepts {scheme}"));
             }
-            let mut query = Map::new();
-            let mut required = vec![];
-            for p in op["parameters"].as_array().into_iter().flatten() {
-                if p["in"] == "query" {
-                    let n = p["name"].as_str().context("a parameter is named")?;
-                    query.insert(n.to_string(), p["schema"].clone());
-                    if p["required"] == true {
+            let mut p = Projector { lines: &mut lines };
+            // its inputs beside its body, each an `in` shape every route has
+            // (empty when it takes none), so a first optional one is a new
+            // optional field: a path's and a query's
+            for at in ["path", "query"] {
+                let mut fields = Map::new();
+                let mut required = vec![];
+                for param in op["parameters"].as_array().into_iter().flatten().filter(|q| q["in"] == at) {
+                    let n = param["name"].as_str().context("a parameter is named")?;
+                    fields.insert(n.to_string(), param["schema"].clone());
+                    if param["required"] == true {
                         required.push(Value::String(n.to_string()));
                     }
                 }
-            }
-            let mut p = Projector { lines: &mut lines };
-            if !query.is_empty() {
-                let pseudo = format!("{name}.query");
-                let schema = serde_json::json!({ "type": "object", "properties": query, "required": required });
-                p.object(&pseudo, &schema, Direction::In, false)?;
-                p.lines.insert(format!("route {name} query {pseudo}"));
+                let pseudo = format!("{name}.{at}");
+                p.object(&pseudo, &serde_json::json!({ "type": "object", "properties": fields, "required": required }), Direction::In, false)?;
+                p.lines.insert(format!("route {name} {at} {pseudo}"));
             }
             if let Some(body) = op.pointer("/requestBody/content/application~1json/schema") {
                 let t = p.render(body, &format!("{name}.request"), Direction::In)?;
@@ -188,10 +198,13 @@ impl Projector<'_> {
             return Ok(());
         }
         let map = known(schema, name)?;
+        if types_of(map).len() > 1 {
+            bail!("{name}: a shape of several types ({:?}): a nullable one is a field's (`T|null`), and the wire lock reads no other", types_of(map));
+        }
         if let Some(values) = enum_values(schema) {
             self.bounds(name, map)?;
             self.enumeration(name, &values, direction, open);
-        } else if map.contains_key("properties") || types_of(map) == ["object"] {
+        } else if map.contains_key("properties") || map.contains_key("required") || types_of(map) == ["object"] {
             self.object(name, schema, direction, open)?;
         } else if let (Some((keyword, branches)), true) = (union_of(map), !map.contains_key("type")) {
             self.bounds(name, map)?;
@@ -225,7 +238,7 @@ impl Projector<'_> {
     fn branches(&mut self, name: &str, branches: &[Value], tag: Option<&str>, direction: Direction) -> Result<()> {
         for (i, b) in branches.iter().enumerate() {
             let key = match tag {
-                Some(t) => b["properties"][t]["const"].as_str().expect("tag_of found it").to_string(),
+                Some(t) => tag_value(b, t).expect("tag_of found it"),
                 None => format!("#{i}"),
             };
             self.lines.insert(format!("value {name} {key}"));
@@ -236,13 +249,17 @@ impl Projector<'_> {
                     required.retain(|r| r != t);
                 }
             }
-            self.node(&format!("{name}.{key}"), &branch, direction, false)?;
+            let open = branch["x-fragment-open"] == true;
+            self.node(&format!("{name}.{key}"), &branch, direction, open)?;
         }
         Ok(())
     }
 
     fn object(&mut self, name: &str, schema: &Value, direction: Direction, open: bool) -> Result<()> {
         let map = known(schema, name)?;
+        if !matches!(types_of(map).as_slice(), [] | ["object"]) {
+            bail!("{name}: an object's schema of type {:?}", types_of(map));
+        }
         let closed = map.get("additionalProperties") == Some(&Value::Bool(false));
         let kind = if closed { "object closed" } else { "object" };
         self.lines.insert(format!("type {name} {} {kind}{}", direction.as_str(), if open { " open" } else { "" }));
@@ -255,6 +272,11 @@ impl Projector<'_> {
             let t = self.render(s, &format!("{name}.{field}"), direction)?;
             let need = if required.contains(field.as_str()) { "required" } else { "optional" };
             self.lines.insert(format!("field {name}.{field} {need} {t}"));
+        }
+        // a condition's names it requires present, whatever they hold
+        let described = map.get("properties").and_then(Value::as_object);
+        for field in required.iter().filter(|r| !described.is_some_and(|d| d.contains_key(**r))) {
+            self.lines.insert(format!("field {name}.{field} required any"));
         }
         match map.get("additionalProperties") {
             None | Some(Value::Bool(_)) => {}
@@ -277,11 +299,21 @@ impl Projector<'_> {
     /// or map of one, a constant, `T|null`, or an inline enum, union or
     /// object projected under `at`; its bounds as facts at `at`.
     fn render(&mut self, schema: &Value, at: &str, direction: Direction) -> Result<String> {
-        if schema == &Value::Bool(true) {
-            return Ok("any".into());
+        match schema {
+            Value::Bool(true) => return Ok("any".into()),
+            // no value: the field is absent
+            Value::Bool(false) => return Ok("never".into()),
+            _ => {}
         }
         let map = known(schema, at)?;
         let s = structural(map);
+        // a nullable inline shape: the shape under `at`, or null
+        let types = types_of(map);
+        if types.len() == 2 && types.contains(&"null") && (s.contains_key("properties") || types.contains(&"object")) {
+            let mut inner = schema.clone();
+            inner["type"] = Value::String(types.iter().find(|t| **t != "null").expect("one is not null").to_string());
+            return Ok(format!("{}|null", self.render(&inner, at, direction)?));
+        }
         if s.is_empty() {
             self.bounds(at, map)?;
             return Ok("any".into());
@@ -324,6 +356,7 @@ impl Projector<'_> {
                 self.bounds(at, map)?;
                 t.to_string()
             }
+            [] if nullable && s.keys().all(|k| k == "type") => return Ok("null".into()),
             _ => bail!("{at}: a schema the wire lock does not know how to read ({}): teach xtask/src/wire/lock.rs, or describe the type another way", Value::Object(s)),
         };
         Ok(if nullable { format!("{rendered}|null") } else { rendered })
@@ -370,12 +403,26 @@ impl Projector<'_> {
 }
 
 /// The tag every branch names itself by: a property each holds as a
-/// constant string, `type` first.
+/// constant string or number, `type` first, each branch's its own.
 fn tag_of(branches: &[Value]) -> Option<String> {
     let first = branches.first()?["properties"].as_object()?;
     let mut keys: Vec<&String> = first.keys().collect();
     keys.sort_by_key(|k| *k != "type");
-    keys.into_iter().find(|t| branches.iter().all(|b| b["properties"][t.as_str()]["const"].is_string())).cloned()
+    keys.into_iter()
+        .find(|t| {
+            let keys: Vec<Option<String>> = branches.iter().map(|b| tag_value(b, t)).collect();
+            keys.iter().all(Option::is_some) && keys.iter().collect::<BTreeSet<_>>().len() == keys.len()
+        })
+        .cloned()
+}
+
+/// A branch's value of its tag, as its key.
+fn tag_value(branch: &Value, tag: &str) -> Option<String> {
+    match &branch["properties"][tag]["const"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// The sized integer formats schemars writes, and their ranges.
@@ -533,6 +580,11 @@ fn enum_values(schema: &Value) -> Option<Vec<String>> {
     let branches = schema.get("oneOf")?.as_array()?;
     let mut values = vec![];
     for b in branches {
+        // a branch that says more than its value is a union's, visited as one
+        let bare = b.as_object().is_some_and(|m| m.iter().all(|(k, v)| matches!(k.as_str(), "const" | "enum") || (k == "type" && v == "string") || DOCUMENTARY.contains(&k.as_str())));
+        if !bare {
+            return None;
+        }
         match (b.get("const").and_then(Value::as_str), b.get("enum").and_then(strings)) {
             (Some(c), None) => values.push(c.to_string()),
             (None, Some(e)) => values.extend(e),
@@ -712,7 +764,7 @@ pub fn breaches(base: &Facts, head: &Facts, retired: &BTreeSet<String>) -> Vec<B
         for scheme in was.accepts.difference(&now.accepts) {
             breach(format!("route {op} accepts {scheme}"), "the route no longer takes this credential: an older client still sends it");
         }
-        for slot in ["query", "request", "response", "sends", "receives"] {
+        for slot in ["path", "query", "request", "response", "sends", "receives"] {
             match (was.shapes.get(slot), now.shapes.get(slot)) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), _) => breach(format!("route {op} {slot} {a}"), "the route's shape changed: an older client sends or reads the one it had"),

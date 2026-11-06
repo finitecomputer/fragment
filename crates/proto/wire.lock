@@ -39,6 +39,9 @@ bound Urls.platform default ""
 bound channels.read.query.after range i64
 bound channels.read.query.before range i64
 bound channels.read.query.limit range u64
+branches LiveIn.subscribe oneOf
+branches LiveOut.result oneOf
+branches LiveOut.result.#1 status
 extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
 field Archived.archived required boolean
@@ -110,6 +113,10 @@ field LiveIn.presence.data optional any
 field LiveIn.query.id required string
 field LiveIn.query.input optional any
 field LiveIn.query.op required string
+field LiveIn.subscribe.#0.after required integer
+field LiveIn.subscribe.#0.last optional null
+field LiveIn.subscribe.#1.after optional null
+field LiveIn.subscribe.#1.last required integer
 field LiveIn.subscribe.after optional integer|null
 field LiveIn.subscribe.channel required string
 field LiveIn.subscribe.last optional integer|null
@@ -127,6 +134,27 @@ field LiveOut.hello.platform required string
 field LiveOut.hello.presence required array<Present>
 field LiveOut.hello.principal required string
 field LiveOut.hello.role required Role
+field LiveOut.result.#0.error optional null
+field LiveOut.result.#0.message optional null
+field LiveOut.result.#0.result required any
+field LiveOut.result.#0.status optional null
+field LiveOut.result.#1.400.error optional LiveOut.result.#1.400.error
+field LiveOut.result.#1.401.error optional LiveOut.result.#1.401.error
+field LiveOut.result.#1.402.error optional LiveOut.result.#1.402.error
+field LiveOut.result.#1.403.error optional LiveOut.result.#1.403.error
+field LiveOut.result.#1.404.error optional LiveOut.result.#1.404.error
+field LiveOut.result.#1.409.error optional LiveOut.result.#1.409.error
+field LiveOut.result.#1.413.error optional LiveOut.result.#1.413.error
+field LiveOut.result.#1.422.error optional LiveOut.result.#1.422.error
+field LiveOut.result.#1.429.error optional LiveOut.result.#1.429.error
+field LiveOut.result.#1.500.error optional LiveOut.result.#1.500.error
+field LiveOut.result.#1.502.error optional LiveOut.result.#1.502.error
+field LiveOut.result.#1.503.error optional LiveOut.result.#1.503.error
+field LiveOut.result.#1.507.error optional LiveOut.result.#1.507.error
+field LiveOut.result.#1.error required any
+field LiveOut.result.#1.message required string
+field LiveOut.result.#1.result optional never
+field LiveOut.result.#1.status required any
 field LiveOut.result.error optional ErrorCode|null
 field LiveOut.result.id required string
 field LiveOut.result.message optional string|null
@@ -186,74 +214,109 @@ field Sharing.reach optional boolean
 field Sharing.visibility required Visibility
 field Urls.canonical required string
 field Urls.platform required string
+field channels.draft.path.channel required string
+field channels.draft.path.name required string
+field channels.post.path.channel required string
+field channels.post.path.name required string
+field channels.read.path.channel required string
+field channels.read.path.name required string
 field channels.read.query.after optional integer
 field channels.read.query.before optional integer
 field channels.read.query.limit optional integer
+field fragments.archive.path.name required string
+field fragments.dock.path.name required string
 field fragments.list.query.for optional string
+field fragments.pin.path.name required string
+field fragments.seen.path.name required string
+field fragments.status.path.name required string
+field live.open.path.name required string
+field members.list.path.name required string
 field search.find.query.q required string
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft
 route channels.draft accepts nip98
-route channels.draft accepts none
 route channels.draft accepts session
+route channels.draft path channels.draft.path
+route channels.draft query channels.draft.query
 route channels.draft request PutDraft
 route channels.draft response Done
 route channels.post POST /api/f/{name}/channels/{channel}
 route channels.post accepts nip98
-route channels.post accepts none
 route channels.post accepts session
+route channels.post path channels.post.path
+route channels.post query channels.post.query
 route channels.post request PostRecord
 route channels.post response Posted
 route channels.read GET /api/f/{name}/channels/{channel}
 route channels.read accepts nip98
-route channels.read accepts none
 route channels.read accepts session
+route channels.read path channels.read.path
 route channels.read query channels.read.query
 route channels.read response ChannelPage
 route fragments.archive PUT /api/fragments/{name}/archived
 route fragments.archive accepts nip98
 route fragments.archive accepts session
+route fragments.archive path fragments.archive.path
+route fragments.archive query fragments.archive.query
 route fragments.archive request SetArchived
 route fragments.archive response Archived
 route fragments.dock PUT /api/fragments/{name}/dock
 route fragments.dock accepts nip98
 route fragments.dock accepts session
+route fragments.dock path fragments.dock.path
+route fragments.dock query fragments.dock.query
 route fragments.dock request SetDock
 route fragments.dock response Docked
 route fragments.list GET /api/fragments
 route fragments.list accepts nip98
 route fragments.list accepts session
+route fragments.list path fragments.list.path
 route fragments.list query fragments.list.query
 route fragments.list response FragmentList
 route fragments.pin PUT /api/fragments/{name}/pinned
 route fragments.pin accepts nip98
 route fragments.pin accepts session
+route fragments.pin path fragments.pin.path
+route fragments.pin query fragments.pin.query
 route fragments.pin request SetPinned
 route fragments.pin response Pinned
 route fragments.seen PUT /api/fragments/{name}/seen
 route fragments.seen accepts nip98
 route fragments.seen accepts session
+route fragments.seen path fragments.seen.path
+route fragments.seen query fragments.seen.query
 route fragments.seen response Seen
 route fragments.status GET /api/f/{name}/status
 route fragments.status accepts nip98
 route fragments.status accepts session
+route fragments.status path fragments.status.path
+route fragments.status query fragments.status.query
 route fragments.status response FragmentStatus
 route fragments.watch GET /api/fragments/watch
 route fragments.watch accepts nip98
 route fragments.watch accepts session
+route fragments.watch path fragments.watch.path
+route fragments.watch query fragments.watch.query
 route fragments.watch receives ListWatchFrame
 route live.open GET /f/{name}/__live
+route live.open accepts frame
+route live.open accepts link
 route live.open accepts nip98
 route live.open accepts none
-route live.open accepts session
+route live.open accepts site
+route live.open path live.open.path
+route live.open query live.open.query
 route live.open receives LiveOut
 route live.open sends LiveIn
 route members.list GET /api/f/{name}/members
 route members.list accepts nip98
 route members.list accepts session
+route members.list path members.list.path
+route members.list query members.list.query
 route members.list response MemberList
 route search.find GET /api/search
 route search.find accepts nip98
 route search.find accepts session
+route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
 type Archived out object
@@ -280,6 +343,8 @@ type LiveIn.ping in object closed
 type LiveIn.presence in object closed
 type LiveIn.query in object closed
 type LiveIn.subscribe in object closed
+type LiveIn.subscribe.#0 in object
+type LiveIn.subscribe.#1 in object
 type LiveIn.unsubscribe in object closed
 type LiveOut out union(type) open
 type LiveOut.changed out object
@@ -290,6 +355,34 @@ type LiveOut.pong out object
 type LiveOut.presence out object
 type LiveOut.record out object
 type LiveOut.result out object closed
+type LiveOut.result.#0 out object
+type LiveOut.result.#1 out object open
+type LiveOut.result.#1.400 out object
+type LiveOut.result.#1.400.error out enum open
+type LiveOut.result.#1.401 out object
+type LiveOut.result.#1.401.error out enum open
+type LiveOut.result.#1.402 out object
+type LiveOut.result.#1.402.error out enum open
+type LiveOut.result.#1.403 out object
+type LiveOut.result.#1.403.error out enum open
+type LiveOut.result.#1.404 out object
+type LiveOut.result.#1.404.error out enum open
+type LiveOut.result.#1.409 out object
+type LiveOut.result.#1.409.error out enum open
+type LiveOut.result.#1.413 out object
+type LiveOut.result.#1.413.error out enum open
+type LiveOut.result.#1.422 out object
+type LiveOut.result.#1.422.error out enum open
+type LiveOut.result.#1.429 out object
+type LiveOut.result.#1.429.error out enum open
+type LiveOut.result.#1.500 out object
+type LiveOut.result.#1.500.error out enum open
+type LiveOut.result.#1.502 out object
+type LiveOut.result.#1.502.error out enum open
+type LiveOut.result.#1.503 out object
+type LiveOut.result.#1.503.error out enum open
+type LiveOut.result.#1.507 out object
+type LiveOut.result.#1.507.error out enum open
 type LiveOut.subscribed out object
 type Member out object
 type MemberList out object
@@ -315,8 +408,31 @@ type SetPinned in object
 type Sharing out object
 type Urls out object
 type Visibility out enum
+type channels.draft.path in object
+type channels.draft.query in object
+type channels.post.path in object
+type channels.post.query in object
+type channels.read.path in object
 type channels.read.query in object
+type fragments.archive.path in object
+type fragments.archive.query in object
+type fragments.dock.path in object
+type fragments.dock.query in object
+type fragments.list.path in object
 type fragments.list.query in object
+type fragments.pin.path in object
+type fragments.pin.query in object
+type fragments.seen.path in object
+type fragments.seen.query in object
+type fragments.status.path in object
+type fragments.status.query in object
+type fragments.watch.path in object
+type fragments.watch.query in object
+type live.open.path in object
+type live.open.query in object
+type members.list.path in object
+type members.list.query in object
+type search.find.path in object
 type search.find.query in object
 value ErrorCode already_exists
 value ErrorCode app_failed
@@ -357,6 +473,8 @@ value LiveIn presence
 value LiveIn query
 value LiveIn subscribe
 value LiveIn unsubscribe
+value LiveIn.subscribe #0
+value LiveIn.subscribe #1
 value LiveOut changed
 value LiveOut draft
 value LiveOut error
@@ -366,6 +484,43 @@ value LiveOut presence
 value LiveOut record
 value LiveOut result
 value LiveOut subscribed
+value LiveOut.result #0
+value LiveOut.result #1
+value LiveOut.result.#1 400
+value LiveOut.result.#1 401
+value LiveOut.result.#1 402
+value LiveOut.result.#1 403
+value LiveOut.result.#1 404
+value LiveOut.result.#1 409
+value LiveOut.result.#1 413
+value LiveOut.result.#1 422
+value LiveOut.result.#1 429
+value LiveOut.result.#1 500
+value LiveOut.result.#1 502
+value LiveOut.result.#1 503
+value LiveOut.result.#1 507
+value LiveOut.result.#1.400.error invalid_request
+value LiveOut.result.#1.401.error unauthenticated
+value LiveOut.result.#1.402.error budget_used_up
+value LiveOut.result.#1.403.error forbidden
+value LiveOut.result.#1.403.error not_connected
+value LiveOut.result.#1.404.error no_code
+value LiveOut.result.#1.404.error not_found
+value LiveOut.result.#1.404.error unknown_operation
+value LiveOut.result.#1.409.error already_exists
+value LiveOut.result.#1.409.error conflict
+value LiveOut.result.#1.409.error conflicting_body
+value LiveOut.result.#1.413.error too_large
+value LiveOut.result.#1.422.error app_failed
+value LiveOut.result.#1.429.error rate_limited
+value LiveOut.result.#1.500.error host_failed
+value LiveOut.result.#1.500.error schema_refused
+value LiveOut.result.#1.502.error upstream_failed
+value LiveOut.result.#1.503.error deploying
+value LiveOut.result.#1.503.error node_full
+value LiveOut.result.#1.503.error registry_unavailable
+value LiveOut.result.#1.503.error wont_wake
+value LiveOut.result.#1.507.error storage_full
 value OpKind job
 value OpKind mutation
 value OpKind query

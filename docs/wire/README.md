@@ -105,7 +105,7 @@ A fragment's channels: its records, read, posted and drafted.
 
 `PUT /api/f/{name}/channels/{channel}/draft`: Show a record as it is written to the channel's live readers; never stored.
 
-- Credentials: NIP-98, the shell's session, none
+- Credentials: NIP-98, the shell's session
 - Body: [`PutDraft`](#putdraft)
 - Answer: [`Done`](#done)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 429 `rate_limited`; 500 `schema_refused`; 503 `deploying`
@@ -114,7 +114,7 @@ A fragment's channels: its records, read, posted and drafted.
 
 `POST /api/f/{name}/channels/{channel}`: Append a `message` record as the poster.
 
-- Credentials: NIP-98, the shell's session, none
+- Credentials: NIP-98, the shell's session
 - Body: [`PostRecord`](#postrecord)
 - Answer: [`Posted`](#posted)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 402 `budget_used_up`; 403 `forbidden`; 404 `not_found`; 409 `conflicting_body`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
@@ -123,7 +123,7 @@ A fragment's channels: its records, read, posted and drafted.
 
 `GET /api/f/{name}/channels/{channel}`: A page of a channel's records, always ascending.
 
-- Credentials: NIP-98, the shell's session, none
+- Credentials: NIP-98, the shell's session
 - Query `after` (`integer`, optional): Read forward from past this seq (0 when neither cursor is named).
 - Query `before` (`integer`, optional): Read the records just below this seq.
 - Query `limit` (`integer`, optional): At most `CHANNEL_PAGE`.
@@ -138,7 +138,7 @@ A fragment's live socket: records as they are appended, presence, drafts and que
 
 `GET /f/{name}/__live`: A fragment's live socket: subscribe to channels, share presence, run queries.
 
-- Credentials: NIP-98, the shell's session, none
+- Credentials: NIP-98, its page's session, its framed page's session, its share link, none
 - A WebSocket; sends: [`LiveIn`](#livein)
 - A WebSocket; receives: [`LiveOut`](#liveout)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
@@ -334,9 +334,14 @@ in. A frame a page sends. One that does not decode is answered with `LiveOut::Er
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `after` | `integer` or `null` | optional | The records with `seq` after this one (0: from the start). Exactly one of `after` and `last`. |
+| `after` | `integer` or `null` | optional | The records with `seq` after this one (0: from the start). |
 | `channel` | `string` | required |  |
 | `last` | `integer` or `null` | optional | The channel's last this many records (at most `limits::CHANNEL_PAGE`). |
+
+Exactly one of these holds:
+
+- `after` is there; `after` is integer; `last` is null or absent
+- `last` is there; `after` is null or absent; `last` is integer
 
 `type: "unsubscribe"`. 
 
@@ -414,8 +419,13 @@ And every field of [`Present`](#present).
 | `error` | [`ErrorCode`](#errorcode) or `null` | optional |  |
 | `id` | `string` | required |  |
 | `message` | `string` or `null` | optional |  |
-| `result` | `any` | optional |  |
+| `result` | `any` | optional | The query's answer, any JSON (`null` included), as the app gave it. |
 | `status` | `integer` or `null` | optional |  |
+
+Exactly one of these holds:
+
+- `result` is there; `error` is null or absent; `message` is null or absent; `status` is null or absent
+- `error` is there; `message` is there; `status` is there; `message` is string; no `result`; one of 13 shapes beside (openapi.json)
 
 `type: "error"`. A frame the fragment refused, and why; the socket stays open.
 

@@ -690,9 +690,37 @@
           {
             "additionalProperties": false,
             "description": "One page of a channel's records from a cursor; the page that\nreaches the end makes the socket live on the channel.",
+            "oneOf": [
+              {
+                "properties": {
+                  "after": {
+                    "type": "integer"
+                  },
+                  "last": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "after"
+                ]
+              },
+              {
+                "properties": {
+                  "after": {
+                    "type": "null"
+                  },
+                  "last": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "last"
+                ]
+              }
+            ],
             "properties": {
               "after": {
-                "description": "The records with `seq` after this one (0: from the start). Exactly\none of `after` and `last`.",
+                "description": "The records with `seq` after this one (0: from the start).",
                 "format": "int64",
                 "type": [
                   "integer",
@@ -954,6 +982,218 @@
           {
             "additionalProperties": false,
             "description": "A query's answer.",
+            "oneOf": [
+              {
+                "properties": {
+                  "error": {
+                    "type": "null"
+                  },
+                  "message": {
+                    "type": "null"
+                  },
+                  "status": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "invalid_request"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 400
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "unauthenticated"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 401
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "budget_used_up"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 402
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "forbidden",
+                          "not_connected"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 403
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "not_found",
+                          "unknown_operation",
+                          "no_code"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 404
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "already_exists",
+                          "conflicting_body",
+                          "conflict"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 409
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "too_large"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 413
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "app_failed"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 422
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "rate_limited"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 429
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "host_failed",
+                          "schema_refused"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 500
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "upstream_failed"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 502
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "registry_unavailable",
+                          "node_full",
+                          "wont_wake",
+                          "deploying"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 503
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "storage_full"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 507
+                      }
+                    }
+                  }
+                ],
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "result": false
+                },
+                "required": [
+                  "error",
+                  "message",
+                  "status"
+                ],
+                "x-fragment-open": true
+              }
+            ],
             "properties": {
               "error": {
                 "anyOf": [
@@ -974,7 +1214,9 @@
                   "null"
                 ]
               },
-              "result": true,
+              "result": {
+                "description": "The query's answer, any JSON (`null` included), as the app gave it."
+              },
               "status": {
                 "format": "uint16",
                 "maximum": 65535,
@@ -1567,15 +1809,33 @@
       }
     },
     "securitySchemes": {
+      "frame": {
+        "description": "The session of a fragment's page framed by another page (docs/api.md, Frame sessions); `fragment_frame` over plain http.",
+        "in": "cookie",
+        "name": "__Host-fragment_frame",
+        "type": "apiKey"
+      },
+      "link": {
+        "description": "A fragment's share link's token (docs/api.md, Sharing); its page keeps it in a cookie of its origin after.",
+        "in": "query",
+        "name": "view",
+        "type": "apiKey"
+      },
       "nip98": {
         "description": "NIP-98: `Authorization: Nostr <base64 event>`, a kind-27235 event signed over the method, the URL and the body's SHA-256 (crates/nip98).",
         "scheme": "Nostr",
         "type": "http"
       },
       "session": {
-        "description": "The shell's session (docs/api.md, Sign-in); `fragment_session` over plain http.",
+        "description": "The shell's session, from the platform's own page (docs/api.md, Sign-in); `fragment_session` over plain http.",
         "in": "cookie",
         "name": "__Host-fragment_session",
+        "type": "apiKey"
+      },
+      "site": {
+        "description": "A fragment's own page's session, on its origin (docs/api.md, Sign-in); `fragment_site` over plain http.",
+        "in": "cookie",
+        "name": "__Host-fragment_site",
         "type": "apiKey"
       }
     }
@@ -1738,8 +1998,7 @@
           },
           {
             "session": []
-          },
-          {}
+          }
         ],
         "summary": "A page of a channel's records, always ascending.",
         "tags": [
@@ -1913,8 +2172,7 @@
           },
           {
             "session": []
-          },
-          {}
+          }
         ],
         "summary": "Append a `message` record as the poster.",
         "tags": [
@@ -2077,8 +2335,7 @@
           },
           {
             "session": []
-          },
-          {}
+          }
         ],
         "summary": "Show a record as it is written to the channel's live readers; never stored.",
         "tags": [
@@ -3113,7 +3370,13 @@
             "nip98": []
           },
           {
-            "session": []
+            "site": []
+          },
+          {
+            "frame": []
+          },
+          {
+            "link": []
           },
           {}
         ],

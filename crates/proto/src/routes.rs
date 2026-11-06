@@ -46,8 +46,16 @@ pub enum Auth {
     /// A NIP-98 signature (`Authorization: Nostr <event>`): the CLI, the
     /// iOS app, an agent's computer.
     Nip98,
-    /// The shell's session cookie (docs/api.md, Sign-in).
+    /// The shell's session cookie, from the platform's own page
+    /// (docs/api.md, Sign-in).
     Session,
+    /// A fragment's own page's session cookie (its origin's sign-in).
+    Site,
+    /// The session cookie of a fragment's page framed by another page
+    /// (docs/api.md, Frame sessions).
+    Frame,
+    /// Its share link's token (`?view=`).
+    Link,
     /// None: whoever the fragment's visibility lets in (an anonymous
     /// visitor of a public fragment).
     Anyone,
@@ -118,8 +126,14 @@ pub const TAGS: [(&str, &str); 5] = [
     ("live", "A fragment's live socket: records as they are appended, presence, drafts and queries."),
 ];
 
+// Each route's credentials are what its dispatch takes (cell/src/lib.rs):
+// every `/api/…` route's `signer` or `signer_for` (a signature, or else
+// the shell's session from the platform's own page: `caller`), and a
+// fragment's page's routes (`/f/{name}/…`) `site_credential` (a
+// signature, its origin's session or frame cookie) beside its share link
+// and the anonymous visitor its visibility lets in (`serve`).
 const SIGNED: &[Auth] = &[Auth::Nip98, Auth::Session];
-const VISITOR: &[Auth] = &[Auth::Nip98, Auth::Session, Auth::Anyone];
+const VISITOR: &[Auth] = &[Auth::Nip98, Auth::Site, Auth::Frame, Auth::Link, Auth::Anyone];
 
 const NAME: Param = Param { name: "name", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The fragment's name, in full." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
@@ -241,7 +255,7 @@ pub const ROUTES: &[Route] = &[
         method: Method::Get,
         path: "/api/f/{name}/channels/{channel}",
         summary: "A page of a channel's records, always ascending.",
-        auth: VISITOR,
+        auth: SIGNED,
         params: &[
             NAME,
             CHANNEL,
@@ -258,7 +272,7 @@ pub const ROUTES: &[Route] = &[
         method: Method::Post,
         path: "/api/f/{name}/channels/{channel}",
         summary: "Append a `message` record as the poster.",
-        auth: VISITOR,
+        auth: SIGNED,
         params: &[NAME, CHANNEL],
         request: Some(shape::<PostRecord>),
         answer: Answer::Json(shape::<Posted>),
@@ -269,7 +283,7 @@ pub const ROUTES: &[Route] = &[
         method: Method::Put,
         path: "/api/f/{name}/channels/{channel}/draft",
         summary: "Show a record as it is written to the channel's live readers; never stored.",
-        auth: VISITOR,
+        auth: SIGNED,
         params: &[NAME, CHANNEL],
         request: Some(shape::<PutDraft>),
         answer: Answer::Json(shape::<Done>),
@@ -324,6 +338,20 @@ pub enum ListWatchFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: each route's credentials are what its dispatch takes. Method:
+    /// an `/api/…` route is a signer's alone (`signer`, `signer_for`), and a
+    /// fragment's page's (`/f/{name}/…`) a visitor's (`site_credential`).
+    #[test]
+    fn credentials_are_the_dispatchs() {
+        for r in ROUTES {
+            match r.path {
+                p if p.starts_with("/api/") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
+                p if p.starts_with("/f/{name}/") => assert_eq!(r.auth, VISITOR, "{}", r.operation),
+                p => panic!("{} at {p}: say whose dispatch it is", r.operation),
+            }
+        }
+    }
 
     /// Goal: an operation names one route, and a route one operation, for
     /// good: OpenAPI's `operationId` is unique, and a generated client's
