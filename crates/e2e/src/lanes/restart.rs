@@ -50,6 +50,109 @@ fn added_key_price(book: &Value) -> Option<Value> {
     book["keys"].as_array()?.iter().find(|k| k["key"] == ADDED_KEY.0).cloned()
 }
 
+/// Each of `paths`' cache policy on public fragment `name`, revalidated
+/// (`public, max-age=60`) or not: `{ok, paths: {path: [status, cache]}}`.
+fn revalidated(api: &Api, name: &str, paths: &[&str]) -> Result<Value> {
+    let mut seen = serde_json::Map::new();
+    let mut ok = true;
+    for path in paths {
+        let r = api.page(name, path, None)?;
+        ok &= r.status == 200 && r.header("cache-control") == "public, max-age=60";
+        seen.insert(path.to_string(), json!([r.status, r.header("cache-control")]));
+    }
+    Ok(json!({ "ok": ok, "paths": seen }))
+}
+
+/// A public site that keeps `assets/**` for good (its first deploy, checked
+/// so), then a deploy of `manifest` (`immutable` gone or changed, and a
+/// refused field) adding `added`: its install refused, its tree served
+/// with none of the first's kept paths. Its name, and `added` under `site/`.
+fn kept_then_refused(s: &mut Suite, api: &Api, owner: &Keys, label: &str, manifest: &[u8], added: &str) -> Result<(String, String)> {
+    let name = s.named(api, owner, label)?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    s.commit(&c, &[("fragment.json", Some(br#"{"immutable":["assets/**"]}"#)), ("site/index.html", Some(b"<p>kept</p>")), ("site/assets/a-Ikq0sZO3.js", Some(b"1"))]);
+    s.deploy(&c);
+    let first = api.page(&name, "assets/a-Ikq0sZO3.js", None)?;
+    s.ok(&format!("{label}: its first deploy keeps assets/** for good"), first.status == 200 && first.header("cache-control") == "public, max-age=31536000, immutable", &first);
+    let added_bytes: &[u8] = b"2";
+    s.commit(&c, &[("fragment.json", Some(manifest)), (added, Some(added_bytes))]);
+    let live = s.deploy(&c);
+    let status = api.status(owner, &name)?;
+    let added = added.strip_prefix("site/").expect("a site file").to_string();
+    let seen = revalidated(api, &name, &["assets/a-Ikq0sZO3.js", &added])?;
+    s.ok(
+        &format!("{label}: a deploy whose install is refused (fragment.json {}) is served with none of the last install's kept paths: its old and new files revalidated", String::from_utf8_lossy(manifest)),
+        status.body["code"]["error"].as_str().is_some_and(|e| e.contains(&live[..12])) && seen["ok"] == true,
+        json!({ "code": status.body["code"], "seen": seen }),
+    );
+    Ok((name, added))
+}
+
+/// A public site's blob-backed asset: its name, its path under `site/`,
+/// and the commit that last changed it before the cut refresh.
+struct Blobbed {
+    name: String,
+    path: String,
+    commit: String,
+}
+
+/// The asset's cache policy by its path and by its version (`__file?v=`):
+/// `{kept, asset: [status, cache, bytes], version: [status, cache]}`,
+/// `kept` whether either is kept for good.
+fn blob_caching(api: &Api, b: &Blobbed) -> Result<Value> {
+    let asset = api.page(&b.name, b.path.strip_prefix("site/").expect("a site file"), None)?;
+    let version = api.page(&b.name, &format!("__file?path={}&v={}", b.path, b.commit), None)?;
+    let kept = [&asset, &version].iter().any(|r| r.header("cache-control").contains("immutable"));
+    Ok(json!({ "kept": kept, "asset": [asset.status, asset.header("cache-control"), asset.text], "version": [version.status, version.header("cache-control")] }))
+}
+
+/// FIN-391: a blob's bytes come by the pointer table, which a refresh
+/// rewrites path by path before it moves the tree and its pin, so a
+/// declared asset stored as a blob is never kept for good, nor its version:
+/// as deployed, and with a refresh cut between its two pointer reads (the
+/// first asset's pointer the next commit's, the tree and pin still this
+/// one's), whose state the caller checks again after a crash. The read
+/// stays failing until the caller clears it.
+fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
+    let name = s.named(api, owner, "restart-blobbed")?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    let upload = |text: &str| -> Result<String> {
+        let bytes = text.as_bytes().to_vec();
+        let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        let r = api.call(Call { method: "PUT", url: format!("{}/api/f/{name}/blobs/{sha}", api.base), body: Some(bytes.clone()), keys: Some(owner), ..Call::default() })?;
+        anyhow::ensure!(r.status == 200, "a blob's upload: {r}");
+        Ok(fragment_core::blob::pointer(&sha, bytes.len() as u64))
+    };
+    let (a, b) = ("site/assets/a-Ikq0sZO3.js", "site/assets/b-S4M26L7U.js");
+    let (a1, b1) = (upload("console.log('a, first')")?, upload("console.log('b, first')")?);
+    let first = s.commit(&c, &[("fragment.json", Some(br#"{"immutable":["assets/**"]}"#)), ("site/index.html", Some(b"<p>blobs</p>")), (a, Some(a1.as_bytes())), (b, Some(b1.as_bytes()))]);
+    s.deploy(&c);
+    let blobbed = Blobbed { name: name.clone(), path: a.into(), commit: first.clone() };
+    let deployed = blob_caching(api, &blobbed)?;
+    s.ok(
+        "a declared asset stored as a blob is served its bytes, revalidated, and so is its version: never kept for good",
+        deployed["kept"] == false && deployed["asset"][2] == "console.log('a, first')" && deployed["version"][0] == 200,
+        &deployed,
+    );
+    // the next commit's pointers, at main whole; then live's refresh to it
+    // cut at the second's read (main's, had it been cut, would stop the
+    // refresh before live's pointers)
+    let (a2, b2) = (upload("console.log('a, second')")?, upload("console.log('b, second')")?);
+    s.commit(&c, &[(a, Some(a2.as_bytes())), (b, Some(b2.as_bytes()))]);
+    s.fake.fail_file_read(Some(b));
+    s.deploy(&c);
+    let pins = api.status(owner, &name)?.body["pins"].clone();
+    let cut = blob_caching(api, &blobbed)?;
+    s.ok(
+        "a refresh cut between two pointer reads (live still the first commit, the first asset's pointer the next's): its bytes are the next's, and neither it nor its version is kept for good",
+        pins["live"] == first.as_str() && cut["asset"][2] == "console.log('a, second')" && cut["kept"] == false && cut["version"][0] == 200,
+        json!({ "pins": pins, "cut": cut }),
+    );
+    Ok(blobbed)
+}
+
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
@@ -414,8 +517,27 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let files = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(site.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
     let kept = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "kept.md")).and_then(|f| f["commit"].as_str()).unwrap_or_default().to_string();
     anyhow::ensure!(fragment_core::site::valid_version(&kept), "a version before the crash: {files}");
+    // FIN-391: a site's paths kept for good describe the commit they were
+    // read from: a deploy whose install is refused leaves its tree served
+    // with none of the last one's, before a crash and after it
+    let unkept = kept_then_refused(s, &api, &owner, "restart-unkept", br#"{"operations":3}"#, "site/assets/new-B4k9Qz2m.js")?;
+    let moved = kept_then_refused(s, &api, &owner, "restart-moved", br#"{"immutable":["fonts/**"],"operations":3}"#, "site/fonts/new.woff2")?;
+    let blobbed = blobs_never_kept(s, &api, &owner)?;
     s.crash()?;
     let api = s.start(false)?;
+    let seen = blob_caching(&api, &blobbed)?;
+    s.fake.fail_file_read(None);
+    s.ok(
+        "after a crash, the refresh cut between its pointer reads still persisted, a declared blob-backed asset and its version are revalidated, never kept for good",
+        seen["kept"] == false && seen["asset"][0] == 200 && seen["version"][0] == 200,
+        &seen,
+    );
+    let after: Vec<Value> = [&unkept, &moved].iter().map(|(name, added)| revalidated(&api, name, &["assets/a-Ikq0sZO3.js", added])).collect::<Result<_>>()?;
+    s.ok(
+        "after a crash a refused deploy's tree is still served with none of the last install's kept paths: its files revalidated, the new ones too",
+        after.iter().all(|r| r["ok"] == true),
+        json!(after),
+    );
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",
