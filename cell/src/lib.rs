@@ -647,7 +647,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
-    Ok(FragmentList { fragments })
+    Ok(FragmentList { fragments, limits: None })
 }
 
 /// Whose ledger a signer reads: a person's own; an agent's owner's.

@@ -65,8 +65,12 @@ const TEXT_MAX_BYTES = 32 * 1024;
 // kept this long after a change.
 const DRAFT_KEY = "fragment.chat.draft.v1";
 const DRAFT_SAVE_MS = 300;
-const ATTACHMENTS_MAX = 8;
-const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+// What one message carries, at most: the platform's own (`limits` in the
+// page's hello, docs/api.md), set once the page's socket says hello.
+let limits = null;
+const tooMany = (n) => !!limits && n >= limits.filesPerMessage;
+const tooBig = (bytes) => !!limits && bytes > limits.uploadMaxBytes;
+const over = () => `over ${Math.round(limits.uploadMaxBytes / 1e6)} MB, the most a chat takes`;
 // The backlog a page reads: the chat's last messages, and enough of `work`
 // for their turns (each turn writes two records or more there).
 const CHAT_LAST = 400;
@@ -310,13 +314,13 @@ function avatar(color, extra = "", picture = null) {
   return mark;
 }
 
-/// A record's files, as docs/chat-records.md names them: at most 8, each
-/// a blob of this fragment by its hash.
+/// A record's files, as docs/chat-records.md names them: at most the
+/// platform's `filesPerMessage`, each a blob of this fragment by its hash.
 function attachmentsOf(body) {
   if (!Array.isArray(body.attachments)) return [];
   return body.attachments
     .filter((a) => a && typeof a === "object" && SHA256.test(a.sha256))
-    .slice(0, ATTACHMENTS_MAX)
+    .slice(0, limits?.filesPerMessage)
     .map((a) => ({ sha256: a.sha256, size: Number(a.size), type: typeof a.type === "string" ? a.type : "", name: typeof a.name === "string" ? a.name : "" }));
 }
 
@@ -2269,12 +2273,12 @@ export function mount(root) {
   function addFiles(files) {
     if (!canAttach()) return;
     for (const file of files) {
-      if (attachments.length >= ATTACHMENTS_MAX) {
-        problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
+      if (tooMany(attachments.length)) {
+        problem(`A message carries at most ${limits.filesPerMessage} files.`);
         break;
       }
-      if (file.size > ATTACHMENT_MAX_BYTES) {
-        problem(`${file.name} is over 25 MB, the most a chat takes.`);
+      if (tooBig(file.size)) {
+        problem(`${file.name} is ${over()}.`);
         continue;
       }
       attachments.push({ file, name: file.name || "a file", size: file.size, type: file.type, uploading: false });
@@ -2334,7 +2338,7 @@ export function mount(root) {
   }
   async function startMemo() {
     if (ended || recording || !canAttach() || !recordable()) return;
-    if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
+    if (tooMany(attachments.length)) return problem(`A message carries at most ${limits.filesPerMessage} files.`);
     const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
     // held while the browser asks for the microphone, so a second press waits
     recording = memo;
@@ -2359,7 +2363,7 @@ export function mount(root) {
       if (!e.data?.size) return;
       memo.chunks.push(e.data);
       memo.bytes += e.data.size;
-      if (memo.bytes > ATTACHMENT_MAX_BYTES && memo.recorder.state !== "inactive") {
+      if (tooBig(memo.bytes) && memo.recorder.state !== "inactive") {
         memo.tooLarge = true;
         memo.recorder.stop();
       }
@@ -2395,7 +2399,7 @@ export function mount(root) {
     renderRecording();
     if (memo.discard) return;
     if (memo.failed) return problem(`Your voice memo was not kept: ${memo.failed}`);
-    if (memo.tooLarge) return problem("That voice memo is over 25 MB, the most a chat takes.");
+    if (memo.tooLarge) return problem(`That voice memo is ${over()}.`);
     const type = essence(memo.recorder?.mimeType || memo.chunks[0]?.type);
     if (!memo.bytes || !SHOWN_AUDIO.test(type)) return problem("Nothing was recorded.");
     const file = new File(memo.chunks, `voice-memo.${MEMO_EXT[type]}`, { type });
@@ -2763,7 +2767,7 @@ export function mount(root) {
       }
       if (outside.length) await readMembers();
       const named = [];
-      // bounded: at most ATTACHMENTS_MAX files
+      // bounded: at most limits.filesPerMessage files (addFiles)
       for (const f of files) named.push(await fragment.blob(f.file, { name: f.name }));
       const replyTo = state.replyTo?.seq ?? null;
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
@@ -3016,6 +3020,7 @@ export function mount(root) {
   });
   fragment.me().then((hello) => {
     state.me = hello;
+    limits = hello.limits ?? null;
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
     if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {

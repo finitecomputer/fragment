@@ -1317,7 +1317,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     launch_late_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
     knowledge_ui(s, api, &mut b, &page, &me, &shots)?;
-    launch_geometry_ui(s, &mut b, &page, &shots)?;
+    launch_geometry_ui(s, api, &mut b, &page, &me, &shots)?;
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -6755,7 +6755,8 @@ fn fresh_shown(b: &mut Browser, page: &Page, before: &[String]) -> Option<String
 /// is one line at rest and as words are typed; Shift+Enter is a new line,
 /// which it grows to, and a long prompt grows it to 200 px, then it
 /// scrolls. Files dropped on it or pasted into it are chips under its words
-/// (an image's with its picture): at most 8, none over 25 MB, each
+/// (an image's with its picture): at most and none over what the platform
+/// names (`limits` on the list, the fleet's own `UPLOAD_MAX_BYTES`), each
 /// removable, and a draft of that opening only. Enter goes straight to the
 /// new chat: the launcher closes and the chat shows while its message is on
 /// its way, its page never showing a new chat's start (`?sent=1`), then
@@ -6792,8 +6793,12 @@ fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me
         json!({ "rest": rest, "typed": typed, "two": two, "words": words, "long": long, "emptied": emptied }),
     );
 
-    // files: two dropped, an image among them; then more than 8, and one
-    // over 25 MB; one taken out
+    // files: two dropped, an image among them; then more than a message
+    // carries, and one over its bound, both as the platform names them
+    // (the fleet's, not a zone's); one taken out
+    let limits = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["limits"].clone();
+    let (most, count) = (limits["uploadMaxBytes"].as_u64().unwrap_or(0), limits["filesPerMessage"].as_u64().unwrap_or(0));
+    let past = format!("atlas.tiff is over {} MB.", (most as f64 / 1e6).round());
     let dropped = b.eval(
         page,
         "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'map.png', { type: 'image/png' })); d.items.add(new File(['three atlases'], 'atlases.txt', { type: 'text/plain' })); \
@@ -6803,13 +6808,13 @@ fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me
     )?;
     let many = b.eval(
         page,
-        &format!("(() => {{ const d = new DataTransfer(); for (let i = 0; i < 7; i++) d.items.add(new File([`atlas ${{i}}`], `atlas-${{i}}.txt`, {{ type: 'text/plain' }})); \
+        &format!("(() => {{ const d = new DataTransfer(); for (let i = 0; i < {count} - 1; i++) d.items.add(new File([`atlas ${{i}}`], `atlas-${{i}}.txt`, {{ type: 'text/plain' }})); \
           document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return {{ chips: {chips}, status: {status} }}; }})()"),
     )?;
     b.eval(page, "(document.querySelector('#search-files .search-file-remove')?.click(), true)")?;
     let big = b.eval(
         page,
-        &format!("(() => {{ const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', {{ type: 'image/tiff' }})); \
+        &format!("(() => {{ const d = new DataTransfer(); d.items.add(new File([new Uint8Array({most} + 1)], 'atlas.tiff', {{ type: 'image/tiff' }})); \
           document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return {{ chips: {chips}, status: {status} }}; }})()"),
     )?;
     b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
@@ -6818,12 +6823,15 @@ fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me
     b.until(page, opened, wait);
     let again = b.eval(page, &format!("({{ chips: {chips}, hidden: document.getElementById('search-files').hidden, status: {status} }})"))?;
     s.ok(
-        "files dropped on the launcher show as chips under its words (an image's with its picture), at most 8 (saying so), none over 25 MB (saying so), each removable; closed, they are gone from its next opening",
-        dropped == json!({ "said": true, "chips": 2, "pictured": 1, "after": false })
-            && many == json!({ "chips": 8, "status": "A message carries at most 8 files." })
-            && big == json!({ "chips": 7, "status": "atlas.tiff is over 25 MB." })
+        "files dropped on the launcher show as chips under its words (an image's with its picture), at most as many as the platform names (saying so), none over its bound (saying so, in its number), each removable; closed, they are gone from its next opening",
+        // a hosted run's bound is its deployment's (a zone's), not this fleet's
+        (s.hosted() || limits["uploadMaxBytes"] == crate::UPLOAD_MAX_BYTES)
+            && limits["filesPerMessage"] == fragment_proto::limits::FILES_PER_MESSAGE
+            && dropped == json!({ "said": true, "chips": 2, "pictured": 1, "after": false })
+            && many == json!({ "chips": count, "status": format!("A message carries at most {count} files.") })
+            && big == json!({ "chips": count - 1, "status": past })
             && again == json!({ "chips": 0, "hidden": true, "status": "" }),
-        json!({ "dropped": dropped, "many": many, "big": big, "again": again }),
+        json!({ "limits": limits, "dropped": dropped, "many": many, "big": big, "again": again }),
     );
 
     // Enter, its message held on the way: the new chat at once, never its start
@@ -6994,8 +7002,11 @@ fn knowledge_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Per
     Ok(())
 }
 
-fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
+fn launch_geometry_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
+    // one file past what the platform names (`limits` on the list)
+    let most = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["limits"]["uploadMaxBytes"].as_u64().context("the list names its upload bound")?;
+    let past = format!("atlas.tiff is over {} MB.", (most as f64 / 1e6).round());
     let opened = "document.getElementById('search-dialog').open";
     let closed = "!document.getElementById('search-dialog').open";
     b.viewport(page, 320, 800, true)?;
@@ -7026,10 +7037,10 @@ fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::
     );
     b.eval(
         page,
-        "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', { type: 'image/tiff' })); \
-          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return true; })()",
+        &format!("(() => {{ const d = new DataTransfer(); d.items.add(new File([new Uint8Array({most} + 1)], 'atlas.tiff', {{ type: 'image/tiff' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return true; }})()"),
     )?;
-    let rejected = b.until(page, "document.getElementById('search-status').textContent === 'atlas.tiff is over 25 MB.'", wait);
+    let rejected = b.until(page, &format!("document.getElementById('search-status').textContent === {}", json!(past)), wait);
     let rejected_send = b.eval(page, LAUNCHER_GEOMETRY)?;
     let rejected_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
     let _ = b.screenshot(page, &shots.join("phone-300-launcher-file-rejected.png"));
@@ -8190,7 +8201,10 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.click(page, "#settings")?;
     // one button, New agent, opens its dialog
     let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
-    b.click(page, "#settings-page .agent-add-open")?;
+    // pressed as an element, not at a point: Settings' Computer section
+    // grows above it as its computer is read, which moves the button
+    // between a point's measuring and its press
+    b.eval(page, "(document.querySelector('#settings-page .agent-add-open').click(), true)")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
     // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)

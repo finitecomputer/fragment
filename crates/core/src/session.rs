@@ -50,9 +50,11 @@ const _: () = assert!(SESSIONS_MAX + 2_000 <= crate::export::limits::FILES_MAX, 
 const _: () = assert!(2 * ARCHIVE_MAX_BYTES <= crate::export::limits::FRAGMENT_MAX_BYTES, "an archive's bytes fit its person's export");
 /// One conversation's file: one larger is refused, and the rest imported.
 pub const SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
-/// One file a message held (`Attachment`): one larger is left out, its
-/// message kept. An archive's bytes count every one (`ARCHIVE_MAX_BYTES`).
-pub const MEDIA_FILE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// One file a message held (`Attachment`), at most what a person uploads
+/// (`fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT`: the import's own
+/// upload, from their laptop): one larger is left out, its message kept.
+/// An archive's bytes count every one (`ARCHIVE_MAX_BYTES`).
+pub const MEDIA_FILE_MAX_BYTES: u64 = fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT;
 /// A tool's output, an assistant's reasoning, and a tool call's arguments
 /// are cut to this many characters (what the person and the agent said
 /// never is), as the old Finite's export cuts them.

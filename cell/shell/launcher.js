@@ -35,9 +35,6 @@ import { icon } from "./icons.js";
 import { KIND } from "./frame-messages.js";
 import { speakers } from "./session-text.js";
 
-// At most 8 files, 25 MiB each, as the chat's page takes them.
-const FILES_MAX = 8;
-const FILE_MAX_BYTES = 25 * 1024 * 1024;
 // A connection dropped on a file's upload is tried again, as `fragment.blob` does.
 const UPLOAD_TRIES = 3;
 // The input grows with a long prompt to this, then scrolls; one line at rest.
@@ -330,15 +327,18 @@ export function createLauncher(shell) {
   const canSend = () => canLaunch() || !!firstChat();
   const sendable = () => canSend() && (!!input.value.trim() || (launchFiles.length > 0 && canLaunch()));
 
+  // What a message carries, at most, as the chat's page takes it: the
+  // platform's own (`limits` on the person's list, `state.limits`).
   function addFiles(files) {
     launchError = "";
+    const limits = state.limits;
     for (const file of files) {
-      if (launchFiles.length >= FILES_MAX) {
-        launchError = `A message carries at most ${FILES_MAX} files.`;
+      if (limits && launchFiles.length >= limits.filesPerMessage) {
+        launchError = `A message carries at most ${limits.filesPerMessage} files.`;
         break;
       }
-      if (file.size > FILE_MAX_BYTES) {
-        launchError = `${file.name || "A file"} is over 25 MB.`;
+      if (limits && file.size > limits.uploadMaxBytes) {
+        launchError = `${file.name || "A file"} is over ${Math.round(limits.uploadMaxBytes / 1e6)} MB.`;
         continue;
       }
       launchFiles.push({ file, url: file.type.startsWith("image/") ? URL.createObjectURL(file) : null });
@@ -547,7 +547,7 @@ export function createLauncher(shell) {
         leaveSidebar();
         view = shell.views();
       }
-      // bounded: at most FILES_MAX, uploaded together
+      // bounded: at most state.limits.filesPerMessage (addFiles), uploaded together
       const attachments = await Promise.all(files.map((f) => upload(name, f)));
       await api("POST", `/api/f/${seg(name)}/channels/chat`, { id: pendingLaunch.id, body: { text, ...(attachments.length ? { attachments } : {}) } });
       pendingLaunch = null;

@@ -5,6 +5,7 @@
 //   await fragment.call("add_todo", { text: "milk" });        // an operation
 //   await fragment.post("chat", { text: "hi" });               // a record, no app code
 //   const file = await fragment.blob(picked);                  // a blob: {sha256, size, type, name}
+//   const { limits } = await fragment.me();                    // {uploadMaxBytes, filesPerMessage}
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
@@ -242,7 +243,7 @@ function connect() {
   ws.onmessage = (event) => {
     const m = JSON.parse(event.data);
     if (m.type === "hello") {
-      hello = { id: m.id, principal: m.principal, role: m.role, platform: m.platform };
+      hello = { id: m.id, principal: m.principal, role: m.role, platform: m.platform, limits: m.limits };
       present.clear();
       for (const p of m.presence) present.set(p.id, p);
       helloWaiters.splice(0).forEach((resolve) => resolve(hello));
@@ -433,9 +434,11 @@ export function closed(handler) {
   return () => closedHandlers.delete(handler);
 }
 
-/// Who this page is to the fragment: { id, principal, role, platform }
-/// (`platform` the platform's origin, the one page that frames it with its
-/// person's session).
+/// Who this page is to the fragment: { id, principal, role, platform,
+/// limits } (`platform` the platform's origin, the one page that frames it
+/// with its person's session; `limits` what one message of a person's may
+/// carry, {uploadMaxBytes, filesPerMessage}: the platform's, which a page
+/// checks files against before it uploads them).
 export function me() {
   connect();
   return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));

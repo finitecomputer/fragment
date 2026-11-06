@@ -189,4 +189,85 @@ mod tests {
         assert_eq!(constant(&launcher, "const", "KNOWLEDGE_IN_MAX", " = "), fragment_proto::search::IN_MAX as i64);
         assert_eq!(constant(&launcher, "const", "KNOWLEDGE_Q_MAX_BYTES", " = "), fragment_proto::search::QUERY_MAX_BYTES as i64);
     }
+
+    /// Goal: the bridge, which cannot depend on proto yet (images/ is a
+    /// workspace of its own), takes a message's files as the platform
+    /// bounds them: its `ATTACHMENT_MAX_BYTES` is proto's `BLOB_MAX_BYTES`
+    /// (a computer's files never meet a zone's limit) and its
+    /// `ATTACHMENTS_MAX` is `FILES_PER_MESSAGE`. Its `HERMES_MEDIA_MAX_BYTES`
+    /// is Hermes' own, and no platform limit. Method: its file, read and
+    /// evaluated.
+    #[test]
+    fn the_bridge_takes_files_as_the_platform_bounds_them() {
+        let bridge = std::fs::read_to_string(crate::devstack::repo_root().join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
+        assert_eq!(constant(&bridge, "pub const", "ATTACHMENT_MAX_BYTES", ": u64 = "), fragment_proto::limits::BLOB_MAX_BYTES as i64);
+        assert_eq!(constant(&bridge, "pub const", "ATTACHMENTS_MAX", ": usize = "), i64::from(fragment_proto::limits::FILES_PER_MESSAGE));
+    }
+
+    /// The sizes a file bound has been written as: 25 MiB (the old bound,
+    /// copied by hand into every client until 2026-11), 100 MB (a zone's)
+    /// and 256 MiB (a blob's), as integer expressions with their spaces
+    /// and digit separators taken out. `100000000` is a common number
+    /// besides, so it counts only on a line that speaks of bytes.
+    const FILE_BOUNDS: [&str; 10] = ["25*1024*1024", "25<<20", "26214400", "100*1024*1024", "100<<20", "104857600", "100*1000*1000", "256*1024*1024", "256<<20", "268435456"];
+    const ZONE_BOUND: &str = "100000000";
+
+    /// How many times `line` writes a file bound (`FILE_BOUNDS`).
+    fn file_bounds(line: &str) -> usize {
+        let squeezed: String = line.chars().filter(|c| !c.is_whitespace() && *c != '_').collect();
+        let bytes = squeezed.as_bytes();
+        let digit = |i: Option<usize>| i.and_then(|i| bytes.get(i)).is_some_and(u8::is_ascii_digit);
+        let count = |needle: &str| squeezed.match_indices(needle).filter(|(at, n)| !digit(at.checked_sub(1)) && !digit(Some(at + n.len()))).count();
+        let zone = if squeezed.to_ascii_lowercase().contains("byte") { count(ZONE_BOUND) } else { 0 };
+        FILE_BOUNDS.iter().map(|b| count(b)).sum::<usize>() + zone
+    }
+
+    /// Goal: a file bound is stated once (Paul, 2026-11-06: the chat's
+    /// composer still refused 25 MB after the platform took 256 MiB, as
+    /// the limit was copied into every client): proto's `limits`
+    /// (`BLOB_MAX_BYTES`, `UPLOAD_MAX_BYTES_DEFAULT`), which the platform
+    /// serves its clients (`UploadLimits`), and the app's fallback for a
+    /// platform older than that, alone. images/ keeps its own bounds (the
+    /// bridge's, held to proto above; Hermes' and SimpleX's own). Method:
+    /// every Rust, JavaScript and Swift source of the platform, its
+    /// clients and its tests, read.
+    #[test]
+    fn a_file_bound_is_written_once() {
+        let root = crate::devstack::repo_root();
+        let mut found: BTreeMap<String, usize> = BTreeMap::new();
+        let mut dirs: Vec<std::path::PathBuf> = ["cell", "cli", "crates", "templates", "applib", "ios", "xtask"].iter().map(|d| root.join(d)).collect();
+        let mut read = 0;
+        // bounded: the repository's own sources
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries {
+                let path = entry.expect("an entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if path.is_dir() {
+                    // built output, third-party bundles and installs
+                    if !["target", "build", "node_modules", "fixtures"].contains(&name) && !name.starts_with('.') {
+                        dirs.push(path);
+                    }
+                } else if ["rs", "js", "mjs", "swift"].iter().any(|e| path.extension().is_some_and(|x| x == *e)) {
+                    let rel = path.strip_prefix(&root).expect("under the root").to_string_lossy().into_owned();
+                    if rel == "xtask/src/guards.rs" {
+                        continue;
+                    }
+                    read += 1;
+                    let n: usize = std::fs::read_to_string(&path).map(|t| t.lines().map(file_bounds).sum()).unwrap_or(0);
+                    if n > 0 {
+                        found.insert(rel, n);
+                    }
+                }
+            }
+        }
+        assert!(read > 300, "the sources were found ({read})");
+        let once = BTreeMap::from([("crates/proto/src/lib.rs".to_string(), 2), ("ios/Sources/ChatMedia.swift".to_string(), 1)]);
+        assert_eq!(found, once, "a file bound is proto's `limits` (which clients read from the platform: `UploadLimits`), not a copy");
+        assert_eq!(file_bounds("const FILE_MAX_BYTES = 25 * 1024 * 1024;"), 1);
+        assert_eq!(file_bounds("static let bytesMax = 25 * 1_024 * 1_024"), 1);
+        assert_eq!(file_bounds("pub const UPLOAD_MAX_BYTES_DEFAULT: u64 = 100_000_000;"), 1);
+        assert_eq!(file_bounds("static let pixelsMax = 100_000_000"), 0, "not a byte count");
+        assert_eq!(file_bounds("let size = 1_268_435_456; // bytes"), 0, "within a longer number");
+    }
 }

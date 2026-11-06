@@ -1320,7 +1320,7 @@ impl PrincipalCell {
                 })
             })
             .collect();
-        Ok(FragmentList { fragments })
+        Ok(FragmentList { fragments, limits: None })
     }
 
     /// Each shared fragment's owner, from its status as the person reads it.

@@ -215,7 +215,8 @@ struct ChatView: View {
                         let scoped = url.startAccessingSecurityScopedResource()
                         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                        guard size > 0, size <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
+                        let limits = ChatAttachment.limits
+                        guard size > 0, size <= limits.uploadMaxBytes else { throw APIError.server(limits.sizeRefusal) }
                         return try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
                     }
                 }.value
@@ -249,7 +250,7 @@ struct ChatView: View {
         if voice.recording {
             if let url = voice.stop() { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) }
         } else {
-            guard session.attachments.count < ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
+            guard session.attachments.count < ChatAttachment.countMax else { session.error = ChatAttachment.limits.countRefusal; return }
             await voice.start { url in Task { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) } }
         }
     }
