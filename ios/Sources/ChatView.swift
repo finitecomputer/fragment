@@ -73,23 +73,28 @@ struct ChatView: View {
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 geometry.contentSize.height
             } action: { old, new in
-                if followsBottom && !scrollingByHand && session.read && new > old { proxy.scrollTo("bottom", anchor: .bottom) }
+                guard followsBottom, !scrollingByHand, !jumping, session.read,
+                      !session.detached, !session.paging, new > old else { return }
+                // Follow measured growth, not each token. Only the scroll
+                // offset animates; initial positioning and Latest stay instant.
+                let motion: Animation? = !reduceMotion && !session.drafts.isEmpty
+                    ? .easeOut(duration: 0.16) : nil
+                withAnimation(motion) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onScrollPhaseChange { _, phase in
-                scrollingByHand = phase == .interacting || phase == .decelerating
+                scrollingByHand = phase == .tracking || phase == .interacting || phase == .decelerating
             }
             // the newest record, never a count: at the window's bound a new
             // message leaves the count as it was (one in, the oldest out), and
             // an older page read changes the count but not the newest
             .onChange(of: [session.rows.last?.id, session.pending.last?.id]) { _, _ in
-                if followsBottom && session.read { proxy.scrollTo("bottom", anchor: .bottom) }
+                if followsBottom && !scrollingByHand && !jumping && !session.detached && session.read { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.read) { _, read in
                 if read { followsBottom = true; proxy.scrollTo("bottom", anchor: .bottom) }
             }
-            .onChange(of: session.drafts) { _, _ in
-                if followsBottom { proxy.scrollTo("bottom", anchor: .bottom) }
-            }
+            // Drafts follow through measured height above: a token that adds
+            // no line must not restart (or snap) the in-flight follow scroll.
             .scrollDisabled(jumping)
             // once scrolling is held off (the fling stopped), the jump lands
             .onChange(of: followsBottom) { _, following in
