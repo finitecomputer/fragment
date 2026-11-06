@@ -568,7 +568,13 @@ pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
 }"#;
 
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
+///
+/// Open (`x-fragment-open`, docs/wire): a code this reader does not know
+/// is read by its HTTP status (the CLI's `Resp::refusal`), so one is added
+/// without breaking a shipped client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// 400: the request is malformed or breaks a rule.
@@ -655,6 +661,7 @@ impl ErrorCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ErrorBody {
     pub error: ErrorCode,
     pub message: String,
@@ -826,9 +833,28 @@ impl Serialize for Reason {
     }
 }
 
+/// Written by hand as its `Serialize` is: its names, open (a reader that
+/// does not know one reads none: `reason_or_none`).
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Reason {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Reason".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.",
+            "type": "string",
+            "enum": Reason::ALL.map(Reason::as_str),
+            "x-fragment-open": true,
+        })
+    }
+}
+
 /// A member's role in a fragment. `Public` is the floor anyone who can see
 /// the fragment holds; the others are granted. Ordered weakest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Public,
@@ -861,7 +887,12 @@ impl Role {
 /// What a fragment is to the people who use it (`fragment.json`'s `kind`,
 /// decision 6): the shell lists each kind in its own place. An app unless
 /// it says otherwise.
+///
+/// Open (`x-fragment-open`, docs/wire): a kind this build does not know
+/// reads as `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(rename_all = "snake_case")]
 pub enum FragmentKind {
     #[default]
@@ -922,6 +953,7 @@ pub fn valid_template_name(s: &str) -> bool {
 
 /// Who can see a fragment: everyone, holders of its share link, or members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
     Public,
@@ -1013,21 +1045,30 @@ pub struct Created {
     pub canonical: String,
 }
 
+/// Where its refs point (`PINNED_REFS`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Pins {
+    /// The commit `main` points at; none before its first.
     pub main: Option<String>,
+    /// The commit installed as `live`; none before the first deploy.
     pub live: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Counts {
+    /// Files at main.
     pub files: u64,
+    /// Records of its `events` channel.
     pub events: u64,
+    /// Its members.
     pub members: u64,
 }
 
 /// The app code installed from the `live` pin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
     /// The live commit the code was installed from; `None` without app code.
@@ -1042,7 +1083,9 @@ pub struct CodeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Urls {
+    /// Its own origin, where its page is served.
     pub canonical: String,
     /// The platform's own origin, where people open its join links and
     /// send its inbox's webhooks: a client inside a computer reaches the
@@ -1053,6 +1096,7 @@ pub struct Urls {
 
 /// `GET /api/f/<name>/status` (viewer and up).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
@@ -1103,6 +1147,7 @@ pub struct FragmentStatus {
 /// card, as a visitor without an account sees it: as it loaded and in
 /// the second after, with no interaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageReport {
     /// The live commit the shot loaded.
     pub live: String,
@@ -1115,6 +1160,7 @@ pub struct PageReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageError {
     pub kind: PageErrorKind,
     /// What the page or the browser said (cut to
@@ -1126,6 +1172,7 @@ pub struct PageError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PageErrorKind {
     /// An uncaught exception or an unhandled rejection (a syntax error too).
@@ -1139,8 +1186,10 @@ pub enum PageErrorKind {
     Security,
 }
 
-/// A fragment the signer holds a role on.
+/// A fragment the signer holds a role on: a row of `GET /api/fragments`
+/// (and of a search's fragments), with the role they hold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
@@ -1165,8 +1214,9 @@ pub struct ListedFragment {
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
-    /// A chat's newest message, its first line, as the signer's search
-    /// holds it (none when it holds none: docs/api.md, Search).
+    /// A chat's newest message, its first line (at most
+    /// `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it
+    /// (none when it holds none: docs/api.md, Search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     /// With `preview`: when its message was said (ms), so a list can put
@@ -1214,12 +1264,14 @@ pub struct ListedFragment {
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
 /// fragment they hold a role on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetArchived {
     pub archived: bool,
 }
 
 /// Its answer: the fragment, and whether it is archived now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Archived {
     pub name: String,
     pub archived: bool,
@@ -1228,6 +1280,7 @@ pub struct Archived {
 /// `PUT /api/fragments/{name}/dock`: the signer's own choice of whether
 /// their dock shows a fragment they hold a role on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetDock {
     pub dock: bool,
 }
@@ -1235,12 +1288,14 @@ pub struct SetDock {
 /// `PUT /api/fragments/{name}/pinned`: the signer's own choice of whether
 /// a fragment they hold a role on is pinned in their sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetPinned {
     pub pinned: bool,
 }
 
 /// Its answer: the fragment, and whether it is pinned now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Pinned {
     pub name: String,
     pub pinned: bool,
@@ -1248,6 +1303,7 @@ pub struct Pinned {
 
 /// Its answer: the fragment, and whether it is on their dock now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Docked {
     pub name: String,
     pub dock: bool,
@@ -1266,8 +1322,10 @@ fn is_on_the_dock(dock: &bool) -> bool {
 /// `PUT /api/fragments/{name}/seen`'s answer: the signer has seen the
 /// fragment's messages their search holds, so its row counts none unread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Seen {
     pub name: String,
+    /// Always 0: none of its messages is unread now.
     pub unread: u32,
 }
 
@@ -1279,6 +1337,7 @@ fn is_zero(n: &u32) -> bool {
 /// or name match every word of the query, then the messages that do,
 /// newest first, from the fragments they hold a role on now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SearchAnswer {
     pub fragments: Vec<ListedFragment>,
     pub messages: Vec<MessageHit>,
@@ -1288,10 +1347,13 @@ pub struct SearchAnswer {
 /// a snippet of its text around the match (plain text, at most
 /// `limits::SEARCH_SNIPPET_MAX_BYTES`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MessageHit {
     pub fragment: String,
     pub channel: String,
+    /// The record's place in its channel.
     pub seq: i64,
+    /// When it was written (ms).
     pub at: i64,
     pub snippet: String,
 }
@@ -1301,6 +1363,7 @@ pub struct MessageHit {
 /// (neither the owner nor an agent of theirs), and how many invites wait
 /// on an email (`None` in a row sent before rows counted them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Sharing {
     pub visibility: Visibility,
     pub members: u64,
@@ -1412,11 +1475,13 @@ pub struct AccessAgent {
 
 /// `GET /api/fragments` (any signer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FragmentList {
     pub fragments: Vec<ListedFragment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
     /// The member's identity (an npub).
@@ -1435,6 +1500,7 @@ pub struct Member {
 
 /// `GET /api/f/<name>/members` (viewer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MemberList {
     pub members: Vec<Member>,
 }
@@ -1478,6 +1544,7 @@ pub const DEFAULT_TIER: Tier = Tier::Cheap;
 /// stays the fragment's and is not registered. An agent has a designated
 /// owner, a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
     Person,
@@ -1805,6 +1872,7 @@ impl StorageAccess {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum OpKind {
     Query,
@@ -1829,6 +1897,7 @@ impl OpKind {
 
 /// An operation as `fragment.json` declares it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpDecl {
     pub kind: OpKind,
     /// The weakest role that may call it.
@@ -1898,6 +1967,7 @@ pub struct ListedDecl {
 /// a member's newest record of a kind its channel lists, sent to the lists
 /// of the members whose role may read that channel, and to no one else's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListedRecord {
     pub channel: String,
     /// Who posted it: a member of the fragment.
@@ -1929,6 +1999,7 @@ pub fn valid_listed_field(field: &str) -> bool {
 /// `ops`, and posts to a channel its fragment.json declares postable) or by
 /// mutations' effects (app channels), never by a client's own hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelRecord {
     pub channel: String,
     pub seq: i64,
@@ -1946,6 +2017,7 @@ pub struct ChannelRecord {
 /// (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the
 /// record it appended and appends nothing; with another body it is 409.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PostRecord {
     pub id: String,
@@ -1959,6 +2031,7 @@ pub struct PostRecord {
 /// `draft` frame on `__live`); `text: null` stops it. The record its poster
 /// then writes with the same `turn` replaces it on a page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PutDraft {
     pub turn: String,
     /// At most `limits::RECORD_BODY_MAX_BYTES`.
@@ -1967,6 +2040,7 @@ pub struct PutDraft {
 
 /// A post's answer: the record, and whether this id had posted it before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Posted {
     pub record: ChannelRecord,
     pub replayed: bool,
@@ -1980,6 +2054,7 @@ pub const POST_KIND: &str = "message";
 /// read, its first seq for a backwards read, or the input cursor if empty.
 // no PartialEq: a record's body is raw JSON text (compare the JSON instead)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelPage {
     pub channel: String,
     pub records: Vec<ChannelRecord>,
@@ -2334,6 +2409,8 @@ pub mod export;
 pub mod ledger;
 pub mod live;
 pub mod org;
+#[cfg(feature = "schema")]
+pub mod routes;
 pub mod search;
 pub mod wipe;
 

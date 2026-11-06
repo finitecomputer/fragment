@@ -13,6 +13,7 @@ use crate::{ChannelRecord, ErrorBody, ErrorCode, Role};
 /// A frame a page sends. One that does not decode is answered with
 /// `LiveOut::Error`, naming what was wrong.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LiveIn {
     /// One page of a channel's records from a cursor; the page that
@@ -24,8 +25,8 @@ pub enum LiveIn {
     Query(Query),
     /// Shares `data` with everyone on the page (at most
     /// `limits::PRESENCE_MAX_BYTES`); `null`, or no `data`, clears it. At
-    /// most `limits::PRESENCE_PER_S` a second, after a burst: faster
-    /// changes are dropped, each with an error.
+    /// most `limits::PRESENCE_PER_S` a second, after a burst of
+    /// `limits::PRESENCE_BURST`: faster ones are dropped, each with an error.
     Presence {
         #[serde(default)]
         data: Value,
@@ -36,6 +37,7 @@ pub enum LiveIn {
 /// `{type: "subscribe", channel, after}` or `{type: "subscribe", channel,
 /// last}`: exactly one cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "SubscribeFrame", into = "SubscribeFrame")]
 pub struct Subscribe {
     pub channel: String,
@@ -46,6 +48,7 @@ pub struct Subscribe {
 /// (`^[A-Za-z0-9._:-]{1,128}$`, one run at a time each), the query, and
 /// its input (`null` when absent).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     pub id: String,
@@ -65,11 +68,15 @@ pub enum Cursor {
 
 /// A subscribe as it travels: the cursor is one of two keys.
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct SubscribeFrame {
     channel: String,
+    /// The records with `seq` after this one (0: from the start). Exactly
+    /// one of `after` and `last`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     after: Option<i64>,
+    /// The channel's last this many records (at most `limits::CHANNEL_PAGE`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last: Option<i64>,
 }
@@ -99,7 +106,12 @@ impl From<Subscribe> for SubscribeFrame {
 }
 
 /// A frame the fragment sends.
+///
+/// Open (`x-fragment-open`, docs/wire): a reader skips a frame it does not
+/// know (the CLI's `channel --follow`, cell/client.mjs, the iOS app).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveOut {
     /// First on every socket: who the page is to the fragment (the role is
@@ -135,13 +147,14 @@ pub enum LiveOut {
     Changed { op: String },
     /// A query's answer.
     Result(Answer),
-    /// A frame the fragment refused, and why.
+    /// A frame the fragment refused, and why; the socket stays open.
     Error { message: String },
     Pong,
 }
 
 /// One socket's presence (`data` is never `null` in a `hello`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Present {
     pub id: String,
     pub principal: String,
@@ -154,6 +167,7 @@ pub struct Present {
 /// The result is the app's answer as the cell got it, JSON text passed
 /// through, never parsed on its way to the page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "AnswerFrame", into = "AnswerFrame")]
 pub struct Answer {
     pub id: String,
@@ -176,6 +190,7 @@ impl PartialEq for Answer {
 
 /// An answer as it travels: a result, or an error with its message and status.
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct AnswerFrame {
     id: String,

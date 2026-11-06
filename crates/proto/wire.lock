@@ -1,0 +1,345 @@
+# The wire's facts (docs/wire/openapi.json), one a line: what clients
+# call and the shapes they send and read. `cargo xtask wire` writes it
+# from crates/proto; `cargo xtask check` fails when it is not what proto
+# makes, or when it breaks a fact master's holds in a way an older
+# client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
+# fact gone on purpose is retired in wire.retired.
+
+extends LiveOut.presence Present
+extends LiveOut.record ChannelRecord
+field Archived.archived required boolean
+field Archived.name required string
+field ChannelPage.channel required string
+field ChannelPage.next required integer
+field ChannelPage.records required array<ChannelRecord>
+field ChannelRecord.at required integer
+field ChannelRecord.body required any
+field ChannelRecord.channel required string
+field ChannelRecord.kind required string
+field ChannelRecord.principal required string
+field ChannelRecord.seq required integer
+field CodeStatus.error required string|null
+field CodeStatus.id required string|null
+field CodeStatus.operations required map<OpDecl>
+field CodeStatus.sha required string|null
+field Counts.events required integer
+field Counts.files required integer
+field Counts.members required integer
+field Docked.dock required boolean
+field Docked.name required string
+field Done.ok required boolean
+field ErrorBody.error required ErrorCode
+field ErrorBody.message required string
+field ErrorBody.reason optional Reason|null
+field ErrorBody.retry_after_ms optional integer|null
+field FragmentList.fragments required array<ListedFragment>
+field FragmentStatus.agentRole optional string|null
+field FragmentStatus.blobMinBytes optional integer|null
+field FragmentStatus.code required CodeStatus
+field FragmentStatus.counts required Counts
+field FragmentStatus.inboxToken required string|null
+field FragmentStatus.kind required FragmentKind
+field FragmentStatus.name required string
+field FragmentStatus.npub required string
+field FragmentStatus.owner required string
+field FragmentStatus.page optional PageReport|null
+field FragmentStatus.pins required Pins
+field FragmentStatus.reach optional boolean
+field FragmentStatus.repo required string
+field FragmentStatus.role required Role
+field FragmentStatus.title optional string|null
+field FragmentStatus.urls required Urls
+field FragmentStatus.viewToken required string|null
+field FragmentStatus.visibility required Visibility
+field ListedFragment.agentRole optional string|null
+field ListedFragment.agents optional array<string>
+field ListedFragment.archived optional boolean
+field ListedFragment.dock optional boolean
+field ListedFragment.kind required FragmentKind
+field ListedFragment.listed optional array<ListedRecord>
+field ListedFragment.name required string
+field ListedFragment.owned optional boolean
+field ListedFragment.picture optional string|null
+field ListedFragment.pinned optional boolean
+field ListedFragment.preview optional string|null
+field ListedFragment.previewAt optional integer|null
+field ListedFragment.role required Role
+field ListedFragment.sharing optional Sharing|null
+field ListedFragment.title optional string|null
+field ListedFragment.unread optional integer
+field ListedRecord.at required integer
+field ListedRecord.channel required string
+field ListedRecord.fields optional map<string>
+field ListedRecord.kind required string
+field ListedRecord.principal required string
+field LiveIn.presence.data optional any
+field LiveIn.query.id required string
+field LiveIn.query.input optional any
+field LiveIn.query.op required string
+field LiveIn.subscribe.after optional integer|null
+field LiveIn.subscribe.channel required string
+field LiveIn.subscribe.last optional integer|null
+field LiveIn.unsubscribe.channel required string
+field LiveOut.changed.op required string
+field LiveOut.draft.at required integer
+field LiveOut.draft.channel required string
+field LiveOut.draft.principal required string
+field LiveOut.draft.text required string|null
+field LiveOut.draft.thinking optional integer|null
+field LiveOut.draft.turn required string
+field LiveOut.error.message required string
+field LiveOut.hello.id required string
+field LiveOut.hello.platform required string
+field LiveOut.hello.presence required array<Present>
+field LiveOut.hello.principal required string
+field LiveOut.hello.role required Role
+field LiveOut.result.error optional ErrorCode|null
+field LiveOut.result.id required string
+field LiveOut.result.message optional string|null
+field LiveOut.result.result optional any
+field LiveOut.result.status optional integer|null
+field LiveOut.subscribed.channel required string
+field LiveOut.subscribed.more required boolean
+field LiveOut.subscribed.next required integer
+field Member.addedAt required integer
+field Member.addedBy required string
+field Member.kind optional IdentityKind|null
+field Member.owner optional string|null
+field Member.principal required string
+field Member.role required Role
+field MemberList.members required array<Member>
+field MessageHit.at required integer
+field MessageHit.channel required string
+field MessageHit.fragment required string
+field MessageHit.seq required integer
+field MessageHit.snippet required string
+field OpDecl.description optional string|null
+field OpDecl.ephemeral optional boolean
+field OpDecl.input optional any
+field OpDecl.kind required OpKind
+field OpDecl.role required Role
+field PageError.kind required PageErrorKind
+field PageError.source optional string|null
+field PageError.text required string
+field PageReport.at required integer
+field PageReport.dropped required integer
+field PageReport.errors required array<PageError>
+field PageReport.live required string
+field Pinned.name required string
+field Pinned.pinned required boolean
+field Pins.live required string|null
+field Pins.main required string|null
+field PostRecord.body required any
+field PostRecord.id required string
+field Posted.record required ChannelRecord
+field Posted.replayed required boolean
+field Present.data required any
+field Present.id required string
+field Present.principal required string
+field PutDraft.text optional string|null
+field PutDraft.turn required string
+field SearchAnswer.fragments required array<ListedFragment>
+field SearchAnswer.messages required array<MessageHit>
+field Seen.name required string
+field Seen.unread required integer
+field SetArchived.archived required boolean
+field SetDock.dock required boolean
+field SetPinned.pinned required boolean
+field Sharing.guests required integer
+field Sharing.invites optional integer|null
+field Sharing.members required integer
+field Sharing.reach optional boolean
+field Sharing.visibility required Visibility
+field Urls.canonical required string
+field Urls.platform required string
+field channels.read.query.after optional integer
+field channels.read.query.before optional integer
+field channels.read.query.limit optional integer
+field fragments.list.query.for optional string
+field search.find.query.q required string
+route channels.draft PUT /api/f/{name}/channels/{channel}/draft
+route channels.draft request PutDraft
+route channels.draft response Done
+route channels.post POST /api/f/{name}/channels/{channel}
+route channels.post request PostRecord
+route channels.post response Posted
+route channels.read GET /api/f/{name}/channels/{channel}
+route channels.read query channels.read.query
+route channels.read response ChannelPage
+route fragments.archive PUT /api/fragments/{name}/archived
+route fragments.archive request SetArchived
+route fragments.archive response Archived
+route fragments.dock PUT /api/fragments/{name}/dock
+route fragments.dock request SetDock
+route fragments.dock response Docked
+route fragments.list GET /api/fragments
+route fragments.list query fragments.list.query
+route fragments.list response FragmentList
+route fragments.pin PUT /api/fragments/{name}/pinned
+route fragments.pin request SetPinned
+route fragments.pin response Pinned
+route fragments.seen PUT /api/fragments/{name}/seen
+route fragments.seen response Seen
+route fragments.status GET /api/f/{name}/status
+route fragments.status response FragmentStatus
+route fragments.watch GET /api/fragments/watch
+route fragments.watch receives ListWatchFrame
+route live.open GET /f/{name}/__live
+route live.open receives LiveOut
+route live.open sends LiveIn
+route members.list GET /api/f/{name}/members
+route members.list response MemberList
+route search.find GET /api/search
+route search.find query search.find.query
+route search.find response SearchAnswer
+type Archived out object
+type ChannelPage out object
+type ChannelRecord out object
+type CodeStatus out object
+type Counts out object
+type Docked out object
+type Done out object
+type ErrorBody out object
+type ErrorCode out enum open
+type FragmentKind out enum open
+type FragmentList out object
+type FragmentStatus out object
+type IdentityKind out enum
+type ListWatchFrame out union(type) open
+type ListWatchFrame.changed out object
+type ListWatchFrame.hello out object
+type ListWatchFrame.invited out object
+type ListedFragment out object
+type ListedRecord out object
+type LiveIn in union(type)
+type LiveIn.ping in object closed
+type LiveIn.presence in object closed
+type LiveIn.query in object closed
+type LiveIn.subscribe in object closed
+type LiveIn.unsubscribe in object closed
+type LiveOut out union(type) open
+type LiveOut.changed out object
+type LiveOut.draft out object
+type LiveOut.error out object
+type LiveOut.hello out object
+type LiveOut.pong out object
+type LiveOut.presence out object
+type LiveOut.record out object
+type LiveOut.result out object closed
+type LiveOut.subscribed out object
+type Member out object
+type MemberList out object
+type MessageHit out object
+type OpDecl out object
+type OpKind out enum
+type PageError out object
+type PageErrorKind out enum
+type PageReport out object
+type Pinned out object
+type Pins out object
+type PostRecord in object closed
+type Posted out object
+type Present out object
+type PutDraft in object
+type Reason out enum open
+type Role out enum
+type SearchAnswer out object
+type Seen out object
+type SetArchived in object
+type SetDock in object
+type SetPinned in object
+type Sharing out object
+type Urls out object
+type Visibility out enum
+type channels.read.query in object
+type fragments.list.query in object
+type search.find.query in object
+value ErrorCode already_exists
+value ErrorCode app_failed
+value ErrorCode budget_used_up
+value ErrorCode conflict
+value ErrorCode conflicting_body
+value ErrorCode deploying
+value ErrorCode forbidden
+value ErrorCode host_failed
+value ErrorCode invalid_request
+value ErrorCode no_code
+value ErrorCode node_full
+value ErrorCode not_connected
+value ErrorCode not_found
+value ErrorCode rate_limited
+value ErrorCode registry_unavailable
+value ErrorCode schema_refused
+value ErrorCode storage_full
+value ErrorCode too_large
+value ErrorCode unauthenticated
+value ErrorCode unknown_operation
+value ErrorCode upstream_failed
+value ErrorCode wont_wake
+value FragmentKind agent
+value FragmentKind app
+value FragmentKind brain
+value FragmentKind chat
+value FragmentKind other
+value FragmentKind sessions
+value FragmentKind skills
+value IdentityKind agent
+value IdentityKind person
+value ListWatchFrame changed
+value ListWatchFrame hello
+value ListWatchFrame invited
+value LiveIn ping
+value LiveIn presence
+value LiveIn query
+value LiveIn subscribe
+value LiveIn unsubscribe
+value LiveOut changed
+value LiveOut draft
+value LiveOut error
+value LiveOut hello
+value LiveOut pong
+value LiveOut presence
+value LiveOut record
+value LiveOut result
+value LiveOut subscribed
+value OpKind job
+value OpKind mutation
+value OpKind query
+value PageErrorKind console
+value PageErrorKind exception
+value PageErrorKind network
+value PageErrorKind security
+value Reason admins_full
+value Reason already_offered
+value Reason gone
+value Reason holds_seat
+value Reason last_admin
+value Reason last_paid_seat
+value Reason no_seat
+value Reason not_admin
+value Reason not_an_email
+value Reason not_payer
+value Reason not_sold
+value Reason offers_per_day
+value Reason org_full
+value Reason org_not_paying
+value Reason org_pays
+value Reason payer_only
+value Reason pays
+value Reason private_while_reaching
+value Reason step_down_first
+value Reason stripe_refused
+value Reason too_many_offers
+value Reason trial_ended
+value Reason trial_not_here
+value Reason trial_taken
+value Reason trial_unknown
+value Reason trial_used
+value Reason unshare_first
+value Role editor
+value Role owner
+value Role public
+value Role viewer
+value Visibility link
+value Visibility members
+value Visibility public
