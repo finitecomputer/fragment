@@ -388,6 +388,9 @@ pub(crate) enum MetaKey {
     BlobsGcAt,
     /// The fragment's VAPID key, sealed (push.rs).
     Vapid,
+    /// The prefix of each postable channel's running total of body bytes
+    /// (channels.rs `posted_key`: `posted_bytes:<channel>`).
+    PostedBytes,
     /// Test fleets only: a shorter ledger window (`/test/fragment ledger`).
     TestLedgerMs,
     /// Test fleets only: how many more queue sends fail (`fail-deliveries`).
@@ -408,6 +411,11 @@ pub(crate) enum MetaKey {
     /// Test fleets only: the capability calls each start of the app facet
     /// may make (`facet-calls`), as Cloudflare spends a facet's subrequests.
     TestFacetCalls,
+    /// Test fleets only: fewer records a postable channel keeps
+    /// (`posted-kept`), so a lane reaches the trim without 100,000 posts.
+    TestPostedKept,
+    /// Test fleets only: fewer bytes a postable channel keeps (`posted-bytes`).
+    TestPostedBytes,
     TestAdvanceHeld,
     /// Test fleets: while set, a wake with something due waits before it
     /// reads the ledger (jobs.rs `held_woke`), at most `TEST_HOLD_MAX_MS`.
@@ -520,6 +528,7 @@ impl MetaKey {
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
+            MetaKey::PostedBytes => "posted_bytes",
             MetaKey::TestLedgerMs => "test_ledger_ms",
             MetaKey::TestFailDeliveries => "test_fail_deliveries",
             MetaKey::TestFailOutbox => "test_fail_outbox",
@@ -528,6 +537,8 @@ impl MetaKey {
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestHoldRows => "test_hold_rows",
             MetaKey::TestFacetCalls => "test_facet_calls",
+            MetaKey::TestPostedKept => "test_posted_kept",
+            MetaKey::TestPostedBytes => "test_posted_bytes",
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::TestHoldWoke => "test_hold_woke",
             MetaKey::TestWokeHeld => "test_woke_held",

@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ChatView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var session: ChatSession
     @State private var followsBottom = true
     @State private var scrollingByHand = false
@@ -19,53 +20,22 @@ struct ChatView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                // Each part observes what it draws alone: a draft's next words
+                // redraw the draft, a new record the rows (each an equatable
+                // `ChatRow`, drawn again only when it changes), and the
+                // stack draws only the rows on screen.
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    if session.hasEarlier && !session.timeline.records.isEmpty {
-                        Button("Earlier messages") { Task { await session.loadEarlier() } }
-                            .font(.footnote).frame(maxWidth: .infinity).disabled(session.loadingHistory)
-                    }
-                    ForEach(session.timeline.records) { record in
-                        if record.isMessage {
-                            VStack(alignment: .leading, spacing: 8) {
-                                MessageView(text: record.text, isYou: record.principal == session.principal, agent: library.agent(for: record.principal))
-                                    .contextMenu {
-                                        Button("Reply", systemImage: "arrowshape.turn.up.left") { session.replyTo = record }
-                                        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
-                                        ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
-                                    }
-                                ForEach(attachments(record)) { attachment in
-                                    AttachmentView(attachment: attachment, api: session.api, fragment: session.fragment.name)
-                                }
-                                Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
-                            }.id(record.id)
-                        } else if record.channel == "work" {
-                            WorkRecordView(record: record)
-                        }
-                    }
-                    ForEach(session.pending) { pending in
-                        VStack(alignment: .trailing, spacing: 6) {
-                            MessageView(text: pending.text, isYou: true)
-                            if let refused = pending.refused {
-                                Button("Not sent: \(refused) Tap to edit", systemImage: "pencil") {
-                                    session.reopen(pending)
-                                }.font(.caption).accessibilityIdentifier("editRefused")
-                            } else if pending.failed {
-                                Button("Not sent. Tap to retry", systemImage: "arrow.clockwise") {
-                                    Task { await session.retry(pending) }
-                                }.font(.caption).accessibilityIdentifier("retry")
-                            } else { Text("Sending…").font(.caption).foregroundStyle(.secondary) }
-                        }.frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-                    ForEach(session.timeline.drafts.values.sorted { $0.at < $1.at }) { draft in
-                        MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
-                    }
-                    if !session.timeline.activeTurns.isEmpty && session.timeline.drafts.isEmpty {
-                        Label("Working…", systemImage: "ellipsis").font(.callout).foregroundStyle(.secondary)
-                    }
+                    EarlierButton(session: session)
+                    ChatRows(session: session, library: library)
+                    PendingRows(session: session)
+                    DraftRows(session: session, library: library)
+                    WorkingLine(session: session)
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .frame(maxWidth: 660, alignment: .leading)
                 .padding(.horizontal, 20).padding(.vertical, 24).frame(maxWidth: .infinity)
+                // its backlog is laid out unseen, and shown once read, at its end
+                .opacity(session.read ? 1 : 0)
             }
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("timeline")
@@ -79,27 +49,30 @@ struct ChatView: View {
             .onScrollPhaseChange { _, phase in
                 scrollingByHand = phase == .interacting || phase == .decelerating
             }
-            .onChange(of: session.timeline.records.count + session.pending.count) { _, _ in
+            .onChange(of: session.rows.count + session.pending.count) { _, _ in
+                if followsBottom && session.read { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onChange(of: session.read) { _, read in
+                if read { followsBottom = true; proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onChange(of: session.drafts) { _, _ in
                 if followsBottom { proxy.scrollTo("bottom", anchor: .bottom) }
             }
-            .onChange(of: session.timeline.drafts) { _, _ in
-                if followsBottom { proxy.scrollTo("bottom", anchor: .bottom) }
-            }
+            .animation(reduceMotion ? nil : .easeIn(duration: 0.2), value: session.read)
             .overlay(alignment: .bottomTrailing) {
-                if !followsBottom {
+                if !followsBottom && session.read {
+                    // At once, not animated: an animated scroll across rows the
+                    // lazy stack has not drawn lands short of the end. The
+                    // bottom anchor then keeps it there as they are drawn.
                     Button("Latest messages", systemImage: "arrow.down") {
                         followsBottom = true
-                        withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     }
                     .labelStyle(.iconOnly).buttonStyle(.borderedProminent).buttonBorderShape(.circle).padding()
+                    .accessibilityIdentifier("latestMessages")
                 }
             }
-            .overlay {
-                if session.timeline.records.isEmpty && session.pending.isEmpty {
-                    ContentUnavailableView("A fresh start", systemImage: "bubble.left.and.bubble.right",
-                        description: Text("A new conversation with your agent."))
-                }
-            }
+            .overlay { ChatEmptyState(session: session) }
         }
         .background(FragmentStyle.background)
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -108,7 +81,7 @@ struct ChatView: View {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
                 composerAccessories
-                ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.timeline.activeTurns.isEmpty,
+                ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
                     enabled: session.connected && session.caughtUp, busy: uploading, recording: voice.recording,
                     attach: { importer = true }, record: { Task { await recordVoice() } },
                     send: { await session.send() }, stop: { await session.stop() }, hasAttachments: !session.attachments.isEmpty)
@@ -120,7 +93,7 @@ struct ChatView: View {
             case .failure(let error): session.error = error.localizedDescription
             }
         }
-        .task(id: "\(session.caughtUp)|\(session.timeline.cursors["chat"] ?? 0)|\(scenePhase)") {
+        .task(id: "\(session.caughtUp)|\(session.chatCursor)|\(scenePhase)") {
             guard scenePhase == .active, session.caughtUp else { return }
             do { let _: JSONValue = try await session.api.request("api/fragments/\(session.fragment.name)/seen", method: "PUT") }
             catch { /* A later live cursor or foreground visit retries the read marker. */ }
@@ -151,12 +124,6 @@ struct ChatView: View {
         }.padding(.horizontal, 20)
     }
 
-    private func attachments(_ record: ChannelRecord) -> [ChatAttachment] {
-        record.body["attachments"].array.compactMap { value in
-            guard let data = try? JSONEncoder().encode(value) else { return nil }
-            return try? JSONDecoder().decode(ChatAttachment.self, from: data)
-        }
-    }
     private func uploadFiles(_ urls: [URL]) async {
         guard urls.count + session.attachments.count <= 8 else { session.error = "Attach at most eight files per message."; return }
         uploading = true; defer { uploading = false }
@@ -182,6 +149,155 @@ struct ChatView: View {
     }
 }
 
+/// Older messages, a page at a time, once some are shown.
+private struct EarlierButton: View {
+    let session: ChatSession
+    var body: some View {
+        if session.hasEarlier && !session.rows.isEmpty {
+            Button("Earlier messages") { Task { await session.loadEarlier() } }
+                .font(.footnote).frame(maxWidth: .infinity).disabled(session.loadingHistory)
+        }
+    }
+}
+
+private struct ChatRows: View {
+    let session: ChatSession
+    let library: Library
+    var body: some View {
+        let faces = library.agentsByIdentity
+        let you = session.principal
+        ForEach(session.rows) { record in
+            ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal],
+                    api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 })
+                .equatable()
+        }
+    }
+}
+
+/// One record of a chat as shown: drawn again only when what it shows
+/// changes (its record, whose it is, its agent's name and face).
+struct ChatRow: View, Equatable {
+    let record: ChannelRecord
+    let isYou: Bool
+    let agent: FragmentSummary?
+    let api: FragmentAPI
+    let fragment: String
+    let reply: (ChannelRecord) -> Void
+
+    /// Whether a record is one a chat shows: a message, or the work it
+    /// tells of (`WorkRecordView`). The rest only says which turns run.
+    static func shows(_ record: ChannelRecord) -> Bool {
+        if record.isMessage { return true }
+        guard record.channel == "work" else { return false }
+        switch record.body["kind"].string {
+        case "turn.step", "turn.prompt": return true
+        case "turn.end": return record.body["error"].string != nil || record.body["status"].string == "stopped"
+        default: return false
+        }
+    }
+    nonisolated static func == (a: ChatRow, b: ChatRow) -> Bool {
+        a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment
+    }
+
+    var body: some View {
+        if record.isMessage {
+            VStack(alignment: .leading, spacing: 8) {
+                MessageView(text: record.text, isYou: isYou, agent: agent)
+                    .contextMenu {
+                        Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
+                        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
+                        ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
+                    }
+                ForEach(attachments) { attachment in
+                    AttachmentView(attachment: attachment, api: api, fragment: fragment)
+                }
+                Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
+            }
+        } else {
+            WorkRecordView(record: record)
+        }
+    }
+    private var attachments: [ChatAttachment] {
+        record.body["attachments"].array.compactMap { value in
+            guard let data = try? JSONEncoder().encode(value) else { return nil }
+            return try? JSONDecoder().decode(ChatAttachment.self, from: data)
+        }
+    }
+}
+
+private struct PendingRows: View {
+    let session: ChatSession
+    var body: some View {
+        ForEach(session.pending) { pending in
+            VStack(alignment: .trailing, spacing: 6) {
+                MessageView(text: pending.text, isYou: true)
+                if let refused = pending.refused {
+                    Button("Not sent: \(refused) Tap to edit", systemImage: "pencil") {
+                        session.reopen(pending)
+                    }.font(.caption).accessibilityIdentifier("editRefused")
+                } else if pending.failed {
+                    Button("Not sent. Tap to retry", systemImage: "arrow.clockwise") {
+                        Task { await session.retry(pending) }
+                    }.font(.caption).accessibilityIdentifier("retry")
+                } else { Text("Sending…").font(.caption).foregroundStyle(.secondary) }
+            }.frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+}
+
+private struct DraftRows: View {
+    let session: ChatSession
+    let library: Library
+    var body: some View {
+        ForEach(session.drafts) { draft in
+            MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
+        }
+    }
+}
+
+/// What a running turn shows before its reply's words come.
+private struct WorkingLine: View {
+    let session: ChatSession
+    var body: some View {
+        if !session.activeTurns.isEmpty && session.drafts.isEmpty {
+            Label("Working…", systemImage: "ellipsis").font(.callout).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Until the chat is first read to its end, it is loading: never shown as a
+/// chat with nothing in it, which it may not be, nor its backlog streaming
+/// in. Read and empty, it is a fresh start.
+private struct ChatEmptyState: View {
+    let session: ChatSession
+    var body: some View {
+        let empty = session.rows.isEmpty && session.pending.isEmpty && session.drafts.isEmpty && session.activeTurns.isEmpty
+        Group {
+            if !session.read { ChatLoadingView() }
+            else if empty {
+                ContentUnavailableView("A fresh start", systemImage: "bubble.left.and.bubble.right",
+                    description: Text("A new conversation with your agent."))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: session.read)
+    }
+}
+
+/// A chat on its way: a quiet spinner, faded in.
+struct ChatLoadingView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shown = false
+    var body: some View {
+        ProgressView()
+            .controlSize(.large)
+            .opacity(shown ? 1 : 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear { withAnimation(reduceMotion ? nil : .easeIn(duration: 0.4).delay(0.15)) { shown = true } }
+            .accessibilityLabel("Loading this chat")
+            .accessibilityIdentifier("chatLoading")
+    }
+}
+
 struct MessageView: View {
     let text: String
     let isYou: Bool
@@ -196,7 +312,14 @@ struct MessageView: View {
                     HStack(spacing: 7) {
                         AgentAvatar(agent: agent, size: 22)
                         Text(agent?.displayTitle ?? "Agent").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                        if streaming { ProgressView().controlSize(.mini).accessibilityLabel("Replying") }
+                        // drawn by SwiftUI, never a UIKit spinner: a platform view
+                        // in the lazy stack's rows was in each layout pass of a
+                        // stuck one (100% CPU) seen while scrolling up mid-reply
+                        if streaming {
+                            Image(systemName: "ellipsis").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .symbolEffect(.variableColor.iterative, options: .repeating)
+                                .accessibilityLabel("Replying")
+                        }
                     }
                 }
                 if isYou {

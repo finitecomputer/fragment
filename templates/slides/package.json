@@ -1,0 +1,13 @@
+{
+  "name": "slides",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@open-slide/core": "2.3.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

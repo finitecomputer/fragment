@@ -49,12 +49,13 @@ The live service uses these routes already (`docs/api.md` is authoritative):
 
 | Need | Existing API |
 | --- | --- |
-| Person, owned agent | `GET /api/identities/me`, `GET /api/fragments`, agent's `GET /api/f/{name}/status` for its npub |
+| Person, owned agent | `GET /api/identities/me`, `GET /api/fragments`, `GET /api/computers` (its agents' order and identities: the first is the main agent, as the web's sidebar takes it); an agent not on it, `GET /api/f/{name}/status` for its npub |
 | New chat | `POST /api/fragments {label, template:"chat", title}` then `PUT /api/f/{chat}/members/{agent npub} {role:"editor"}`; keep a successful create across a failed join |
 | Messages, Stop, prompt answer | `POST /api/f/{chat}/channels/chat {id, body}`, as `docs/chat-records.md` defines |
 | Stream/catch-up | `GET /f/{chat}/__live`, subscribe to `chat` and `work` with `last` initially, `after` on reconnect; follow `subscribed.more` until caught up |
 | Earlier messages | `GET /api/f/{chat}/channels/chat?before=&limit=50`; never advance live cursors from this page |
-| List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed` |
+| List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed`, a burst as one read 200 ms after (the web's `LIST_SETTLE_MS`) |
+| Chat title | A chat of the person's still titled "New chat" with a message: `GET /api/f/{chat}/channels/chat?after=0&limit=20`, then its manifest's `meta.title` from its first line with words (48 characters at most), written and deployed only if the manifest still says "New chat" (the web's `titleFromFirst`) |
 | Launcher search | `GET /api/search?q=` → fragments by title/label and messages by text, archived included; a message result opens its conversation |
 | Read marker | `PUT /api/fragments/{chat}/seen`, after the visible chat catches up |
 | App URL | `GET /api/f/{name}/status` → `urls.canonical` |
@@ -163,7 +164,15 @@ seconds, as the web's Settings), downloads with the phone's signature to a file 
 its own, is shared from there, and can be made again beside it. Its reads and makes
 run one after another, so an older read never lands after a newer export; the file
 is kept with its export, deleted once the export shown is another, and a download
-still in flight for one no longer shown is never kept. Connected accounts follow the signed list watcher, discard
+still in flight for one no longer shown is never kept. A chat opened is loading
+(a quiet spinner) until both its channels' backlogs are read to their end, then
+shown at its end at once: never as an empty chat, nor its backlog streaming in. No
+turn is said to run while no connection is open, nor until each connection has
+read its `work`, so a catch-up's replayed start never shows as running. Titling
+checks the manifest it read, not its write, as the web's does: a rename landing
+between them is overwritten, as `POST files` takes no expectation. Its view observes what each part draws (rows, drafts,
+running turns), each set only when it changes, so a reply's words redraw that
+reply alone. Pictures are read once a session, kept by their versioned URL. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and
 full Markdown tables are not implemented. Notification permission alone does not

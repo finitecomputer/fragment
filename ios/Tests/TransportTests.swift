@@ -1,4 +1,6 @@
 import Foundation
+import Observation
+import Synchronization
 import Testing
 @testable import Fragment
 
@@ -107,6 +109,86 @@ struct TransportTests {
         #expect(session.timeline.records.map(\.seq) == [1, 2, 3])
         #expect(session.timeline.cursors["chat"] == 3)
         #expect(session.timeline.drafts.isEmpty)
+    }
+
+    /// Until both its channels are first read to their end a chat is
+    /// loading, never an empty chat nor its backlog streaming in; it shows
+    /// its messages and the work it tells of, and a reply's words as they
+    /// come never redraw the chat's rows.
+    @Test func aChatLoadsUntilBothChannelsAreReadAndADraftRedrawsOnlyItself() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("the socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        socket.push(frame("chat", 1, body: #"{"text":"Hello"}"#))
+        socket.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        try await waitUntil("its chat read") { session.caughtUp }
+        #expect(!session.read, "its work is still to come: loading, not shown in part")
+        // the work backlog comes after the chat's, and shows records of its own
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"turn.step","turn":"t1","tool":"search"}"#))
+        try await waitUntil("its work backlog") { session.timeline.records.count == 3 }
+        #expect(!session.read && session.activeTurns.isEmpty, "until its work is read, no turn is said to run")
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        #expect(session.rows.map(\.id) == ["chat:1", "work:2"], "a turn's start is not shown")
+        #expect(session.activeTurns == ["t1"])
+
+        let told = Mutex(false)
+        withObservationTracking { _ = session.rows } onChange: { told.withLock { $0 = true } }
+        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hal","at":2500}"#)
+        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hallo","at":2600}"#)
+        try await waitUntil("the reply's words") { session.drafts.map(\.text) == ["Hallo"] }
+        #expect(!told.withLock { $0 }, "a draft never redraws the rows")
+    }
+
+    /// Which turns run is said again by each connection, once its work is
+    /// read: while none is open no turn runs, and a catch-up that replays a
+    /// turn's start before its end never shows it running meanwhile. What
+    /// was shown stays shown.
+    @Test func eachConnectionReadsItsWorkBeforeATurnRuns() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("the socket") { stub.sockets.count == 1 }
+        let first = stub.sockets[0]
+        first.push(hello)
+        try await waitUntil("its subscriptions") { first.sent.count == 2 }
+        first.push(frame("chat", 1, body: #"{"text":"Hello"}"#))
+        first.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+        first.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        first.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        try await waitUntil("read, a turn running") { session.read && session.activeTurns == ["t1"] }
+
+        first.drop()
+        try await waitUntil("the socket dropped") { !session.connected }
+        #expect(session.activeTurns.isEmpty && !session.workRead, "none heard, none said to run")
+        #expect(session.read && session.rows.map(\.id) == ["chat:1"], "what was shown stays shown")
+
+        try await waitUntil("the second socket") { stub.sockets.count == 2 }
+        let second = stub.sockets[1]
+        second.push(hello)
+        try await waitUntil("its subscriptions") { second.sent.count == 2 }
+        #expect(second.sent[1]["channel"].string == "work" && second.sent[1]["after"] == .number(1))
+        // meanwhile t1 ended and another turn began and ended: its start is replayed first
+        second.push(frame("work", 2, body: #"{"kind":"turn.end","turn":"t1"}"#))
+        second.push(frame("work", 3, body: #"{"kind":"turn.start","turn":"t2"}"#))
+        try await waitUntil("the replay's start") { session.timeline.records.contains { $0.id == "work:3" } }
+        #expect(session.activeTurns.isEmpty, "a replayed start is not a running turn")
+        second.push(frame("work", 4, body: #"{"kind":"turn.end","turn":"t2"}"#))
+        second.push(#"{"type":"subscribed","channel":"work","next":4,"more":false}"#)
+        second.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        try await waitUntil("its work read again") { session.workRead && session.caughtUp }
+        #expect(session.activeTurns.isEmpty)
     }
 
     @Test func stopPostsAStopForEachActiveTurn() async throws {

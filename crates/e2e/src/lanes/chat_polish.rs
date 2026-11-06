@@ -792,3 +792,60 @@ pub(super) fn finished_card_times(s: &mut Suite, api: &Api, owner: &Keys, chrome
     chrome.close(page)?;
     Ok(())
 }
+
+/// A chat of few messages whose turns wrote many `work` records: its page
+/// reads back every page of work its oldest message needs, however many,
+/// whether or not older messages remain. Codex's review of #1059: at the
+/// old 10,000-record cap the ten pages read back after the first 1,000 could
+/// not run short; at 100,000 they did, and a turn's progress just after the
+/// chat's first message never showed. Method: one message; a turn stopped
+/// after it; 11,100 records of work after that (more than 1,000 + 10 ×
+/// 1,000); two messages more; the chat opened as its owner.
+pub(super) fn work_backfill(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "chat-work-pages")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the work-pages chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let post = |by: &Keys, channel: &str, id: String, body: Value| -> Result<()> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        Ok(())
+    };
+    post(owner, "chat", "first".into(), json!({ "text": "The first message" }))?;
+    post(&hand, "work", "deep-start".into(), json!({ "kind": "turn.start", "turn": "deep-progress", "agent": agent }))?;
+    post(&hand, "work", "deep-end".into(), json!({ "kind": "turn.end", "turn": "deep-progress", "agent": agent, "outcome": "stopped" }))?;
+    // 11,100 more, eight posters at once
+    let filled: Vec<Result<()>> = std::thread::scope(|scope| {
+        let posters: Vec<_> = (0..8)
+            .map(|t| {
+                let post = &post;
+                let (hand, agent) = (&hand, &agent);
+                scope.spawn(move || -> Result<()> {
+                    for i in (t..11_100).step_by(8) {
+                        post(hand, "work", format!("filler-{i}"), json!({ "kind": "history.marker", "turn": "filler", "agent": agent }))?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        posters.into_iter().map(|p| p.join().expect("a poster's thread")).collect()
+    });
+    for r in filled {
+        r?;
+    }
+    post(owner, "chat", "second".into(), json!({ "text": "The second message" }))?;
+    post(owner, "chat", "third".into(), json!({ "text": "The third message" }))?;
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let shown = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 3 && !!document.querySelector('.notice.stopped[data-turn=\"deep-progress\"]')");
+    let seen = chrome.eval(&page, "({ messages: document.querySelectorAll('.msg.user').length, stopped: [...document.querySelectorAll('.notice.stopped')].map((n) => n.dataset.turn), earlier: document.getElementById('earlier').hidden, error: document.getElementById('history-error').textContent })")?;
+    s.ok(
+        "a chat of few messages and 11,100 records of work after its first: the turn just after that message shows (its work read back page after page), with no earlier messages offered",
+        shown && seen["earlier"] == true && seen["error"] == "",
+        &seen,
+    );
+    chrome.close(page)?;
+    Ok(())
+}
