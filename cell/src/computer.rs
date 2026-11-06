@@ -1490,7 +1490,7 @@ impl ComputerCell {
             let logged = json!(event);
             let step = life.apply_with(event, js::now_ms(), &self.rules());
             assert!(step.actions.is_empty() && step.ended.is_none(), "a start's failing asks for nothing");
-            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions }));
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase }));
             self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)
         })();
         if let Err(e) = applied {

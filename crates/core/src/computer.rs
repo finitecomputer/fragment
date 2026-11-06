@@ -1513,7 +1513,7 @@ impl Lifecycle {
         if let Phase::Sleeping { owner, restarting: true, owes_start, .. } = self.phase {
             assert!(owner && owes_start, "a restart is its owner's sleep, a start after it");
         }
-        assert_eq!(self.legacy(), Legacy::of(&self.phase), "the previous release's fields say what the phase does");
+        assert!(self.legacy() == Legacy::of(&self.phase), "the previous release's fields say what the phase does");
         assert!(self.failures <= STARTS_FAILED_MAX, "failures stop counting at the limit");
         if self.ready {
             assert!(matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }), "only a start that came up, and is not gone, is ready");
