@@ -916,6 +916,33 @@ pub(super) fn work_backfill(s: &mut Suite, api: &Api, owner: &Keys, session: &st
         &seen,
     );
     chrome.close(page)?;
+    // the same chat, its first read of older work failing (Alex's review of
+    // #1075: a failed work read while the chat's start is already shown left
+    // no Try again and read the work again never): said with Try again, or
+    // read again, whichever readiness comes last; Try again brings it in
+    // (the chat's readiness held until that read has failed, so it comes
+    // last: the order the review found, made every time)
+    let fail = "if (window === window.top) { window.__failWork = true; let failed; window.__workFailed = new Promise((r) => { failed = r; }); const real = window.fetch.bind(window); \
+        window.fetch = (url, o) => { const u = String(url); if (window.__failWork && u.includes('__channel/work') && u.includes('before=')) { window.__failWork = false; failed(); return Promise.reject(new TypeError('Failed to fetch')); } return real(url, o); }; \
+        const d = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage'); \
+        Object.defineProperty(WebSocket.prototype, 'onmessage', { configurable: true, get() { return d.get.call(this); }, set(fn) { d.set.call(this, fn && function (e) { let f = null; try { f = JSON.parse(e.data); } catch {} \
+          if (window.__failWork && f?.type === 'subscribed' && f.channel === 'chat') { window.__workFailed.then(() => fn.call(this, e)); return; } return fn.call(this, e); }); } }); }";
+    let page = chrome.open_with_script(&api.site_url(&name, ""), fail)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let progress = "!!document.querySelector('.notice.stopped[data-turn=\"deep-progress\"]')";
+    let offered = "document.getElementById('history-status').textContent === \"Couldn't load earlier progress.\" && !document.getElementById('earlier-again').hidden";
+    let settled = super::shows(chrome, &page, &format!("window.__failWork === false && document.querySelectorAll('.msg.user').length === 3 && ({progress} || ({offered}))"));
+    let first = chrome.eval(&page, &format!("({{ progress: {progress}, offered: {offered}, history: document.getElementById('scroll').dataset.history }})"))?;
+    if first["offered"] == true {
+        chrome.click(&page, "#earlier-again")?;
+    }
+    let recovered = super::shows(chrome, &page, &format!("{progress} && document.getElementById('history-status').textContent === '' && document.getElementById('earlier-again').hidden"));
+    s.ok(
+        "its first read of older work failing before the chat is ready, the chat's start shown: the failure is said with Try again (or read again as the chat is ready), and the work comes in",
+        settled && recovered && (first["progress"] == true || first["offered"] == true),
+        json!({ "first": first, "recovered": recovered }),
+    );
+    chrome.close(page)?;
     Ok(())
 }
 
