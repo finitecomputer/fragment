@@ -37,7 +37,8 @@
 //! (`<op>.path`, `<op>.query`, empty when it takes none), so its first
 //! optional parameter is a new optional field. A union's branches are
 //! values of it, each with its shape: by its tag (a constant string or
-//! number each holds) or by its place (`#<i>`); a branch may be open. A
+//! number each holds, still a field of its branch, read as any other) or
+//! by its place (`#<i>`); a branch may be open. A
 //! nullable inline shape is a field's `T|null`; `never` is a field a
 //! branch forbids; `null` one it holds only as null or absent.
 //!
@@ -240,7 +241,7 @@ impl Projector<'_> {
 
     /// A union: `union(<tag>)` when every branch names itself by a
     /// constant of one property (serde's `tag`), each branch projected as
-    /// `<name>.<its tag>` without the tag; else `union(oneOf)` or
+    /// `<name>.<its tag>`, its tag a field of it; else `union(oneOf)` or
     /// `union(anyOf)`, each branch `<name>.#<i>` by its place.
     fn union(&mut self, name: &str, keyword: &str, branches: &[Value], direction: Direction, open: bool) -> Result<()> {
         let tag = tag_of(branches);
@@ -257,15 +258,10 @@ impl Projector<'_> {
                 None => format!("#{i}"),
             };
             self.lines.insert(format!("value {name} {key}"));
-            let mut branch = b.clone();
-            if let Some(t) = tag {
-                branch["properties"].as_object_mut().expect("a tagged branch has properties").remove(t);
-                if let Some(required) = branch["required"].as_array_mut() {
-                    required.retain(|r| r != t);
-                }
-            }
-            let open = branch["x-fragment-open"] == true;
-            self.node(&format!("{name}.{key}"), &branch, direction, open)?;
+            // the tag stays a field of its branch, read as any other: its
+            // constant, whether it is required, and anything else it says
+            let open = b["x-fragment-open"] == true;
+            self.node(&format!("{name}.{key}"), b, direction, open)?;
         }
         Ok(())
     }

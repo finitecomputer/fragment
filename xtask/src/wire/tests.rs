@@ -40,6 +40,7 @@ value EB one
 type UO out union(type) open
 value UO one
 type UO.one out object
+field UO.one.type required \"one\"
 type K out object closed
 field K.x required string
 type KI in object closed
@@ -201,6 +202,8 @@ fn what_an_older_client_feels_fails_naming_the_fact() {
     fails(&[("type EO out enum", Some("type EO out enum open"))], &[], "type EO out enum open");
     // a shape of another kind
     fails(&[("type EO out enum", Some("type EO out object"))], &[], "type EO out enum");
+    // a union's tag its readers may no longer find
+    fails(&[("field UO.one.type required \"one\"", Some("field UO.one.type optional \"one\""))], &[], "field UO.one.type required \"one\"");
 }
 
 /// A bound's pass and fail cells: narrower where the cell reads it fails,
@@ -727,4 +730,20 @@ fn absence_is_said_and_held() {
     let schemas = super::openapi::components(Map::new(), g.take_definitions(true)).unwrap();
     let refused = refuse(json!({ "paths": {}, "components": { "schemas": schemas } }));
     assert!(format!("{refused:#}").contains("Big.n"), "{refused}");
+}
+
+/// A union's tag is a field of its branch, read as any other: a keyword
+/// the lock cannot read is refused there too.
+#[test]
+fn a_tag_is_read_as_a_field() {
+    let tagged = |tag: Value| {
+        json!({ "paths": {}, "components": { "schemas": { "T": { "x-fragment-direction": "in", "oneOf": [
+            { "type": "object", "properties": { "type": tag }, "required": ["type"] },
+            { "type": "object", "properties": { "type": { "type": "string", "const": "pong" } }, "required": ["type"] },
+        ] } } } })
+    };
+    let lock = project(&tagged(json!({ "type": "string", "const": "ping" }))).unwrap();
+    assert!(lock.lines().any(|l| l == "field T.ping.type required \"ping\""), "{lock}");
+    let refused = project(&tagged(json!({ "type": "string", "const": "ping", "not": { "const": "ping" } }))).unwrap_err().to_string();
+    assert!(refused.contains("`not`"), "{refused}");
 }

@@ -731,6 +731,8 @@
               "after": {
                 "description": "The records with `seq` after this one (0: from the start).",
                 "format": "int64",
+                "maximum": 9223372036854775807,
+                "minimum": -9223372036854775808,
                 "type": [
                   "integer",
                   "null"
@@ -742,6 +744,8 @@
               "last": {
                 "description": "The channel's last this many records (at most `limits::CHANNEL_PAGE`).",
                 "format": "int64",
+                "maximum": 9223372036854775807,
+                "minimum": -9223372036854775808,
                 "type": [
                   "integer",
                   "null"

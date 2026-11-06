@@ -434,7 +434,8 @@ mod schema {
         }
 
         fn json_schema(_: &mut SchemaGenerator) -> Schema {
-            let cursor = |doc: &str| json!({ "type": ["integer", "null"], "format": "int64", "description": doc });
+            // its bounds besides its format: a validator need not assert a format
+            let cursor = |doc: &str| json!({ "type": ["integer", "null"], "format": "int64", "minimum": i64::MIN, "maximum": i64::MAX, "description": doc });
             json_schema!({
                 "type": "object",
                 "properties": {
