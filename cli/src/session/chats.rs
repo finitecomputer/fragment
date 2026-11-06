@@ -26,7 +26,7 @@ use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use fragment_core::session::{self, Attachment, Kind, Message, Session};
+use fragment_core::session::{Attachment, Kind, Message, Session};
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 
