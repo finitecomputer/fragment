@@ -108,9 +108,11 @@ pub mod limits {
     /// first: a safety bound, not the policy (that is `POSTED_KEPT`).
     /// `POSTED_KEPT` records of `RECORD_BODY_MAX_BYTES` would be 6.1 GiB a
     /// channel, 12.2 GiB a chat, past a Durable Object's 10 GB of SQLite.
-    /// At most what the old 10,000-record cap allowed (625 MiB), so a
-    /// chat's storage and its export (`FRAGMENT_MAX_BYTES`, 2 GiB) are no
-    /// larger than before the count was raised.
+    /// At most the bodies the old 10,000-record cap allowed (625 MiB): a
+    /// chat's two channels hold at most 1 GiB of bodies, far under the
+    /// object's limit with their rows' and indexes' overhead. (Its files,
+    /// blobs and transcript are not bounded by it: an export's
+    /// `FRAGMENT_MAX_BYTES` is no promise that every chat fits.)
     pub const POSTED_BYTES_MAX: i64 = 512 * 1024 * 1024;
     /// `public`-role calls per minute by one principal that is not a member.
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;

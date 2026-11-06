@@ -949,7 +949,8 @@ agent, or carrying code, keeps the last good code and says to fork it.
   - `"post": <role>` (R18): whoever holds it posts (`POST
     …/channels/{channel}`, `fragment.post`), appended by the platform with
     no app code. No looser than `read` (refused at deploy). It keeps its
-    newest `POSTED_KEPT` records.
+    newest records: `POSTED_KEPT` of them, or `POSTED_BYTES_MAX` of their
+    bodies, whichever comes first.
   - `"signedIn": true` (with `post`): only people signed in post (401
     `unauthenticated` otherwise).
   - `"from": "person" | "agent"` (with `post`): only members of that kind,

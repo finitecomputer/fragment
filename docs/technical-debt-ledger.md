@@ -675,11 +675,14 @@ unfinished design, not debt.
 ## A channel's retention is not declarable
 
 - **Shortcut:** an app channel keeps every record, a postable one its
-  newest `limits::POSTED_KEPT`, 100,000 (cell/src/channels.rs `append`;
-  FIN-415). A chat keeps that many on each of `chat` and `work`.
-- **Risk:** app channels grow without bound; a chat past 100,000 records
-  on a channel loses its start (a tool-heavy turn writes 20 to 60 `work`
-  records, so old turns lose their steps first).
+  newest `limits::POSTED_KEPT` (100,000) or `limits::POSTED_BYTES_MAX`
+  (512 MiB of bodies), whichever comes first (cell/src/channels.rs
+  `make_room`; FIN-415). A chat keeps that much on each of `chat` and
+  `work`.
+- **Risk:** app channels grow without bound; a chat past either bound on
+  a channel loses its start (a tool-heavy turn writes 20 to 60 `work`
+  records, so old turns lose their steps first; records near 64 KiB reach
+  the byte bound at about 8,000).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) under a platform ceiling, enforced and tested.
 

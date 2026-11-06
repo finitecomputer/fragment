@@ -334,7 +334,7 @@ impl FragmentCell {
     /// never kept, or one an older release left behind as it appended and
     /// trimmed).
     fn posted_bytes(&self, channel: &str) -> CellResult<i64> {
-        let span = self.rows("SELECT MIN(seq) AS lo, MAX(seq) AS hi, (SELECT value FROM meta WHERE key = ?) AS kept FROM records WHERE channel = ?", vec![posted_key(channel).into(), channel.into()])?;
+        let span = self.rows(fragment_core::retention::POSTED_SPAN_SQL, vec![channel.into(), channel.into(), posted_key(channel).into()])?;
         let (lo, hi) = (span[0]["lo"].as_i64(), span[0]["hi"].as_i64());
         let kept: Vec<i64> = span[0]["kept"].as_str().unwrap_or("").split(' ').filter_map(|n| n.parse().ok()).collect();
         if let ([bytes, first, last], Some(lo), Some(hi)) = (kept.as_slice(), lo, hi) {
