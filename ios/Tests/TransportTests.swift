@@ -466,6 +466,55 @@ struct TransportTests {
         try await waitUntil("its oldest end gone") { session.rows.first?.id != "chat:1" }
         #expect(session.hasOlder, "its oldest end evicted, older messages are there again")
     }
+
+    /// Steps and a prompt after the newest message, heard while paged back,
+    /// are the chat's when it rejoins the newest: by Latest, and by paging
+    /// forward to its end.
+    @Test func rejoiningTheNewestBringsTheWorkAfterItsLastMessage() async throws {
+        // 700 messages; work 1...6 after message 700: five steps, then a prompt
+        let work: @Sendable (Int64) -> String = { k in
+            #"{"channel":"work","seq":\#(k),"at":\#(700_000 + 100 * k),"principal":"npub1agent","kind":"message","body":{"kind":"\#(k == 6 ? "turn.prompt" : "turn.step")","turn":"t","tool":"search","text":"Go on?"}}"#
+        }
+        let stub = Stub { seen, _ in
+            let limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let before = seen.query["before"].flatMap { Int64($0) }, after = Int64(seen.query["after"] ?? "") ?? 0
+            func span(_ top: Int64) -> [Int64] { before.map { Array(max(1, $0 - limit)..<min($0, top + 1)) } ?? (after >= top ? [] : Array((after + 1)...min(after + limit, top))) }
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/chat":
+                return (200, #"{"channel":"chat","records":[\#(span(700).map { record("chat", $0, body: #"{"text":"m"}"#) }.joined(separator: ","))],"next":null}"#)
+            case "GET /api/f/chat--abc123/channels/work":
+                return (200, #"{"channel":"work","records":[\#(span(6).map(work).joined(separator: ","))],"next":null}"#)
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        for seq: Int64 in 651...700 { socket.push(frame("chat", seq, body: #"{"text":"m"}"#)) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":700,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":0,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        func pageBack() async { while !session.detached { await session.loadOlder() } }
+        await pageBack()
+        // heard while paged back: the steps and the prompt after the newest message
+        for k: Int64 in 1...6 { socket.push(#"{"type":"record",\#(work(k).dropFirst())"#) }
+        try await waitUntil("heard") { session.timeline.cursors["work"] == 6 }
+        #expect(!session.timeline.records.contains { $0.channel == "work" }, "paged back, outside the window")
+
+        await session.resetToLatest()
+        #expect(!session.detached && (1...6).allSatisfy { k in session.timeline.records.contains { $0.id == "work:\(k)" } }, "Latest: the chat whole, its prompt too")
+
+        await pageBack()
+        #expect(!session.timeline.records.contains { $0.channel == "work" })
+        while session.detached { await session.loadNewer() }
+        #expect((1...6).allSatisfy { k in session.timeline.records.contains { $0.id == "work:\(k)" } }, "paged forward to its end: whole too")
+    }
 }
 
 /// The answer to a post: the record it appended, its body the post's.

@@ -308,9 +308,9 @@ struct Timeline {
     }
     /// The chat's newest page, and the work it shows, in place of the window
     /// (Latest messages): whether turns run, and the cursors, stay.
-    mutating func reset(_ page: [ChannelRecord]) {
+    mutating func reset(_ page: [ChannelRecord], live: Bool = true) {
         records.removeAll(); ids.removeAll(); chatCount = 0; workCount = 0
-        detached = false
+        detached = !live
         for record in page { place(record) }
         trimOldest()
         revision &+= 1
