@@ -406,16 +406,26 @@ async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue
     settle(pending).await.map_err(|e| CellError::host(format!("{what}: {}", js_message(&e))))
 }
 
-/// Streams `body` into the blob store at `key` while hashing it
-/// (`crypto.DigestStream`): answers (bytes stored, SHA-256 hex).
-pub async fn blob_put(env: &Env, key: &str, body: ReadableStream) -> CellResult<(u64, String)> {
-    let (stored, hashed) = tee(&body)?;
+/// Streams `body`, `size` bytes as its upload declared, into the blob
+/// store at `key`, each chunk hashed (`crypto.DigestStream`) before it is
+/// handed on: in series, so a sender faster than the store fills nothing
+/// (a `tee`'s branch would hold all the store had not read yet). A body of
+/// another length fails the store. Answers its SHA-256 hex.
+pub async fn blob_put(env: &Env, key: &str, body: ReadableStream, size: u64) -> CellResult<String> {
+    use futures_util::TryStreamExt;
     let digest = DigestStream::new(DigestStreamAlgorithm::Sha256);
-    let bucket = blobs(env)?;
-    let (put, piped) = futures_util::future::join(bucket.put(key, stored).execute(), JsFuture::from(hashed.pipe_to(digest.raw()))).await;
-    let object = put.map_err(|e| CellError::host(format!("storing the blob: {e}")))?;
-    piped.map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
-    Ok((object.map_or(0, |o| o.size()), hex::encode(digest.digest().await?.to_vec())))
+    let writer = digest.raw().get_writer().map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
+    let hashing = writer.clone();
+    let hashed = worker::ByteStream::from(body).and_then(move |chunk| {
+        let hashing = hashing.clone();
+        async move {
+            JsFuture::from(hashing.write_with_chunk(&js_sys::Uint8Array::from(chunk.as_slice()))).await.map_err(|e| worker::Error::RustError(format!("hashing the blob: {}", js_message(&e))))?;
+            Ok(chunk)
+        }
+    });
+    blobs(env)?.put(key, worker::FixedLengthStream::wrap(hashed, size)).execute().await.map_err(|e| CellError::host(format!("storing the blob: {e}")))?;
+    JsFuture::from(writer.close()).await.map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
+    Ok(hex::encode(digest.digest().await?.to_vec()))
 }
 
 /// Reads a request's body to its end, keeping nothing, when nothing read
