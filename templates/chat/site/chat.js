@@ -447,7 +447,7 @@ export function mount(root) {
   // Each channel's seq keeps history ordered even when a page arrives
   // backwards and several records have the same timestamp. `done`: the
   // chat's first record is read (no older page to ask for).
-  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, loading: false, done: false, failed: false, watch: false, anchor: null };
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, workFailed: false, loading: false, done: false, failed: false, watch: false, anchor: null };
   const workSeen = new Set();
   const workLatest = new Map(); // each progress field's newest seq
   function remember(channel, record) {
@@ -474,20 +474,44 @@ export function mount(root) {
   // Older messages come as the reader nears the top: a sentinel above the
   // timeline, watched once the newest page is drawn (`watchEarlier`). A
   // page that leaves it in view is followed by the next once drawn.
-  function historyStatus(text, again) {
-    $("history-status").textContent = text;
-    $("earlier-again").hidden = !again;
+  // What the top says, from the history's state: a read in flight, or what
+  // failed (older messages, or the work of those shown: each its own, so the
+  // chat's start reached never hides the work's Try again).
+  function historyStatus() {
+    $("history-status").textContent = history.loading ? "Loading earlier messages…"
+      : history.failed ? "Couldn't load earlier messages."
+      : history.workFailed ? "Couldn't load earlier progress."
+      : "";
+    $("earlier-again").hidden = history.loading || !(history.failed || history.workFailed);
     // (kept while a page loads, so a keyboard's focus stays on it, and
     // after a failure: only the chat's start takes it away)
     $("earlier-load").hidden = history.done || !caughtUp;
     $("earlier-load").setAttribute("aria-disabled", String(history.loading));
-    $("scroll").dataset.history = history.loading ? "loading" : history.failed ? "failed" : history.done ? "done" : "more";
+    $("scroll").dataset.history = history.loading ? "loading" : history.failed || history.workFailed ? "failed" : history.done ? "done" : "more";
+  }
+  // The work of the oldest message shown read back, once at a time (its
+  // subscription's readiness, a page of older messages, a retry); a failure
+  // is said, with Try again, until a read of it succeeds.
+  let readingWork = null;
+  function readWork() {
+    readingWork ??= earlierWork()
+      .then(() => { history.workFailed = false; })
+      .catch((err) => {
+        history.workFailed = true;
+        console.error("chat: earlier progress", err);
+      })
+      .finally(() => {
+        readingWork = null;
+        historyStatus();
+        schedule();
+      });
+    return readingWork;
   }
   async function earlier() {
     if (history.loading || history.done || history.failed || !caughtUp) return;
     history.anchor = visibleAnchor();
     history.loading = true;
-    historyStatus("Loading earlier messages…", false);
+    historyStatus();
     schedule();
     try {
       if (history.first.chat !== null) {
@@ -495,14 +519,13 @@ export function mount(root) {
         for (const record of page.records) onChat(record, true);
         history.done = !moreOf(page, CHAT_LAST);
       } else history.done = true;
-      await earlierWork();
       history.loading = false;
-      historyStatus("", false);
+      await readWork();
     } catch (err) {
       history.loading = false;
       history.failed = true;
       console.error("chat: earlier messages", err);
-      historyStatus("Couldn't load earlier messages.", true);
+      historyStatus();
     } finally {
       history.watch = true;
       schedule();
@@ -525,18 +548,12 @@ export function mount(root) {
     history.failed = false;
     earlier();
   };
-  $("earlier-again").onclick = async () => {
-    history.failed = false;
-    historyStatus("", false);
-    if (!history.done) return earlier();
-    // the chat's first page is read; its work is what failed
-    try { await earlierWork(); }
-    catch (err) {
-      history.failed = true;
-      console.error("chat: earlier progress", err);
-      historyStatus("Couldn't load earlier progress.", true);
+  $("earlier-again").onclick = () => {
+    if (history.failed) {
+      history.failed = false;
+      return earlier();
     }
-    schedule();
+    readWork();
   };
 
   // ---- who: names and pictures from the fragment (`__people`), asked in
@@ -3053,10 +3070,12 @@ export function mount(root) {
     // chat's oldest kept is found by one read that comes back with none)
     if (!caughtUp && (history.first.chat === null || history.first.chat <= 1)) history.done = true;
     caughtUp = true;
-    // connected again (a reconnect after a blip): a read that failed is
-    // tried again as the sentinel is next seen, or from the button
+    // connected again (a reconnect after a blip): older messages that failed
+    // are read again as the sentinel is next seen, or from the button; work
+    // that failed is read again now (its Try again said until it is in)
     history.failed = false;
-    historyStatus("", false);
+    if (history.workFailed && history.workReady) readWork();
+    historyStatus();
     history.watch = true;
     arrive();
     schedule();
@@ -3074,12 +3093,7 @@ export function mount(root) {
     if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {
       history.workReady = true;
       schedule();
-      try { await earlierWork(); }
-      catch (err) {
-        history.failed = true;
-        console.error("chat: earlier progress", err);
-        historyStatus("Couldn't load earlier progress.", true);
-      }
+      await readWork();
     } });
     // what they had typed here before the page last went (any reload), theirs alone; anyone else's goes
     restoreDraft(hello.principal);
