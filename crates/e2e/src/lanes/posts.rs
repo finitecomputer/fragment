@@ -236,14 +236,28 @@ pub(super) fn listed_of(api: &Api, keys: &Keys, name: &str) -> Vec<(String, Stri
 
 /// `json` committed as the fragment's manifest, and deployed.
 /// Deploys `json` as `name`'s fragment.json, then waits for the deploy's
-/// card shot to land (`cards.wanted` none). The shot runs in the
-/// fragment's alarm, which sends the listed rows that wait for their gap:
-/// a shot out (the first ones wait on the browser's cold start, 20 to 35
-/// s on a busy runner) holds those sends, and the checks below time them.
-fn redeploy(s: &Suite, api: &Api, c: &Value, name: &str, json: &str) {
+/// card shot to land: the `cards` lever read, its state there, with
+/// `wanted` none. The shot runs in the fragment's alarm, which sends the
+/// listed rows that wait for their gap: a shot out (the first ones wait on
+/// the browser's cold start, 20 to 35 s on a busy runner) holds those
+/// sends, and the checks below time them. A read that fails is read again
+/// within the bound; a shot that never lands fails here, saying its state.
+fn redeploy(s: &Suite, api: &Api, c: &Value, name: &str, json: &str) -> Result<()> {
     s.commit(c, &[("fragment.json", Some(json.as_bytes()))]);
     s.deploy(c);
-    s.eventually(Duration::from_secs(120), || super::site::cards(api, name)["cards"]["wanted"].is_null());
+    let mut last = Value::Null;
+    let landed = s.eventually(Duration::from_secs(120), || {
+        let read = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "cards" })));
+        let (shown, landed) = match read {
+            Ok(r) if r.status == 200 && r.body["cards"].is_object() => (r.body["cards"].clone(), r.body["cards"].get("wanted") == Some(&Value::Null)),
+            Ok(r) => (json!({ "status": r.status, "body": r.body }), false),
+            Err(e) => (json!({ "error": e.to_string() }), false),
+        };
+        last = shown;
+        landed
+    });
+    anyhow::ensure!(landed, "{name}'s deploy's card shot did not land within 120 s: {last}");
+    Ok(())
 }
 
 /// The next frame a list's socket is told within `wait`, or none.
@@ -276,7 +290,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         let r = set_role(who, role)?;
         anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
     }
-    redeploy(s, api, &c, &name, LISTED_JSON);
+    redeploy(s, api, &c, &name, LISTED_JSON)?;
     let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
     let declared = r.body["channels"].as_array().and_then(|l| l.iter().find(|c| c["name"] == "work").map(|c| c["listed"].clone())).unwrap_or_default();
     s.ok(
@@ -376,7 +390,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 
     // a deploy that tightens a channel's read takes it from the rows that may no longer read it
     let tightened = LISTED_JSON.replacen(r#""work":{"read":"viewer""#, r#""work":{"read":"editor""#, 1);
-    redeploy(s, api, &c, &name, &tightened);
+    redeploy(s, api, &c, &name, &tightened)?;
     let gone = s.eventually(Duration::from_secs(20), || listed_of(api, &editor, &name).is_empty());
     let (kept, owners) = (listed_of(api, &viewer, &name), listed_of(api, owner, &name));
     s.ok(
@@ -387,7 +401,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 
     // an invalid listed is refused at deploy, and what was installed stands
     let bad = tightened.replacen(r#""kinds":["note"]"#, r#""kinds":["a note"]"#, 1);
-    redeploy(s, api, &c, &name, &bad);
+    redeploy(s, api, &c, &name, &bad)?;
     let status = api.status(owner, &name)?;
     s.ok(
         "a listed kind that is no kind is refused at deploy, saying why, and the rows keep what they carried",
@@ -408,9 +422,9 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     // fragment keeps: listed again, it starts from its next record, never
     // the old one (which only the drop keeps from coming back)
     let ends = |json: &str| json.replacen(r#""kinds":["turn.start","turn.asked","turn.end"]"#, r#""kinds":["turn.start","turn.asked"]"#, 1);
-    redeploy(s, api, &c, &name, &ends(&tightened));
+    redeploy(s, api, &c, &name, &ends(&tightened))?;
     let dropped = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().all(|r| r.0 != "work"));
-    redeploy(s, api, &c, &name, &tightened);
+    redeploy(s, api, &c, &name, &tightened)?;
     let relisted = s.eventually(Duration::from_secs(20), || {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok();
         r.is_some_and(|r| r.body["channels"].as_array().is_some_and(|l| l.iter().any(|c| c["name"] == "work" && c["listed"]["kinds"].as_array().is_some_and(|k| k.len() == 3))))
@@ -431,10 +445,10 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let noted = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
     anyhow::ensure!(mine.status == 200 && noted, "the owner's note: {mine}");
     let without_desk = r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked","turn.end"],"fields":["asks"]}}}}"#;
-    redeploy(s, api, &c, &name, without_desk);
+    redeploy(s, api, &c, &name, without_desk)?;
     let no_desk = s.eventually(Duration::from_secs(20), || !listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
     s.ok("a deploy that removes a listed channel takes its records from every row", no_desk && listed_of(api, owner, &name).iter().any(|r| r.0 == "work"), json!(listed_of(api, owner, &name)));
-    redeploy(s, api, &c, &name, r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent"}}}"#);
+    redeploy(s, api, &c, &name, r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent"}}}"#)?;
     let none = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).is_empty() && listed_of(api, &viewer, &name).is_empty());
     s.ok("one that drops a channel's listed (the channel kept) takes its records from every row", none, json!([listed_of(api, owner, &name), listed_of(api, &viewer, &name)]));
     listed_posters(s, api)
