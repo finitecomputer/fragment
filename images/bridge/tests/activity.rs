@@ -24,7 +24,7 @@ fn bound_port() -> std::net::TcpListener {
 
 fn relay(port: &std::net::TcpListener, dir: &std::path::Path) -> Box<Relay> {
     let listen = port.local_addr().unwrap();
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_local: true }, listener: port.try_clone().unwrap() })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "activity-test".into(), secret: SECRET.into(), media_dir: dir.join("media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: true }, listener: port.try_clone().unwrap() })
 }
 
 fn start(fake: &Fake, name: &str) -> (std::net::SocketAddr, support::Running) {

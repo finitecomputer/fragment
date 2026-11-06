@@ -28,7 +28,7 @@ fn bound_port() -> std::net::TcpListener {
 
 fn relay(port: &std::net::TcpListener, dir: &std::path::Path) -> Box<Relay> {
     let listen = port.local_addr().unwrap();
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: true }, listener: port.try_clone().unwrap() })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: true }, listener: port.try_clone().unwrap() })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -847,6 +847,71 @@ async fn large_files_both_ways() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-405, review of #1062): a reply's file is kept from the moment
+/// the relay takes it until its post is done. With the chat's posts held
+/// (a slow lane ahead of the reply), later uploads fill a 100-byte scratch:
+/// the relay lets its table's hold on the reply's file go for room, and the
+/// file stays all the same, its post carrying it. And a reply whose file
+/// is gone all the same posts its words saying so, never silently without
+/// it.
+#[tokio::test]
+async fn a_replys_file_is_kept_until_its_post() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-kept");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let media = dir.join("relay-media");
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: media.clone(), media_max_bytes: 100, media_local: true };
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port.try_clone().unwrap() }));
+    let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let uploads = || -> std::collections::BTreeSet<String> { std::fs::read_dir(&media).map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("up-") && !n.ends_with(".part")).collect()).unwrap_or_default() };
+    let with_file = |w: &World, turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn && r["text"].as_str().is_some_and(|t| t.starts_with("a cat")));
+    let next_upload = |before: std::collections::BTreeSet<String>| async move {
+        let t = std::time::Instant::now();
+        loop {
+            if let Some(n) = uploads().difference(&before).next().cloned() {
+                return n;
+            }
+            assert!(t.elapsed() < Duration::from_millis(WAIT), "Hermes' upload of the reply's file");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+
+    fake.with(|w| w.chat_post_delay_ms = 2_000);
+    let before = uploads();
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "send media" }))["seq"].as_u64().unwrap());
+    let cat = next_upload(before).await;
+    for i in 0..5u8 {
+        assert!(support::hermes::upload_to(listen, "computer-test", SECRET, &[i; 40]).await, "a later upload {i} finds room");
+    }
+    assert!(media.join(&cat).exists(), "the reply's file stayed, its post still to come");
+    fake.with(|w| w.chat_post_delay_ms = 0);
+    fake.until(30_000, "the reply with its file", |w| with_file(w, &turn).is_some()).await;
+    fake.with(|w| {
+        let r = with_file(w, &turn).unwrap();
+        assert_eq!(r["text"], "a cat", "{r}");
+        let sha = r["attachments"][0]["sha256"].as_str().expect("its file attached");
+        assert_eq!(w.fragments[&chat].blobs[sha].1.as_ref(), b"a picture of a cat");
+    });
+
+    // its file gone all the same (removed under it): said, never silent
+    fake.with(|w| w.chat_post_delay_ms = 2_000);
+    let before = uploads();
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "send media again" }))["seq"].as_u64().unwrap());
+    let cat = next_upload(before).await;
+    std::fs::remove_file(media.join(&cat)).unwrap();
+    fake.with(|w| w.chat_post_delay_ms = 0);
+    fake.until(30_000, "the reply that lost its file", |w| with_file(w, &turn).is_some()).await;
+    fake.with(|w| {
+        let r = with_file(w, &turn).unwrap();
+        assert_eq!(r["text"], "a cat\n\n(Its file could not be attached.)", "{r}");
+        assert!(r.get("attachments").is_none());
+    });
+    bridge.stop().await;
+}
+
 /// A provider's file server, as FAL's CDN would be (here on this host):
 /// `/cat.png` an image, `/moved.png` a redirect to it, `/page.html` a page,
 /// `/big.png` an image past the 25 MiB a chat takes.
@@ -950,7 +1015,7 @@ async fn an_image_sent_by_url_is_fetched() {
     let dir = support::dir("relay-image-url-public");
     let port = bound_port();
     let listen = port.local_addr().unwrap();
-    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_local: false };
+    let config = RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, media_local: false };
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), Box::new(Relay { config, listener: port }));
     let _hermes = Hermes::spawn(listen, "computer-test", SECRET);
     let chat = fake.chat("talk", &["juniper"]);

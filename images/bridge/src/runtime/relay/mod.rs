@@ -91,7 +91,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::limits;
 use crate::net::{self, Body};
 use crate::records::{Outcome, Step};
-use crate::runtime::{Command, Event, LocalFile, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
+use crate::runtime::{Command, Event, LocalFile, Kept, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
 use crate::scratch::{InUse, NoRoom, Reservation, Scratch};
 use crate::transfer::Unreceived;
 use wire::{Action, FromGateway};
@@ -114,9 +114,10 @@ pub struct RelayConfig {
     /// `GATEWAY_RELAY_ID` and `GATEWAY_RELAY_SECRET`, the same on both sides.
     pub gateway_id: String,
     pub secret: String,
-    /// Where uploads land (scratch, not `/data`), at most
-    /// `limits::SCRATCH_MAX_BYTES`.
+    /// Where uploads land (scratch, not `/data`), and its bytes at most
+    /// (`limits::SCRATCH_MAX_BYTES`; a test's fewer).
     pub media_dir: PathBuf,
+    pub media_max_bytes: u64,
     /// A file sent by URL may come over plain http from a local address (a
     /// test's fake server; `BRIDGE_MEDIA_LOCAL=allow`).
     pub media_local: bool,
@@ -131,12 +132,12 @@ pub struct Relay {
 }
 
 /// A file Hermes may fetch, or one it uploaded. One it uploaded (or that
-/// was fetched for it) is in use while the table keeps it: Hermes may send
-/// it yet. A message's file is its turn's (the driver's).
+/// was fetched for it) is pinned (`LocalFile::pin`) while the table keeps
+/// it, Hermes may send it yet, and while any reply it was sent with is not
+/// posted. A message's file is its turn's (the driver's).
 #[derive(Debug, Clone)]
 struct Media {
     file: LocalFile,
-    _used: Option<Arc<InUse>>,
 }
 
 #[derive(Default)]
@@ -316,7 +317,7 @@ impl Runtime for Relay {
 }
 
 async fn run(cfg: RelayConfig, listener: std::net::TcpListener, mut io: RuntimeIo) -> Result<(), RuntimeError> {
-    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), limits::SCRATCH_MAX_BYTES).map_err(|e| RuntimeError::Setup(format!("{}: {e}", cfg.media_dir.display())))?);
+    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), cfg.media_max_bytes).map_err(|e| RuntimeError::Setup(format!("{}: {e}", cfg.media_dir.display())))?);
     let listener = listener.set_nonblocking(true).and_then(|()| tokio::net::TcpListener::from_std(listener)).map_err(|e| RuntimeError::Setup(format!("listen {}: {e}", cfg.listen)))?;
     crate::ev!("relay.listening", { "listen": cfg.listen.to_string() });
     let media = Arc::new(Mutex::new(MediaTable::default()));
@@ -425,8 +426,8 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
             Err(Unreceived::Cut(e)) => return net::refusal(StatusCode::BAD_REQUEST, "invalid", &e),
             Err(Unreceived::Disk(e)) => return net::refusal(StatusCode::INTERNAL_SERVER_ERROR, "host", &e),
         };
-        let file = LocalFile { path, media_type, name: if name.is_empty() { "file".into() } else { name }, size };
-        media.lock().expect("the media table").insert(id.clone(), Media { file, _used: Some(Arc::new(used)) });
+        let file = LocalFile { path, media_type, name: if name.is_empty() { "file".into() } else { name }, size, pin: Kept(Some(Arc::new(used))) };
+        media.lock().expect("the media table").insert(id.clone(), Media { file });
         crate::ev!("relay.media_uploaded", { "id": id, "size": size });
         return net::json_answer(StatusCode::OK, &json!({ "id": id }));
     }
@@ -472,6 +473,8 @@ async fn keep(media: &Arc<Mutex<MediaTable>>, scratch: &Scratch, f: fetch::Fetch
     };
     let reserved = room(media, scratch, &id, f.bytes.len() as u64).map_err(|e| format!("keeping it: {e}"))?;
     let path = scratch.dir().join(&id);
+    // in use before the rename shows it: never a moment it may go
+    let used = Arc::new(InUse::new([path.clone()]));
     let written = async {
         tokio::fs::write(reserved.part(), &f.bytes).await?;
         tokio::fs::rename(reserved.part(), &path).await
@@ -480,11 +483,10 @@ async fn keep(media: &Arc<Mutex<MediaTable>>, scratch: &Scratch, f: fetch::Fetch
         let _ = tokio::fs::remove_file(reserved.part()).await;
         return Err(format!("keeping it: {e}"));
     }
-    let used = Arc::new(InUse::new([path.clone()]));
     drop(reserved);
     let name = name.filter(|n| !n.trim().is_empty()).or_else(|| f.url.file_name()).unwrap_or_else(|| "file".into());
-    let file = LocalFile { path, media_type: f.media_type.to_string(), name, size: f.bytes.len() as u64 };
-    media.lock().expect("the media table").insert(id, Media { file: file.clone(), _used: Some(used) });
+    let file = LocalFile { path, media_type: f.media_type.to_string(), name, size: f.bytes.len() as u64, pin: Kept(Some(used)) };
+    media.lock().expect("the media table").insert(id, Media { file: file.clone() });
     Ok(file)
 }
 
@@ -731,7 +733,7 @@ impl Loop {
             for (i, f) in ts.files.iter().enumerate().filter(|(_, f)| f.size <= limits::HERMES_MEDIA_MAX_BYTES) {
                 let id = format!("in-{}-{i}", ts.turn);
                 let url = format!("http://{}/relay/media/{id}", self.cfg.listen);
-                t.insert(id, Media { file: f.clone(), _used: None });
+                t.insert(id, Media { file: f.clone() });
                 hosted.push((url, f.media_type.clone()));
             }
         }

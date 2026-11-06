@@ -1517,21 +1517,34 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     let mut files_refused = false;
     // its files, once uploaded: a retried post sends their refs again,
     // never the bytes (a file may be 256 MiB)
+    // (the files stay in their scratch while `files` lives: `LocalFile::pin`)
     let mut done: Option<Vec<AttachmentRef>> = None;
-    // its files in use until it is posted: a scratch never lets them go
-    let _used = InUse::new(files.iter().map(|f| f.path.clone()));
     for attempt in 1..=tries {
         let uploading = match &done {
             _ if files_refused => Ok(Vec::new()),
             Some(refs) => Ok(refs.clone()),
-            None => upload(api, fragment, agent, files).await,
+            None => match upload(api, fragment, agent, files).await {
+                // a file that could not be read goes unattached, never
+                // unsaid (once: a retry sends the same record)
+                Ok((refs, unread)) => {
+                    if unread > 0 {
+                        let which = match (unread, files.len()) {
+                            (1, 1) => "Its file".to_string(),
+                            (n, all) if n == all => "Its files".to_string(),
+                            (n, _) => format!("{n} of its files"),
+                        };
+                        say_unattached(&mut body, &format!("{which} could not be attached."));
+                    }
+                    Ok(refs)
+                }
+                Err(e) => Err(e),
+            },
         };
         let uploaded = match uploading {
             Err(e) if matches!(e.status(), Some(403 | 413)) && !files.is_empty() => {
                 crate::ev!("upload.refused", { "fragment": fragment, "channel": channel, "id": id, "files": files.len(), "status": e.status() });
                 files_refused = true;
-                let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
-                body["text"] = json!(format!("{said}{}({} could not be attached here.)", if said.is_empty() { "" } else { "\n\n" }, if files.len() == 1 { "Its file" } else { "Its files" }));
+                say_unattached(&mut body, &format!("{} could not be attached here.", if files.len() == 1 { "Its file" } else { "Its files" }));
                 Ok(Vec::new())
             }
             other => other,
@@ -1580,22 +1593,31 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     unreachable!("the last try returns")
 }
 
+/// A reply's words, and a line in parentheses after them saying why it
+/// carries fewer files than it was sent with.
+fn say_unattached(body: &mut Value, why: &str) {
+    let said = body["text"].as_str().unwrap_or("").trim_end().to_string();
+    body["text"] = json!(format!("{said}{}({why})", if said.is_empty() { "" } else { "\n\n" }));
+}
+
 /// Uploads a reply's files as the fragment's blobs, each streamed from
-/// disk (transfer.rs): their refs.
-async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<Vec<AttachmentRef>, ApiError> {
-    let mut refs = Vec::new();
+/// disk (transfer.rs): their refs, and how many could not be read (gone,
+/// empty, or past the bound), which its post says.
+async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> Result<(Vec<AttachmentRef>, usize), ApiError> {
+    let (mut refs, mut unread) = (Vec::new(), 0);
     for f in files.iter().take(limits::ATTACHMENTS_MAX) {
         let (sha, size) = match crate::transfer::hash_file(&f.path).await {
             Ok(hashed) => hashed,
             Err(e) => {
-                crate::ev!("attachment.skipped", { "name": f.name, "why": e.to_string() });
+                crate::ev!("attachment.unattached", { "name": f.name, "why": e.to_string() });
+                unread += 1;
                 continue;
             }
         };
         api.put_blob_file(agent, fragment, &sha, &f.media_type, &f.path, size).await?;
         refs.push(AttachmentRef { sha256: sha, size, media_type: f.media_type.clone(), name: f.name.clone() });
     }
-    Ok(refs)
+    Ok((refs, unread))
 }
 
 // ---- the runtime's commands ----
@@ -1717,7 +1739,7 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
     for r in refs.iter().take(limits::ATTACHMENTS_MAX) {
         match crate::transfer::download(api, agent, fragment, r, scratch).await {
             Ok((path, u)) => {
-                out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
+                out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size, pin: Default::default() });
                 used.push(u);
             }
             Err(e) => crate::ev!("attachment.unread", { "sha256": r.sha256, "size": r.size, "error": e.to_string() }),

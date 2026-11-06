@@ -1662,7 +1662,7 @@ impl Manager {
             Resp::FileReady { file } if s.files.contains_key(file) => self.act(f, Action::Ask(Cmd::Receive { file: *file })),
             Resp::FileDone { file, path } => match s.files.remove(file) {
                 Some((inbound, _)) => {
-                    let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size) };
+                    let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size), pin: Default::default() };
                     self.post(f, inbound, Some(local), None);
                 }
                 // one given up on (`files_overdue`) that came anyway, its
@@ -1708,7 +1708,7 @@ impl Manager {
         }
         if let Some(path) = file.path.clone() {
             // received already (a catch-up of one received before)
-            let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size };
+            let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size, pin: Default::default() };
             self.reserve(f, file.id, false);
             return self.post(f, inbound, Some(local), None);
         }
@@ -2485,7 +2485,7 @@ mod tests {
         std::fs::create_dir_all(dir).expect("its directory");
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("written");
-        LocalFile { path, media_type: media_type.into(), name: name.into(), size: bytes.len() as u64 }
+        LocalFile { path, media_type: media_type.into(), name: name.into(), size: bytes.len() as u64, pin: Default::default() }
     }
 
     /// One file's reply (a PDF named `name`), handed to the manager: its
@@ -2540,7 +2540,7 @@ mod tests {
             reply_file(&src, "report.pdf", "application/pdf; charset=binary", b"%PDF-1.7"),
             reply_file(&src, "empty.txt", "text/plain", b""),
             big,
-            LocalFile { path: src.join("gone.ogg"), media_type: "audio/ogg".into(), name: "gone.ogg".into(), size: 3 },
+            LocalFile { path: src.join("gone.ogg"), media_type: "audio/ogg".into(), name: "gone.ogg".into(), size: 3, pin: Default::default() },
         ];
         let out = m.slots[f].dir.join(OUT_DIR);
         let (outgoing, kept) = outgoing(&out, &files).await;

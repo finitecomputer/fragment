@@ -99,6 +99,9 @@ pub async fn download(api: &Api, agent: &str, fragment: &str, r: &AttachmentRef,
     // into each other. Its room is held through every retry and wait.
     let room = scratch.reserve(&format!("{}.{:016x}", r.sha256, crate::net::jitter_seed()), r.size).map_err(Unread::NoRoom)?;
     let path = scratch.dir().join(&r.sha256);
+    // in use before the rename shows it, and its room held until then:
+    // never a moment it may go
+    let used = InUse::new([path.clone()]);
     let got = match fetch_into(api, agent, fragment, r, room.part(), stall()).await {
         Ok(()) => tokio::fs::rename(room.part(), &path).await.map_err(|e| Unread::Disk(e.to_string())),
         Err(e) => Err(e),
@@ -107,8 +110,6 @@ pub async fn download(api: &Api, agent: &str, fragment: &str, r: &AttachmentRef,
         let _ = tokio::fs::remove_file(room.part()).await;
     }
     got?;
-    // in use before its room is let go: never a moment it may go
-    let used = InUse::new([path.clone()]);
     drop(room);
     Ok((path, used))
 }
@@ -217,6 +218,8 @@ where
     B::Error: std::fmt::Display,
 {
     let part = room.part().to_path_buf();
+    // in use before the rename shows it: never a moment it may go
+    let used = InUse::new([path.to_path_buf()]);
     let got = async {
         let mut file = tokio::fs::File::create(&part).await.map_err(|e| Unreceived::Disk(e.to_string()))?;
         let mut have = 0;
@@ -225,7 +228,7 @@ where
             Ok(()) => {
                 file.flush().await.map_err(|e| Unreceived::Disk(e.to_string()))?;
                 tokio::fs::rename(&part, path).await.map_err(|e| Unreceived::Disk(e.to_string()))?;
-                Ok((have, InUse::new([path.to_path_buf()])))
+                Ok(have)
             }
             Err(Cut::TooLarge) => Err(Unreceived::TooLarge),
             Err(Cut::Disk(e)) => Err(Unreceived::Disk(e)),
@@ -237,7 +240,7 @@ where
         let _ = tokio::fs::remove_file(&part).await;
     }
     drop(room);
-    got
+    got.map(|have| (have, used))
 }
 
 /// Why a reply's file was not hashed.

@@ -964,7 +964,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let path = cfg.scratch.join(format!("{id}-drawing.txt"));
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
-            let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64 };
+            let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64, pin: Default::default() };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
@@ -972,7 +972,7 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let path = cfg.scratch.join(format!("{id}-speech.mp3"));
         let body = crate::simplex::audio::silence_mp3(SPOKEN_SECS);
         if tokio::fs::write(&path, &body).await.is_ok() {
-            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64 };
+            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64, pin: Default::default() };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }

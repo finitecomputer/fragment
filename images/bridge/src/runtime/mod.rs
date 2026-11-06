@@ -199,7 +199,25 @@ pub struct LocalFile {
     pub media_type: String,
     pub name: String,
     pub size: u64,
+    /// What keeps it in its scratch while any copy of it lives (a reply's
+    /// file, from the relay taking it until its post is done or given up:
+    /// through the event, the open reply, the post's job and a SimpleX
+    /// copy alike). None where no scratch bounds it.
+    pub pin: Kept,
 }
+
+/// A file kept in use (scratch.rs, `InUse`) while any clone of it lives.
+/// Not part of what the file is: any two are equal.
+#[derive(Debug, Clone, Default)]
+pub struct Kept(pub Option<std::sync::Arc<crate::scratch::InUse>>);
+
+impl PartialEq for Kept {
+    fn eq(&self, _: &Kept) -> bool {
+        true
+    }
+}
+
+impl Eq for Kept {}
 
 /// Files a person sent with an answer (`Command::Tell`, `Command::Answer`),
 /// as their message names them. The driver downloads them as a turn's
@@ -516,7 +534,7 @@ mod tests {
     use super::*;
 
     fn file(name: &str, at: &str) -> LocalFile {
-        LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1 }
+        LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1, pin: Default::default() }
     }
 
     /// Goal: an agent's runtime is its `agent.json`'s `runtime`. Absent (no

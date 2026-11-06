@@ -734,9 +734,19 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
 }
 
 async fn http(gw: &Gateway, method: &str, path: &str, content_type: Option<&str>, body: &[u8]) -> Option<Vec<u8>> {
+    http_to(gw.addr, &gw.id, &gw.secret, method, path, content_type, body).await
+}
+
+/// An upload to a relay's `/relay/media` as Hermes makes one, its token
+/// that of `id` and `secret`: whether it was taken.
+pub async fn upload_to(addr: std::net::SocketAddr, id: &str, secret: &str, bytes: &[u8]) -> bool {
+    http_to(addr, id, secret, "POST", "/relay/media", Some("image/png"), bytes).await.is_some()
+}
+
+async fn http_to(addr: std::net::SocketAddr, id: &str, secret: &str, method: &str, path: &str, content_type: Option<&str>, body: &[u8]) -> Option<Vec<u8>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut s = tokio::net::TcpStream::connect(gw.addr).await.ok()?;
-    let mut head = format!("{method} {path} HTTP/1.1\r\nhost: {}\r\nauthorization: {}\r\ncontent-length: {}\r\nconnection: close\r\n", gw.addr, bearer(&gw.id, &gw.secret), body.len());
+    let mut s = tokio::net::TcpStream::connect(addr).await.ok()?;
+    let mut head = format!("{method} {path} HTTP/1.1\r\nhost: {addr}\r\nauthorization: {}\r\ncontent-length: {}\r\nconnection: close\r\n", bearer(id, secret), body.len());
     if let Some(t) = content_type {
         head.push_str(&format!("content-type: {t}\r\nx-media-filename: cat.png\r\n"));
     }

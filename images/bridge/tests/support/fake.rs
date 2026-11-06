@@ -118,6 +118,9 @@ pub struct World {
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
+    /// Each post to a `chat` channel (a reply, among others) is answered
+    /// this much later: a fragment's lane of posts held.
+    pub chat_post_delay_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
     /// Each agent's door, by its fragment: the nonce of the link ticket its
@@ -506,7 +509,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         if w.down {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the fake is down");
         }
-        if method == Method::POST && path.ends_with("/channels/work") { w.work_post_delay_ms } else { 0 }
+        match method {
+            Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
+            Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
+            _ => 0,
+        }
     };
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;

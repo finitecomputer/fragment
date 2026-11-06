@@ -90,6 +90,7 @@ fn runtime() -> Box<dyn Runtime> {
                 gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
                 secret,
                 media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
+                media_max_bytes: limits::SCRATCH_MAX_BYTES,
                 // a test's fake servers, local and plain http (runtime/relay/fetch.rs)
                 media_local: match env("BRIDGE_MEDIA_LOCAL").as_deref() {
                     None | Some("") => false,
