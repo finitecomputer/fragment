@@ -473,7 +473,7 @@ export function mount(root) {
       for (const record of page.records) onWork(record);
       // (the cursor moves past the page whatever it held)
       if (page.records.length) history.first.work = Math.min(history.first.work ?? Infinity, page.records[0].seq);
-      history.workDone = page.records.length < WORK_LAST;
+      history.workDone = !page.more;
     }
   }
   $("earlier").onclick = async () => {
@@ -488,7 +488,7 @@ export function mount(root) {
     try {
       const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
       for (const record of page.records) onChat(record, true);
-      button.hidden = page.records.length < CHAT_LAST;
+      button.hidden = !page.more;
       await earlierWork();
     } catch (err) {
       button.hidden = false;

@@ -68,7 +68,8 @@ pub mod limits {
     /// Tries of a part that fails for a reason that may pass, then the
     /// export fails `unavailable`.
     pub const ATTEMPTS_MAX: u32 = 8;
-    /// Records read from a channel a page (at most 6.4 MiB of bodies).
+    /// Records read from a channel a page (the platform cuts a page at
+    /// about 4 MiB of bodies, `limits::CHANNEL_HTTP_PAGE_MAX_BYTES`).
     pub const CHANNEL_PAGE: usize = 100;
     /// Rows of a table read a page, and the most of their JSON a page holds.
     pub const TABLE_PAGE: usize = 1000;
