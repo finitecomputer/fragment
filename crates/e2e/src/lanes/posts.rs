@@ -571,7 +571,10 @@ fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// A channel people may post to keeps its newest `limits::POSTED_KEPT`
 /// records (the oldest go, whoever appended them), as `events` does: a
 /// public chat would otherwise grow for good. Filled by a mutation, 64
-/// records a call, then one post more.
+/// records a call. The trim is reached through the `posted-kept` lever
+/// (100,000 posts would take this lane most of an hour): a lower cap, as
+/// an older release's after a rollback, trims everything past it at the
+/// next append, then one record a post.
 fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = s.named(api, owner, "wall")?;
     let c = s.create(api, owner, &name)?;
@@ -579,8 +582,7 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let fill = |id: &str, n: i64| api.op(owner, &name, "fill", id, json!({ "n": n }));
     // the deploy lands: the first fill again until it has
     s.eventually(Duration::from_secs(15), || fill("f0", 64).is_ok_and(|r| r.status == 200));
-    let kept = limits::POSTED_KEPT;
-    let calls = kept / 64 + 1;
+    let calls = 11;
     let mut failed = None;
     for i in 1..calls {
         let r = fill(&format!("f{i}"), 64)?;
@@ -590,29 +592,89 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         }
     }
     let appended = calls * 64;
+    assert!(appended < limits::POSTED_KEPT, "the fill stays under the real cap");
     let first = |api: &Api| records(api, owner, &name, "wall").first().and_then(|r| r["seq"].as_i64());
     let newest = || -> Option<i64> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok()?;
         r.body["channels"].as_array()?.iter().find(|c| c["name"] == "wall")?["seq"].as_i64()
     };
-    // the oldest go as the fragment trims, as each post past them is applied:
-    // the fills' effects (10 048 records) are applied after their commits,
-    // which takes over a minute on a slow runner
-    // and the channel's listing names the newest, read in the same wait (a
-    // read of it once, after, saw a moment before the last fill had landed)
-    let trimmed = s.eventually(Duration::from_secs(180), || first(api) == Some(appended - kept + 1) && newest() == Some(appended));
+    // the fills' effects are applied after their commits; the channel's
+    // listing names the newest, read in the same wait (a read of it once,
+    // after, saw a moment before the last fill had landed)
+    let all = s.eventually(Duration::from_secs(60), || newest() == Some(appended) && first(api) == Some(1));
     s.ok(
-        &format!("a postable channel keeps its newest {kept} records: past them, the oldest go"),
-        failed.is_none() && trimmed,
+        &format!("under its cap ({}) a postable channel keeps every record", limits::POSTED_KEPT),
+        failed.is_none() && all,
         format!("{failed:?}; newest {:?}, oldest kept {:?}", newest(), first(api)),
     );
-    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
-    let trimmed = s.eventually(Duration::from_secs(60), || first(api) == Some(appended - kept + 2));
+    let kept = 640;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": kept })))?;
+    s.ok("(a test lever lowers the cap, as an older release's)", r.status == 200 && r.body["kept"] == kept, &r);
+    let r = post(api, owner, &name, "wall", "past", json!({ "text": "past the cap" }))?;
+    let trimmed = s.eventually(Duration::from_secs(30), || first(api) == Some(appended + 1 - kept + 1));
     s.ok(
-        "a post past them drops one more of the oldest",
+        &format!("a lower cap trims every record past its newest {kept} at the next append"),
         r.status == 200 && r.body["record"]["seq"] == appended + 1 && trimmed,
         format!("{} oldest kept {:?}", r.status, first(api)),
     );
+    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
+    let trimmed = s.eventually(Duration::from_secs(30), || first(api) == Some(appended + 2 - kept + 1));
+    s.ok(
+        "a post past them drops one more of the oldest",
+        r.status == 200 && r.body["record"]["seq"] == appended + 2 && trimmed,
+        format!("{} oldest kept {:?}", r.status, first(api)),
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-kept", "n": 0 })))?;
+    s.ok("(a cap of none is refused)", r.status == 400, &r);
+    retention_bytes(s, api, owner)
+}
+
+/// Such a channel keeps its newest records by bytes too, whichever bound
+/// comes first (`limits::POSTED_BYTES_MAX`, a safety bound under a Durable
+/// Object's storage): an append past it first lets the oldest go, so it
+/// always makes room, and a record that nearly fills the bound alone is
+/// kept alone. Reached through the `posted-bytes` lever (100,000 bytes),
+/// with posts of known sizes: after each, the channel holds the newest
+/// records whose bodies fit, numbered on (one that empties the channel to
+/// fit is not numbered from 1 again).
+fn retention_bytes(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "wall-bytes")?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, WALL_APP, WALL_JSON);
+    let cap = 100_000usize;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-bytes", "n": cap })))?;
+    s.ok("(a test lever lowers the byte bound)", r.status == 200 && r.body["bytes"] == cap, &r);
+    // each body `{"text":"x…"}`, `n` bytes in all
+    let body = |n: usize| json!({ "text": "x".repeat(n - r#"{"text":""}"#.len()) });
+    let sizes = [20_000, 20_000, 20_000, 20_000, 20_000, 20_000, 60_000, 60_000];
+    // the deploy lands: the first post again until it has
+    s.eventually(Duration::from_secs(15), || post(api, owner, &name, "wall", "b0", body(sizes[0])).is_ok_and(|r| r.status == 200));
+    let mut steps = vec![];
+    for (i, n) in sizes.iter().enumerate() {
+        let r = post(api, owner, &name, "wall", &format!("b{i}"), body(*n))?;
+        let held: Vec<(i64, usize)> = records(api, owner, &name, "wall").iter().map(|r| (r["seq"].as_i64().unwrap_or(0), r["body"].to_string().len())).collect();
+        // the newest that fit, newest first, as the bound keeps them
+        let (mut want, mut sum) = (vec![], 0);
+        for (j, m) in sizes[..=i].iter().enumerate().rev() {
+            if sum + m > cap {
+                break;
+            }
+            sum += m;
+            want.insert(0, (j as i64 + 1, *m));
+        }
+        steps.push(json!({ "status": r.status, "held": held, "want": want }));
+        if r.status != 200 || held != want {
+            break;
+        }
+    }
+    let kept_alone = steps.last().is_some_and(|l| l["held"].as_array().map(Vec::len) == Some(1));
+    s.ok(
+        &format!("past {cap} bytes of bodies, the oldest go before each append (whichever bound comes first): the newest that fit are kept, and one that nearly fills the bound alone is kept alone"),
+        steps.len() == sizes.len() && steps.iter().all(|x| x["status"] == 200 && x["held"] == x["want"]) && kept_alone,
+        json!(steps),
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "posted-bytes", "n": 0 })))?;
+    s.ok("(a byte bound of none is refused)", r.status == 400, &r);
     Ok(())
 }
 
