@@ -25,7 +25,7 @@ fragment deploy my-talk --dir .
 - `scripts/build.mjs` builds the deck into `site/` (below).
 - `live/` is the live layer the build adds to the page:
   `slides-live.js` (the bar: who is here, Present live, following, notes),
-  `slides-present.js` (who presents, decided alike on every page),
+  `slides-present.js` (who presents, and posts sent in order),
   `slides-live.css`, and `slides-route.js` (`/` opens the deck).
 - `app.mjs` and `applib/notes.mjs` are the notes: the doc template's
   mixin, copied whole. A note's `anchor` is its page: `p1` for the first.
@@ -49,7 +49,8 @@ of any deck, take about a second with no network. It is kept in
 install removes the old one. It is linked into the deck as
 `node_modules`; a `node_modules` of the deck's own (`npm ci`) is used
 instead. npm's download cache is removed after the install, and a failed
-install leaves nothing. Edit `slides/`, build, deploy.
+install leaves nothing. Builds in one home take turns, so none loses the
+toolchain it is using to another's install. Edit `slides/`, build, deploy.
 
 `node scripts/build.mjs --check` builds the deck again aside and says
 whether `site/` is that build, byte for byte, without changing it.
@@ -62,8 +63,8 @@ own editor on your machine; build and deploy when done.
 An editor or the owner presses **Present live**. Their page goes to the
 `present` channel (`{page, live, from}`, which only editors and up may
 post), and every open page follows it, in open-slide's present mode too.
-If two start at once, the later start presents and the other gives way,
-on every page alike. A viewer can stop following and follow again.
+The latest Present wins: an earlier presenter stops when someone presses
+it after them. A viewer can stop following and follow again.
 Presenting ends with **Stop**, or when the presenter's page closes. The presenter's view
 (`/s/deck/presenter`, with speaker notes and a timer) is open-slide's.
 

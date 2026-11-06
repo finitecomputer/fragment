@@ -13,7 +13,10 @@
 // temporary folder TMPDIR names (scratch). A folder per lockfile's hash;
 // installing one removes the others, so one version takes the disk. npm's
 // download cache (about 300 MB) and the install's staging go away on every
-// way out, a failure's included; the toolchain is kept on purpose. The build's files then get
+// way out, a failure's included; the toolchain is kept on purpose. Builds
+// in one home take turns (its `.lock`): installing, building with and
+// removing a toolchain all happen under it, so no build loses the
+// toolchain it is using to another's install. The build's files then get
 // what a fragment's site needs: the deck's page at /, /s/<id>/ and
 // /s/<id>/presenter/ (a site has no fallback page), the live layer (live/:
 // following a presenter, who is watching, notes), and site/build.json,
@@ -53,27 +56,59 @@ function installRoot() {
 }
 
 // What an earlier install left in `base` beside `key`: another lockfile's
-// toolchain, or the staging of a build that is no longer running. Only
-// names this script makes: a 12-hex key, or one with a process id.
+// toolchain, or a staging folder. Under the lock no other build is using
+// either. Only names this script makes: a 12-hex key, or one with a
+// process id.
 function others(base, key) {
-  const alive = (pid) => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (e) {
-      return e.code === "EPERM";
-    }
-  };
-  return fs.readdirSync(base).filter((name) => {
-    const m = /^([0-9a-f]{12})(?:\.(\d+))?$/.exec(name);
-    if (!m) return false;
-    if (m[2] !== undefined) return Number(m[2]) !== process.pid && !alive(Number(m[2]));
-    return m[1] !== key;
-  });
+  return fs.readdirSync(base).filter((name) => /^[0-9a-f]{12}(?:\.\d+)?$/.test(name) && name !== key);
 }
 
-// Folders to remove on the way out, whatever the way.
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+// How long a build waits for another to finish (an install takes about 15 s).
+const LOCK_WAIT_MS = 10 * 60 * 1000;
+
+// Takes the home's lock, waiting while a running build holds it; a lock
+// whose build is gone (killed) is removed. Returns its release.
+function lock(base) {
+  const at = path.join(base, ".lock");
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  const since = Date.now();
+  let told = false;
+  for (;;) {
+    try {
+      fs.writeFileSync(at, String(process.pid), { flag: "wx" });
+      return () => fs.rmSync(at, { force: true });
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    let holder = 0;
+    try {
+      holder = Number(fs.readFileSync(at, "utf8"));
+    } catch {
+      continue; // let go meanwhile
+    }
+    if (holder > 0 && !alive(holder)) {
+      fs.rmSync(at, { force: true });
+      continue;
+    }
+    if (Date.now() - since > LOCK_WAIT_MS) fail(`another build in ${base} has run for ${LOCK_WAIT_MS / 60000} minutes (process ${holder}): stop it, or remove ${at}`);
+    if (!told) console.log(`slides: waiting for another build in ${base}`);
+    told = true;
+    Atomics.wait(nap, 0, 0, 200);
+  }
+}
+
+// Folders to remove on the way out, whatever the way, and the lock to let go.
 const scratch = new Set();
+let unlock = null;
 
 // Each file under `dir` at the paths `names` (a file, or a folder whole),
 // by path, `/`-separated, sorted.
@@ -184,6 +219,7 @@ try {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const id = theDeck();
   const base = installRoot();
+  unlock = lock(base);
   const out = fs.mkdtempSync(path.join(os.tmpdir(), "slides-build-"));
   scratch.add(out);
   build(out, pkg, id, base);
@@ -205,4 +241,5 @@ try {
   process.exitCode = 1;
 } finally {
   for (const dir of scratch) fs.rmSync(dir, { recursive: true, force: true });
+  unlock?.();
 }

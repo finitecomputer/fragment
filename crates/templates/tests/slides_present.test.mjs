@@ -1,98 +1,47 @@
 // Who presents a deck (templates/slides/live/slides-present.js), driven as
 // pages see it: the `present` channel's records in seq order, and presence.
-// Valid: one presenter, followed; a newer start takes over and the older
-// gives way. Crossed starts (#1057 review): two editors start before either
-// hears the other, in every order the two records can reach each of them;
-// exactly the newer claim presents, and every page, the two and a viewer's,
-// follows it. One presenter's own posts (#1057 review): delayed and
-// answered late, they still reach the channel in the order of its actions,
-// page changes and a stop then a restart alike, so a follower ends where
-// the presenter is and the restarted presenter is followed. Invalid: a
-// page yielding to a claim before it knows its own, a page following
-// itself, a presenter no longer here, a page change dropped across a stop.
+// Valid: one presenter, followed; the latest Present wins, and the page
+// that pressed it earlier stops; one presenter's posts, answered late,
+// reach the channel in the order of its actions (#1057 review), page
+// changes and a stop then a restart alike, so a follower ends where the
+// presenter is. Invalid: a page following itself; a presenter no longer
+// here, followed or stopping a new one. Not a goal: two pressing Present at
+// the same instant (either presses it again).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const { Outbox, Present } = await import(new URL("../../../templates/slides/live/slides-present.js", import.meta.url).href);
 
 const live = (seq, from, page = 1) => ({ seq, principal: `npub-${from}`, body: { page, live: true, from } });
-const ended = (seq, from) => ({ seq, principal: `npub-${from}`, body: { page: 1, live: false, from } });
 const here = (...presenting) => [{ id: "a" }, { id: "b" }, { id: "v" }].map((p) => ({ ...p, data: presenting.includes(p.id) ? { presenting: true } : {} }));
 
 test("one presenter: every other page follows its newest page", () => {
-  const a = new Present();
   const v = new Present();
-  a.start();
-  for (const p of [a, v]) {
-    p.record(live(1, "a", 1), p === a ? "a" : "v");
-    p.record(live(2, "a", 3), p === a ? "a" : "v");
-  }
-  assert.equal(a.mine, 1, "its claim, from its own first record");
-  assert.equal(a.yields(here("a"), "a"), false);
-  assert.equal(a.presenter(here("a"), "a"), null, "never its own presenter");
-  assert.deepEqual(v.presenter(here("a"), "v"), { from: "a", page: 3, principal: "npub-a", claim: 1 });
+  v.record(live(1, "a", 1));
+  v.record(live(2, "a", 3));
+  assert.deepEqual(v.presenter(here("a"), "v"), { from: "a", page: 3, principal: "npub-a", seq: 2 });
+  assert.equal(v.presenter(here("a"), "a"), null, "never its own presenter");
   assert.equal(v.presenter(here(), "v"), null, "a presenter whose page is gone is no one's");
 });
 
-test("a newer start takes over, and the older gives way", () => {
-  const a = new Present();
-  a.start();
-  a.record(live(1, "a"), "a");
-  a.record(live(2, "b", 2), "a");
-  assert.equal(a.yields(here("a", "b"), "a"), true);
-  a.stop();
-  a.record(ended(3, "a"), "a");
-  assert.equal(a.presenter(here("b"), "a").from, "b");
-  // a new start here is a new claim, newer than b's
-  a.start();
-  a.record(live(4, "a"), "a");
-  assert.equal(a.mine, 4);
-  assert.equal(a.yields(here("a", "b"), "a"), false);
-});
-
-test("crossed starts: the newer claim presents, in every order, and the older gives way", () => {
-  // each page sees the records in seq order (A's claim 5, B's 6); what
-  // differs is how the two pages' handling interleaves
-  const interleavings = [["a", "a", "b", "b"], ["a", "b", "a", "b"], ["a", "b", "b", "a"], ["b", "a", "a", "b"], ["b", "a", "b", "a"], ["b", "b", "a", "a"]];
-  for (const order of interleavings) {
-    const pages = { a: new Present(), b: new Present() };
-    const seen = { a: 0, b: 0 };
-    const presence = new Set(["a", "b"]);
-    const list = () => here(...presence);
-    pages.a.start();
-    pages.b.start();
-    const yielded = [];
-    for (const who of order) {
-      const p = pages[who];
-      p.record([live(5, "a"), live(6, "b", 2)][seen[who]++], who);
-      if (p.yields(list(), who)) {
-        p.stop();
-        presence.delete(who);
-        yielded.push(who);
-      }
-    }
-    assert.deepEqual(yielded, ["a"], `only the older claim gives way: ${order}`);
-    assert.equal(pages.b.presenting, true, `the newer presents: ${order}`);
-    assert.equal(pages.a.presenter(list(), "a")?.from, "b", `the older follows the newer: ${order}`);
-    const viewer = new Present();
-    viewer.record(live(5, "a"), "v");
-    viewer.record(live(6, "b", 2), "v");
-    assert.equal(viewer.presenter(list(), "v")?.from, "b", `a viewer follows the newer: ${order}`);
-  }
-});
-
-test("a page that has started yields to nothing until it knows its own claim", () => {
-  const b = new Present();
+test("the latest Present wins: the earlier presenter stops, and viewers follow the later", () => {
+  const [a, b, v] = [new Present(), new Present(), new Present()];
   b.start();
-  b.record(live(5, "a"), "b");
-  assert.equal(b.yields(here("a", "b"), "b"), false, "its own claim may be the newer");
-  b.record(live(6, "b"), "b");
-  assert.equal(b.yields(here("a", "b"), "b"), false, "and it is");
+  for (const p of [a, b, v]) p.record(live(1, "b", 2));
+  a.start(); // pressed after B's record
+  for (const p of [a, b, v]) p.record(live(2, "a", 5));
+  assert.equal(a.yields(here("a", "b"), "a"), false, "B's record is older than A's start");
+  assert.equal(b.yields(here("a", "b"), "b"), true, "A's is newer than B's own");
+  b.stop();
+  assert.equal(v.presenter(here("a"), "v").from, "a");
+  assert.equal(v.presenter(here("a"), "v").page, 5);
+});
+
+test("a presenter no longer here stops no one, even with the newest record", () => {
   const a = new Present();
+  a.record(live(7, "b", 4)); // B's tab closed without Stop
   a.start();
-  a.record(live(5, "a"), "a");
-  a.record(live(6, "b"), "a");
-  assert.equal(a.yields(here("a", "b"), "a"), true, "its own record told it its claim, the older");
+  assert.equal(a.yields(here("a"), "a"), false);
 });
 
 // A channel and a page's transport: each post is held until the test lets
@@ -127,7 +76,7 @@ test("one presenter's posts reach the channel in the order of its actions, howev
   await ch.release();
   assert.deepEqual(ch.records.map((r) => r.body.page), [1, 3], "page 2 was passed by page 3, never posted after it");
   const v = new Present();
-  for (const r of ch.records) v.record(r, "v");
+  for (const r of ch.records) v.record(r);
   assert.equal(v.presenter(here("a"), "v").page, 3, "a follower ends where the presenter is");
 });
 
@@ -150,11 +99,10 @@ test("a stop then a restart are each posted, in order, and the restarted present
   assert.deepEqual(ch.records.map((r) => [r.body.live, r.body.page]), [[true, 3], [false, 3], [true, 4]], "start, stop, restart: in that order, the restart's page its latest");
   const v = new Present();
   for (const r of ch.records) {
-    a.record(r, "a");
-    v.record(r, "v");
+    a.record(r);
+    v.record(r);
   }
-  assert.equal(a.mine, 3, "the restart's claim is its record's seq, as every page reckons it");
-  assert.deepEqual(v.presenter(here("a"), "v"), { from: "a", page: 4, principal: "npub-a", claim: 3 }, "the follower follows the restarted presenter");
+  assert.deepEqual(v.presenter(here("a"), "v"), { from: "a", page: 4, principal: "npub-a", seq: 3 }, "the follower follows the restarted presenter");
   assert.equal(a.yields(here("a"), "a"), false);
 });
 

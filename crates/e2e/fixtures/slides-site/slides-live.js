@@ -4,10 +4,10 @@
 // The page open-slide shows is its URL's `?p=` (1 for the first; present
 // mode follows it too), so presenting is posting that page to the `present`
 // channel, which editors and up may post to (fragment.json), and following
-// is setting it. Who presents is slides-present.js's to decide, alike on
-// every page: a presenter is live while their page's presence says
-// `presenting` (a closed tab ends it), and of two, the newer claim wins. A
-// viewer may stop following, and follows again when someone else starts.
+// is setting it. The latest Present wins (slides-present.js): a presenter
+// is live while their page's presence says `presenting` (a closed tab ends
+// it). A viewer may stop following, and follows again when someone else
+// starts.
 // Notes are applib/notes.mjs's operations, each on its page (`p3`),
 // followed with `fragment.live`; a note being written keeps the page it was
 // started on.
@@ -129,8 +129,7 @@ function stopPresenting() {
 }
 
 function follow() {
-  // someone's newer claim: give way to them (and say so, so a later start
-  // here is a new claim)
+  // someone pressed Present after this page did: stop here, and say so
   if (present.yields(people, me?.id)) {
     present.stop();
     fragment.presence.set({});
@@ -284,8 +283,8 @@ function start() {
     render();
   });
   fragment.presence.set({});
-  // enough of the channel's end for each presenter's claim
-  fragment.subscribe("present", (rec) => { present.record(rec, me?.id); want(rec.principal); follow(); render(); }, { last: 100 });
+  // the channel's end: each presenter's newest record
+  fragment.subscribe("present", (rec) => { present.record(rec); want(rec.principal); follow(); render(); }, { last: 100 });
   fragment.live("notes", {}, (r) => { notes = r.notes; notesError = null; for (const n of notes) want(n.author); render(); }, (err) => { notesError = err; render(); });
   render();
 }
