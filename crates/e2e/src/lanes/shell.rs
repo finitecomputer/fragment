@@ -5903,6 +5903,32 @@ fn making_states(
     );
     archive(b, &made)?;
 
+    // ---- made, but the list's reads failing as a network fails (no deploy
+    // going out): the band says so with Try again, its room waits; the list
+    // back, Try again opens the chat there
+    let before = names();
+    let refresh = "document.querySelector('#computer-notices [data-action=refresh]')";
+    let no_band = b.until(page, &format!("!{refresh}"), wait);
+    b.eval(page, "(() => { const f = window.fetch; window.__listOff = true; window.__failedAfter = 0; window.__posted = false; window.__restoreList = () => { window.fetch = f; }; \
+                 window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; \
+                 if ((o?.method ?? 'GET') === 'GET' && path === '/api/fragments' && window.__listOff && window.__posted) { window.__failedAfter++; throw new TypeError('Failed to fetch (a test)'); } \
+                 const r = await f(url, o); if (o?.method === 'POST' && path === '/api/fragments' && r.ok) window.__posted = true; return r; }; return true; })()")?;
+    let picked = new_chat(b, reader_hero)?;
+    let told = b.until(page, &format!("window.__failedAfter >= 1 && !!{refresh} && !document.getElementById('computer-notices').hidden"), wait);
+    let waiting = b.eval(page, &format!("{making_shown} && ![...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden)"))?;
+    b.eval(page, "(window.__listOff = false, true)")?;
+    b.eval(page, &format!("({refresh}?.click(), true)"))?;
+    let made: Vec<String> = names().into_iter().filter(|n| !before.contains(n)).collect();
+    let made = made.first().cloned().unwrap_or_default();
+    let opened = b.until(page, &format!("{shown} === {} && !document.querySelector('#frames .making-standin') && location.pathname === '/' && !{refresh}", js(&made)), wait);
+    b.eval(page, "(window.__restoreList(), true)")?;
+    s.ok(
+        "made while the list's reads fail as a network fails: the band says so with Try again, its room waits in its place; the list back, Try again opens the chat there and the band goes",
+        no_band && picked && told && waiting == json!(true) && !made.is_empty() && opened,
+        json!({ "told": told, "waiting": waiting, "made": made, "shown": open_chat(b, page) }),
+    );
+    archive(b, &made)?;
+
     // ---- another chat opened meanwhile, then refused
     click_chat(b, page, &first_chat)?;
     b.until(page, &format!("{shown} === {}", js(&first_chat)), wait);

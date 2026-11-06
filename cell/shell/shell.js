@@ -1545,8 +1545,8 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
           state.making = making.renamed(state.making, name);
         }
       }
-      // made: a list read that fails says so itself (the band's Try
-      // again), and its room waits for the next (`listedMade`)
+      // made: a list read that fails says so itself (`load`: the band's
+      // Try again), and its room waits for the next (`listedMade`)
       if (open) await load().catch(() => {});
       else await load();
     }
@@ -1888,9 +1888,14 @@ async function load(changed = false) {
   if (mine < reads.shown) return;
   reads.shown = mine;
   clearTimeout(reads.timer);
-  // A list's ordinary failure still goes to its caller, as before.
+  // A list's ordinary failure still goes to its caller, as before, and is
+  // known first: its band says so with Try again (computer.js
+  // `renderComputer`) whoever asked, so a caller that goes on without the
+  // list (the live list's refresh; a chat made, its room waiting for the
+  // list: `newChat`) leaves the person a way on. A read that answers clears it.
   if (listRead.error && !listRead.deploying) {
     reads.updating = false;
+    reads.listFailed = true;
     renderComputer();
     throw listRead.error;
   }
