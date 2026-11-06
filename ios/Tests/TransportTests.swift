@@ -298,12 +298,24 @@ struct TransportTests {
         #expect(!session.timeline.records.contains { $0.id == "work:500" }, "older work only says which turns run")
     }
 
-    @Test func earlierMessagesAreAPageBeforeTheOldestAndNeverMoveTheCursor() async throws {
+    /// A chat of 1,000 messages, opened on its newest 50: scrolled up, a
+    /// page at a time before the oldest, never moving the live cursor; past
+    /// the window's 600 its newest end goes. A live message then waits
+    /// outside the window, counted; scrolled down, the window pages newer
+    /// until it reaches the newest; Latest reads the newest page at once.
+    @Test func aLongChatPagesBothWaysInAWindowOf600() async throws {
         let stub = Stub { seen, _ in
-            guard seen.route == "GET /api/f/chat--abc123/channels/chat" else { return (404, "{}") }
-            let before = Int64(seen.query["before"] ?? "") ?? 0
-            let page = (1..<before).map { record("chat", $0, body: #"{"text":"old"}"#) }.joined(separator: ",")
-            return (200, #"{"channel":"chat","records":[\#(page)],"next":null}"#)
+            let limit = Int64(seen.query["limit"] ?? "") ?? 0
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/chat":
+                let seqs: [Int64]
+                if let before = seen.query["before"].flatMap({ Int64($0) }) { seqs = Array(max(1, before - limit)..<min(before, 1002)) }
+                else { let after = Int64(seen.query["after"] ?? "") ?? 0; seqs = Array((after + 1)...min(after + limit, 1001)).filter { $0 <= 1001 } }
+                let page = seqs.map { record("chat", $0, body: #"{"text":"m"}"#) }.joined(separator: ",")
+                return (200, #"{"channel":"chat","records":[\#(page)],"next":null}"#)
+            case "GET /api/f/chat--abc123/channels/work": return (200, #"{"channel":"work","records":[],"next":null}"#)
+            default: return (404, "{}")
+            }
         }
         let api = try stub.api()
         defer { try? ChatDraftStore.removeAccount(api: api) }
@@ -313,15 +325,42 @@ struct TransportTests {
         try await waitUntil("a socket") { stub.sockets.count == 1 }
         let socket = stub.sockets[0]
         socket.push(hello)
-        for seq: Int64 in [31, 32] { socket.push(frame("chat", seq, body: #"{"text":"new"}"#)) }
-        socket.push(#"{"type":"subscribed","channel":"chat","next":32,"more":false}"#)
-        try await waitUntil("caught up") { session.caughtUp }
-        await session.loadEarlier()
-        let asked = try #require(stub.seen.first { $0.method == "GET" })
-        #expect(asked.query == ["before": "31", "limit": "50"])
-        #expect(session.timeline.records.count == 32)
-        #expect(session.timeline.cursors["chat"] == 32)
-        #expect(!session.hasEarlier)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        for seq: Int64 in 951...1000 { socket.push(frame("chat", seq, body: #"{"text":"m"}"#)) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":1000,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":0,"more":false}"#)
+        try await waitUntil("read") { session.read }
+        #expect(session.hasOlder, "a full first page: there may be more")
+
+        await session.loadOlder()
+        let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/chat" }.map(\.query)
+        #expect(asked == [["before": "951", "limit": "50"]])
+        #expect(session.rows.first?.id == "chat:901" && session.rows.last?.id == "chat:1000" && session.timeline.cursors["chat"] == 1000)
+        for _ in 0..<10 { await session.loadOlder() }
+        #expect(session.timeline.chatCount == 600 && !session.detached, "600 held, still the newest")
+        await session.loadOlder()
+        #expect(session.timeline.chatCount == 600 && session.detached, "past 600, the newest end goes")
+        #expect(session.rows.first?.id == "chat:351" && session.rows.last?.id == "chat:950")
+
+        // a live message while paged back: counted, not in the window
+        let heard = session.heard
+        socket.push(frame("chat", 1001, body: #"{"text":"new"}"#))
+        try await waitUntil("heard") { session.heard == heard + 1 }
+        #expect(session.rows.last?.id == "chat:950" && session.timeline.cursors["chat"] == 1001)
+
+        // scrolled down: the page after the window's newest
+        await session.loadNewer()
+        #expect(stub.seen.last { $0.route == "GET /api/f/chat--abc123/channels/chat" }?.query == ["after": "950", "limit": "50"])
+        #expect(session.rows.last?.id == "chat:1000" && session.detached && session.timeline.chatCount == 600)
+        await session.loadNewer()
+        #expect(session.rows.last?.id == "chat:1001" && !session.detached, "the newest reached: the chat's again")
+
+        // Latest from far back: the newest page at once
+        for _ in 0..<13 { await session.loadOlder() }
+        #expect(session.detached)
+        await session.resetToLatest()
+        #expect(stub.seen.last { $0.route == "GET /api/f/chat--abc123/channels/chat" }?.query == ["before": "1002", "limit": "50"])
+        #expect(!session.detached && session.rows.first?.id == "chat:952" && session.rows.last?.id == "chat:1001")
     }
 }
 

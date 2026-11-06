@@ -154,11 +154,18 @@ struct Timeline {
     /// The oldest `work` record read (its seq and time): where reading
     /// earlier work goes on from, and how far back it reached.
     private(set) var oldestWork: (seq: Int64, at: Int64)?
-    /// The window: its newest `chat` records, at most this many, whatever
-    /// the server keeps (100,000 a channel). `work` records never count
-    /// toward it: they say which turns run (`turns`, kept apart) and give
-    /// the turns in the window their steps.
-    static let chatMax = 2_000
+    /// The window: at most this many `chat` records, whatever the server
+    /// keeps (100,000 a channel), as the web's chat holds about as many:
+    /// its newest while it follows the chat, else the stretch scrolled to
+    /// (two-sided: `insertOlder` lets the newest end go, `insertNewer` the
+    /// oldest). `work` records never count toward it: they say which turns
+    /// run (`turns`, kept apart, so Stop survives any window) and give the
+    /// turns in the window their steps.
+    static let chatMax = 600
+    /// Whether the window's newest end was let go (paged back past
+    /// `chatMax`): live records then say which turns run, but enter no
+    /// window until it reaches the newest again (`insertNewer`, `reset`).
+    private(set) var detached = false
     /// `work` records kept at most, the oldest let go first: a bound on
     /// memory alone, past which the oldest turns' steps go.
     static let workMax = 20_000
@@ -197,7 +204,7 @@ struct Timeline {
     /// Past `chatMax`, the oldest `chat` records go, and the `work` before
     /// the oldest one kept with them (it belongs to no turn in the window);
     /// past `workMax`, the oldest `work` goes. Whether a turn runs stays.
-    private mutating func trim() {
+    private mutating func trimOldest() {
         guard chatCount > Self.chatMax || workCount > Self.workMax else { return }
         var cut = 0
         if chatCount > Self.chatMax {
@@ -227,10 +234,13 @@ struct Timeline {
         // in order of time, then channel, then seq: placed where it goes (a
         // live record at the end, an older page's at the start), not sorted
         // again with every record
+        // detached, a live record says which turns run, and waits outside the window
+        // (a record the phone posts, newer than the window, waits likewise)
+        if detached && (advancingCursor || newestChat.map({ Self.precedes($0, record) }) ?? true) { ids.remove(record.id); return }
         let index = Self.place(record, in: records)
         records.insert(record, at: index)
         if record.channel == "chat" { chatCount += 1 } else { workCount += 1 }
-        trim()
+        trimOldest()
         revision &+= 1
         if advancingCursor, record.channel == "chat", let turn = record.turn,
            drafts[turn]?.principal == record.principal {
@@ -240,6 +250,53 @@ struct Timeline {
             drafts.removeValue(forKey: turn)
         }
     }
+
+    /// An older page, scrolled up to: kept whole, and past `chatMax` the
+    /// window's newest end goes instead (the chat no longer reaches its
+    /// newest record: `detached`).
+    mutating func insertOlder(_ page: [ChannelRecord]) {
+        for record in page { place(record) }
+        guard chatCount > Self.chatMax else { revision &+= 1; return }
+        var extra = chatCount - Self.chatMax
+        var cut = records.count
+        // its newest messages beyond the bound, and the work after the newest one kept
+        while extra > 0 || (cut > 0 && records[cut - 1].channel != "chat") {
+            cut -= 1
+            if records[cut].channel == "chat" { extra -= 1 }
+        }
+        for old in records[cut...] { ids.remove(old.id); if old.channel == "chat" { chatCount -= 1 } else { workCount -= 1 } }
+        records.removeSubrange(cut...)
+        detached = true
+        drafts.removeAll()
+        revision &+= 1
+    }
+    /// A newer page, scrolled down to: past `chatMax` the oldest end goes;
+    /// once it reaches the newest record heard, the window is the chat's again.
+    mutating func insertNewer(_ page: [ChannelRecord], reachesNewest: Bool) {
+        for record in page { place(record) }
+        trimOldest()
+        if reachesNewest { detached = false }
+        revision &+= 1
+    }
+    /// The chat's newest page, and the work it shows, in place of the window
+    /// (Latest messages): whether turns run, and the cursors, stay.
+    mutating func reset(_ page: [ChannelRecord]) {
+        records.removeAll(); ids.removeAll(); chatCount = 0; workCount = 0
+        detached = false
+        for record in page { place(record) }
+        trimOldest()
+        revision &+= 1
+    }
+    /// A record read back into the window, never a live one: what it says of
+    /// its turn is learned, and it is placed, if not held already.
+    private mutating func place(_ record: ChannelRecord) {
+        learn(record)
+        guard ids.insert(record.id).inserted else { return }
+        records.insert(record, at: Self.place(record, in: records))
+        if record.channel == "chat" { chatCount += 1 } else { workCount += 1 }
+    }
+    var oldestChat: ChannelRecord? { records.first { $0.channel == "chat" } }
+    var newestChat: ChannelRecord? { records.last { $0.channel == "chat" } }
 
     static func precedes(_ a: ChannelRecord, _ b: ChannelRecord) -> Bool {
         if a.at != b.at { return a.at < b.at }

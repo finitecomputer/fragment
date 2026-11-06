@@ -151,8 +151,14 @@ phone's network: an attachment of at most 25 MiB, and an icon fitted inside
 
 JSON text subscriptions match the Worker’s live protocol. A chat reads its last
 50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Its window holds at most
-2,000 `chat` records; `work` never counts toward it, and the `work` before its
-oldest message goes with it (at most 20,000 `work` records in all). The chat
+600 `chat` records, as the web's chat holds about as many; `work` never counts
+toward it, and the `work` before its oldest message goes as that message does
+(at most 20,000 `work` records in all). Scrolled to its top,
+the chat reads the 50 messages before (and the work their turns show), keeping
+the row in view in place; past 600, the window's newest end goes, and live
+messages then say which turns run and are counted on the Latest pill ("3 new")
+without entering it. Scrolled back down, it reads the 50 after, until it reaches
+the newest; Latest reads the newest page at once, and so does a send. The chat
 follows its newest record, never a count. Which turns run follows
 the web's chat page (`templates/chat/site/chat.js`): a turn is its agent's and its
 id, a record counts only toward its own poster's turn, and a turn runs once its

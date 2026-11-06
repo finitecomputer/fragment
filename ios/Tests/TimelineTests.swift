@@ -172,4 +172,31 @@ struct TimelineTests {
         timeline.learn(work(10, "turn.step", "busy"))
         #expect(timeline.awaitsAStart)
     }
+
+    /// Paged back past the bound, the window lets its newest end go (and the
+    /// steps after its newest kept message); a live record then says which
+    /// turns run but enters no window, until a newer page reaches the newest.
+    @Test func theWindowIsTwoSided() {
+        func chat(_ seq: Int64) -> ChannelRecord { ChannelRecord(channel: "chat", seq: seq, at: seq * 10, principal: "a", kind: "message", body: .object(["text": .string("m")])) }
+        func step(_ seq: Int64, at: Int64, _ kind: String = "turn.step") -> ChannelRecord {
+            ChannelRecord(channel: "work", seq: seq, at: at, principal: "a", kind: "message", body: .object(["kind": .string(kind), "turn": .string("t")]))
+        }
+        var timeline = Timeline()
+        for seq in Int64(551)...1000 { timeline.insert(chat(seq)) }
+        timeline.insert(step(1, at: 10_005))
+        timeline.insertOlder((Int64(401)...550).map(chat))
+        #expect(timeline.chatCount == 600 && !timeline.detached)
+        timeline.insertOlder((Int64(351)...400).map(chat))
+        #expect(timeline.detached && timeline.chatCount == 600 && timeline.newestChat?.seq == 950 && timeline.oldestChat?.seq == 351)
+        #expect(!timeline.records.contains { $0.id == "work:1" }, "the steps after its newest kept message went too")
+        // live, detached: it runs, but waits outside
+        timeline.insert(step(2, at: 10_020, "turn.start"))
+        timeline.insert(chat(1001))
+        #expect(timeline.activeTurns == ["t"] && timeline.newestChat?.seq == 950 && timeline.cursors["chat"] == 1001)
+        timeline.insertNewer((Int64(951)...1001).map(chat), reachesNewest: true)
+        #expect(!timeline.detached && timeline.newestChat?.seq == 1001 && timeline.oldestChat?.seq == 402 && timeline.chatCount == 600)
+        // the newest page in place of the window: turns stay
+        timeline.reset((Int64(952)...1001).map(chat))
+        #expect(timeline.chatCount == 50 && timeline.activeTurns == ["t"] && timeline.cursors["chat"] == 1001)
+    }
 }

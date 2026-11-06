@@ -12,6 +12,10 @@ struct ChatView: View {
     /// stops a fling's momentum. Momentum ran on past a jump made while it
     /// lasted, so the tap only hid the button.
     @State private var jumping = false
+    /// The row the chat keeps in place as pages come in above it.
+    @State private var anchor: String?
+    /// Messages heard (`ChatSession.heard`) when it last left the newest.
+    @State private var heardAtLeave = 0
     let library: Library
     /// Opens a fragment of the person's (a chat, or an app at a page).
     let open: (FragmentSummary) -> Void
@@ -35,18 +39,26 @@ struct ChatView: View {
                 // `ChatRow`, drawn again only when it changes), and the
                 // stack draws only the rows on screen.
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    EarlierButton(session: session)
+                    // the top reached: the page before it (FIN-415's sentinel)
+                    Color.clear.frame(height: 1)
+                        // (again once a page is in, if the top is still in view)
+                        .task(id: "\(session.oldestMessage ?? "")|\(session.paging)") { if session.read && !session.paging { session.page(.older) } }
                     ChatRows(session: session, library: library, open: open)
                     PendingRows(session: session)
                     DraftRows(session: session, library: library)
                     WorkingLine(session: session, library: library)
+                    // the end of a window paged back reached: the page after it
                     Color.clear.frame(height: 1).id("bottom")
+                        .task(id: "\(session.rows.last?.id ?? "")|\(session.paging)") { if session.detached && !session.paging { session.page(.newer) } }
                 }
+                .scrollTargetLayout()
                 .frame(maxWidth: 660, alignment: .leading)
                 .padding(.horizontal, 20).padding(.vertical, 24).frame(maxWidth: .infinity)
                 // its backlog is laid out unseen, and shown once read, at its end
                 .opacity(session.read ? 1 : 0)
             }
+            // rows read in above keep the one shown in place
+            .scrollPosition(id: $anchor, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("timeline")
             .defaultScrollAnchor(.bottom, for: .initialOffset)
@@ -81,6 +93,12 @@ struct ChatView: View {
             }
             .scrollDisabled(jumping)
             // once scrolling is held off (the fling stopped), the jump lands
+            .onChange(of: followsBottom) { _, following in
+                if !following { heardAtLeave = session.heard }
+            }
+            .onChange(of: session.detached) { _, detached in
+                if detached { followsBottom = false }
+            }
             .onChange(of: jumping) { _, now in
                 guard now else { return }
                 scrollingByHand = false
@@ -89,15 +107,19 @@ struct ChatView: View {
             }
             .animation(reduceMotion ? nil : .easeIn(duration: 0.2), value: session.read)
             .overlay(alignment: .bottomTrailing) {
-                if !followsBottom && session.read {
+                if (!followsBottom || session.detached) && session.read {
                     // At once, not animated: an animated scroll across rows the
-                    // lazy stack has not drawn lands short of the end. The
-                    // bottom anchor then keeps it there as they are drawn.
-                    Button("Latest messages", systemImage: "arrow.down") {
-                        followsBottom = true
-                        jumping = true
+                    // lazy stack has not drawn lands short of the end. A window
+                    // paged back is the chat's newest page again first.
+                    let fresh = session.heard - heardAtLeave
+                    Button(fresh > 0 ? "\(fresh) new" : "Latest messages", systemImage: "arrow.down") {
+                        Task {
+                            if session.detached { await session.resetToLatest() }
+                            followsBottom = true
+                            jumping = true
+                        }
                     }
-                    .labelStyle(.iconOnly).buttonStyle(.borderedProminent).buttonBorderShape(.circle).padding()
+                    .labelStyle(LatestLabel(counted: fresh > 0)).buttonStyle(.borderedProminent).buttonBorderShape(fresh > 0 ? .capsule : .circle).padding()
                     .accessibilityIdentifier("latestMessages")
                 }
             }
@@ -223,14 +245,12 @@ struct ChatView: View {
     }
 }
 
-/// Older messages, a page at a time, once some are shown.
-private struct EarlierButton: View {
-    let session: ChatSession
-    var body: some View {
-        if session.hasEarlier && !session.rows.isEmpty {
-            Button("Earlier messages") { Task { await session.loadEarlier() } }
-                .font(.footnote).frame(maxWidth: .infinity).disabled(session.loadingHistory)
-        }
+/// The Latest pill: its arrow alone, or with how many messages came.
+private struct LatestLabel: LabelStyle {
+    let counted: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        if counted { HStack(spacing: 6) { configuration.icon; configuration.title }.font(.footnote.weight(.semibold)) }
+        else { configuration.icon }
     }
 }
 
@@ -351,8 +371,11 @@ private struct DraftRows: View {
     let session: ChatSession
     let library: Library
     var body: some View {
-        ForEach(session.drafts) { draft in
-            MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
+        // a reply being written is at the chat's end, which a window paged back does not show
+        if !session.detached {
+            ForEach(session.drafts) { draft in
+                MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
+            }
         }
     }
 }
