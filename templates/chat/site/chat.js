@@ -58,6 +58,7 @@ import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
 import { moreOf } from "./pages.js";
+import { over, refusal } from "./limits.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -65,12 +66,6 @@ const TEXT_MAX_BYTES = 32 * 1024;
 // kept this long after a change.
 const DRAFT_KEY = "fragment.chat.draft.v1";
 const DRAFT_SAVE_MS = 300;
-// What one message carries, at most: the platform's own (`limits` in the
-// page's hello, docs/api.md), set once the page's socket says hello.
-let limits = null;
-const tooMany = (n) => !!limits && n >= limits.filesPerMessage;
-const tooBig = (bytes) => !!limits && bytes > limits.uploadMaxBytes;
-const over = () => `over ${Math.round(limits.uploadMaxBytes / 1e6)} MB, the most a chat takes`;
 // The backlog a page reads: the chat's last messages, and enough of `work`
 // for their turns (each turn writes two records or more there).
 const CHAT_LAST = 400;
@@ -320,7 +315,7 @@ function attachmentsOf(body) {
   if (!Array.isArray(body.attachments)) return [];
   return body.attachments
     .filter((a) => a && typeof a === "object" && SHA256.test(a.sha256))
-    .slice(0, limits?.filesPerMessage)
+    .slice(0, fragment.limits()?.filesPerMessage)
     .map((a) => ({ sha256: a.sha256, size: Number(a.size), type: typeof a.type === "string" ? a.type : "", name: typeof a.name === "string" ? a.name : "" }));
 }
 
@@ -2270,15 +2265,16 @@ export function mount(root) {
       }),
     );
   }
+  // the platform's word now (limits.js): a deploy may change it while the
+  // page is open, and `send` checks the files again
   function addFiles(files) {
     if (!canAttach()) return;
+    const limits = fragment.limits();
     for (const file of files) {
-      if (tooMany(attachments.length)) {
-        problem(`A message carries at most ${limits.filesPerMessage} files.`);
-        break;
-      }
-      if (tooBig(file.size)) {
-        problem(`${file.name} is ${over()}.`);
+      const why = refusal(limits, [file], attachments.length);
+      if (why) {
+        problem(why);
+        if (attachments.length >= limits.filesPerMessage) break;
         continue;
       }
       attachments.push({ file, name: file.name || "a file", size: file.size, type: file.type, uploading: false });
@@ -2338,8 +2334,9 @@ export function mount(root) {
   }
   async function startMemo() {
     if (ended || recording || !canAttach() || !recordable()) return;
-    if (tooMany(attachments.length)) return problem(`A message carries at most ${limits.filesPerMessage} files.`);
-    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
+    const full = refusal(fragment.limits(), [{ size: 0 }], attachments.length);
+    if (full) return problem(full);
+    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: null };
     // held while the browser asks for the microphone, so a second press waits
     recording = memo;
     renderRecording();
@@ -2363,8 +2360,9 @@ export function mount(root) {
       if (!e.data?.size) return;
       memo.chunks.push(e.data);
       memo.bytes += e.data.size;
-      if (tooBig(memo.bytes) && memo.recorder.state !== "inactive") {
-        memo.tooLarge = true;
+      const limits = fragment.limits();
+      if (limits && memo.bytes > limits.uploadMaxBytes && memo.recorder.state !== "inactive") {
+        memo.tooLarge = limits;
         memo.recorder.stop();
       }
     };
@@ -2399,7 +2397,7 @@ export function mount(root) {
     renderRecording();
     if (memo.discard) return;
     if (memo.failed) return problem(`Your voice memo was not kept: ${memo.failed}`);
-    if (memo.tooLarge) return problem(`That voice memo is ${over()}.`);
+    if (memo.tooLarge) return problem(`That voice memo is ${over(memo.tooLarge)}.`);
     const type = essence(memo.recorder?.mimeType || memo.chunks[0]?.type);
     if (!memo.bytes || !SHOWN_AUDIO.test(type)) return problem("Nothing was recorded.");
     const file = new File(memo.chunks, `voice-memo.${MEMO_EXT[type]}`, { type });
@@ -2753,6 +2751,10 @@ export function mount(root) {
         tellSaid();
         return;
       }
+      // its files against the platform's word now, which a deploy may have
+      // changed since they were taken: refused, the message stays to send
+      const why = refusal(fragment.limits(), files);
+      if (why) throw new Error(why);
       const to = addressed(text);
       // an agent of the owner's not in the chat yet is added first, so its
       // bridge follows the chat and takes the message (bounded: the roster)
@@ -2767,7 +2769,7 @@ export function mount(root) {
       }
       if (outside.length) await readMembers();
       const named = [];
-      // bounded: at most limits.filesPerMessage files (addFiles)
+      // bounded: at most the platform's filesPerMessage (just checked)
       for (const f of files) named.push(await fragment.blob(f.file, { name: f.name }));
       const replyTo = state.replyTo?.seq ?? null;
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
@@ -3020,7 +3022,6 @@ export function mount(root) {
   });
   fragment.me().then((hello) => {
     state.me = hello;
-    limits = hello.limits ?? null;
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
     if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {

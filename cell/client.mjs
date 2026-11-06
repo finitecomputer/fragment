@@ -5,7 +5,7 @@
 //   await fragment.call("add_todo", { text: "milk" });        // an operation
 //   await fragment.post("chat", { text: "hi" });               // a record, no app code
 //   const file = await fragment.blob(picked);                  // a blob: {sha256, size, type, name}
-//   const { limits } = await fragment.me();                    // {uploadMaxBytes, filesPerMessage}
+//   fragment.limits();                                         // {uploadMaxBytes, filesPerMessage}, as said last
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
@@ -436,12 +436,19 @@ export function closed(handler) {
 
 /// Who this page is to the fragment: { id, principal, role, platform,
 /// limits } (`platform` the platform's origin, the one page that frames it
-/// with its person's session; `limits` what one message of a person's may
-/// carry, {uploadMaxBytes, filesPerMessage}: the platform's, which a page
-/// checks files against before it uploads them).
+/// with its person's session; `limits` as `limits()` reads them).
 export function me() {
   connect();
   return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));
+}
+
+/// What one message of a person's may carry, as the platform said it last
+/// ({uploadMaxBytes, filesPerMessage}: the latest hello's, which each
+/// reconnect brings again): null before the first hello, or from an older
+/// platform. A page checks files against it when it takes them and again
+/// as it sends them, since a deploy may change it while the page is open.
+export function limits() {
+  return hello?.limits ?? null;
 }
 
 // ---- web push: the fragment's service worker (./__sw.js) and VAPID key

@@ -6884,7 +6884,7 @@ fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me
     // (the fleet's, not a zone's); one taken out
     let limits = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["limits"].clone();
     let (most, count) = (limits["uploadMaxBytes"].as_u64().unwrap_or(0), limits["filesPerMessage"].as_u64().unwrap_or(0));
-    let past = format!("atlas.tiff is over {} MB.", (most as f64 / 1e6).round());
+    let past = format!("atlas.tiff is over {} MB, the most a chat takes.", (most as f64 / 1e6).round());
     let dropped = b.eval(
         page,
         "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'map.png', { type: 'image/png' })); d.items.add(new File(['three atlases'], 'atlases.txt', { type: 'text/plain' })); \
@@ -7092,7 +7092,7 @@ fn launch_geometry_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me
     let wait = std::time::Duration::from_secs(30);
     // one file past what the platform names (`limits` on the list)
     let most = shell(api, me.session, "GET", "/api/fragments", None, &[])?.body["limits"]["uploadMaxBytes"].as_u64().context("the list names its upload bound")?;
-    let past = format!("atlas.tiff is over {} MB.", (most as f64 / 1e6).round());
+    let past = format!("atlas.tiff is over {} MB, the most a chat takes.", (most as f64 / 1e6).round());
     let opened = "document.getElementById('search-dialog').open";
     let closed = "!document.getElementById('search-dialog').open";
     b.viewport(page, 320, 800, true)?;

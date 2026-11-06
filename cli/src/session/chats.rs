@@ -407,6 +407,33 @@ pub(crate) mod tests {
         assert_eq!(roomy.media.len(), 1, "a deployment past the default takes it");
     }
 
+    /// Goal: a file past the default upload comes on a deployment that
+    /// takes more, and is left out, said, on one that takes the default.
+    /// Method: a real file one byte past it (sparse, its bytes zeros).
+    #[test]
+    fn a_file_past_the_default_comes_where_the_platform_takes_it() {
+        let root = super::super::tempdir();
+        let chats = root.join("chats");
+        std::fs::create_dir_all(chats.join("media")).unwrap();
+        let size = UPLOAD_MAX + 1;
+        std::fs::File::create(chats.join("media/scan.tiff")).unwrap().set_len(size).unwrap();
+        let sha = fragment_core::blob::sha256_hex(&vec![0u8; size as usize]);
+        let chat = json!({ "format": FORMAT, "id": "c1", "kind": "chat", "messages": [
+            { "role": "user", "at": "2026-10-01T09:00:00Z", "text": "the scan", "attachments": [{ "name": "scan.tiff", "media_type": "image/tiff", "size": size, "sha256": sha, "path": "media/scan.tiff" }] },
+        ] });
+        std::fs::write(chats.join("c1.json"), chat.to_string()).unwrap();
+        std::fs::write(chats.join("index.json"), json!({ "format": FORMAT, "conversations": [{ "id": "c1", "file": "chats/c1.json" }] }).to_string()).unwrap();
+        let mut roomy = spool();
+        let problems = read(&root, &mut roomy, 2 * UPLOAD_MAX).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(read_back(&roomy, "hermes-c1").messages[0].attachments.len(), 1, "taken where the platform takes more");
+        assert_eq!(std::fs::metadata(&roomy.media[&format!("media/{sha}.tiff")]).unwrap().len(), size);
+        let mut default = spool();
+        let problems = read(&root, &mut default, UPLOAD_MAX).unwrap();
+        assert!(problems.iter().any(|p| p.contains(&format!("is {size} bytes, past the {UPLOAD_MAX} this platform takes"))), "{problems:?}");
+        assert!(read_back(&default, "hermes-c1").messages[0].attachments.is_empty() && default.media.is_empty(), "left out, its message kept");
+    }
+
     /// Goal: a conversation of a kind not asked for has none of its files
     /// read. Method: the export with a picture on its chat, read for its
     /// scheduled runs alone.
