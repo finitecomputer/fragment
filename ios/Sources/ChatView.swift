@@ -64,7 +64,10 @@ struct ChatView: View {
             .onScrollPhaseChange { _, phase in
                 scrollingByHand = phase == .interacting || phase == .decelerating
             }
-            .onChange(of: session.rows.count + session.pending.count) { _, _ in
+            // the newest record, never a count: at the window's bound a new
+            // message leaves the count as it was (one in, the oldest out), and
+            // an older page read changes the count but not the newest
+            .onChange(of: [session.rows.last?.id, session.pending.last?.id]) { _, _ in
                 if followsBottom && session.read { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.read) { _, read in

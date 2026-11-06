@@ -223,13 +223,23 @@ final class ChatSession {
     /// calls and 200 steps) and, mostly, its start (`earlierWork`).
     static let chatLast = 50
     static let workPage = 1_000
-    /// Earlier `work` is read in batches of this many: each record at most
-    /// `RECORD_BODY_MAX_BYTES` (64 KiB), so a batch stays within the 4 MiB
-    /// an answer may be here (`FragmentAPI.request`), which the HTTP route,
-    /// bounding its pages by count alone, does not promise.
+    /// Earlier `work` is read first in batches of this many: each record at
+    /// most `RECORD_BODY_MAX_BYTES` (64 KiB), so a batch stays within the
+    /// 4 MiB an answer may be here (`FragmentAPI.historyBytesMax`), which the
+    /// HTTP route, bounding its pages by count alone, does not promise.
     static let workBatch = 50
     /// Earlier `work` read back at most, a visit.
     static let earlierWorkMax = 1_000
+
+    /// The next batch, sized by what the last one's records took: as many
+    /// as half the answer's bound holds at twice their mean, between
+    /// `workBatch` and `earlierWorkMax`. One that still overflows is read
+    /// again at `workBatch`.
+    static func nextBatch(after count: Int, bytes: Int) -> Int {
+        guard count > 0 else { return workBatch }
+        let mean = max(bytes / count, 256)
+        return min(earlierWorkMax, max(workBatch, FragmentAPI.historyBytesMax / 2 / (2 * mean)))
+    }
 
     private func subscribe(_ socket: LiveSocket, channel: String, after: Int64?) async throws {
         var body: [String: JSONValue] = ["type": .string("subscribe"), "channel": .string(channel)]
@@ -240,23 +250,31 @@ final class ChatSession {
     }
 
     /// Earlier `work`, read back as the web's chat page reads it
-    /// (templates/chat/site/chat.js `earlierWork`): until it reaches the
-    /// oldest message shown, and, here, also while a turn was read without
-    /// its start (a long turn's begun before the backlog), so it shows
-    /// running, and Stop, however the chat was opened. What it reads only
-    /// says which turns run; none of it is shown. Bounded by
-    /// `earlierWorkMax`; a failure leaves it for the next visit, and says so.
+    /// (templates/chat/site/chat.js `earlierWork`), only as far as the turns
+    /// in the window need: to the oldest message shown, so those turns have
+    /// their steps (inserted), and while a turn that may run was read
+    /// without its start, so it shows running, and Stop, however the chat
+    /// was opened (learned). A turn whose end was read needs nothing more.
+    /// Batches grow with how little their records take (`nextBatch`), so a
+    /// visit is a call or two, not twenty; bounded by `earlierWorkMax`. A
+    /// failure leaves it for the next visit, and says so.
     private func earlierWork() async {
         var read = 0
+        var batch = Self.workBatch
         while read < Self.earlierWorkMax, let oldest = timeline.oldestWork, oldest.seq > 1 {
             let shownFrom = timeline.records.first { $0.channel == "chat" }?.at
             guard timeline.awaitsAStart || shownFrom.map({ oldest.at >= $0 }) == true else { return }
-            let page: [ChannelRecord]
-            do { page = try await api.history(fragment.name, channel: "work", before: oldest.seq, limit: Self.workBatch) }
+            let limit = min(batch, Self.earlierWorkMax - read)
+            let page: (records: [ChannelRecord], bytes: Int)
+            do { page = try await api.historyPage(fragment.name, channel: "work", before: oldest.seq, limit: limit) }
+            catch APIError.limitExceeded where limit > Self.workBatch { batch = Self.workBatch; continue }
             catch { self.error = "Earlier progress could not be read: " + error.localizedDescription; return }
-            for record in page { timeline.learn(record) }
-            read += page.count
-            if page.count < Self.workBatch { return }
+            for record in page.records {
+                if let shownFrom, record.at >= shownFrom { timeline.insert(record, advancingCursor: false) } else { timeline.learn(record) }
+            }
+            read += page.records.count
+            if page.records.count < limit { return }
+            batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)
         }
     }
 
@@ -335,7 +353,7 @@ final class ChatSession {
         do {
             let page = try await api.history(fragment.name, before: first)
             for record in page { timeline.insert(record, advancingCursor: false) }
-            hasEarlier = page.count == 50 && timeline.records.count < Timeline.maximumRecords
+            hasEarlier = page.count == 50 && timeline.chatCount < Timeline.chatMax
         } catch { self.error = error.localizedDescription }
     }
 }

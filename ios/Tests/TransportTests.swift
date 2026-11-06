@@ -256,6 +256,48 @@ struct TransportTests {
         }
     }
 
+    /// Earlier work is read in batches that grow with how little their
+    /// records take: a call or two, not twenty. What falls in the window
+    /// (from its oldest message on) is kept, for its turns' steps; what is
+    /// older only says which turns run. A batch that overflows the answer's
+    /// bound is read again at the first batch's size.
+    @Test func earlierWorkIsACallOrTwoAndKeepsWhatTheWindowShows() async throws {
+        // work 1 to 2000: t7's start at 500, then its steps; 871 to 940 are
+        // large (60 KB): a batch of them all is past the 4 MiB an answer holds
+        let large = String(repeating: "x", count: 60_000)
+        let work: @Sendable (Int64) -> String = { seq in
+            record("work", seq, body: seq == 500 ? #"{"kind":"turn.start","turn":"t7"}"# : #"{"kind":"turn.step","turn":"t7","text":"\#((871...940).contains(seq) ? large : "s")"}"#)
+        }
+        let stub = Stub { seen, _ in
+            guard seen.route == "GET /api/f/chat--abc123/channels/work" else { return (404, "{}") }
+            let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
+            return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        // the window's oldest message is at work 960's time; the backlog is the last 1000
+        socket.push(frame("chat", 960, body: #"{"text":"Look this up"}"#))
+        for seq: Int64 in 1001...2000 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":960,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":2000,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t7"] }
+        let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/work" }.map(\.query)
+        #expect(Array(asked.prefix(3)) == [["before": "1001", "limit": "50"], ["before": "951", "limit": "950"], ["before": "951", "limit": "50"]],
+                "a small batch grows; one past the bound is read again small")
+        #expect(asked.count <= 6, "\(asked.count) calls")
+        #expect(session.error == nil)
+        #expect(session.timeline.records.contains { $0.id == "work:960" }, "its steps in the window are kept")
+        #expect(!session.timeline.records.contains { $0.id == "work:500" }, "older work only says which turns run")
+    }
+
     @Test func earlierMessagesAreAPageBeforeTheOldestAndNeverMoveTheCursor() async throws {
         let stub = Stub { seen, _ in
             guard seen.route == "GET /api/f/chat--abc123/channels/chat" else { return (404, "{}") }

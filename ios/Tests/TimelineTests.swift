@@ -75,7 +75,7 @@ struct TimelineTests {
         // its own agent's end, read before its start (paging back): it ended
         var same = Timeline()
         same.learn(work(9, "turn.end", "t"))
-        #expect(same.awaitsAStart)
+        #expect(!same.awaitsAStart, "an ended turn never runs: no start is read back for it")
         same.learn(work(1, "turn.start", "t"))
         #expect(same.activeTurns.isEmpty && !same.awaitsAStart)
         // another agent's end naming it: A's turn still runs once its start is read
@@ -133,8 +133,43 @@ struct TimelineTests {
         #expect(timeline.revision == made.count, "a record read again changes nothing")
         // past its bound the oldest go, and one of them read again is let go again
         var long = Timeline()
-        for seq in 1...Int64(Timeline.maximumRecords + 10) { long.insert(record(seq, body: .string("m"))) }
+        for seq in 1...Int64(Timeline.chatMax + 10) { long.insert(record(seq, body: .string("m"))) }
         long.insert(record(1, body: .string("m")), advancingCursor: false)
-        #expect(long.records.count == Timeline.maximumRecords && long.records.first?.seq == 11)
+        #expect(long.records.count == Timeline.chatMax && long.records.first?.seq == 11)
+    }
+
+    /// The window counts `chat` records alone: `work` never takes a
+    /// message's place, and the `work` before the oldest message kept goes
+    /// with it. At the window's bound a new message keeps the count, but is
+    /// the newest record: what the chat follows (`ChatView`), never a count.
+    @Test func theWindowCountsMessagesAloneAndItsNewestMoves() {
+        var timeline = Timeline()
+        func at(_ channel: String, _ seq: Int64, _ time: Int64) -> ChannelRecord {
+            ChannelRecord(channel: channel, seq: seq, at: time, principal: "agent", kind: "message", body: .object(["text": .string("r"), "kind": .string(channel == "work" ? "turn.step" : "message"), "turn": .string("t")]))
+        }
+        // each message with three steps before it
+        for n in Int64(1)...Int64(Timeline.chatMax) {
+            for k in Int64(0)..<3 { timeline.insert(at("work", n * 3 + k, n * 10 + k)) }
+            timeline.insert(at("chat", n, n * 10 + 5))
+        }
+        #expect(timeline.chatCount == Timeline.chatMax && timeline.records.count == Timeline.chatMax * 4, "steps never count toward the window")
+        let newest = timeline.records.last?.id
+        let next = Int64(Timeline.chatMax + 1)
+        timeline.insert(at("chat", next, next * 10 + 5))
+        #expect(timeline.chatCount == Timeline.chatMax, "the count is the same at the bound")
+        #expect(timeline.records.last?.id != newest && timeline.records.last?.id == "chat:\(next)", "its newest is not")
+        // the oldest message went, and the steps before the oldest kept went with it
+        #expect(timeline.records.first?.id == "chat:2")
+        #expect(!timeline.records.contains { $0.id == "work:6" } && timeline.records.contains { $0.id == "work:7" } == false && timeline.records.contains { $0.id == "chat:2" })
+    }
+
+    /// A turn that ended never runs, so it never asks for its start to be read
+    /// back; one read without a start or an end may run, and does ask.
+    @Test func onlyATurnThatMayRunAwaitsItsStart() {
+        var timeline = Timeline()
+        timeline.learn(work(9, "turn.end", "done"))
+        #expect(!timeline.awaitsAStart)
+        timeline.learn(work(10, "turn.step", "busy"))
+        #expect(timeline.awaitsAStart)
     }
 }

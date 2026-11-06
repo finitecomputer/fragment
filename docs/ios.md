@@ -150,13 +150,18 @@ phone's network: an attachment of at most 25 MiB, and an icon fitted inside
 256×256 on the phone, as the server would fit it.
 
 JSON text subscriptions match the Worker’s live protocol. A chat reads its last
-50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Which turns run follows
+50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Its window holds at most
+2,000 `chat` records; `work` never counts toward it, and the `work` before its
+oldest message goes with it (at most 20,000 `work` records in all). The chat
+follows its newest record, never a count. Which turns run follows
 the web's chat page (`templates/chat/site/chat.js`): a turn is its agent's and its
 id, a record counts only toward its own poster's turn, and a turn runs once its
 start is read and until its end is, in either order; this is kept apart from the
 shown records. Earlier work is read back as the web reads it, to the oldest message
-shown, and also while a turn was read without its start, in batches of 50 (each
-answer within the app's 4 MiB) and at most 1000 records a visit, so Stop shows for
+shown (kept, for those turns' steps), and also while a turn that may run was read
+without its start (a turn whose end was read needs nothing), in batches that grow
+with how little their records take (from 50, each answer within the app's 4 MiB,
+one that overflows read again at 50), at most 1000 records a visit, so Stop shows for
 a long turn however the chat was opened. An archive's chats index is
 optional: an archive of other kinds alone has none, and a failed read never
 stops the list or its agents. An export is followed while it builds (every two

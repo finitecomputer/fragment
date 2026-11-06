@@ -154,8 +154,16 @@ struct Timeline {
     /// The oldest `work` record read (its seq and time): where reading
     /// earlier work goes on from, and how far back it reached.
     private(set) var oldestWork: (seq: Int64, at: Int64)?
-    // Bound the in-memory window independently of the server's retention.
-    static let maximumRecords = 2_000
+    /// The window: its newest `chat` records, at most this many, whatever
+    /// the server keeps (100,000 a channel). `work` records never count
+    /// toward it: they say which turns run (`turns`, kept apart) and give
+    /// the turns in the window their steps.
+    static let chatMax = 2_000
+    /// `work` records kept at most, the oldest let go first: a bound on
+    /// memory alone, past which the oldest turns' steps go.
+    static let workMax = 20_000
+    private(set) var chatCount = 0
+    private var workCount = 0
     /// Turns kept, past which the oldest ones both begun and ended go: their
     /// start was read, so no earlier page holds it to begin one again.
     static let maximumTurns = 4_096
@@ -181,8 +189,36 @@ struct Timeline {
         }
     }
 
-    /// Whether a turn was read without its start: earlier work holds it.
-    var awaitsAStart: Bool { turns.values.contains { $0.startAt == nil } }
+    /// Whether a turn that may be running was read without its start:
+    /// earlier work holds it. One whose end was read never runs, so its
+    /// start is never read back for it.
+    var awaitsAStart: Bool { turns.values.contains { $0.startAt == nil && !$0.ended } }
+
+    /// Past `chatMax`, the oldest `chat` records go, and the `work` before
+    /// the oldest one kept with them (it belongs to no turn in the window);
+    /// past `workMax`, the oldest `work` goes. Whether a turn runs stays.
+    private mutating func trim() {
+        guard chatCount > Self.chatMax || workCount > Self.workMax else { return }
+        var cut = 0
+        if chatCount > Self.chatMax {
+            var extra = chatCount - Self.chatMax
+            while extra > 0 || (cut < records.count && records[cut].channel != "chat") {
+                if records[cut].channel == "chat" { extra -= 1 }
+                cut += 1
+            }
+        }
+        for old in records.prefix(cut) { ids.remove(old.id); if old.channel == "chat" { chatCount -= 1 } else { workCount -= 1 } }
+        records.removeFirst(cut)
+        if workCount > Self.workMax {
+            var extra = workCount - Self.workMax
+            var kept: [ChannelRecord] = []
+            kept.reserveCapacity(records.count - extra)
+            for old in records {
+                if extra > 0 && old.channel != "chat" { extra -= 1; ids.remove(old.id); workCount -= 1 } else { kept.append(old) }
+            }
+            records = kept
+        }
+    }
 
     mutating func insert(_ record: ChannelRecord, advancingCursor: Bool = true) {
         learn(record)
@@ -193,11 +229,8 @@ struct Timeline {
         // again with every record
         let index = Self.place(record, in: records)
         records.insert(record, at: index)
-        if records.count > Self.maximumRecords {
-            let gone = records.count - Self.maximumRecords
-            for old in records.prefix(gone) { ids.remove(old.id) }
-            records.removeFirst(gone)
-        }
+        if record.channel == "chat" { chatCount += 1 } else { workCount += 1 }
+        trim()
         revision &+= 1
         if advancingCursor, record.channel == "chat", let turn = record.turn,
            drafts[turn]?.principal == record.principal {
