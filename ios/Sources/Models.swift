@@ -196,10 +196,16 @@ struct Timeline {
         }
     }
 
-    /// Whether a turn that may be running was read without its start:
-    /// earlier work holds it. One whose end was read never runs, so its
-    /// start is never read back for it.
-    var awaitsAStart: Bool { turns.values.contains { $0.startAt == nil && !$0.ended } }
+    /// Whether a turn read without its start needs it, from earlier work:
+    /// one that may be running (for Stop), or one whose steps the window
+    /// shows (its card is drawn from its start). One that ended with
+    /// nothing shown needs nothing more.
+    var awaitsAStart: Bool {
+        turns.values.contains { $0.startAt == nil && !$0.ended }
+            || records.contains { record in
+                record.channel == "work" && record.turn.map { turns[TurnKey(agent: record.principal, id: $0)]?.startAt == nil } == true
+            }
+    }
 
     /// Past `chatMax`, the oldest `chat` records go, and the `work` before
     /// the oldest one kept with them (it belongs to no turn in the window);

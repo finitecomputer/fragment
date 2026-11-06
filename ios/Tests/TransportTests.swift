@@ -298,6 +298,39 @@ struct TransportTests {
         #expect(!session.timeline.records.contains { $0.id == "work:500" }, "older work only says which turns run")
     }
 
+    /// A completed turn straddling the backlog: its steps and end are held,
+    /// its start older than both the backlog and the oldest message shown.
+    /// Earlier work goes on past that message until the start, so its card
+    /// (drawn from its start) shows.
+    @Test func aCompletedTurnStraddlingTheBacklogGetsItsStart() async throws {
+        let work: @Sendable (Int64) -> String = { seq in
+            record("work", seq, body: seq == 50 ? #"{"kind":"turn.start","turn":"t"}"# : seq == 110 ? #"{"kind":"turn.end","turn":"t"}"# : #"{"kind":"turn.step","turn":"t","tool":"search"}"#)
+        }
+        let stub = Stub { seen, _ in
+            guard seen.route == "GET /api/f/chat--abc123/channels/work" else { return (404, "{}") }
+            let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
+            return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        // its intermediate reply is the oldest message shown, after its start
+        socket.push(frame("chat", 95, body: #"{"text":"Still looking","turn":"t"}"#))
+        for seq: Int64 in 101...110 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":95,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":110,"more":false}"#)
+        try await waitUntil("its start read back") { session.timeline.turns[TurnKey(agent: "npub1agent", id: "t")]?.startAt != nil }
+        #expect(session.activeTurns.isEmpty && session.error == nil)
+        #expect(!session.activity.cards.isEmpty, "its steps show as a card")
+    }
+
     /// A chat of 1,000 messages, opened on its newest 50: scrolled up, a
     /// page at a time before the oldest, never moving the live cursor; past
     /// the window's 600 its newest end goes. A live message then waits

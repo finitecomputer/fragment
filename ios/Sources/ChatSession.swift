@@ -54,6 +54,9 @@ final class ChatSession {
     /// they are in the window: what the Latest pill counts from.
     private(set) var heard = 0
     var error: String?
+    /// Files being attached, from their choosing until their upload: the
+    /// composer is busy, and one attaching goes at a time (`beginAttaching`).
+    private(set) var attaching = false
     var composer = "" { didSet { scheduleDraftSave() } }
     var attachments: [ChatAttachment] = [] { didSet { scheduleDraftSave() } }
     var replyTo: ChannelRecord? { didSet { scheduleDraftSave() } }
@@ -293,7 +296,34 @@ final class ChatSession {
         }
     }
 
+    /// Reserves the attaching of `count` files, at once, before anything is
+    /// read: none while others are attaching, none past `countMax` a message.
+    /// Then `attach` reads and uploads them; until it ends, nothing sends.
+    func beginAttaching(_ count: Int) -> Bool {
+        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count + attachments.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return false }
+        attaching = true
+        return true
+    }
+    /// The files `prepare` reads (off the main actor, its own), each put by
+    /// its hash and held as the message's attachment; ends what
+    /// `beginAttaching` began.
+    func attach(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
+        defer { attaching = false }
+        do {
+            let files = try await prepare()
+            guard !files.isEmpty else { error = "This could not be attached."; return }
+            guard files.count + attachments.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return }
+            for file in files {
+                let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
+                if !attachments.contains(where: { $0.id == put.id }) { attachments.append(put) }
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+
     func send() async {
+        // what is being attached goes with it, or the message waits
+        guard !attaching else { error = "Wait for the files being attached."; return }
         // a send goes at the chat's end: a window paged back returns there first
         if timeline.detached { await resetToLatest() }
         guard persistence != nil else {

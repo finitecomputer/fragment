@@ -199,4 +199,15 @@ struct TimelineTests {
         timeline.reset((Int64(952)...1001).map(chat))
         #expect(timeline.chatCount == 50 && timeline.activeTurns == ["t"] && timeline.cursors["chat"] == 1001)
     }
+
+    /// A turn that ended still needs its start while the window shows its
+    /// steps: its card is drawn from it.
+    @Test func anEndedTurnWhoseStepsAreShownAwaitsItsStart() {
+        var timeline = Timeline()
+        timeline.insert(work(8, "turn.step", "shown"))
+        timeline.insert(work(9, "turn.end", "shown"))
+        #expect(timeline.awaitsAStart)
+        timeline.learn(work(2, "turn.start", "shown"))
+        #expect(!timeline.awaitsAStart && timeline.activeTurns.isEmpty)
+    }
 }

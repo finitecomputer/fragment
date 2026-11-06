@@ -22,7 +22,6 @@ struct ChatView: View {
     @State private var importer = false
     @State private var photos = false
     @State private var picked: [PhotosPickerItem] = []
-    @State private var uploading = false
     @State private var voice = VoiceMemo()
 
     init(session: ChatSession, library: Library, open: @escaping (FragmentSummary) -> Void) {
@@ -140,16 +139,16 @@ struct ChatView: View {
                 }
                 composerAccessories
                 ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
-                    enabled: session.connected && session.caughtUp, busy: uploading, recording: voice.recording,
+                    enabled: session.connected && session.caughtUp, busy: session.attaching, recording: voice.recording,
                     attachPhotos: { photos = true }, attachFiles: { importer = true },
-                    pasteImages: { pasteboard in Task { await upload(AttachmentInput.pasted(pasteboard)) } },
+                    pasteImages: { pasteboard in paste(pasteboard) },
                     record: { Task { await recordVoice() } },
                     send: { await session.send() }, stop: { await session.stop() }, hasAttachments: !session.attachments.isEmpty)
             }.background(FragmentStyle.background)
         }
         .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
-            case .success(let urls): Task { await uploadFiles(urls) }
+            case .success(let urls): uploadFiles(urls)
             case .failure(let error): session.error = error.localizedDescription
             }
         }
@@ -160,7 +159,9 @@ struct ChatView: View {
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
             picked = []
-            Task { await uploadPicked(items) }
+            // busy from the choosing on, before any photo is read (an iCloud one takes a while)
+            guard session.beginAttaching(items.count) else { return }
+            Task { await session.attach { try await Self.read(items) } }
         }
         .task(id: "\(session.caughtUp)|\(session.chatCursor)|\(scenePhase)") {
             guard scenePhase == .active, session.caughtUp else { return }
@@ -193,54 +194,54 @@ struct ChatView: View {
         }.padding(.horizontal, 20)
     }
 
-    private func uploadFiles(_ urls: [URL]) async {
-        guard urls.count + session.attachments.count <= ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
-        var files: [OutgoingFile] = []
-        for url in urls {
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            do {
-                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size > 0, size <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
-                files.append(try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension)))
-            } catch { session.error = error.localizedDescription; return }
+    /// Files picked, read and put as the message's attachments (the
+    /// session's one attaching at a time); its task, to wait on.
+    @discardableResult
+    private func uploadFiles(_ urls: [URL]) -> Task<Void, Never>? {
+        guard session.beginAttaching(urls.count) else { return nil }
+        return Task {
+            await session.attach {
+                try await Task.detached(priority: .userInitiated) {
+                    try urls.map { url in
+                        let scoped = url.startAccessingSecurityScopedResource()
+                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                        guard size > 0, size <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
+                        return try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
+                    }
+                }.value
+            }
         }
-        await upload(files)
     }
     /// Photos picked: each read in the picker's most compatible encoding,
-    /// a picture made one the web shows (`AttachmentInput.image`).
-    private func uploadPicked(_ items: [PhotosPickerItem]) async {
+    /// a picture made one the web shows (`AttachmentInput.image`), off the
+    /// main actor.
+    private nonisolated static func read(_ items: [PhotosPickerItem]) async throws -> [OutgoingFile] {
         var files: [OutgoingFile] = []
         for (index, item) in items.enumerated() {
-            do {
-                guard let data = try await item.loadTransferable(type: Data.self) else { throw APIError.server("This item could not be read.") }
-                let type = item.supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) } ?? .data
-                files.append(type.conforms(to: .image)
+            guard let data = try await item.loadTransferable(type: Data.self) else { throw APIError.server("This item could not be read.") }
+            let type = item.supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) } ?? .data
+            files.append(try await Task.detached(priority: .userInitiated) {
+                type.conforms(to: .image)
                     ? try AttachmentInput.image(data, type: type, name: "photo-\(index + 1)")
-                    : try AttachmentInput.file(data, name: "video-\(index + 1).\(type.preferredFilenameExtension ?? "mov")", type: type))
-            } catch { session.error = error.localizedDescription; return }
+                    : try AttachmentInput.file(data, name: "video-\(index + 1).\(type.preferredFilenameExtension ?? "mov")", type: type)
+            }.value)
         }
-        await upload(files)
+        return files
     }
-    /// Files put by their hash and held as the message's attachments,
-    /// at most `ChatAttachment.countMax` a message.
-    private func upload(_ files: [OutgoingFile]) async {
-        guard !files.isEmpty else { return }
-        guard files.count + session.attachments.count <= ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
-        uploading = true; defer { uploading = false }
-        for file in files {
-            do {
-                let put = try await session.api.upload(file.data, name: file.name, type: file.type, to: session.fragment.name)
-                if !session.attachments.contains(where: { $0.id == put.id }) { session.attachments.append(put) }
-            } catch { session.error = error.localizedDescription; return }
-        }
+    /// Pictures pasted: read from the pasteboard here, made off the main actor.
+    private func paste(_ pasteboard: UIPasteboard) {
+        let pictures = AttachmentInput.snapshot(pasteboard)
+        guard !pictures.isEmpty else { session.error = "This picture could not be attached."; return }
+        guard session.beginAttaching(pictures.count) else { return }
+        Task { await session.attach { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value } }
     }
     private func recordVoice() async {
         if voice.recording {
-            if let url = voice.stop() { await uploadFiles([url]); try? FileManager.default.removeItem(at: url) }
+            if let url = voice.stop() { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) }
         } else {
             guard session.attachments.count < ChatAttachment.countMax else { session.error = "Attach at most eight files per message."; return }
-            await voice.start { url in Task { await uploadFiles([url]); try? FileManager.default.removeItem(at: url) } }
+            await voice.start { url in Task { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) } }
         }
     }
 }
