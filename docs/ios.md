@@ -211,7 +211,9 @@ failure, or a connection that closes within 5 s of its hello, backs off. Nothing
 is said unless it is not back within 5 s ("Reconnecting…"); the composer stays
 open (sends go over HTTP), and a reply being written stays until the next
 connection's work says its turn ended. A chat closed for good is never opened
-again, and says so as the web's chat does: deleted (4004, or its upgrade answered
+again by its session (not on returning to the app, nor its view coming back;
+leaving the chat and opening it again asks anew), and says so as the web's chat
+does: deleted (4004, or its upgrade answered
 404), "This chat was deleted."; its access changed (4003, or 403), "Your access to
 this chat changed." HTTP/WebSocket
 interruption recovery, independent cursors, Stop and history remain unchanged. Push delivery, approval-card controls, imported-chat continuation, and

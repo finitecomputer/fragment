@@ -275,7 +275,22 @@ struct TransportTests {
             #expect(session.drafts.isEmpty && !session.connected, "\(end): nothing left writing")
             try await Task.sleep(for: .milliseconds(300))
             #expect(stub.sockets.count == sockets, "\(end): no socket after")
+            // back to the app (its view's task runs it again): still closed, no socket
+            await session.run()
+            #expect(stub.sockets.count == sockets && session.error == said && session.closed == said, "\(end): a return to the app opens nothing")
+
+            // left and opened again: a new session asks anew
+            let library = Library()
+            library.sessions[chat.name] = session
+            library.leftChat(chat.name)
+            #expect(library.sessions[chat.name] == nil, "\(end): a closed session goes once the chat is left")
         }
+        // one still open stays across leaving (its drafts and cursors)
+        let open = ChatSession(fragment: chat, api: try Stub { _, _ in (404, "{}") }.api())
+        let library = Library()
+        library.sessions[chat.name] = open
+        library.leftChat(chat.name)
+        #expect(library.sessions[chat.name] === open)
     }
 
     @Test func stopPostsAStopForEachActiveTurn() async throws {

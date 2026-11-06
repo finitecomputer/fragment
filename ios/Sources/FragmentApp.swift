@@ -58,6 +58,11 @@ final class Library {
         if found.kind != "chat" { found.link = url }
         return found
     }
+    /// A chat left: a session of it closed for good goes, so opening it
+    /// again asks anew what it is now (deleted, or open to them again).
+    func leftChat(_ name: String) {
+        if sessions[name]?.closed != nil { sessions.removeValue(forKey: name) }
+    }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]
@@ -339,6 +344,9 @@ struct FragmentRoot: View {
         }
         .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(scenePhase)") {
             if scenePhase == .active { await library.load(api); await library.watch(api) }
+        }
+        .onChange(of: page) { left, _ in
+            if case .chat(let name) = left { library.leftChat(name) }
         }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }

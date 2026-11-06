@@ -160,7 +160,14 @@ final class ChatSession {
     static let accessChanged = "Your access to this chat changed."
     @ObservationIgnored private var reconnectNotice: Task<Void, Never>?
 
+    /// Why the chat is closed for good (deleted, its access changed, the
+    /// key ended), once it is: nothing opens it again, not a return to the
+    /// app nor its view coming back. Only a new session, made once the chat
+    /// is left and opened again, asks anew (`Library.leftChat`).
+    private(set) var closed: String?
+
     func run() async {
+        if let closed { error = closed; return }
         // failures since the last hello: the first reconnects at once (a
         // socket closed as its object sleeps, 4001, or the network dropped),
         // only repeated ones back off
@@ -252,7 +259,7 @@ final class ChatSession {
                 else if code == 4003 || status == 403 { ended = Self.accessChanged }
                 else if status == 401 { ended = "Your access ended. Reconnect your account or check sharing permissions." }
                 refused = ended != nil
-                if !Task.isCancelled, let ended { self.error = ended }
+                if let ended { closed = ended; self.error = ended }
             }
             socket.cancel(with: .goingAway, reason: nil)
             connected = false
