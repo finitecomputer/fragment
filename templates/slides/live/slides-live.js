@@ -12,7 +12,7 @@
 // followed with `fragment.live`; a note being written keeps the page it was
 // started on.
 import * as fragment from "./__fragment.js";
-import { Present } from "./slides-present.js";
+import { Outbox, Present } from "./slides-present.js";
 
 const NOTE_MAX_CHARS = 2000;
 const PROFILES_PER_ASK = 64;
@@ -100,17 +100,21 @@ const mayChange = (note) => me !== null && (me.role === "owner" || note.author =
 // The presenter this page would follow, never itself.
 const presenter = () => present.presenter(people, me?.id);
 
-async function share(live) {
+// This page's posts, one at a time and in order (slides-present.js).
+const outbox = new Outbox(async ({ page: p, live }) => {
   const at = await fragment.me();
   try {
-    const r = await fragment.post("present", { page: page(), live, from: at.id });
-    present.posted(r?.record?.seq ?? r?.seq);
+    await fragment.post("present", { page: p, live, from: at.id });
     failure = null;
   } catch {
     failure = live ? "Your page didn't reach everyone. It will on the next page." : "Couldn't stop presenting. Try again.";
   }
   follow();
   render();
+});
+
+function share(live) {
+  outbox.put({ page: page(), live });
 }
 
 function startPresenting() {

@@ -43,10 +43,13 @@ fragment deploy <name> --dir .
 
 It needs Node 20.19 or later and npm. The first build installs open-slide
 (about 250 MB, from the lockfile: `npm ci`) into a folder outside the
-deck, `$OPEN_SLIDE_HOME` or the system's temporary folder, and links it as
-`node_modules`; npm's cache goes there too and is deleted after. Later
-builds take about a second. A `node_modules` of the deck's own (`npm ci`)
-is used instead. Edit `slides/`, build, deploy.
+deck, `$OPEN_SLIDE_HOME` or else `/tmp/open-slide`, and links it as
+`node_modules`. It never uses the folder `TMPDIR` names: on a computer
+that is the agent's work, saved with it, while the container's `/tmp` is
+not. A folder under `/data` is refused. npm's cache, the install's staging
+and the build's output go there too, and are removed after, a failed
+build's included. Later builds take about a second. A `node_modules` of
+the deck's own (`npm ci`) is used instead. Edit `slides/`, build, deploy.
 
 `node scripts/build.mjs --check` builds the deck again aside and says
 whether `site/` is that build, byte for byte, without changing it.

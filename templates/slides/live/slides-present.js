@@ -11,7 +11,13 @@
 // claims in one order, so the newer wins everywhere, and the older yields
 // once it sees it. A page that has started and not yet heard its own
 // claim's seq yields to nothing: it cannot tell yet whether its claim is the
-// older.
+// older. A page learns its claim as every page does, from its own records,
+// never from a post's answer, so it computes the same claim the others do.
+//
+// One page's posts reach the channel in the order of its actions: its
+// Outbox has one post in flight at a time, and a page change waiting behind
+// it is replaced by a newer one (only the latest page matters), but never
+// across a start or a stop: those are each posted, in order.
 
 export class Present {
   constructor() {
@@ -29,23 +35,18 @@ export class Present {
     if (s && rec.seq <= s.seq) return;
     const claim = b.live ? (s?.live ? s.claim : rec.seq) : null;
     this.sockets.set(b.from, { claim, page: b.page, live: b.live === true, seq: rec.seq, principal: rec.principal });
-    if (b.from === myId && b.live && this.presenting) this.claimed(claim);
+    // my own socket's claim, as the others reckon it (a reconnect is a new
+    // socket, with a claim of its own)
+    if (b.from === myId && b.live && this.presenting) {
+      this.mine = claim;
+      this.pending = false;
+    }
   }
 
   start() {
     this.presenting = true;
     this.pending = true;
     this.mine = null;
-  }
-
-  // My post's answer: its seq. My claim is my first since starting.
-  posted(seq) {
-    if (this.presenting && this.pending && Number.isInteger(seq)) this.claimed(seq);
-  }
-
-  claimed(seq) {
-    if (this.mine === null || seq < this.mine) this.mine = seq;
-    this.pending = false;
   }
 
   stop() {
@@ -72,5 +73,38 @@ export class Present {
     if (!this.presenting || this.pending || this.mine === null) return false;
     const other = this.presenter(here, myId);
     return other !== null && other.claim > this.mine;
+  }
+}
+
+// A page's posts, one in flight at a time, in the order of its actions.
+// `put(state)` with `{page, live}`; `send(state)` posts one and settles when
+// the channel has it (or it failed: the next goes anyway). A page change
+// waiting is replaced by a newer one with the same `live`; a start or a stop
+// waits its turn and is never dropped.
+export class Outbox {
+  constructor(send) {
+    this.send = send;
+    this.queue = [];
+    this.busy = false;
+  }
+
+  put(state) {
+    const last = this.queue[this.queue.length - 1];
+    if (last && last.live === state.live) this.queue[this.queue.length - 1] = state;
+    else this.queue.push(state);
+    if (!this.busy) this.drain();
+  }
+
+  async drain() {
+    this.busy = true;
+    while (this.queue.length) {
+      const state = this.queue.shift();
+      try {
+        await this.send(state);
+      } catch {
+        // its sender says so; the next state still goes
+      }
+    }
+    this.busy = false;
   }
 }
