@@ -4,12 +4,15 @@
 // The page open-slide shows is its URL's `?p=` (1 for the first; present
 // mode follows it too), so presenting is posting that page to the `present`
 // channel, which editors and up may post to (fragment.json), and following
-// is setting it. A presenter is live while their page's presence says
-// `presenting`: a closed tab ends it. The newest live presenter is the one
-// followed; a viewer may stop following, and follows again when someone
-// else starts. Notes are applib/notes.mjs's operations, each on its page
-// (`p3`), followed with `fragment.live`.
+// is setting it. Who presents is slides-present.js's to decide, alike on
+// every page: a presenter is live while their page's presence says
+// `presenting` (a closed tab ends it), and of two, the newer claim wins. A
+// viewer may stop following, and follows again when someone else starts.
+// Notes are applib/notes.mjs's operations, each on its page (`p3`),
+// followed with `fragment.live`; a note being written keeps the page it was
+// started on.
 import * as fragment from "./__fragment.js";
+import { Present } from "./slides-present.js";
 
 const NOTE_MAX_CHARS = 2000;
 const PROFILES_PER_ASK = 64;
@@ -79,8 +82,7 @@ function nameOf(principal) {
 // ---- state
 let me = null; // { id, principal, role } once the socket says hello
 let people = []; // presence: [{id, principal, data}]
-let latest = null; // the newest `present` record
-let presenting = false;
+const present = new Present();
 let following = true;
 let followedFrom = null; // the presenter's socket this page last followed
 let shown = page();
@@ -88,56 +90,55 @@ let notes = [];
 let notesError = null;
 let open = false; // the notes panel
 let replyingTo = null;
-let draft = "";
+const drafts = new Map(); // a composer's key (`p3`, or `r<id>` for a reply) -> its text so far
 let failure = null; // what the last action could not do
 
 const editor = () => me?.role === "editor" || me?.role === "owner";
 const signedIn = () => typeof me?.principal === "string" && me.principal.startsWith("npub1");
 const mayChange = (note) => me !== null && (me.role === "owner" || note.author === me.principal);
 
-// The presenter this page would follow: the newest live record, from a page
-// that is still here and presenting, and not this one.
-function presenter() {
-  const r = latest;
-  if (!r?.body?.live || r.body.from === me?.id) return null;
-  const there = people.find((p) => p.id === r.body.from);
-  return there?.data?.presenting ? r : null;
-}
+// The presenter this page would follow, never itself.
+const presenter = () => present.presenter(people, me?.id);
 
 async function share(live) {
   const at = await fragment.me();
   try {
-    await fragment.post("present", { page: page(), live, from: at.id });
+    const r = await fragment.post("present", { page: page(), live, from: at.id });
+    present.posted(r?.record?.seq ?? r?.seq);
     failure = null;
   } catch {
     failure = live ? "Your page didn't reach everyone. It will on the next page." : "Couldn't stop presenting. Try again.";
   }
+  follow();
   render();
 }
 
 function startPresenting() {
-  presenting = true;
+  present.start();
   fragment.presence.set({ presenting: true });
   share(true);
 }
 function stopPresenting() {
-  presenting = false;
+  present.stop();
   fragment.presence.set({});
   share(false);
 }
 
 function follow() {
-  const r = presenter();
-  if (r && r.body.from !== followedFrom) {
-    // someone started presenting: follow them, and stop presenting here
-    followedFrom = r.body.from;
-    following = true;
-    if (presenting) {
-      presenting = false;
-      fragment.presence.set({});
-    }
+  // someone's newer claim: give way to them (and say so, so a later start
+  // here is a new claim)
+  if (present.yields(people, me?.id)) {
+    present.stop();
+    fragment.presence.set({});
+    share(false);
   }
-  if (r && following && !presenting && Number.isInteger(r.body.page) && r.body.page !== page()) goTo(r.body.page);
+  const r = presenter();
+  if (r && r.from !== followedFrom) {
+    // someone started presenting: follow them
+    followedFrom = r.from;
+    following = true;
+  }
+  if (r && following && !present.presenting && Number.isInteger(r.page) && r.page !== page()) goTo(r.page);
 }
 
 function onPage() {
@@ -145,7 +146,7 @@ function onPage() {
   if (p === shown) return;
   shown = p;
   replyingTo = null;
-  if (presenting) share(true);
+  if (present.presenting) share(true);
   render();
 }
 
@@ -162,7 +163,7 @@ function renderBar() {
   const others = people.filter((p) => p.id !== me?.id).length;
   const r = presenter();
   const parts = [];
-  if (presenting) {
+  if (present.presenting) {
     parts.push(h("span", { class: "sl-live" }, "Live"), h("span", { class: "sl-text" }, `${others} watching`), button("Stop", stopPresenting));
   } else {
     if (here > 0) parts.push(h("span", { class: "sl-text", title: [...new Set(people.map((p) => nameOf(p.principal)))].join(", ") }, `${here} here`));
@@ -196,16 +197,20 @@ function composer(replyTo) {
     const back = `${location.pathname}${location.search}`;
     return h("a", { class: "sl-signin", href: `/__signin?return=${encodeURIComponent(back)}` }, "Sign in to leave a note");
   }
-  const area = h("textarea", { class: "sl-input", rows: "3", maxlength: String(NOTE_MAX_CHARS), placeholder: replyTo ? "Reply" : `A note on page ${page()}` });
-  area.value = draft;
-  area.addEventListener("input", () => { draft = area.value; });
+  // the page it is on now, kept: a note started on page 2 is page 2's,
+  // whatever page the deck has moved to by its send
+  const on = page();
+  const key = replyTo ? `r${replyTo}` : `p${on}`;
+  const area = h("textarea", { class: "sl-input", rows: "3", maxlength: String(NOTE_MAX_CHARS), placeholder: replyTo ? "Reply" : `A note on page ${on}`, "data-anchor": replyTo ? null : `p${on}` });
+  area.value = drafts.get(key) ?? "";
+  area.addEventListener("input", () => { drafts.set(key, area.value); });
   const send = async (e) => {
     e.preventDefault();
     const text = area.value.trim();
     if (!text) return;
-    const input = replyTo ? { reply_to: replyTo, text } : { anchor: `p${page()}`, text };
+    const input = replyTo ? { reply_to: replyTo, text } : { anchor: `p${on}`, text };
     if (await act("annotate", input)) {
-      draft = "";
+      drafts.delete(key);
       replyingTo = null;
       render();
     }
@@ -217,7 +222,7 @@ function thread(root) {
   const replies = notes.filter((n) => n.reply_to === root.id);
   const line = (n) => h("div", { class: "sl-note" }, h("div", { class: "sl-who" }, nameOf(n.author)), h("div", { class: "sl-say" }, n.text));
   const actions = [];
-  if (!root.resolved && signedIn()) actions.push(button("Reply", () => { replyingTo = root.id; draft = ""; render(); }, "sl-quiet"));
+  if (!root.resolved && signedIn()) actions.push(button("Reply", () => { replyingTo = root.id; render(); }, "sl-quiet"));
   if (mayChange(root)) actions.push(button(root.resolved ? "Reopen" : "Resolve", () => act("resolve", { id: root.id, resolved: !root.resolved }), "sl-quiet"));
   if (root.resolved) {
     return h("div", { class: "sl-thread sl-resolved", "data-thread": String(root.id) }, h("div", { class: "sl-say" }, `Resolved: ${root.text}`), h("div", { class: "sl-actions" }, actions));
@@ -270,12 +275,13 @@ function start() {
     people = list;
     for (const p of list) want(p.principal);
     // a reconnected presenter's socket is new: say where it is again
-    if (presenting) fragment.me().then((m) => { me = m; if (latest?.body?.from !== m.id) share(true); });
+    if (present.presenting) fragment.me().then((m) => { me = m; if (!present.sockets.get(m.id)?.live) share(true); });
     follow();
     render();
   });
   fragment.presence.set({});
-  fragment.subscribe("present", (rec) => { latest = rec; want(rec.principal); follow(); render(); }, { last: 1 });
+  // enough of the channel's end for each presenter's claim
+  fragment.subscribe("present", (rec) => { present.record(rec, me?.id); want(rec.principal); follow(); render(); }, { last: 100 });
   fragment.live("notes", {}, (r) => { notes = r.notes; notesError = null; for (const n of notes) want(n.author); render(); }, (err) => { notesError = err; render(); });
   render();
 }

@@ -6,7 +6,8 @@
 //! hashed assets are served; an editor presents live on the `present`
 //! channel and a second, anonymous page follows page by page, also in
 //! open-slide's present mode, stops following and follows again; a note
-//! left on a page reaches the other page live. Invalid: a reader's post to
+//! left on a page reaches the other page live, and one typed while the
+//! page moves keeps the page it was started on. Invalid: a reader's post to
 //! `present` (editors and up present), and an anonymous one (sign in). With
 //! `FRAGMENT_E2E_KEEP`, the run keeps the two pages' screenshots in
 //! `slides-media/`.
@@ -23,6 +24,7 @@ use crate::Suite;
 
 const WAIT: Duration = Duration::from_secs(20);
 const NOTE: &str = "Could this page say who follows?";
+const KEPT: &str = "Started on page 4, sent from page 2.";
 
 /// The bar's text on a page (empty before it is drawn).
 fn bar(chrome: &mut Browser, page: &Page) -> String {
@@ -192,6 +194,23 @@ pub fn slides(s: &mut Suite, api: &Api) -> Result<()> {
         "stopping ends it for everyone, and the channel holds each page presented",
         ended && bodies.last().is_some_and(|b| b["live"] == false) && [1, 2, 3, 4].iter().all(|p| bodies.iter().any(|b| b["page"] == *p && b["live"] == true)),
         json!(bodies),
+    );
+
+    // a note keeps the page it was started on: typed on page 4, sent after
+    // the page moved to 2 (as following moves it), it is page 4's
+    let typing = chrome.until(&a, "document.querySelector('.sl-panel textarea')?.dataset.anchor === 'p4'", WAIT);
+    chrome.click(&a, ".sl-panel textarea")?;
+    chrome.type_text(&a, KEPT)?;
+    chrome.eval(&a, "(() => { const u = new URL(location.href); u.searchParams.set('p', '2'); history.replaceState(history.state, '', u); dispatchEvent(new PopStateEvent('popstate', { state: history.state })); })()")?;
+    let moved = chrome.until(&a, &at_page(2), WAIT);
+    chrome.click(&a, ".sl-panel button[type=submit]")?;
+    let sent = chrome.until(&a, &format!("document.querySelector('.sl-panel').innerText.includes({KEPT:?}) || document.querySelector('.sl-panel').innerText.includes('Page 2')"), WAIT);
+    let kept = api.op(&owner, &name, "notes", "q2", json!({}))?;
+    let kept: Vec<Value> = kept.body["result"]["notes"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "a note typed on page 4 and sent after the page moved stays page 4's",
+        typing && moved && sent && kept.iter().any(|n| n["text"] == KEPT && n["anchor"] == "p4") && !kept.iter().any(|n| n["text"] == KEPT && n["anchor"] != "p4"),
+        json!(kept),
     );
     Ok(())
 }

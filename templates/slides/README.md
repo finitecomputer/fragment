@@ -17,16 +17,20 @@ fragment init my-talk --template slides   # scaffold, create, deploy
   `slide-authoring` skill is the reference for writing one
   (`node_modules/@open-slide/core/skills/` after a build). One deck per
   fragment.
-- `package.json` pins open-slide and React to exact versions;
-  `open-slide.config.ts` turns off open-slide's list of decks.
+- `package.json` pins open-slide and React to exact versions, and
+  `package-lock.json` locks everything they need; `open-slide.config.ts`
+  turns off open-slide's list of decks.
 - `scripts/build.mjs` builds the deck into `site/` (below).
 - `live/` is the live layer the build adds to the page:
   `slides-live.js` (the bar: who is here, Present live, following, notes),
+  `slides-present.js` (who presents, decided alike on every page),
   `slides-live.css`, and `slides-route.js` (`/` opens the deck).
 - `app.mjs` and `applib/notes.mjs` are the notes: the doc template's
   mixin, copied whole. A note's `anchor` is its page: `p1` for the first.
 - `site/` is the built deck the fragment serves. The template ships one,
   built from the starter deck, so a new deck deploys as it is.
+  `site/build.json` names the hash of every input the build read and of
+  every file it made.
 
 ## Building
 
@@ -36,10 +40,14 @@ fragment deploy <name> --dir .
 ```
 
 It needs Node 20.19 or later and npm. The first build installs open-slide
-(about 250 MB) into a folder outside the deck, `$OPEN_SLIDE_HOME` or the
-system's temporary folder, and links it as `node_modules`; later builds
-take about a second. A `node_modules` of the deck's own (`npm install`)
+(about 250 MB, from the lockfile: `npm ci`) into a folder outside the
+deck, `$OPEN_SLIDE_HOME` or the system's temporary folder, and links it as
+`node_modules`; npm's cache goes there too and is deleted after. Later
+builds take about a second. A `node_modules` of the deck's own (`npm ci`)
 is used instead. Edit `slides/`, build, deploy.
+
+`node scripts/build.mjs --check` builds the deck again aside and says
+whether `site/` is that build, byte for byte, without changing it.
 
 `open-slide dev` (`npx open-slide dev`, after a build) runs open-slide's
 own editor on your machine; build and deploy when done.
@@ -49,7 +57,8 @@ own editor on your machine; build and deploy when done.
 An editor or the owner presses **Present live**. Their page goes to the
 `present` channel (`{page, live, from}`, which only editors and up may
 post), and every open page follows it, in open-slide's present mode too.
-A viewer can stop following and follow again. Presenting ends with
+If two start at once, the later start presents and the other gives way,
+on every page alike. A viewer can stop following and follow again. Presenting ends with
 **Stop**, or when the presenter's page closes. The presenter's view
 (`/s/deck/presenter`, with speaker notes and a timer) is open-slide's.
 
@@ -64,7 +73,7 @@ fragment call <deck> resolve --input '{"id": 1, "resolved": true}'
 ```
 
 A note stays on its page number: reordering pages leaves notes where
-they were.
+they were. A note being written keeps the page it was started on.
 
 ## Exports
 
