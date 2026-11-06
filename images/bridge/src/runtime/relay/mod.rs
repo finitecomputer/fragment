@@ -172,6 +172,269 @@ enum Wire {
     Pictured { turn: String, part: u32, link: String, file: Result<LocalFile, String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    Unsent,
+    Sent,
+    Acked,
+}
+
+impl Delivery {
+    fn sent(self) -> bool {
+        self != Self::Unsent
+    }
+
+    fn send(&mut self, sent: bool) {
+        if sent && *self == Self::Unsent {
+            *self = Self::Sent;
+        }
+    }
+
+    fn ack(&mut self) -> bool {
+        if *self == Self::Acked {
+            return false;
+        }
+        *self = Self::Acked;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnPhase {
+    Running,
+    Stopping,
+    Ending { stopped: bool },
+}
+
+impl TurnPhase {
+    fn stopped(self) -> bool {
+        matches!(self, Self::Stopping | Self::Ending { stopped: true })
+    }
+
+    fn ending(self) -> bool {
+        matches!(self, Self::Ending { .. })
+    }
+
+    fn stop(&mut self) {
+        *self = match *self {
+            Self::Running | Self::Stopping => Self::Stopping,
+            Self::Ending { .. } => Self::Ending { stopped: true },
+        };
+    }
+
+    fn end(&mut self) {
+        *self = Self::Ending { stopped: self.stopped() };
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordQuestion {
+    Idle,
+    Asking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardQuestion {
+    Closed,
+    Open,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtherAnswer {
+    None,
+    Worded,
+}
+
+struct Question {
+    words: WordQuestion,
+    card: CardQuestion,
+    other: OtherAnswer,
+}
+
+impl Question {
+    fn new() -> Self {
+        Self { words: WordQuestion::Idle, card: CardQuestion::Closed, other: OtherAnswer::None }
+    }
+
+    fn waits_for_owner(&self) -> bool {
+        self.words == WordQuestion::Asking || self.card == CardQuestion::Open
+    }
+
+    fn answer_words(&mut self) {
+        self.words = WordQuestion::Idle;
+    }
+
+    fn close_card(&mut self) {
+        self.card = CardQuestion::Closed;
+    }
+
+    fn answer_card(&mut self, words: bool) {
+        self.card = CardQuestion::Closed;
+        self.other = if words { OtherAnswer::Worded } else { OtherAnswer::None };
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Draft {
+    Idle,
+    Streaming,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepReply {
+    None,
+    Worded,
+    Unworded,
+}
+
+struct Replies {
+    draft: Draft,
+    step: StepReply,
+    late: Option<u32>,
+}
+
+impl Replies {
+    fn new() -> Self {
+        Self { draft: Draft::Idle, step: StepReply::None, late: None }
+    }
+
+    fn drafting(&mut self) {
+        self.draft = Draft::Streaming;
+    }
+
+    fn step(&mut self) {
+        self.step = if self.draft == Draft::Idle && self.step != StepReply::Worded { StepReply::Unworded } else { StepReply::None };
+    }
+
+    /// Returns the preceding late reply that this send proves was interim.
+    /// A send inserted at a word barrier does not advance step segmentation.
+    fn sent(&mut self, part: u32, waited: bool) -> Option<u32> {
+        self.draft = Draft::Idle;
+        let late = self.late.take();
+        if waited {
+            return late;
+        }
+        if self.step == StepReply::Unworded {
+            self.late = Some(part);
+            self.step = StepReply::None;
+            return None;
+        }
+        self.step = StepReply::Worded;
+        late
+    }
+
+    fn stop_waiting(&mut self) {
+        self.draft = Draft::Idle;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WordWait {
+    at: usize,
+    since: tokio::time::Instant,
+}
+
+enum Barrier {
+    Open,
+    Words(WordWait),
+    Images(usize),
+    WordsAndImages { words: WordWait, images: usize },
+    Draining,
+}
+
+struct Ordering {
+    queue: VecDeque<Event>,
+    barrier: Barrier,
+}
+
+impl Ordering {
+    fn new() -> Self {
+        Self { queue: VecDeque::new(), barrier: Barrier::Open }
+    }
+
+    fn waits(&self) -> bool {
+        !matches!(self.barrier, Barrier::Open | Barrier::Draining)
+    }
+
+    fn images(&self) -> usize {
+        match self.barrier {
+            Barrier::Images(images) | Barrier::WordsAndImages { images, .. } => images,
+            _ => 0,
+        }
+    }
+
+    fn words(&self) -> Option<WordWait> {
+        match self.barrier {
+            Barrier::Words(words) | Barrier::WordsAndImages { words, .. } => Some(words),
+            _ => None,
+        }
+    }
+
+    fn word_position(&self) -> Option<usize> {
+        self.words().map(|w| w.at)
+    }
+
+    fn move_word_position(&mut self, from: usize) {
+        if let Some(mut words) = self.words().filter(|w| w.at >= from) {
+            words.at += 1;
+            self.set_words(Some(words));
+        }
+    }
+
+    fn set_words(&mut self, words: Option<WordWait>) {
+        let images = self.images();
+        self.barrier = match (words, images) {
+            (Some(words), 0) => Barrier::Words(words),
+            (Some(words), images) => Barrier::WordsAndImages { words, images },
+            (None, 0) => Barrier::Open,
+            (None, images) => Barrier::Images(images),
+        };
+    }
+
+    fn wait_for_words(&mut self, at: usize, since: tokio::time::Instant) {
+        if self.words().is_none() {
+            self.set_words(Some(WordWait { at, since }));
+        }
+    }
+
+    fn take_words(&mut self) -> Option<usize> {
+        let at = self.word_position();
+        self.set_words(None);
+        at
+    }
+
+    fn add_images(&mut self, images: usize) {
+        if images == 0 {
+            return;
+        }
+        let words = self.words();
+        let images = self.images() + images;
+        self.barrier = match words {
+            Some(words) => Barrier::WordsAndImages { words, images },
+            None => Barrier::Images(images),
+        };
+    }
+
+    fn image_done(&mut self) {
+        let images = self.images().saturating_sub(1);
+        let words = self.words();
+        self.barrier = match (words, images) {
+            (Some(words), 0) => Barrier::Words(words),
+            (Some(words), images) => Barrier::WordsAndImages { words, images },
+            (None, 0) => Barrier::Open,
+            (None, images) => Barrier::Images(images),
+        };
+    }
+
+    fn begin_drain(&mut self) -> Barrier {
+        std::mem::replace(&mut self.barrier, Barrier::Draining)
+    }
+
+    fn end_drain(&mut self, barrier: Barrier) {
+        self.barrier = barrier;
+    }
+}
+
 /// A turn Hermes was handed.
 struct Inflight {
     start: TurnStart,
@@ -179,76 +442,32 @@ struct Inflight {
     profile: String,
     order: u64,
     frame: String,
-    acked: bool,
-    /// Its inbound went out on a greeted connection at least once.
-    sent: bool,
+    delivery: Delivery,
     /// Reply messages, by the id the bridge gave them, and their parts.
     parts: HashMap<String, u32>,
     next_part: u32,
     /// It said something: a reply, a draft, a step, a prompt, a file (so
     /// its next `✅` is its end, not the startup gate's empty bracket's).
     said: bool,
-    stopped: bool,
-    /// It asked its asker something to answer in words, not yet told.
-    asking: bool,
-    /// A clarify's card of choices is open, not yet answered.
-    carded: bool,
-    /// A clarify's "Other" was answered in words on its card, which went to
-    /// Hermes with the answer: its `✏️ Type your answer:` that follows asks
-    /// nothing.
-    worded: bool,
-    /// Draft frames came since its last reply `send`: words stream, and the
-    /// `send` that ends them is still to come (Hermes ends a draft segment
-    /// at every tool boundary with one, so the model's words before a tool
-    /// call arrive as a reply, which its tool's observation can come before).
-    drafting: bool,
-    /// Words came since its last step, not that step's late ones: the
-    /// next step's.
-    worded_since_step: bool,
-    /// Its last step came with no words nor any streaming: its words, if
-    /// any, are still to come (its end overtook their `send`).
-    unworded_step: bool,
-    /// The words that came first after an unworded step: its, late, or the
-    /// turn's next. A reply after them, no step between, says they were
-    /// its: interim (`Event::Interim`, just before that reply).
-    late_reply: Option<u32>,
-    /// The turn's events (steps, replies and their files, cards, its end)
-    /// that wait, in the order they came, behind what is not whole yet: a
-    /// reply's image links being fetched (nothing after a reply may seal
-    /// it before its files are on it), or the words a draft segment
-    /// streams after its tool's observation came first (`words_at`: where in
-    /// the queue those words go when their `send` comes, before the steps
-    /// that came meanwhile; `held_at`, since when). Let go in order once
-    /// nothing is awaited (`drain`); the words are waited for at most
-    /// `limits::STEP_HOLD_MS`, the files within the fetch's own bound.
-    queue: VecDeque<Event>,
-    words_at: Option<usize>,
-    held_at: Option<tokio::time::Instant>,
-    /// Its end is said (queued behind what waits, or posted): another
-    /// says nothing more.
-    ending: bool,
+    phase: TurnPhase,
+    question: Question,
+    replies: Replies,
+    ordering: Ordering,
     /// Messages that are no reply (a notice, "Other"'s ask for words, its
     /// progress): an edit of one changes nothing.
     taken: Vec<String>,
-    /// Its replies' image links being fetched (`picture`), and the reply
-    /// parts they are in with their text as it stands.
-    pictures: usize,
+    /// Reply parts whose image links are being fetched, with their text as it
+    /// stands. The outstanding count belongs to the ordering barrier.
     pictured: HashMap<u32, String>,
 }
 
 impl Inflight {
-    /// Something of the turn is not whole yet, so what comes after it waits.
-    fn waits(&self) -> bool {
-        self.pictures > 0 || self.words_at.is_some()
-    }
-
     /// The words a draft segment streamed are not waited for any more (a
     /// question, a card, a file or the end came instead, or their wait is
     /// out): the steps that waited for them go once nothing else waits.
     fn stop_waiting_for_words(&mut self) {
-        self.drafting = false;
-        self.words_at = None;
-        self.held_at = None;
+        self.replies.stop_waiting();
+        self.ordering.take_words();
     }
 
     /// A message that is no reply (its edits change nothing), the oldest
@@ -264,7 +483,7 @@ impl Inflight {
     /// `✅` once it said something; once stopped, its `👀` off or either.
     fn ended_by(&self, emoji: &str, remove: bool) -> Option<Outcome> {
         match (emoji, remove) {
-            (wire::STARTED, true) | (wire::DONE | wire::FAILED, false) if self.stopped => Some(Outcome::Stopped),
+            (wire::STARTED, true) | (wire::DONE | wire::FAILED, false) if self.phase.stopped() => Some(Outcome::Stopped),
             (wire::FAILED, false) => Some(Outcome::Error("Hermes' turn failed".into())),
             (wire::DONE, false) if self.said => Some(Outcome::Idle),
             _ => None,
@@ -579,15 +798,15 @@ impl Loop {
             Command::Start(ts) => self.start(*ts),
             Command::Stop { turn } => {
                 let Some(f) = self.inflight.get_mut(&turn) else { return };
-                if f.acked || f.sent {
+                if f.delivery.sent() {
                     // Hermes has it (or may): interrupt it now, and again at
                     // its ack or the next dial, should this one be lost.
-                    f.stopped = true;
+                    f.phase.stop();
                     let frame = wire::interrupt(&f.profile, &f.chat);
                     // a clarify waiting on the person (their words, or its
                     // card) never sees the interrupt: words let it go, and
                     // the turn stops
-                    let asking = (f.asking || f.carded).then(|| (f.start.asker.clone(), f.start.asker_name.clone()));
+                    let asking = f.question.waits_for_owner().then(|| (f.start.asker.clone(), f.start.asker_name.clone()));
                     crate::ev!("relay.interrupt", { "turn": turn });
                     self.send(frame);
                     if let Some((by, by_name)) = asking {
@@ -603,7 +822,7 @@ impl Loop {
                 // Answered or expired, the card asks no more: a Stop after
                 // it says nothing to a clarify.
                 if let Some(f) = self.inflight.get_mut(&turn) {
-                    f.carded = false;
+                    f.question.close_card();
                 }
                 // An expiry needs no word to Hermes: its own wait (the
                 // image sets an approval's and a clarify's to the bridge's
@@ -617,7 +836,7 @@ impl Loop {
                 // waits on words) before it reads the next inbound, the
                 // words, as its clarify's answer; its ask for them shows
                 // nothing
-                f.worded = words.is_some();
+                f.question.answer_card(words.is_some());
                 let _ = self.send(frame.clone());
                 self.answers.push(PendingAnswer { buffer, frame });
                 if let Some(words) = words {
@@ -650,7 +869,7 @@ impl Loop {
     /// inbound in the turn's chat, kept until Hermes acks it.
     fn tell(&mut self, turn: &str, seq: u64, by: &str, by_name: &str, text: &str) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        f.asking = false;
+        f.question.answer_words();
         let message_id = format!("{turn}-t{seq}");
         let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
         let buffer = format!("t-{turn}-{seq}");
@@ -706,7 +925,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, worded_since_step: false, unworded_step: false, late_reply: None, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, delivery: if sent { Delivery::Sent } else { Delivery::Unsent }, parts: HashMap::new(), next_part: 1, said: false, phase: TurnPhase::Running, question: Question::new(), replies: Replies::new(), ordering: Ordering::new(), taken: Vec::new(), pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -773,29 +992,28 @@ impl Loop {
                 // Every inbound not acked, in the order handed, then every
                 // answer, then every Stop: Hermes drops what it already saw.
                 let mut unacked: BTreeMap<u64, (String, String)> = BTreeMap::new();
-                for (id, f) in self.inflight.iter().filter(|(_, f)| !f.acked) {
+                for (id, f) in self.inflight.iter().filter(|(_, f)| f.delivery != Delivery::Acked) {
                     unacked.insert(f.order, (id.clone(), f.frame.clone()));
                 }
                 for (id, frame) in unacked.into_values() {
                     let sent = self.send(frame);
                     if let Some(f) = self.inflight.get_mut(&id) {
-                        f.sent |= sent;
+                        f.delivery.send(sent);
                     }
                 }
                 for a in &self.answers {
                     let _ = self.send(a.frame.clone());
                 }
-                let stops: Vec<String> = self.inflight.values().filter(|f| f.stopped && f.acked).map(|f| wire::interrupt(&f.profile, &f.chat)).collect();
+                let stops: Vec<String> = self.inflight.values().filter(|f| f.phase.stopped() && f.delivery == Delivery::Acked).map(|f| wire::interrupt(&f.profile, &f.chat)).collect();
                 for frame in stops {
                     let _ = self.send(frame);
                 }
             }
             FromGateway::InboundAck { buffer_id } => {
                 if let Some(f) = self.inflight.get_mut(&buffer_id) {
-                    if !f.acked {
-                        f.acked = true;
+                    if f.delivery.ack() {
                         // Stopped before Hermes took it: tell it now.
-                        let stop = f.stopped.then(|| wire::interrupt(&f.profile, &f.chat));
+                        let stop = f.phase.stopped().then(|| wire::interrupt(&f.profile, &f.chat));
                         if let Some(frame) = stop {
                             let _ = self.send(frame);
                         }
@@ -894,9 +1112,9 @@ impl Loop {
                     let (fragment, agent) = (f.start.fragment.clone(), f.start.agent.fragment.clone());
                     crate::ev!("relay.notice", { "turn": turn, "category": category.as_str() });
                     self.emit(Event::Notice { agent, fragment, category, text }).await;
-                } else if f.worded && text.trim_start().starts_with("✏️") {
+                } else if f.question.other == OtherAnswer::Worded && text.trim_start().starts_with("✏️") {
                     // "Other"'s ask for words, which went with its answer
-                    f.worded = false;
+                    f.question.other = OtherAnswer::None;
                     f.take_message(id.clone());
                     crate::ev!("relay.worded", { "turn": turn });
                 } else if let Some(question) = wire::question(&text) {
@@ -906,7 +1124,7 @@ impl Loop {
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
-                    f.asking = true;
+                    f.question.words = WordQuestion::Asking;
                     // no words to wait for: the steps before it go first
                     f.stop_waiting_for_words();
                     self.drain(&turn, false).await;
@@ -922,22 +1140,16 @@ impl Loop {
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
-                    f.drafting = false;
-                    let said = f.late_reply.take().map(|late| Event::Interim { turn: turn.clone(), part: late }).into_iter().chain([Event::Reply { turn: turn.clone(), part, text: text.clone() }]);
-                    match f.words_at.take() {
+                    let waited = f.ordering.words().is_some();
+                    let said = f.replies.sent(part, waited).map(|late| Event::Interim { turn: turn.clone(), part: late }).into_iter().chain([Event::Reply { turn: turn.clone(), part, text: text.clone() }]);
+                    match f.ordering.take_words() {
                         Some(at) => {
-                            f.held_at = None;
-                            let at = at.min(f.queue.len());
+                            let at = at.min(f.ordering.queue.len());
                             for (i, e) in said.enumerate() {
-                                f.queue.insert(at + i, e);
+                                f.ordering.queue.insert(at + i, e);
                             }
                         }
                         None => {
-                            if std::mem::take(&mut f.unworded_step) {
-                                f.late_reply = Some(part);
-                            } else {
-                                f.worded_since_step = true;
-                            }
                             for e in said {
                                 self.out(&turn, e).await;
                             }
@@ -947,7 +1159,7 @@ impl Loop {
                     // comes after it waits for them
                     let links = wire::image_links(&text);
                     if let Some(f) = self.inflight.get_mut(&turn).filter(|_| !links.is_empty()) {
-                        f.pictures += links.len();
+                        f.ordering.add_images(links.len());
                         f.pictured.insert(part, text);
                     }
                     self.picture(&turn, part, links);
@@ -1003,7 +1215,7 @@ impl Loop {
             Action::Draft { chat, content, .. } => {
                 if let Some(turn) = turn_of(&chat, &self.by_chat) {
                     let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                    f.drafting = true;
+                    f.replies.drafting();
                     let (text, _) = wire::uncursored(&content);
                     self.emit(Event::Draft { turn, text: text.to_string() }).await;
                 }
@@ -1013,7 +1225,9 @@ impl Loop {
                 let Some(turn) = turn_of(&chat, &self.by_chat) else { return json!({ "success": false, "error": "no turn runs in that chat" }) };
                 let id = self.message_id();
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                f.carded |= clarify;
+                if clarify {
+                    f.question.card = CardQuestion::Open;
+                }
                 // the engine posts an open reply before the card; the steps
                 // before it go first, as soon as a reply's files are in
                 f.stop_waiting_for_words();
@@ -1117,7 +1331,7 @@ impl Loop {
     async fn pictured(&mut self, turn: &str, part: u32, link: String, file: Result<LocalFile, String>) {
         // a turn over (stopped, gone quiet) takes no file
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        f.pictures = f.pictures.saturating_sub(1);
+        f.ordering.image_done();
         // a part taken back since (Hermes' delete) shows nothing of it
         let shown = match (&file, f.pictured.get_mut(&part)) {
             (Ok(_), Some(text)) => {
@@ -1126,21 +1340,19 @@ impl Loop {
             }
             _ => None,
         };
-        if f.pictures == 0 {
+        if f.ordering.images() == 0 {
             f.pictured.clear();
         }
         if let (Some(text), Ok(file)) = (shown, file) {
             let files = [Event::Reply { turn: turn.to_string(), part, text }, Event::Attachment { turn: turn.to_string(), part, file }];
-            match f.queue.iter().rposition(|e| part_of(e) == Some(part)) {
+            match f.ordering.queue.iter().rposition(|e| part_of(e) == Some(part)) {
                 // its reply still waits in the queue: just after it (words
                 // awaited at or past there keep their place behind it)
                 Some(at) => {
                     for (i, e) in files.into_iter().enumerate() {
                         let here = at + 1 + i;
-                        f.queue.insert(here, e);
-                        if let Some(w) = f.words_at.as_mut().filter(|w| **w >= here) {
-                            *w += 1;
-                        }
+                        f.ordering.queue.insert(here, e);
+                        f.ordering.move_word_position(here);
                     }
                 }
                 // its reply went out, and all that came after it waits: now
@@ -1167,34 +1379,32 @@ impl Loop {
     /// `✅` ends it), after the model's words before the call: a reply part
     /// the engine posts before the step. One that comes while its words
     /// still stream (their `send` to come) waits for them, which go before
-    /// it (`Inflight::words_at`); one that comes while something before it
-    /// is not whole waits in order (`out`).
+    /// it; one that comes while something before it is not whole waits in
+    /// order (`out`).
     async fn step(&mut self, turn: &str, step: Step) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.said = true;
-        f.unworded_step = !f.drafting && !f.worded_since_step;
-        f.worded_since_step = false;
-        if f.drafting && f.words_at.is_none() {
-            f.words_at = Some(f.queue.len());
-            f.held_at = Some(tokio::time::Instant::now());
+        f.replies.step();
+        if f.replies.draft == Draft::Streaming && f.ordering.words().is_none() {
+            f.ordering.wait_for_words(f.ordering.queue.len(), tokio::time::Instant::now());
             crate::ev!("relay.steps_wait", { "turn": turn, "for": "words" });
         }
         self.out(turn, Event::Step { turn: turn.to_string(), step }).await;
     }
 
     /// An event of the turn, in its order: at once, or, while something
-    /// before it is not whole (`Inflight::waits`) or others wait, behind
-    /// them. Bounded: past `limits::QUEUED_EVENTS_MAX` waiting, all go at
-    /// once (a file still coming is then too late for its reply).
+    /// before it is not whole or others wait, behind them. Bounded: past
+    /// `limits::QUEUED_EVENTS_MAX` waiting, all go at once (a file still
+    /// coming is then too late for its reply).
     async fn out(&mut self, turn: &str, e: Event) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        if !f.waits() && f.queue.is_empty() {
+        if !f.ordering.waits() && f.ordering.queue.is_empty() {
             self.emit(e).await;
             return;
         }
-        f.queue.push_back(e);
-        if f.queue.len() >= limits::QUEUED_EVENTS_MAX {
-            crate::ev!("relay.queue_full", { "turn": turn, "events": f.queue.len() });
+        f.ordering.queue.push_back(e);
+        if f.ordering.queue.len() >= limits::QUEUED_EVENTS_MAX {
+            crate::ev!("relay.queue_full", { "turn": turn, "events": f.ordering.queue.len() });
             self.drain(turn, true).await;
         }
     }
@@ -1204,16 +1414,19 @@ impl Loop {
     /// end among them lets the turn go.
     async fn drain(&mut self, turn: &str, force: bool) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        if f.queue.is_empty() || (!force && f.waits()) {
+        if f.ordering.queue.is_empty() || (!force && f.ordering.waits()) {
             return;
         }
         if force {
             f.stop_waiting_for_words();
         }
-        let waited: Vec<Event> = f.queue.drain(..).collect();
+        let barrier = f.ordering.begin_drain();
+        let waited: Vec<Event> = f.ordering.queue.drain(..).collect();
         crate::ev!("relay.released", { "turn": turn, "events": waited.len(), "force": force });
         if waited.iter().any(|e| matches!(e, Event::End { .. })) {
             self.forget(turn);
+        } else if let Some(f) = self.inflight.get_mut(turn) {
+            f.ordering.end_drain(barrier);
         }
         for e in waited {
             self.emit(e).await;
@@ -1224,7 +1437,7 @@ impl Loop {
     /// links is the fetch's, which answers within its own bound).
     fn hold_due(&self) -> Option<tokio::time::Instant> {
         let wait = std::time::Duration::from_millis(limits::STEP_HOLD_MS);
-        self.inflight.values().filter(|f| f.pictures == 0).filter_map(|f| f.held_at).map(|at| at + wait).min()
+        self.inflight.values().filter(|f| f.ordering.images() == 0).filter_map(|f| f.ordering.words()).map(|w| w.since + wait).min()
     }
 
     /// Steps whose wait for the words before them ran out post now: the
@@ -1232,7 +1445,7 @@ impl Loop {
     async fn held_out(&mut self) {
         let now = tokio::time::Instant::now();
         let wait = std::time::Duration::from_millis(limits::STEP_HOLD_MS);
-        let due: Vec<String> = self.inflight.iter().filter(|(_, f)| f.pictures == 0 && f.held_at.is_some_and(|at| at + wait <= now)).map(|(id, _)| id.clone()).collect();
+        let due: Vec<String> = self.inflight.iter().filter(|(_, f)| f.ordering.images() == 0 && f.ordering.words().is_some_and(|w| w.since + wait <= now)).map(|(id, _)| id.clone()).collect();
         for turn in due {
             if let Some(f) = self.inflight.get_mut(&turn) {
                 f.stop_waiting_for_words();
@@ -1248,16 +1461,16 @@ impl Loop {
     async fn end(&mut self, turn: &str, outcome: Outcome) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         let idle = outcome == Outcome::Idle;
-        if f.ending {
+        if f.phase.ending() {
             // its idle end waits for a file; a stop or failure now ends it
             if !idle {
                 self.drain(turn, true).await;
             }
             return;
         }
-        f.ending = true;
+        f.phase.end();
         f.stop_waiting_for_words();
-        f.queue.push_back(Event::End { turn: turn.to_string(), outcome });
+        f.ordering.queue.push_back(Event::End { turn: turn.to_string(), outcome });
         self.drain(turn, !idle).await;
     }
 
@@ -1266,5 +1479,111 @@ impl Loop {
         if let Some(f) = self.by_chat.get(chat).and_then(|t| self.inflight.get_mut(t)) {
             f.said = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn delivery_send_and_ack_are_idempotent() {
+        let mut delivery = Delivery::Unsent;
+        delivery.send(false);
+        assert_eq!(delivery, Delivery::Unsent);
+        delivery.send(true);
+        assert_eq!(delivery, Delivery::Sent);
+        assert!(delivery.ack());
+        assert!(!delivery.ack(), "a replayed ack changes nothing");
+        delivery.send(true);
+        assert_eq!(delivery, Delivery::Acked, "a replayed send cannot regress delivery");
+    }
+
+    #[test]
+    fn stopping_and_ending_compose_without_regressing() {
+        let mut phase = TurnPhase::Running;
+        phase.end();
+        assert_eq!(phase, TurnPhase::Ending { stopped: false });
+        phase.stop();
+        assert!(phase.stopped());
+        assert!(phase.ending());
+        phase.end();
+        assert_eq!(phase, TurnPhase::Ending { stopped: true });
+        phase.stop();
+        assert_eq!(phase, TurnPhase::Ending { stopped: true });
+    }
+
+    #[test]
+    fn word_and_card_questions_close_independently() {
+        let mut question = Question::new();
+        question.words = WordQuestion::Asking;
+        question.card = CardQuestion::Open;
+        question.close_card();
+        assert_eq!(question.words, WordQuestion::Asking);
+        assert!(question.waits_for_owner());
+        question.answer_words();
+        assert!(!question.waits_for_owner());
+        question.answer_card(true);
+        assert_eq!(question.other, OtherAnswer::Worded);
+        question.answer_words();
+        assert_eq!(question.other, OtherAnswer::Worded, "answering words does not erase Other's marker");
+    }
+
+    #[test]
+    fn reply_segmentation_keeps_late_and_barrier_sends_distinct() {
+        let mut replies = Replies::new();
+        replies.step();
+        assert_eq!(replies.step, StepReply::Unworded);
+        assert_eq!(replies.sent(1, false), None);
+        assert_eq!(replies.late, Some(1));
+        assert_eq!(replies.sent(2, false), Some(1));
+        assert_eq!(replies.step, StepReply::Worded);
+        replies.step();
+        assert_eq!(replies.step, StepReply::None);
+
+        replies.step();
+        assert_eq!(replies.sent(3, false), None);
+        replies.drafting();
+        replies.step();
+        assert_eq!(replies.sent(4, true), Some(3), "a streaming step does not erase the late reply");
+        assert_eq!(replies.step, StepReply::None, "a barrier send does not count as words after its step");
+        replies.step();
+        assert_eq!(replies.step, StepReply::Unworded);
+    }
+
+    #[test]
+    fn ordering_barrier_tracks_overlapping_waits_and_replays() {
+        let now = tokio::time::Instant::now();
+        let mut ordering = Ordering::new();
+        ordering.wait_for_words(0, now);
+        ordering.add_images(2);
+        assert!(matches!(ordering.barrier, Barrier::WordsAndImages { images: 2, .. }));
+        assert_eq!(ordering.take_words(), Some(0));
+        assert_eq!(ordering.images(), 2);
+        ordering.image_done();
+        ordering.image_done();
+        assert!(!ordering.waits());
+        ordering.image_done();
+        assert_eq!(ordering.images(), 0, "a replayed completion cannot underflow the barrier");
+
+        ordering.wait_for_words(1, now);
+        ordering.add_images(1);
+        let waiting = ordering.begin_drain();
+        assert!(matches!(ordering.barrier, Barrier::Draining));
+        ordering.end_drain(waiting);
+        assert!(matches!(ordering.barrier, Barrier::WordsAndImages { images: 1, .. }));
+    }
+
+    #[test]
+    fn fetched_files_move_only_later_word_insertion_points() {
+        let now = tokio::time::Instant::now();
+        let mut ordering = Ordering::new();
+        ordering.wait_for_words(2, now);
+        ordering.move_word_position(1);
+        assert_eq!(ordering.word_position(), Some(3));
+        ordering.move_word_position(3);
+        assert_eq!(ordering.word_position(), Some(4));
+        ordering.move_word_position(5);
+        assert_eq!(ordering.word_position(), Some(4));
     }
 }
