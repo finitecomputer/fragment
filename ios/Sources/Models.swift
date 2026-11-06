@@ -367,6 +367,9 @@ struct Timeline {
 
     /// Drafts of turns read to have ended (or begun nowhere): a reconnect
     /// keeps drafts until the new connection's work says this.
+    /// Every draft: a chat closed for good hears no more of them.
+    mutating func dropDrafts() { drafts.removeAll() }
+
     mutating func settleDrafts() {
         let running = Set(activeTurns)
         drafts = drafts.filter { running.contains($0.key) }

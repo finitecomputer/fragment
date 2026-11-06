@@ -240,6 +240,44 @@ struct TransportTests {
         try await waitUntil("unsaid once back") { session.error == nil && session.connected }
     }
 
+    /// A chat deleted (4004, or an upgrade answered 404) or one whose access
+    /// changed (4003, 403) is closed for good: said as the web's chat says
+    /// it, never reconnected, and a reply being written goes with it.
+    @Test func aChatClosedForGoodIsNeverReconnected() async throws {
+        for (end, said) in [("4004", ChatSession.deleted), ("4003", ChatSession.accessChanged), ("404", ChatSession.deleted), ("403", ChatSession.accessChanged)] {
+            let stub = Stub { _, _ in (404, "{}") }
+            let api = try stub.api()
+            defer { try? ChatDraftStore.removeAccount(api: api) }
+            let session = ChatSession(fragment: chat, api: api)
+            let run = Task { await session.run() }
+            try await waitUntil("a socket") { stub.sockets.count == 1 }
+            let first = stub.sockets[0]
+            if end.hasPrefix("40") && end.count == 3 {
+                // its upgrade refused, after a connection that had been open
+                first.push(hello)
+                try await waitUntil("its subscriptions") { first.sent.count == 2 }
+                first.close(URLSessionWebSocketTask.CloseCode(rawValue: 4001)!)
+                try await waitUntil("opened again") { stub.sockets.count == 2 }
+                stub.sockets[1].refuse(Int(end)!)
+            } else {
+                first.push(hello)
+                try await waitUntil("its subscriptions") { first.sent.count == 2 }
+                first.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1"}"#))
+                first.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+                first.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+                first.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Half","at":2500}"#)
+                try await waitUntil("a reply being written") { session.drafts.count == 1 }
+                first.close(URLSessionWebSocketTask.CloseCode(rawValue: Int(end)!)!)
+            }
+            await run.value
+            let sockets = stub.sockets.count
+            #expect(session.error == said, "\(end): \(session.error ?? "nothing said")")
+            #expect(session.drafts.isEmpty && !session.connected, "\(end): nothing left writing")
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(stub.sockets.count == sockets, "\(end): no socket after")
+        }
+    }
+
     @Test func stopPostsAStopForEachActiveTurn() async throws {
         let route = posts
         let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 9, replayed: false) : (404, "{}") }

@@ -103,7 +103,10 @@ final class ScriptedSocket: LiveSocket {
     private let state = Mutex<(queue: [Result<URLSessionWebSocketTask.Message, any Error>], waiting: CheckedContinuation<URLSessionWebSocketTask.Message, any Error>?, sent: [JSONValue], cancelled: Bool)>(([], nil, [], false))
     init(request: URLRequest) { self.request = request }
 
-    var response: URLResponse? { nil }
+    private let answered = Mutex<Int?>(nil)
+    var response: URLResponse? {
+        answered.withLock { $0 }.flatMap { HTTPURLResponse(url: request.url!, statusCode: $0, httpVersion: "HTTP/1.1", headerFields: nil) }
+    }
     private let code = Mutex(URLSessionWebSocketTask.CloseCode.invalid)
     var closeCode: URLSessionWebSocketTask.CloseCode { code.withLock { $0 } }
     var sent: [JSONValue] { state.withLock { $0.sent } }
@@ -131,6 +134,11 @@ final class ScriptedSocket: LiveSocket {
     }
     func push(_ frame: String) { deliver(.success(.string(frame))) }
     func drop() { deliver(.failure(URLError(.networkConnectionLost))) }
+    /// The server answers its upgrade with `status`, and no socket.
+    func refuse(_ status: Int) {
+        answered.withLock { $0 = status }
+        deliver(.failure(URLError(.badServerResponse)))
+    }
     /// The server closes it with `code` (4001: its object slept).
     func close(_ code: URLSessionWebSocketTask.CloseCode) {
         self.code.withLock { $0 = code }

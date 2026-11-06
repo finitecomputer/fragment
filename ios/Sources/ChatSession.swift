@@ -155,6 +155,9 @@ final class ChatSession {
     /// How long a reconnect goes unsaid: back within it, nothing is shown.
     var reconnectNoticeAfter = Duration.seconds(5)
     static let reconnecting = "Reconnecting…"
+    /// The web's chat's words for a socket closed for good (chat.js `closed`).
+    static let deleted = "This chat was deleted."
+    static let accessChanged = "Your access to this chat changed."
     @ObservationIgnored private var reconnectNotice: Task<Void, Never>?
 
     func run() async {
@@ -172,6 +175,7 @@ final class ChatSession {
             do { socket = try api.socket(fragment.name) }
             catch { self.error = error.localizedDescription; return }
             var refused = false
+            var ended: String?
             socket.resume()
             do {
                 try await withTaskCancellationHandler {
@@ -239,14 +243,16 @@ final class ChatSession {
                 }
             } catch {
                 let status = (socket.response as? HTTPURLResponse)?.statusCode
+                let code = socket.closeCode.rawValue
                 if status == 401 { api.authorizationFailed() }
-                refused = status == 401 || status == 403
-                if socket.closeCode.rawValue == 4003 {
-                    do { let _: JSONValue = try await api.request("api/identities/me") }
-                    catch APIError.unauthorized { refused = true }
-                    catch { /* A transient check failure can retry with the usual backoff. */ }
-                }
-                if !Task.isCancelled && refused { self.error = "Your access ended. Reconnect your account or check sharing permissions." }
+                // final, never reconnected: the chat deleted (4004, or an upgrade
+                // 404), access to it changed (4003, or 403), the key's ended (401),
+                // said as the web's chat says it
+                if code == 4004 || status == 404 { ended = Self.deleted }
+                else if code == 4003 || status == 403 { ended = Self.accessChanged }
+                else if status == 401 { ended = "Your access ended. Reconnect your account or check sharing permissions." }
+                refused = ended != nil
+                if !Task.isCancelled, let ended { self.error = ended }
             }
             socket.cancel(with: .goingAway, reason: nil)
             connected = false
@@ -259,6 +265,11 @@ final class ChatSession {
             // says what became of it (`settleDrafts`)
             timelineChanged()
             presence = [:]
+            if refused {
+                // no connection follows to say what became of a reply being written
+                reconnectNotice?.cancel(); reconnectNotice = nil
+                timeline.dropDrafts()
+            }
             guard !Task.isCancelled, !refused else { return }
             // said only if it is not back soon, so the words are true
             if reconnectNotice == nil {
