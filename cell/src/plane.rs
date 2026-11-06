@@ -14,7 +14,8 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::tree::{self, Indexed, TreeDiff};
+use fragment_core::codestorage::TreeEntry;
+use fragment_core::tree::{self, Indexed};
 use fragment_core::{face, manifest, npub, site};
 use fragment_proto::{
     limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
@@ -241,6 +242,65 @@ struct TriggerRow {
     from_kind: Option<String>,
 }
 
+/// A pin's move, every read done (`refresh_pin`): what its publish writes.
+struct Moved {
+    which: String,
+    to: String,
+    /// The tree's changes (`tree::diff`): paths gone, and files added or changed.
+    removed: Vec<String>,
+    upserts: Vec<TreeEntry>,
+    /// Each changed path's pointer at `to`, or none (`read_pointers`).
+    pointers: Vec<(String, Option<fragment_core::blob::Pointer>)>,
+    /// The listing's files, which the index holds once written.
+    files: usize,
+}
+
+impl Moved {
+    /// Publishes the move: its pointer rows, its tree rows and the pin, in
+    /// the caller's one transaction (`js::transaction_sync`), awaiting
+    /// nothing. The tree's rows are its changes alone, so a one-file commit
+    /// writes one row whatever the tree's size. The index then holds one
+    /// row per file of the listing, or the listing named a path twice: then
+    /// it is refused, all of it rolled back, and the next refresh diffs
+    /// again from what was there.
+    fn publish(&self, sql: &SqlStorage) -> CellResult<()> {
+        let which = self.which.as_str();
+        for (path, pointer) in &self.pointers {
+            sql.exec("DELETE FROM pointers WHERE ref = ? AND path = ?", vec![which.into(), path.as_str().into()])?;
+            if let Some(p) = pointer {
+                sql.exec("INSERT INTO pointers (ref, path, sha, size) VALUES (?, ?, ?, ?)", vec![which.into(), path.as_str().into(), p.sha256.as_str().into(), SqlStorageValue::Integer(p.size as i64)])?;
+            }
+        }
+        for batch in self.removed.chunks(TREE_BATCH) {
+            let marks = vec!["?"; batch.len()].join(", ");
+            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() + 1);
+            binds.push(which.into());
+            binds.extend(batch.iter().map(|p| SqlStorageValue::from(p.as_str())));
+            sql.exec(&format!("DELETE FROM tree WHERE ref = ? AND path IN ({marks})"), binds)?;
+        }
+        for batch in self.upserts.chunks(TREE_BATCH) {
+            let tuples = vec!["(?, ?, ?, ?, ?)"; batch.len()].join(", ");
+            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() * 5);
+            for e in batch {
+                binds.extend([which.into(), e.path.as_str().into(), SqlStorageValue::Integer(e.size as i64), e.mode.as_str().into(), e.last_commit_sha.as_str().into()]);
+            }
+            sql.exec(
+                &format!(
+                    "INSERT INTO tree (ref, path, size, mode, last_commit) VALUES {tuples}
+                     ON CONFLICT (ref, path) DO UPDATE SET size = excluded.size, mode = excluded.mode, last_commit = excluded.last_commit"
+                ),
+                binds,
+            )?;
+        }
+        let held = sql.exec("SELECT COUNT(*) AS n FROM tree WHERE ref = ?", vec![which.into()])?.to_array::<Value>()?.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row");
+        if held != self.files as u64 {
+            return Err(CellError::host(format!("{which}'s index would hold {held} files after the move, not the listing's {} (a path listed twice?)", self.files)));
+        }
+        sql.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![MetaKey::pin(which).key().into(), self.to.as_str().into()])?;
+        Ok(())
+    }
+}
+
 impl FragmentCell {
     pub(crate) fn cs(&self) -> CellResult<Cs<'_>> {
         Ok(Cs::new(self.cfg.codestorage(), &self.env))
@@ -286,9 +346,14 @@ impl FragmentCell {
             if from.is_none() {
                 return Ok(PinMove { changed: false, to: None, paths: vec![], removed: vec![] });
             }
-            self.exec("DELETE FROM tree WHERE ref = ?", vec![which.into()])?;
-            self.exec("DELETE FROM pointers WHERE ref = ?", vec![which.into()])?;
-            self.del_meta(MetaKey::pin(which))?;
+            let (sql, which_owned, pin) = (self.sql(), which.to_string(), MetaKey::pin(which).key());
+            // all or none, as a move is published
+            js::transaction_sync(&self.raw, move || {
+                sql.exec("DELETE FROM tree WHERE ref = ?", vec![which_owned.as_str().into()])?;
+                sql.exec("DELETE FROM pointers WHERE ref = ?", vec![which_owned.as_str().into()])?;
+                sql.exec("DELETE FROM meta WHERE key = ?", vec![pin.into()])?;
+                Ok(())
+            })?;
             self.event("git.refresh", &format!("{which}: the branch is gone; pin cleared"), json!({ "ref": which, "from": from }));
             return Ok(PinMove { changed: true, to: None, paths: vec![], removed: vec![] });
         };
@@ -301,9 +366,21 @@ impl FragmentCell {
         let diff = tree::diff(&prior, &entries);
         let paths = diff.paths();
         let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
-        self.track_pointers(which, &to, &paths, &sizes).await?;
-        self.write_tree(which, &diff, entries.len())?;
-        self.set_meta(MetaKey::pin(which), &to)?;
+        // every read first: the move is then published in one synchronous
+        // transaction, its pointer rows, tree rows and pin together, so no
+        // reader sees one without the others and no crash keeps half of it
+        // (FIN-407)
+        let pointers = self.read_pointers(&to, &paths, &sizes).await?;
+        let moved = Moved {
+            which: which.to_string(),
+            to: to.clone(),
+            removed: diff.removed.iter().map(|p| p.to_string()).collect(),
+            upserts: diff.upserts.iter().map(|e| (*e).clone()).collect(),
+            pointers,
+            files: entries.len(),
+        };
+        let sql = self.sql();
+        js::transaction_sync(&self.raw, move || moved.publish(&sql))?;
         self.event(
             "git.refresh",
             &format!("{which}: {} → {} ({} files, {} changed)", short(from.as_deref()), short(Some(&to)), entries.len(), paths.len()),
@@ -313,40 +390,7 @@ impl FragmentCell {
         Ok(PinMove { changed: true, to: Some(to), paths, removed })
     }
 
-    /// Writes a pin move's changes to its index (`tree::diff`): deletes
-    /// the paths gone and upserts the ones added or changed, so a one-file
-    /// commit writes one row whatever the tree's size. The index then
-    /// holds one row per file of the listing, `files`, or the listing
-    /// named a path twice: then the pin does not move, and the next
-    /// refresh diffs again from what was written.
-    fn write_tree(&self, which: &str, diff: &TreeDiff<'_>, files: usize) -> CellResult<()> {
-        for batch in diff.removed.chunks(TREE_BATCH) {
-            let marks = vec!["?"; batch.len()].join(", ");
-            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() + 1);
-            binds.push(which.into());
-            binds.extend(batch.iter().map(|p| SqlStorageValue::from(*p)));
-            self.exec(&format!("DELETE FROM tree WHERE ref = ? AND path IN ({marks})"), binds)?;
-        }
-        for batch in diff.upserts.chunks(TREE_BATCH) {
-            let tuples = vec!["(?, ?, ?, ?, ?)"; batch.len()].join(", ");
-            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() * 5);
-            for e in batch {
-                binds.extend([which.into(), e.path.as_str().into(), SqlStorageValue::Integer(e.size as i64), e.mode.as_str().into(), e.last_commit_sha.as_str().into()]);
-            }
-            self.exec(
-                &format!(
-                    "INSERT INTO tree (ref, path, size, mode, last_commit) VALUES {tuples}
-                     ON CONFLICT (ref, path) DO UPDATE SET size = excluded.size, mode = excluded.mode, last_commit = excluded.last_commit"
-                ),
-                binds,
-            )?;
-        }
-        let held = self.rows("SELECT COUNT(*) AS n FROM tree WHERE ref = ?", vec![which.into()])?.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row");
-        if held != files as u64 {
-            return Err(CellError::host(format!("{which}'s index holds {held} files after the move, not the listing's {files} (a path listed twice?)")));
-        }
-        Ok(())
-    }
+
 
     /// What follows a pin: the manifest from main, the code from live.
     /// Each records the commit it was read from, so a read that failed
