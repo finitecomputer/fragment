@@ -390,7 +390,7 @@ export function mount(root) {
     me: null, // { id, principal, role } once the socket said hello
     members: [], // the fragment's members (`__members`), the first added first
     chat: [], // the window's messages, commands and replies (`windowed`), in the order read: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
-    spoke: new Map(), // speaker -> when they last said something not of a turn (`waitsOnWords`)
+    spoke: new Map(), // `principal relayed.by relayed.for` -> { m: {principal, relayed}, at }: when each said something not of a turn (`waitsOnWords`), its speaker found as members say now
     history: null, // the chat's first `history` record, as its poster wrote it: { seq, principal, body } (shown only its owner's)
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
@@ -580,6 +580,8 @@ export function mount(root) {
     }
   }
   // Jump to latest, the window up the chat: it starts again at the newest page.
+  // Answers whether the window is at the end now (a failed read leaves it
+  // where it was, said in the banner, Jump to latest there to try again).
   async function toLatest() {
     const gen = ++history.gen;
     history.loading = true;
@@ -588,16 +590,21 @@ export function mount(root) {
     historyStatus("", false);
     try {
       const page = await fragment.read("chat", { before: Number.MAX_SAFE_INTEGER, limit: CHAT_LAST });
-      if (gen !== history.gen) return;
+      if (gen !== history.gen) return false;
       for (const m of state.chat) state.seen.delete(m.seq);
       state.chat = [];
       history.first.chat = null;
       for (const record of page.records) onChat(record, true);
       history.done = !moreOf(page, CHAT_LAST);
       reachedEnd();
+      // (what came meanwhile joins it: the window at its bound again)
+      windowed("newer");
+      return true;
     } catch (err) {
-      if (gen !== history.gen) return;
-      problem(`Could not show the latest messages: ${err.message}`);
+      if (gen !== history.gen) return false;
+      console.error("chat: latest messages", err);
+      problem("Couldn't show the latest messages.");
+      return false;
     } finally {
       if (gen === history.gen) {
         history.loading = false;
@@ -855,7 +862,7 @@ export function mount(root) {
     return !by || (by.kind === "agent" && by.owner === m.relayed.for) ? m.relayed.for : null;
   };
   const speaker = (m) => relayedOwner(m) ?? m.principal;
-  const waitsOnWords = (t) => running(t) && !!t.asked && !((state.spoke.get(t.asked.asks) ?? -Infinity) >= t.asked.at);
+  const waitsOnWords = (t) => running(t) && !!t.asked && ![...state.spoke.values()].some((x) => x.at >= t.asked.at && speaker(x.m) === t.asked.asks);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
@@ -875,7 +882,12 @@ export function mount(root) {
   // up the chat is kept aside (and read again as the window reaches it).
   // At the end, the window lets its oldest go as new ones come.
   function keep(record, historical, m) {
-    if (!m.turn) state.spoke.set(speaker(m), Math.max(state.spoke.get(speaker(m)) ?? -Infinity, m.at));
+    if (!m.turn) {
+      // (by who posted it and for whom: whose words they are is read as the
+      // members say when asked, so a relay's owner known later counts)
+      const key = `${m.principal} ${m.relayed?.by ?? ""} ${m.relayed?.for ?? ""}`;
+      if (!(state.spoke.get(key)?.at >= m.at)) state.spoke.set(key, { m: { principal: m.principal, relayed: m.relayed ?? null }, at: m.at });
+    }
     if (!historical && !history.live && record.seq > history.last) {
       state.seen.delete(record.seq);
       history.aside.push(record);
@@ -883,7 +895,9 @@ export function mount(root) {
       return;
     }
     state.chat.push(m);
-    if (!historical && stuck) windowed("newer");
+    // at the end, the oldest go; the reader up the window, the newest (the
+    // window goes up: what comes is counted and read again as it reaches it)
+    if (!historical) windowed(stuck ? "newer" : "older");
   }
 
   function onChat(record, historical = false) {
@@ -2212,7 +2226,7 @@ export function mount(root) {
     showLatest();
   };
   $("latest").onclick = async () => {
-    if (!history.live) await toLatest();
+    if (!history.live && !(await toLatest())) return;
     stuck = true;
     toEnd();
   };
@@ -2913,7 +2927,8 @@ export function mount(root) {
     try {
       // said up the chat: the window goes to the end first, where it shows
       if (!history.live) {
-        await toLatest();
+        // (not at the end, the message is not sent: it would show nowhere)
+        if (!(await toLatest())) throw new Error("the latest messages could not be shown");
         stuck = true;
         toEnd();
       }

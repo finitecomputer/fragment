@@ -999,7 +999,10 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "long", "body": { "kind": "turn.start", "turn": "long", "agent": agent, "asker": me } })))?;
     anyhow::ensure!(r.status == 200, "starting a turn: {r}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
-    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    // (`__failLatest`: the next read of the newest page fails, as a blip)
+    let hook = "if (window === window.top) { window.__failLatest = false; const real = window.fetch.bind(window); \
+        window.fetch = (url, o) => { const u = String(url); if (window.__failLatest && u.includes('__channel/chat') && u.includes('before=9007199254740991')) { window.__failLatest = false; return Promise.reject(new TypeError('Failed to fetch')); } return real(url, o); }; }";
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), hook)?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let count = "document.querySelectorAll('.msg.user').length";
     let window = "document.getElementById('scroll').dataset.window";
@@ -1071,6 +1074,108 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
         "Jump to latest, up the chat, starts the window again at the newest page, at the end",
         reset && after["first"] == "702" && after["last"] == "801" && super::shows(chrome, &page, running),
         &after,
+    );
+    // Alex's review of #1078. The reader up within a window at the end: 600
+    // messages more come, and the window holds 600 still, the newest let go
+    // (it goes up the chat, each counted), the reader not moved
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight - s.clientHeight - 2000; return true; })()")?;
+    anyhow::ensure!(super::shows(chrome, &page, "!document.getElementById('latest').hidden"), "the reader is up from the end");
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg[data-seq]')].find((m) => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__seq = m.dataset.seq; window.__top = m.getBoundingClientRect().top; window.__most = 0; return true; })()")?;
+    let post_lines = |from: usize, to: usize| -> Result<()> {
+        for i in from..to {
+            let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("more-{i}"), "body": { "text": format!("More {i:04}") } })))?;
+            anyhow::ensure!(r.status == 200, "posting more {i}: {r}");
+        }
+        Ok(())
+    };
+    post_lines(0, 600)?;
+    let held = super::shows(chrome, &page, &format!("{window} === 'up' && document.getElementById('latest').textContent.includes('600 new messages')"));
+    let up = seen(chrome)?;
+    let moved = chrome.eval(&page, "Math.abs(document.querySelector('.msg[data-seq=\"' + window.__seq + '\"]').getBoundingClientRect().top - window.__top)")?;
+    s.ok(
+        "the reader up within a window at the end, 600 messages more: it holds 600 at most, the newest let go and each counted, the reader not moved",
+        held && up["count"].as_u64().is_some_and(|n| n <= 600) && up["most"].as_u64().is_some_and(|n| n <= 600) && moved.as_f64().is_some_and(|n| n < 2.0),
+        json!({ "seen": up, "moved": moved }),
+    );
+    // 700 more meanwhile, kept aside; Jump to latest's read fails once
+    post_lines(600, 1300)?;
+    let before = seen(chrome)?;
+    chrome.eval(&page, "(window.__failLatest = true, true)")?;
+    chrome.click(&page, "#latest")?;
+    let said = super::shows(chrome, &page, &format!("document.getElementById('banner-text').textContent === \"Couldn't show the latest messages.\" && !document.getElementById('latest').hidden && {window} === 'up' && window.__failLatest === false"));
+    let still = seen(chrome)?;
+    s.ok(
+        "Jump to latest whose read fails: said, the window where it was, Jump to latest there to try again with its count",
+        said && still["first"] == before["first"] && still["last"] == before["last"] && still["latest"] == before["latest"],
+        json!({ "before": before, "after": still }),
+    );
+    chrome.click(&page, "#latest")?;
+    let newest = 801 + 1300;
+    let reset = super::shows(chrome, &page, &format!("{window} === 'live' && [...document.querySelectorAll('.msg[data-seq]')].at(-1)?.dataset.seq === '{newest}' && document.getElementById('latest').hidden"));
+    let after = seen(chrome)?;
+    s.ok(
+        "and again: the window at the newest, what came meanwhile joined to it, 600 at most",
+        reset && after["count"].as_u64().is_some_and(|n| n <= 600),
+        &after,
+    );
+    // up the chat again, a message sent while the newest page's read fails
+    for _ in 0..3 {
+        chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+        if super::shows(chrome, &page, &format!("{window} === 'up'")) {
+            break;
+        }
+    }
+    anyhow::ensure!(chrome.eval(&page, window)? == "up", "the window is up the chat again");
+    chrome.eval(&page, "(window.__failLatest = true, (() => { document.getElementById('text').value = 'Said from up the chat'; document.getElementById('say').requestSubmit(); return true; })())")?;
+    let refused = super::shows(chrome, &page, &format!("document.getElementById('banner-text').textContent.startsWith('Your message was not sent') && document.getElementById('text').value === 'Said from up the chat' && {window} === 'up'"));
+    let stored = super::super::jobs::records(api, owner, &name, "chat").iter().filter(|r| r["body"]["text"] == "Said from up the chat").count();
+    s.ok(
+        "a message sent up the chat while the newest page's read fails is not sent: said, its words kept, the window where it was",
+        refused && stored == 0,
+        json!({ "stored": stored, "banner": chrome.eval(&page, "document.getElementById('banner-text').textContent")? }),
+    );
+    chrome.eval(&page, "(() => { document.getElementById('say').requestSubmit(); return true; })()")?;
+    let sent = super::shows(chrome, &page, &format!("{window} === 'live' && [...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === 'Said from up the chat') && document.getElementById('latest').hidden"));
+    s.ok("sent again: the window at the end, the message there", sent, seen(chrome)?);
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// A relayed answer of the owner's (a door: SimpleX), come before the
+/// page knows its members (Alex's review of #1078): once they say the relay
+/// is the owner's agent, its words are the owner's, and a turn that asked
+/// the owner before them waits on no one. Method: a quiet chat; a turn
+/// that asks its owner; the agent's relay of the owner's reply; the page's
+/// `__members` held until all of it is drawn.
+pub(super) fn relayed_answer(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "chat-relayed")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the relay chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let me = api.identity(owner)?;
+    let post = |by: &Keys, channel: &str, id: &str, body: Value| -> Result<()> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        Ok(())
+    };
+    post(owner, "chat", "ask", json!({ "text": "Book the table" }))?;
+    post(&hand, "work", "start", json!({ "kind": "turn.start", "turn": "r1", "agent": agent, "asker": me }))?;
+    post(&hand, "work", "asked", json!({ "kind": "turn.asked", "turn": "r1", "asks": me, "text": "For how many?" }))?;
+    post(&hand, "chat", "relay", json!({ "text": "Four", "relayed": { "for": me, "via": "simplex" } }))?;
+    let hold = "if (window === window.top) { const real = window.fetch.bind(window); let let_go; window.__members = new Promise((r) => { let_go = r; }); window.__letMembers = () => let_go(); \
+        window.fetch = async (url, o) => { if (String(url).includes('__members')) await window.__members; return real(url, o); }; }";
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), hold)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let drawn = super::shows(chrome, &page, "[...document.querySelectorAll('.bubble, .msg .md')].some((b) => b.textContent.trim() === 'Four') && !!document.querySelector('.msg.working')");
+    chrome.eval(&page, "(window.__letMembers(), true)")?;
+    let mine = super::shows(chrome, &page, "!document.querySelector('.msg.working.asked') && !!document.querySelector('.msg.working') && [...document.querySelectorAll('.msg.user')].some((m) => m.textContent.includes('Four'))");
+    let seen = chrome.eval(&page, "({ working: [...document.querySelectorAll('.msg.working')].map((n) => [n.className, n.textContent]) })")?;
+    s.ok(
+        "a relayed answer of the owner's, come before the members: once they are known it is the owner's, and the turn that asked waits on no one",
+        drawn && mine,
+        &seen,
     );
     chrome.close(page)?;
     Ok(())
