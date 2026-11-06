@@ -172,4 +172,15 @@ struct TimelineTests {
         timeline.learn(work(10, "turn.step", "busy"))
         #expect(timeline.awaitsAStart)
     }
+
+    /// A turn that ended still needs its start while the window shows its
+    /// steps: its card is drawn from it.
+    @Test func anEndedTurnWhoseStepsAreShownAwaitsItsStart() {
+        var timeline = Timeline()
+        timeline.insert(work(8, "turn.step", "shown"))
+        timeline.insert(work(9, "turn.end", "shown"))
+        #expect(timeline.awaitsAStart)
+        timeline.learn(work(2, "turn.start", "shown"))
+        #expect(!timeline.awaitsAStart && timeline.activeTurns.isEmpty)
+    }
 }
