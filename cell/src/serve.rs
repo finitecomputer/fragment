@@ -385,7 +385,9 @@ impl FragmentCell {
         for &which in self.content_pins()? {
             match self.tree_row(which, p)? {
                 Some(row) if row.last_commit == v => {
-                    let cache = site::pinned_cache(public);
+                    // a blob's bytes come by the pointer table, not by the
+                    // commit `v` names: revalidated, never kept (`kept_bytes`)
+                    let cache = if kept_bytes(row.size) { site::pinned_cache(public) } else { "no-cache" };
                     let etag = site::file_etag(v);
                     if let Some(resp) = not_modified(req, &etag, cache)? {
                         return Ok(Some(resp));
@@ -658,7 +660,11 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
         let mime = site::mime_for_path(&row.path);
-        let cache = site::cache_control(&row.path, public);
+        // no await between the row's read and this: the same tree's paths.
+        // Never a file that may be a blob's pointer: its bytes are read by
+        // the pointer table, which a refresh rewrites as it goes, not by
+        // this tree (`kept_bytes`)
+        let cache = site::cache_control(kept_bytes(row.size) && self.declared_immutable(&row.path)?, public);
         // a file of a pointer's size may be one: its bytes are a blob's
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
         // Only a page gets Open Graph tags, so only a page reads `meta`.
@@ -706,6 +712,16 @@ impl FragmentCell {
     }
 }
 
+/// Whether a file whose tree row is `size` bytes may be kept for good: its
+/// bytes the tree's own, never a blob's (a file of `BLOB_MIN_BYTES` or
+/// more, its git file a pointer). A pointer's bytes are read from the
+/// pointer table, which a refresh rewrites path by path before it moves the
+/// tree and its pin (blobs.rs `track_pointers`), so they need not be the
+/// served tree's; any file the size of a pointer is revalidated (FIN-391).
+fn kept_bytes(size: u64) -> bool {
+    !crate::blobs::maybe_pointer(size)
+}
+
 impl FragmentCell {
     /// A file of a blessed template's site, from the release: a page gets
     /// the fragment's own Open Graph tags, as a site's page does. A 304 and
@@ -713,7 +729,8 @@ impl FragmentCell {
     async fn blessed_page(&self, req: &Request, caller: &Caller, facts: &Facts, file: &'static File, release: &str, public: bool) -> CellResult<Response> {
         let path = file.path;
         let mime = site::mime_for_path(path);
-        let cache = site::cache_control(path, public);
+        // the release's own files: kept for good by the platform's hash alone
+        let cache = site::cache_control(site::hashed(path), public);
         let page = mime.starts_with("text/html");
         let og: Option<fragment_core::manifest::Meta> = match page.then(|| self.meta(MetaKey::MetaLive)).transpose()?.flatten() {
             Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
@@ -792,6 +809,21 @@ impl FragmentCell {
             fragment_proto::FragmentKind::Agent | fragment_proto::FragmentKind::Sessions => &["main", "live"],
             _ => &["live", "main"],
         })
+    }
+
+    /// Whether live's manifest keeps the site file at `path` (`site/…`) for
+    /// good (`immutable`, site.rs `declared_immutable`): the paths stored
+    /// for the commit live is at now, read with it in one statement, and
+    /// asked with no await since the file's tree row was read, so of the
+    /// very tree that row is of. Read only for a file that is no page, as a
+    /// page never is.
+    fn declared_immutable(&self, path: &str) -> CellResult<bool> {
+        let Some(rest) = path.strip_prefix("site/") else { return Ok(false) };
+        if site::mime_for_path(rest).starts_with("text/html") {
+            return Ok(false);
+        }
+        let [declared, live] = self.metas([MetaKey::ImmutableLive, MetaKey::PinLive])?;
+        Ok(site::declared_immutable(declared.as_deref(), live.as_deref().unwrap_or(""), rest))
     }
 
     /// What live's manifest says of the files view (`files`), if anything.

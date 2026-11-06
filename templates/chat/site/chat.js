@@ -461,13 +461,18 @@ export function mount(root) {
       $("earlier").hidden = false;
     }
   }
+  // The work of the oldest message shown: `work` read back a page at a time
+  // until its records reach that message's time (every record tied at it
+  // included), however many pages that is (a turn may write dozens of
+  // records a message), whether or not older messages remain. Bounded by
+  // the channel: each page moves its cursor back.
   async function earlierWork() {
     const oldest = Math.min(...state.chat.map((m) => m.at));
-    // Both postable channels retain at most 10,000 records. Include every
-    // work record tied at the boundary time before considering it caught up.
-    for (let pages = 0; pages < 10 && history.workReady && !history.workDone && history.workAt >= oldest; pages++) {
+    while (history.workReady && !history.workDone && history.workAt >= oldest) {
       const page = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
       for (const record of page.records) onWork(record);
+      // (the cursor moves past the page whatever it held)
+      if (page.records.length) history.first.work = Math.min(history.first.work ?? Infinity, page.records[0].seq);
       history.workDone = page.records.length < WORK_LAST;
     }
   }

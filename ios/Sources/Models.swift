@@ -129,6 +129,10 @@ struct TurnState: Equatable, Sendable {
 
 struct Timeline {
     private(set) var records: [ChannelRecord] = []
+    /// Bumped by each change to `records`: what a view draws from them is
+    /// made again only then (`ChatSession.rows`), never for a draft's words.
+    private(set) var revision = 0
+    private var ids: Set<String> = []
     private(set) var drafts: [String: ReplyDraft] = [:]
     private(set) var cursors: [String: Int64] = [:]
     /// Each turn read, kept apart from the record window, which a long
@@ -170,15 +174,18 @@ struct Timeline {
     mutating func insert(_ record: ChannelRecord, advancingCursor: Bool = true) {
         learn(record)
         if advancingCursor { cursors[record.channel] = max(cursors[record.channel] ?? 0, record.seq) }
-        if !records.contains(where: { $0.id == record.id }) {
-            records.append(record)
-            records.sort {
-                if $0.at != $1.at { return $0.at < $1.at }
-                if $0.channel != $1.channel { return $0.channel < $1.channel }
-                return $0.seq < $1.seq
-            }
-            if records.count > Self.maximumRecords { records.removeFirst(records.count - Self.maximumRecords) }
-        } else { return }
+        guard ids.insert(record.id).inserted else { return }
+        // in order of time, then channel, then seq: placed where it goes (a
+        // live record at the end, an older page's at the start), not sorted
+        // again with every record
+        let index = Self.place(record, in: records)
+        records.insert(record, at: index)
+        if records.count > Self.maximumRecords {
+            let gone = records.count - Self.maximumRecords
+            for old in records.prefix(gone) { ids.remove(old.id) }
+            records.removeFirst(gone)
+        }
+        revision &+= 1
         if advancingCursor, record.channel == "chat", let turn = record.turn,
            drafts[turn]?.principal == record.principal {
             drafts.removeValue(forKey: turn)
@@ -186,6 +193,23 @@ struct Timeline {
         if record.channel == "work", record.body["kind"].string == "turn.end", let turn = record.turn {
             drafts.removeValue(forKey: turn)
         }
+    }
+
+    static func precedes(_ a: ChannelRecord, _ b: ChannelRecord) -> Bool {
+        if a.at != b.at { return a.at < b.at }
+        if a.channel != b.channel { return a.channel < b.channel }
+        return a.seq < b.seq
+    }
+    /// Where `record` goes in `records`, kept in `precedes` order: after
+    /// every record before it.
+    static func place(_ record: ChannelRecord, in records: [ChannelRecord]) -> Int {
+        if let last = records.last, precedes(last, record) { return records.count }
+        var low = 0, high = records.count
+        while low < high {
+            let mid = (low + high) / 2
+            if precedes(records[mid], record) { low = mid + 1 } else { high = mid }
+        }
+        return low
     }
 
     mutating func apply(_ frame: LiveFrame) throws {

@@ -949,7 +949,8 @@ agent, or carrying code, keeps the last good code and says to fork it.
   - `"post": <role>` (R18): whoever holds it posts (`POST
     …/channels/{channel}`, `fragment.post`), appended by the platform with
     no app code. No looser than `read` (refused at deploy). It keeps its
-    newest `POSTED_KEPT` records.
+    newest records: `POSTED_KEPT` of them, or `POSTED_BYTES_MAX` of their
+    bodies, whichever comes first.
   - `"signedIn": true` (with `post`): only people signed in post (401
     `unauthenticated` otherwise).
   - `"from": "person" | "agent"` (with `post`): only members of that kind,
@@ -981,6 +982,18 @@ agent, or carrying code, keeps the last good code and says to fork it.
   and `busy` the view shows as a status line, asking again while busy.
   Unknown keys are refused at deploy; a fragment on a blessed template
   declares none (its template's applies).
+- `immutable` (optional, FIN-391): at most `IMMUTABLE_MAX` paths under
+  `site/`, patterns as file triggers' are, each naming its first folder or
+  file (`["assets/**"]`; `**` or `*.js` is refused at deploy). A site file
+  they match is served `max-age=31536000, immutable` (`private` unless the
+  fragment is public); a page never is, nor a file stored as a blob (1 MiB
+  or more, its git file a pointer: Blobs) or the size of one's pointer
+  (126 to 200 bytes), whose bytes come by its pointer, not by the tree
+  served. Every other file of a site is
+  revalidated (`no-cache`, `max-age=60` when public), however hashed its
+  name looks: a bundler's output folder, whose names change with their
+  bytes, is the one to name. A fragment on a blessed template declares
+  none (its release's own built names are kept for good).
 - `inbox` (optional): `{"header": "x-telegram-bot-api-secret-token",
   "secret": "TELEGRAM_WEBHOOK_SECRET"}`: the inbox takes a delivery only
   with that header (lower case; never `x-fragment-*`, `cookie`, `host`,
@@ -1644,7 +1657,7 @@ fragment's, `/api/…` included.
 | --- | --- |
 | `/`, `/<page>` | `site/` in the live commit (`index.html` for a directory); Open Graph tags from `meta`. With `files.page`, `/` is the files view |
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
-| `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
+| `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public; a blob's, or a file the size of a pointer, `no-cache`), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | `GET`, `HEAD`: one of this fragment's blobs, to viewers and up (not `public` alone), as its declared type (Blobs; ranges 206), `private, max-age=31536000, immutable`, `nosniff`, `ETag` the hash; another fragment's hash 404. `PUT` (editors, from the fragment's own page) uploads as `PUT /api/f/{name}/blobs/{sha256}` → `{ok, sha, size, stored}`; another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): as `GET /api/f/{name}/members` |

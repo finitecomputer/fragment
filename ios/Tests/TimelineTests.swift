@@ -116,4 +116,25 @@ struct TimelineTests {
         timeline.learn(work(1, "turn.start", "late"))
         #expect(timeline.activeTurns.isEmpty)
     }
+
+    /// Records are placed in order as they come, from either end or the
+    /// middle, each once: as sorting all of them would leave them.
+    @Test func recordsArePlacedInOrderEachOnce() {
+        var generator = SystemRandomNumberGenerator()
+        var made: [ChannelRecord] = []
+        for seq in 1...300 {
+            let channel = seq % 3 == 0 ? "work" : "chat"
+            made.append(ChannelRecord(channel: channel, seq: Int64(seq), at: Int64.random(in: 0...50, using: &generator),
+                                      principal: "agent", kind: "message", body: .string("r\(seq)")))
+        }
+        var timeline = Timeline()
+        for record in (made + made.prefix(40)).shuffled() { timeline.insert(record, advancingCursor: false) }
+        #expect(timeline.records.map(\.id) == made.sorted(by: Timeline.precedes).map(\.id))
+        #expect(timeline.revision == made.count, "a record read again changes nothing")
+        // past its bound the oldest go, and one of them read again is let go again
+        var long = Timeline()
+        for seq in 1...Int64(Timeline.maximumRecords + 10) { long.insert(record(seq, body: .string("m"))) }
+        long.insert(record(1, body: .string("m")), advancingCursor: false)
+        #expect(long.records.count == Timeline.maximumRecords && long.records.first?.seq == 11)
+    }
 }

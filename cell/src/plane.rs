@@ -419,6 +419,7 @@ impl FragmentCell {
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::FilesLive)?;
+            self.del_meta(MetaKey::ImmutableLive)?;
             self.del_meta(MetaKey::Blessed)?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
@@ -545,6 +546,15 @@ impl FragmentCell {
         match &manifest.files {
             Some(files) => self.set_meta(MetaKey::FilesLive, &serde_json::to_string(files).expect("files serialize"))?,
             None => self.del_meta(MetaKey::FilesLive)?,
+        }
+        // with the commit they describe: served only beside its tree
+        // (site.rs `declared_immutable`)
+        match manifest.immutable.is_empty() {
+            false => {
+                let declared = fragment_core::site::Declared { commit: sha.to_string(), paths: manifest.immutable.clone() };
+                self.set_meta(MetaKey::ImmutableLive, &serde_json::to_string(&declared).expect("paths serialize"))?
+            }
+            true => self.del_meta(MetaKey::ImmutableLive)?,
         }
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template whose manifest was read is blessed")))?,
@@ -693,6 +703,9 @@ impl FragmentCell {
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {
+        // live's tree is the refused commit's: the last install's kept paths
+        // describe another (its commit's, which the serving path compares too)
+        self.del_meta(MetaKey::ImmutableLive)?;
         self.set_meta(MetaKey::CodeError, &format!("live {}: {why}", short(Some(sha))))?;
         self.event("code.refused", &format!("live {} not installed: {why}", short(Some(sha))), json!({ "sha": sha }));
         Ok(())

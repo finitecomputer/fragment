@@ -51,6 +51,7 @@ pub mod connection_signin;
 pub mod org;
 pub mod price;
 pub mod ratelimit;
+pub mod retention;
 pub mod registry;
 pub mod relay;
 pub mod release;
