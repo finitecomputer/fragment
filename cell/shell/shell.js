@@ -35,6 +35,7 @@ import { createThreads } from "./threads.js";
 import { KIND } from "./frame-messages.js";
 import { answerTo } from "./computer-answer.js";
 import { standIns } from "./frame-standin.js";
+import * as making from "./making.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -80,7 +81,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false };
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -252,6 +253,29 @@ function notice(title, text, action = null) {
   }
   n.hidden = false;
   return ++noticeGen;
+}
+
+// What one of the person's own actions came to when it failed (a New chat
+// refused): `title` and the platform's `words`, a row of the band over the
+// chat (#action-notices, the computer notices' look), never drawn over its
+// messages; gone when dismissed, or when another view is given (`newView`).
+function said(title, words) {
+  const box = $("action-notices");
+  const copy = el("div", "notice-copy");
+  copy.append(el("strong", null, title), ...(words ? [el("p", null, words)] : []));
+  const dismiss = el("button", null, "Dismiss");
+  dismiss.type = "button";
+  dismiss.onclick = unsaid;
+  const actions = el("div", "notice-actions");
+  actions.append(dismiss);
+  const row = el("div", "computer-notice");
+  row.append(copy, actions);
+  box.replaceChildren(row);
+  box.hidden = false;
+}
+function unsaid() {
+  $("action-notices").replaceChildren();
+  $("action-notices").hidden = true;
 }
 
 // ---- layout: sidebar | chat | viewer ----
@@ -874,7 +898,9 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ask
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
     isThread: (f) => threads.isPair(f), waitingOn: (name) => threads.waitingOn(name), renderThreads: () => threads.render(),
     offers: (agent, what) => offers(agent, what) },
-  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name) },
+  selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,
+    onScreen: () => making.shownChat(state.making, state.current, state.page),
+    reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
@@ -932,15 +958,26 @@ const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = crea
   agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
 });
 
-// Each time the middle column is given a view (a chat, settings): a
-// launch's late answer changes the screen only if none was given since
-// (launcher.js).
+// Each time the middle column is given a view (a chat, settings, Apps,
+// History, a chat being made): a launch's late answer changes the screen
+// only if none was given since (launcher.js), and a chat being made shown
+// there is away from then on (making.js `left`), its room hidden.
 let views = 0;
+let makingRoom = null;
+function newView() {
+  views++;
+  unsaid();
+  state.making = making.left(state.making);
+  if (!making.holdsView(state.making) && makingRoom) {
+    makingRoom.remove();
+    makingRoom = null;
+  }
+}
 // `path`: the page of it to show (the session archive's list, or one of
 // its conversations: session-archive.js), its frame sent there.
 function openChat(name, push = true, path = null) {
   if (!byName(name)) return;
-  views++;
+  newView();
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
@@ -1399,6 +1436,87 @@ async function stillBlank(name) {
   return !firstSaid(r.records);
 }
 let starting = false;
+// The one thing the shell shows before the platform has it (Paul,
+// 2026-11-04: "we don't need to lean on optimistic UI yet", this alone): a
+// chat its agent's New chat is making, at once under that agent, open in
+// the middle column (its empty room's stand-in, frame-standin.js) and
+// titled, until the create answers. Its states and their moves are
+// making.js's; what each move shows is here.
+function showMaking(identity, name) {
+  const before = { page: state.page, current: state.current };
+  // its agent's menu (or the launcher's) gone before its room shows
+  closeMenu(true);
+  newView();
+  at("/");
+  state.making = making.start({ agent: identity, name, title: UNTITLED, before });
+  state.page = null;
+  hideNotice();
+  $("layout").classList.remove("settings-view");
+  $("settings-page").hidden = true;
+  leaveApps();
+  leaveHistory();
+  $("frames").hidden = false;
+  for (const frame of state.frames.values()) {
+    frame.hidden = true;
+    standins.sync(frame);
+  }
+  makingRoom = el("div", "frame-standin making-standin");
+  makingRoom.setAttribute("aria-hidden", "true");
+  makingRoom.append(el("span", "standin-wait"), el("div", "standin-composer"));
+  $("frames").append(makingRoom);
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+}
+// Its create answered (`made` or `refused`): the screen moves as
+// making.js `settled` says. True when its chat opened.
+function settleMaking(outcome) {
+  const m = state.making;
+  const { next, then } = making.settled(m, outcome, !!m && !!byName(m.name));
+  state.making = next;
+  // made, its list not read yet: its room stays until it is (`load`)
+  if (then === "wait") return false;
+  makingRoom?.remove();
+  makingRoom = null;
+  if (then === "open") {
+    openChat(m.name);
+    return true;
+  }
+  if (then === "restore") restoreView(m.before);
+  else {
+    renderHeading();
+    renderChats();
+  }
+  return false;
+}
+// A list read that has the chat a create made, its room waiting for it
+// (making.js `listed`): it opens in its room's place.
+function listedMade() {
+  if (making.listed(state.making, (name) => !!byName(name)) !== "open") return;
+  const { name } = state.making;
+  state.making = null;
+  makingRoom?.remove();
+  makingRoom = null;
+  openChat(name);
+  leaveSidebar();
+}
+// The view a chat being made was started from, back in its place, its
+// address with it (in place of the chat's `/` it was given)
+function restoreView({ page, current }) {
+  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY }[page] ?? "/";
+  if (location.pathname !== path) history.replaceState(null, "", path);
+  if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
+  else if (page === "Apps") openApps(false);
+  else if (page === "History") openHistory(false);
+  else if (byName(current)) openChat(current, false);
+  else {
+    renderHeading();
+    renderChats();
+  }
+}
+// A name drawn that someone holds already is drawn again, as the platform
+// draws a label's (cell/src/lib.rs NAME_DRAWS)
+const NAME_DRAWS = 3;
 // `open: false` makes it (or finds the blank one) without opening it: the
 // launcher opens it itself, as it posts its first message.
 async function newChat(identity, { quiet = false, open = true } = {}) {
@@ -1410,19 +1528,41 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
     // one that cannot be asked is not taken: a new chat is made
     if (name && !(await stillBlank(name).catch(() => false))) name = null;
     if (!name) {
+      // named here, before it is made, so its row is known as it
+      // whichever comes first, the list's read or the create's answer
+      const label = chatLabel(agent.fragment);
+      name = making.drawName(label);
+      if (open) showMaking(identity, name);
       // made with its agent in it, in one step: its row names its agent
       // from the start, and its computer is told it joined (`joined`)
-      const chat = await api("POST", "/api/fragments", { label: chatLabel(agent.fragment), template: "chat", title: UNTITLED, agent: identity });
-      await load();
-      name = chat.name;
+      for (let draw = 1; ; draw++) {
+        try {
+          await api("POST", "/api/fragments", { name, template: "chat", title: UNTITLED, agent: identity });
+          break;
+        } catch (e) {
+          if (e.status !== 409 || draw >= NAME_DRAWS) throw e;
+          name = making.drawName(label);
+          state.making = making.renamed(state.making, name);
+        }
+      }
+      // made: a list read that fails says so itself (`load`: the band's
+      // Try again), and its room waits for the next (`listedMade`)
+      if (open) await load().catch(() => {});
+      else await load();
     }
     if (!open) return name;
-    openChat(name);
-    leaveSidebar();
+    if (!state.making) {
+      openChat(name);
+      leaveSidebar();
+    } else if (settleMaking("made")) leaveSidebar();
     return name;
   } catch (e) {
+    // refused, or its list not read: nothing of it is left shown, and the
+    // view it was started from is back if it was still shown (a chat made
+    // whose list read failed comes with the list's next read)
+    if (state.making) settleMaking("refused");
     if (quiet) throw e;
-    notice("The chat was not made", e.message);
+    said("The chat was not made", e.message);
   } finally {
     starting = false;
   }
@@ -1533,7 +1673,7 @@ async function composeApp(text) {
   try {
     name = await promptChat();
   } catch (e) {
-    return notice("The chat was not made", e.message);
+    return said("The chat was not made", e.message);
   }
   if (!name) return notice("No agent yet", "Ask for an app once your agent is in your chat.");
   viewer.close("prompts");
@@ -1629,6 +1769,7 @@ const appsPage = createAppsPage($("apps-page"), {
 });
 function openApps(push = true) {
   if (push) at(APPS);
+  if (state.page !== "Apps") newView();
   hideNotice();
   state.page = "Apps";
   $("layout").classList.add("settings-view");
@@ -1660,7 +1801,7 @@ const historyPage = createHistoryPage($("history-page"), {
 });
 function openHistory(push = true) {
   if (push) at(HISTORY);
-  if (state.page !== "History") views++;
+  if (state.page !== "History") newView();
   hideNotice();
   state.page = "History";
   $("layout").classList.add("settings-view");
@@ -1687,7 +1828,7 @@ const settings = createSettings({
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },
   navigation: { at, path: SETTINGS, isOpen: () => state.page === "Settings",
     enter: () => {
-      if (state.page !== "Settings") views++;
+      if (state.page !== "Settings") newView();
       state.page = "Settings";
       $("layout").classList.add("settings-view");
       $("frames").hidden = true;
@@ -1747,9 +1888,14 @@ async function load(changed = false) {
   if (mine < reads.shown) return;
   reads.shown = mine;
   clearTimeout(reads.timer);
-  // A list's ordinary failure still goes to its caller, as before.
+  // A list's ordinary failure still goes to its caller, as before, and is
+  // known first: its band says so with Try again (computer.js
+  // `renderComputer`) whoever asked, so a caller that goes on without the
+  // list (the live list's refresh; a chat made, its room waiting for the
+  // list: `newChat`) leaves the person a way on. A read that answers clears it.
   if (listRead.error && !listRead.deploying) {
     reads.updating = false;
+    reads.listFailed = true;
     renderComputer();
     throw listRead.error;
   }
@@ -1766,6 +1912,7 @@ async function load(changed = false) {
   const list = listRead.value, computers = computerRead.value;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   if (list) state.fragments = list.fragments ?? [];
+  if (list) listedMade();
   // failed, it is not "no computer": what was read before stays, and is said to be old
   const unknown = state.computerFailed && !state.computer;
   state.computerFailed = !computers;
