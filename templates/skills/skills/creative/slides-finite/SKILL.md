@@ -61,6 +61,8 @@ serves `site/`. Never edit `site/` by hand: the next build replaces it.
   need no network. It is linked into the deck as `node_modules`. When a
   deck's lockfile is newer, its first build installs that version and
   removes the old one. npm's download cache is removed after each install.
+- Builds take turns: one may say it is waiting for another build, and goes
+  on when that one ends.
 - Never `npm install` in the deck's folder: it would put a second copy of
   the toolchain there.
 - Keep `package.json` and `package-lock.json` as they are. Your computer
