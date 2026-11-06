@@ -5045,3 +5045,55 @@ async fn playwright_runs_the_system_chromium_and_the_small_tools_run() {
     let browsers = c.exec_out(&["sh", "-c", "ls /opt/hermes/tools | grep chromium"]);
     assert_eq!(browsers.lines().count(), 3, "Chrome for Testing's, and Playwright's two names for the system Chromium; none downloaded: {browsers}");
 }
+
+/// Goal: a deck builds on the Hermes image as the slides skill says
+/// (templates/skills/skills/creative/slides-finite), and its build is the
+/// one the e2e serves. Method: the slides template's own build script, as
+/// the image's unprivileged user with its home on the saved disk, in a deck
+/// folder there holding the e2e's prebuilt starter deck
+/// (crates/e2e/fixtures/slides-site) as its `site/`: `--check` installs the
+/// locked toolchain (`npm ci`, through the image's npm and its 14-day
+/// release cooldown) outside `/data`, links it, builds the deck aside, and
+/// finds `site/` that build byte for byte; then a build writes `site/`,
+/// reusing the install. Invalid: a fixture its inputs no longer make, a
+/// toolchain or npm's cache under `/data` (saved with every disk), a lock
+/// the cooldown refuses, a build that leaves no page. It needs npm's
+/// registry, so it runs by name only, never in the queue's Docker lane:
+/// skipped without `FRAGMENT_DOCKER_SLIDES=1`.
+#[test]
+#[ignore = "needs Docker and npm's registry: FRAGMENT_DOCKER_SLIDES=1 cargo test -p fragment-bridge --test docker -- --ignored --exact a_slides_deck_builds_on_the_image_as_the_e2e_serves_it"]
+fn a_slides_deck_builds_on_the_image_as_the_e2e_serves_it() {
+    if std::env::var("FRAGMENT_DOCKER_SLIDES").is_err() {
+        eprintln!("skip: FRAGMENT_DOCKER_SLIDES=1 installs open-slide from npm's registry");
+        return;
+    }
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let c = Container::idle(&tag);
+    for (from, to) in [("templates/slides", "/tmp/deck-src"), ("crates/e2e/fixtures/slides-site", "/tmp/site-src")] {
+        let cp = Command::new(docker()).args(["cp", &format!("{}/.", repo_dir().join(from).display()), &format!("{}:{to}", c.id)]).output().expect("docker runs");
+        assert!(cp.status.success(), "docker cp {from}: {}", String::from_utf8_lossy(&cp.stderr));
+    }
+    let (code, out) = c.exec_code(&["sh", "-c", "mkdir -p /data/work /data/hermes && cp -r /tmp/deck-src /data/work/deck && rm -rf /data/work/deck/site && cp -r /tmp/site-src /data/work/deck/site && chown -R hermes /data/work /data/hermes"]);
+    assert_eq!(code, 0, "the deck on the saved disk: {out}");
+    let data_mb = |c: &Container| -> u64 { c.exec_out(&["sh", "-c", "du -sm /data | cut -f1"]).trim().parse().unwrap_or(u64::MAX) };
+    let before = data_mb(&c);
+    let run = |c: &Container, args: &[&str]| {
+        let t = Instant::now();
+        let mut cmd = vec!["exec", "-u", "hermes", "-e", "HOME=/data/hermes", "-w", "/data/work/deck", c.id.as_str(), "node", "scripts/build.mjs"];
+        cmd.extend_from_slice(args);
+        let out = Command::new(docker()).args(&cmd).output().expect("docker runs");
+        (out.status.success(), t.elapsed(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, first, log) = run(&c, &["--check"]);
+    assert!(ok && log.contains("byte for byte"), "the e2e's prebuilt deck is the template's build, made again here: {log}");
+    eprintln!("slides: --check, with its install, {} s", first.as_secs());
+    let link = c.exec_out(&["readlink", "/data/work/deck/node_modules"]);
+    assert!(link.trim().starts_with("/tmp/open-slide/"), "the toolchain is linked from outside the saved disk: {link}");
+    let after = data_mb(&c);
+    assert!(after < before + 10, "the saved disk holds the deck, not the toolchain or npm's cache: {before} MB, then {after} MB");
+    let (ok, second, log) = run(&c, &[]);
+    let page = c.exec_out(&["cat", "/data/work/deck/site/index.html"]);
+    assert!(ok && second < Duration::from_secs(30) && page.contains("/slides-live.js"), "a build reuses the install and writes the deck's page: {} s, {log}", second.as_secs());
+    eprintln!("slides: a build {} s; /data {before} MB, then {after} MB", second.as_secs());
+}
