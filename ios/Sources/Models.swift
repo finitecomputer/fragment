@@ -94,6 +94,14 @@ struct LiveFrame: Decodable, Sendable {
     var next: Int64?
     var more: Bool?
     var message: String?
+    struct Presence: Decodable, Sendable {
+        let id: String
+        let principal: String
+        let data: JSONValue?
+    }
+    var presence: [Presence]?
+    var id: String?
+    var data: JSONValue?
 
     var record: ChannelRecord? {
         guard let channel, let seq, seq > 0, let at, let principal, let kind, let body else { return nil }
@@ -124,12 +132,13 @@ struct TurnKey: Hashable, Sendable {
 struct TurnState: Equatable, Sendable {
     var startAt: Int64?
     var ended = false
+    var cause: JSONValue = .null
     var running: Bool { startAt != nil && !ended }
 }
 
 struct Timeline {
     private(set) var records: [ChannelRecord] = []
-    /// Bumped by each change to `records`: what a view draws from them is
+    /// Bumped by each change to records or remembered turns: what a view draws from them is
     /// made again only then (`ChatSession.rows`), never for a draft's words.
     private(set) var revision = 0
     private var ids: Set<String> = []
@@ -157,10 +166,11 @@ struct Timeline {
         let key = TurnKey(agent: record.principal, id: id)
         var state = turns[key] ?? TurnState()
         switch record.body["kind"].string {
-        case "turn.start": state.startAt = record.at
+        case "turn.start": state.startAt = record.at; state.cause = record.body["cause"]
         case "turn.end": state.ended = true
         default: break
         }
+        if turns[key] != state { revision &+= 1 }
         turns[key] = state
         if turns.count > Self.maximumTurns {
             let done = turns.filter { $0.value.startAt != nil && $0.value.ended && $0.key != key }.sorted { $0.value.startAt! < $1.value.startAt! }
