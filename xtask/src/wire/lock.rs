@@ -543,14 +543,14 @@ fn enum_values(schema: &Value) -> Option<Vec<String>> {
 }
 
 /// A route's facts, by what they say of it.
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 struct RouteFacts {
     at: String,
     shapes: BTreeMap<String, String>,
     accepts: BTreeSet<String>,
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 struct TypeFacts {
     direction: Option<Direction>,
     kind: String,
@@ -561,7 +561,7 @@ struct TypeFacts {
     values: BTreeSet<String>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Facts {
     routes: BTreeMap<String, RouteFacts>,
     types: BTreeMap<String, TypeFacts>,
@@ -651,8 +651,49 @@ fn split_null(t: &str) -> (&str, bool) {
     }
 }
 
-/// What `head` breaks of `base`, but those `retired` names.
+/// Each shape as a reader reads it: one that extends another (a `$ref`
+/// beside its own fields, as schemars writes a newtype variant) holds the
+/// other's fields, branches, bounds and inner shapes too, its own first.
+/// So a shape written inline in one release and by reference in the next
+/// compares by what it holds, not by how it is written.
+fn resolved(facts: &Facts) -> Facts {
+    let mut f = facts.clone();
+    let names: Vec<String> = f.types.keys().cloned().collect();
+    for name in names {
+        let mut seen = BTreeSet::new();
+        let mut next = f.types[&name].extends.clone();
+        while let Some(from) = next {
+            if !seen.insert(from.clone()) {
+                break;
+            }
+            let direction = f.types[&name].direction;
+            let inner = |n: &str| n == from || n.strip_prefix(from.as_str()).is_some_and(|r| r.starts_with('.'));
+            let copies: Vec<(String, TypeFacts)> = f.types.iter().filter(|(n, _)| inner(n)).map(|(n, t)| (format!("{name}{}", &n[from.len()..]), t.clone())).collect();
+            for (to, t) in copies {
+                let target = f.types.entry(to.clone()).or_insert_with(|| TypeFacts { direction, kind: t.kind.clone(), open: t.open, ..TypeFacts::default() });
+                for (field, held) in &t.fields {
+                    target.fields.entry(field.clone()).or_insert_with(|| held.clone());
+                }
+                target.values.extend(t.values.iter().cloned());
+                if target.branches.is_none() {
+                    target.branches = t.branches.clone();
+                }
+            }
+            let bounds: Vec<((String, String), String)> =
+                f.bounds.iter().filter(|((path, _), _)| inner(path)).map(|((path, kind), v)| ((format!("{name}{}", &path[from.len()..]), kind.clone()), v.clone())).collect();
+            for (key, v) in bounds {
+                f.bounds.entry(key).or_insert(v);
+            }
+            next = f.types.get(&from).and_then(|t| t.extends.clone());
+        }
+    }
+    f
+}
+
+/// What `head` breaks of `base`, but those `retired` names: each shape as
+/// its readers read it (`resolved`).
 pub fn breaches(base: &Facts, head: &Facts, retired: &BTreeSet<String>) -> Vec<Breach> {
+    let (base, head) = (&resolved(base), &resolved(head));
     let mut out = vec![];
     let mut breach = |fact: String, why: &str| {
         if !retired.contains(&fact) {
@@ -701,13 +742,6 @@ pub fn breaches(base: &Facts, head: &Facts, retired: &BTreeSet<String>) -> Vec<B
         }
         if read && now.open && !was.open {
             breach(type_line(name, now), "it is open now, but an older client reads it closed: a value it does not know fails it");
-        }
-        if was.extends != now.extends {
-            let line = match &was.extends {
-                Some(b) => format!("extends {name} {b}"),
-                None => format!("extends {name} {}", now.extends.as_deref().unwrap_or_default()),
-            };
-            breach(line, "the shape it is built on changed: an older client reads the one it had");
         }
         if was.branches != now.branches {
             let line = format!("branches {name} {}", was.branches.as_deref().or(now.branches.as_deref()).unwrap_or_default());

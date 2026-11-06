@@ -571,3 +571,18 @@ fn what_the_lock_cannot_read_is_refused() {
     let refused = project(&doc(json!({ "x-fragment-direction": "in", "type": "object", "properties": { "n": { "type": "string", "not": { "const": "" } } } }))).unwrap_err().to_string();
     assert!(refused.contains("`not`"), "{refused}");
 }
+
+/// A shape written by reference rather than inline, holding the same, is
+/// the same shape; one whose new field comes through the reference is not.
+#[test]
+fn shapes_compare_by_what_they_hold_not_how_they_are_written() {
+    let none = BTreeSet::new();
+    let base = parse("type S out object\nfield S.a required string\nbound S.n range u16\nfield S.n optional integer\n").unwrap();
+    let by_ref = parse("type S out object\nextends S P\ntype P out object\nfield P.a required string\nfield P.n optional integer\nbound P.n range u16\n").unwrap();
+    assert!(breaches(&base, &by_ref, &none).is_empty(), "{:?}", breaches(&base, &by_ref, &none));
+    let wider = parse("type S out object\nextends S P\ntype P out object\nfield P.a required string\nfield P.n optional integer\nbound P.n range u32\n").unwrap();
+    assert_eq!(facts_of(&breaches(&base, &wider, &none)), ["bound S.n range u16"]);
+    let closed = parse("type R out object closed\nfield R.id required string\n").unwrap();
+    let more = parse("type R out object\nextends R Q\ntype Q out object\nfield Q.id required string\nfield Q.more optional string\n").unwrap();
+    assert_eq!(facts_of(&breaches(&closed, &more, &none)), ["type R out object closed", "field R.more optional string"]);
+}
