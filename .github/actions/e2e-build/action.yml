@@ -107,9 +107,12 @@ runs:
     # The Actions runtime BuildKit's `type=gha` cache needs, handed to the
     # build step below alone (its env), never to the job: a shell step is
     # given none of it, and only a JavaScript action's process holds it.
-    # The token reaches xtask's image builds, whose stub's layers it reads
-    # (and on master's pushes writes); the tests run in later steps without
-    # it. The e2e runs only on trees a review let through (merge groups and
+    # The token reaches every process that step starts: `cargo xtask e2e
+    # --build-only` and all it runs, the host's cargo builds and their build
+    # scripts included, as well as the image builds, whose stub's layers it
+    # reads (and on master's pushes writes). That step is the trust
+    # boundary; the tests run in later steps without it. The e2e runs only
+    # on trees a review let through (merge groups and
     # master's pushes, or a pull request its label opts in), with locked
     # dependencies. It replaces a build of the stub here that read the
     # cache for itself and warmed nothing: BuildKit takes a remote cache's
