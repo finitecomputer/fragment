@@ -120,19 +120,64 @@ pub fn site_candidates(rest: &str) -> Vec<String> {
     vec![format!("site/{rest}"), format!("site/{rest}/index.html")]
 }
 
-/// A name with a content hash in it (`app.3f9a1c2e.js`) never changes:
-/// the one rule for a file kept for good by its name, a fragment's
-/// (`cache_control`) and the shell's built files alike (cell/src/shell.rs
-/// `asset`, crates/templates/bundle.rs).
+/// Whether `path` is a name the platform's own build gave a file of its
+/// release, its bytes' hash in it (`shell.f7db3bbd91f7.js`: 12 hex digits
+/// or more, a digit and a letter among them; crates/templates/bundle.rs):
+/// the shell's and a blessed template's (cell/src/shell.rs `asset`,
+/// cell/src/serve.rs `blessed_page`), kept for good by their name.
+///
+/// Never a person's own file. A name is no promise that its bytes never
+/// change: a file pinned by a wrong guess keeps its old bytes in a browser
+/// for a year, and the person's change never shows, while a miss costs a
+/// 304. Their site's files are kept for good only where its fragment.json
+/// says (`immutable`, `declared_immutable`). Deliberately not pinned by
+/// their name alone (FIN-391):
+///
+/// - a bundler's: Vite's and Rollup's `index-Ikq0sZO3.js`, esbuild's
+///   `index-S4M26L7U.js`, webpack's and Parcel's `app.3f9a1c2e.js`,
+///   Next.js's `main-3f9a2c1b4d5e6f70.js` (each a site declares instead);
+/// - a hand-made, dated or versioned one: `menu-Summer24.css`,
+///   `hero-V2final.png`, `report-Nov2024a.pdf`, `styles-col2Grid.css`,
+///   `backup.20241105.tar`, `jquery-3.7.1.min.js`;
+/// - a UUID or a git SHA in a name: `data-550e8400-e29b-41d4-a716-44665544abcd.json`,
+///   `build-3f9a1c2e.js`;
+/// - a page, even where a site declares it.
 pub fn hashed(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
-    base.split('.').rev().skip(1).any(|part| part.len() >= 8 && part.bytes().all(|b| b.is_ascii_hexdigit()))
+    base.split('.').rev().skip(1).any(|part| {
+        let b = part.as_bytes();
+        b.len() >= 12 && b.iter().all(u8::is_ascii_hexdigit) && b.iter().any(u8::is_ascii_digit) && b.iter().any(u8::is_ascii_alphabetic)
+    })
 }
 
-/// Cache policy for a served file. Anything behind a share link or
-/// membership is `private`: a shared cache must never hand it to someone else.
-pub fn cache_control(path: &str, public_fragment: bool) -> &'static str {
-    match (hashed(path), public_fragment) {
+/// A site's `immutable` paths as its install stored them, with the live
+/// commit they were read from (cell/src/plane.rs `install_code`): they
+/// describe that commit's tree alone.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Declared {
+    pub commit: String,
+    pub paths: Vec<String>,
+}
+
+/// Whether a fragment's own site file (`site_path`, under `site/`), served
+/// from the live commit `live`, is kept for good: one the paths stored for
+/// that very commit match (`Declared`; file trigger patterns, under
+/// `site/`), never a page. Stored for another commit (live moved and its
+/// install was refused, or is still to come), stored in another shape, or
+/// none: revalidated. Nothing else is kept for good, what its name looks
+/// like aside: a dated, versioned or hand-made name (`report-Nov2024a.pdf`,
+/// `menu-Summer24.css`) is revalidated.
+pub fn declared_immutable(stored: Option<&str>, live: &str, site_path: &str) -> bool {
+    let Some(declared) = stored.and_then(|text| serde_json::from_str::<Declared>(text).ok()) else { return false };
+    declared.commit == live && !live.is_empty() && !mime_for_path(site_path).starts_with("text/html") && declared.paths.iter().any(|p| crate::glob::matches_path(p, site_path))
+}
+
+/// Cache policy for a served file, kept for good when `pinned` (its name
+/// the platform's hash, `hashed`, or its fragment's declared,
+/// `declared_immutable`). Anything behind a share link or membership is
+/// `private`: a shared cache must never hand it to someone else.
+pub fn cache_control(pinned: bool, public_fragment: bool) -> &'static str {
+    match (pinned, public_fragment) {
         (true, _) => pinned_cache(public_fragment),
         (false, true) => "public, max-age=60",
         (false, false) => "private, no-cache",
@@ -481,25 +526,75 @@ mod tests {
         }
     }
 
-    /// Goal: only a name with a content hash in it is cached for a year,
-    /// and a public fragment's such file by shared caches too. The e2e's
-    /// site section reads the other three rows off served pages. Method:
-    /// names at the edges of the hash rule, on a public fragment.
+    /// Goal (FIN-391): a file is kept for good only when nothing can change
+    /// under its name: the platform's own built names, and a fragment's
+    /// files its fragment.json declares, never a page. A wrong yes hides a
+    /// person's change for a year; a miss costs a 304. Valid: the
+    /// platform's names; declared paths. Invalid: every bundler's name and
+    /// look-alike undeclared, a UUID, a git SHA, a page, a name outside the
+    /// declared folder.
     #[test]
-    fn only_a_hashed_name_is_immutable() {
-        for (path, hashed) in [
-            ("app.3f9a1c2e.js", true),
-            ("assets/app.3F9A1C2E.min.css", true),
-            ("app.0123456789abcdef.js", true),
-            ("app.3f9a1c2.js", false), // seven hex digits: too short to be a hash
-            ("app.3f9a1c2g.js", false),
-            ("deadbeef", false), // the last part is the extension, never the hash
-            ("app.deadbeef", false),
-            ("3f9a1c2e.d/app.js", false), // a hashed folder names no file's bytes
-        ] {
-            let expected = if hashed { "public, max-age=31536000, immutable" } else { "public, max-age=60" };
-            assert_eq!(cache_control(path, true), expected, "{path}");
+    fn only_a_platform_hash_or_a_declared_path_is_immutable() {
+        // the platform's own (crates/templates/bundle.rs)
+        for path in ["shell.f7db3bbd91f7.js", "chat.dca8eba10ae4.js.map", "site/chat.44e1677f9924.css", "shell.0123456789abcdef.js"] {
+            assert!(hashed(path), "{path}");
         }
+        // anything else, a bundler's name, a look-alike, or hand-made
+        let undeclared = [
+            "app.3f9a1c2e.js",              // 8 hex: Parcel's, or a git SHA
+            "build-3f9a1c2e.js",            // a git SHA in a name
+            "app.3f9a1c2ab.js",             // 9 hex
+            "shell.123456789012.js",        // digits alone: a number
+            "shell.abcdefabcdef.js",        // letters alone: a word
+            "assets/index-Ikq0sZO3.js",     // Vite's
+            "index-S4M26L7U.js",            // esbuild's
+            "main-3f9a2c1b4d5e6f70.js",     // Next.js's
+            "report-Nov2024a.pdf",
+            "styles-col2Grid.css",
+            "data-550e8400-e29b-41d4-a716-44665544abcd.json",
+            "menu-Summer24.css",
+            "hero-V2final.png",
+            "logo-dark.svg",
+            "2024-report.pdf",
+            "my-component.js",
+            "backup.20241105.tar",
+            "jquery-3.7.1.min.js",
+            "3f9a1c2e0123.d/app.js",        // a hashed folder names no file's bytes
+            "deadbeef0123",                 // the last part is the extension
+        ];
+        for path in undeclared {
+            assert!(!hashed(path), "{path}");
+            assert!(!declared_immutable(None, "c0ffee", path), "{path}");
+            assert_eq!(cache_control(hashed(path), true), "public, max-age=60", "{path}");
+        }
+        // declared: what its fragment.json names, and nothing else, for the
+        // commit it was read from alone
+        let live = "3f9a1c2e0123456789abcdef0123456789abcdef";
+        let stored = serde_json::to_string(&Declared { commit: live.into(), paths: vec!["assets/**".into(), "fonts/inter.woff2".into()] }).unwrap();
+        let declared = Some(stored.as_str());
+        for (path, pinned) in [
+            ("assets/index-Ikq0sZO3.js", true),
+            ("assets/menu-Summer24.css", true), // declared: the person's word
+            ("assets/deep/chunk-S4M26L7U.js", true),
+            ("fonts/inter.woff2", true),
+            ("fonts/other.woff2", false),
+            ("assets/index.html", false), // a page, never
+            ("assets/about.htm", false),
+            ("assetsx/a.js", false),
+            ("index-Ikq0sZO3.js", false),
+            ("app.3f9a1c2e.js", false),
+        ] {
+            assert_eq!(declared_immutable(declared, live, path), pinned, "{path}");
+        }
+        // another commit's paths (live moved, its install refused or to
+        // come), none, another shape, or no live: revalidated
+        let other = "0123456789abcdef0123456789abcdef3f9a1c2e";
+        for (stored, at) in [(declared, other), (declared, ""), (None, live), (Some(r#"["assets/**"]"#), live), (Some("{"), live), (Some(r#"{"commit":"x"}"#), live)] {
+            assert!(!declared_immutable(stored, at, "assets/index-Ikq0sZO3.js"), "{stored:?} at {at:?}");
+        }
+        assert_eq!(cache_control(true, true), "public, max-age=31536000, immutable");
+        assert_eq!(cache_control(true, false), "private, max-age=31536000, immutable");
+        assert_eq!(cache_control(false, false), "private, no-cache");
     }
 
     /// Goal (FIN-340): a versioned `__file` names a commit as its tree row
@@ -515,7 +610,7 @@ mod tests {
             assert!(!valid_version(bad), "{bad}");
         }
         assert_eq!((pinned_cache(true), pinned_cache(false)), ("public, max-age=31536000, immutable", "private, max-age=31536000, immutable"));
-        assert_eq!(cache_control("app.3f9a1c2e.js", false), pinned_cache(false), "a hashed name is pinned the same way");
+        assert_eq!(cache_control(true, false), pinned_cache(false), "a pinned file is pinned the same way");
     }
 
     /// Goal: a conditional GET is answered 304 exactly when it names the
