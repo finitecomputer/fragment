@@ -211,12 +211,15 @@ every chat and Settings.
   pressed twice it restarts once, and the ledger is asked first, as for a
   wake. While it runs, the shell shows its phase where the button was
   (saving, then starting; Settings' State says Saving, not Going to sleep,
-  while it saves), read every two seconds while the page is shown
+  while a restart asked in that page saves: one asked elsewhere, by
+  another tab, the CLI or the app, still reads Going to sleep there), read
+  every two seconds while the page is shown
   (`cell/shell/restart-follow.js`), and a line that a big save or restore
   can take a few minutes once it has run 30 seconds; awake on its new
   start, the notice goes. A read that fails says so, with Check again,
-  never that the restart failed; an ask that fails while the computer
-  shows no restart under way says it didn't restart, with Try again.
+  never that the restart failed; an ask that fails is decided by the next
+  read that works (none while the page is hidden or waits for Check
+  again): no restart under way says it didn't restart, with Try again.
 - **An update is told, never forced** (Paul, 2026-10-09). A deploy that
   changes an image pushes it under the same name: asleep, a computer takes
   it at its next wake; awake, it runs the image it started on until it

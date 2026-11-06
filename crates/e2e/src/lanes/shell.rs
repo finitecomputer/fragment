@@ -3321,9 +3321,11 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     );
     let _ = b.screenshot(page, &shots.join("computer-restart-starting.png"));
     // its progress reads failing (injected at fetch, as a blip's): said as
-    // the read's failure, never the restart's, with Check again, and
-    // nothing read on (Codex on #1053: it said Starting… over them); let
-    // through, Check again goes on following
+    // the read's failure, never the restart's, with Check again (Codex on
+    // #1053: it said Starting… over them); let through, Check again goes on
+    // following. That nothing is read until it is pressed is the
+    // follower's own tests' (cell/shell-tests/restart-follow.test.mjs), on a
+    // fake clock rather than a wait here
     b.eval(page, "(window.__restartReads = 0, window.__failRestartReads = true)")?;
     let unread = b.until(
         page,
@@ -3331,15 +3333,12 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         wait,
     );
     let _ = b.screenshot(page, &shots.join("computer-restart-unread.png"));
-    let tried = b.eval(page, "window.__restartReads")?;
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    let quiet = b.eval(page, "window.__restartReads")? == tried;
     b.eval(page, &format!("(window.__failRestartReads = false, {RESTART_ROW}.querySelector('button[data-action=restart-read]').click(), true)"))?;
     let again = b.until(page, &format!("{RESTART_ROW}?.querySelector('.restart-status')?.textContent === 'Starting…'"), wait);
     s.ok(
-        "its progress reads failing are said as such, with Check again, never as a restart that failed, and nothing is read on until it is pressed; then it follows again",
-        unread && quiet && again,
-        json!({ "tried": tried, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
+        "its progress reads failing are said as such, with Check again, never as a restart that failed; pressed, it follows again",
+        unread && again,
+        json!({ "reads": b.eval(page, "window.__restartReads")?, "band": b.eval(page, "document.getElementById('computer-notices').innerText")? }),
     );
     let slow = b.until(page, &format!("{RESTART_ROW}?.innerText.includes('A big restore can take a few minutes.')"), hold);
     let _ = b.screenshot(page, &shots.join("computer-restart-slow.png"));

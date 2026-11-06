@@ -1,25 +1,37 @@
 // A restart the person asked for in this page, followed until the computer
-// says it is done (docs/api.md: a restart answers `starting`, never awake).
-// One small explicit state (FIN-395), every way out of each written below,
-// so the page never says "Starting…" of a restart it can no longer see:
+// says it is done (docs/api.md: a restart answers `starting` once under
+// way, never awake). One explicit machine (FIN-395): `step` takes a state
+// and an event to the next state and the effects it asks for, and nothing
+// else decides; the runner below (`createRestartFollow`) only performs
+// those effects and turns their outcomes into events.
+//
+// A state is none (no restart followed), `failed`, or one of the reading
+// states, each of which also says whether the restart's own ask failed
+// and is not yet decided (`refused`: its words). Every pairing is one the
+// page can be in; `failed` carries neither, so a refused ask always waits
+// for a read that decides it, whatever happens between:
 //
 //   following    its view is read every FOLLOW_MS
-//     hidden          -> paused       (no timer; a read under way is dropped)
-//     a read fails    -> read_failed  (no timer; said, with Check again)
-//     its ask fails   -> one read decides: under way, it goes on; not, failed
+//     hidden           -> paused       (no timer; a read under way dropped)
+//     a read fails     -> read_failed  (no timer; said, with Check again)
+//     its ask fails    -> following, refused, read at once
 //   paused       nothing is read while the page is hidden
-//     shown           -> following    (read at once)
+//     shown            -> following    (read at once)
+//     its ask fails    -> paused, refused (decided once shown)
 //   read_failed  nothing is read: the read's failure is said, never the
-//                restart's (a failed read is no news of the restart)
-//     Check again     -> following    (read at once)
-//     its ask answers -> following    (an answer is a read that worked)
-//   failed       its ask failed and the computer shows no restart under way
-//     Restart         -> following    (a new restart)
-//   any state:   the computer awake on a newer start, or a newer start that
-//                won't start, from any read -> done (none); disposed -> none
+//                restart's (a failed read is no news of it), until Check again
+//     Check again      -> following, or paused if hidden (read at once)
+//     its ask answers  -> following, or paused (an answer is a read that worked)
+//     its ask fails    -> read_failed, refused (decided after Check again)
+//   any read that works, refused: under way (its answer was what was lost)
+//                    -> refused forgotten; not -> failed, with its words
+//   failed       the ask failed and a read showed no restart under way
+//     Restart          -> a new restart
+//   any state:   a view awake on a newer start, or a newer start that won't
+//                start (its own notice says so) -> none; disposed -> none
 //
-// Its effects come in (`read`, `ask`, `timers`, `hidden`), so its tests
-// drive this module itself with a fake clock (cell/shell-tests/).
+// An active restart (`active`) is one being followed, never a failure kept
+// on screen: only it makes Settings' State say Saving (computer.js).
 
 export const FOLLOW_MS = 2000;
 export const FOLLOWING = "following";
@@ -33,120 +45,143 @@ export const finished = (c, asked) => !!c && c.generation > asked && (c.phase ==
 // the computer shows this restart going on: a newer start, or its save or
 // start under way
 export const underway = (c, asked) => !!c && (c.generation > asked || c.phase === "sleeping" || c.phase === "starting");
+// a restart being followed (not a failure kept on screen)
+export const active = (op) => !!op && op.state !== FAILED;
 
-// `read`: its view, read again; `ask`: the restart's own POST, of the start
-// it restarts; `view`: the view the page shows now; `take`: a view read or
-// answered, shown; `changed`: the state changed (draw it); `hidden`: the
-// page is hidden.
+const reading = (s, name, more = {}) => ({ name, asked: s.asked, at: s.at, refused: s.refused, error: null, ...more });
+
+// The machine: `s` (null, or a state as above) and an event to `{ s, fx }`.
+// Events: press {asked, at, hidden} · tick · read_ok {v} · read_err
+// {message} · ask_ok {v, hidden} · ask_err {message} · hidden · shown ·
+// check_again {hidden} · view {v} (one the page took elsewhere) · dispose.
+// Effects: ask · read · schedule · cancel (the timer, and any read under
+// way). The same `s` back when nothing changed.
+export function step(s, e) {
+  const none = { s: null, fx: [{ do: "cancel" }] };
+  if (e.type === "press") {
+    if (s && s.name !== FAILED) return { s, fx: [] };
+    const name = e.hidden ? PAUSED : FOLLOWING;
+    return { s: { name, asked: e.asked, at: e.at, refused: null, error: null }, fx: [{ do: "cancel" }, { do: "ask" }, ...(name === FOLLOWING ? [{ do: "schedule" }] : [])] };
+  }
+  if (!s) return { s, fx: [] };
+  switch (e.type) {
+    case "dispose":
+      return none;
+    case "view":
+      return finished(e.v, s.asked) ? none : { s, fx: [] };
+    case "tick":
+      return { s, fx: s.name === FOLLOWING ? [{ do: "read" }] : [] };
+    case "read_ok": {
+      // a read is only ever under way while following
+      if (s.name !== FOLLOWING) return { s, fx: [] };
+      if (finished(e.v, s.asked)) return none;
+      if (s.refused && !underway(e.v, s.asked)) return { s: { name: FAILED, asked: s.asked, at: s.at, error: s.refused }, fx: [{ do: "cancel" }] };
+      return { s: s.refused ? reading(s, FOLLOWING, { refused: null }) : s, fx: [{ do: "schedule" }] };
+    }
+    case "read_err":
+      if (s.name !== FOLLOWING) return { s, fx: [] };
+      return { s: reading(s, READ_FAILED, { error: e.message }), fx: [{ do: "cancel" }] };
+    case "ask_ok": {
+      if (s.name === FAILED) return { s, fx: [] };
+      if (finished(e.v, s.asked)) return none;
+      // newer than any read under way
+      if (s.name === READ_FAILED) {
+        const name = e.hidden ? PAUSED : FOLLOWING;
+        return { s: reading(s, name), fx: name === FOLLOWING ? [{ do: "schedule" }] : [] };
+      }
+      return { s, fx: s.name === FOLLOWING ? [{ do: "cancel" }, { do: "schedule" }] : [] };
+    }
+    case "ask_err": {
+      if (s.name === FAILED) return { s, fx: [] };
+      const refused = reading(s, s.name, { refused: e.message, error: s.error });
+      // decided by the next read, which waits while hidden or after a read
+      // that failed, for shown or Check again
+      return { s: refused, fx: s.name === FOLLOWING ? [{ do: "cancel" }, { do: "read" }] : [] };
+    }
+    case "hidden":
+      return s.name === FOLLOWING ? { s: reading(s, PAUSED), fx: [{ do: "cancel" }] } : { s, fx: [] };
+    case "shown":
+      return s.name === PAUSED ? { s: reading(s, FOLLOWING), fx: [{ do: "read" }] } : { s, fx: [] };
+    case "check_again": {
+      if (s.name !== READ_FAILED) return { s, fx: [] };
+      const name = e.hidden ? PAUSED : FOLLOWING;
+      return { s: reading(s, name), fx: name === FOLLOWING ? [{ do: "read" }] : [] };
+    }
+  }
+  throw new Error(`no restart event ${e.type}`);
+}
+
+// The runner. `read`: its view, read again; `ask`: the restart's own POST,
+// of the start it restarts; `view`: the view the page shows now; `take`: a
+// view read or answered, shown; `changed`: the state changed (draw it);
+// `hidden`: the page is hidden. Its effects come in, so its tests drive it
+// with a fake clock and held promises (cell/shell-tests/).
 export function createRestartFollow({ read, ask, view, take, changed, hidden, timers = globalThis, now = () => Date.now() }) {
-  // { asked, at, state, error, timer, seq }: `seq` drops a read asked
-  // before a newer answer, a pause or a disposal
-  let op = null;
-  function clear(o) {
-    if (o.timer !== null) timers.clearTimeout(o.timer);
-    o.timer = null;
+  let s = null;
+  let timer = null;
+  // a read's or an ask's outcome counts only while its `seq`/`run` stands
+  let seq = 0;
+  let run = 0;
+  function cancel() {
+    if (timer !== null) timers.clearTimeout(timer);
+    timer = null;
+    seq++;
   }
-  function to(o, state, error = null) {
-    o.state = state;
-    o.error = error;
-    changed();
-  }
-  function schedule(o) {
-    clear(o);
-    o.timer = timers.setTimeout(() => {
-      o.timer = null;
-      if (op === o && o.state === FOLLOWING) readNow(o);
-    }, FOLLOW_MS);
-  }
-  // done, by whatever view the page has now; `tell`: draw it (not when the
-  // page is drawing already: `check`)
-  function done(tell = true) {
-    if (!op || !finished(view(), op.asked)) return false;
-    clear(op);
-    op.seq++;
-    op = null;
-    if (tell) changed();
-    return true;
-  }
-  // `deciding`: the read after its ask failed, which says whether the
-  // restart is under way all the same
-  function readNow(o, deciding = false) {
-    const seq = ++o.seq;
-    read().then(
-      (v) => {
-        if (op !== o || o.seq !== seq) return;
-        take(v);
-        // drawing it may have found it done (`check`)
-        if (op !== o || done()) return;
-        if (deciding && !underway(view(), o.asked)) return to(o, FAILED, o.askFailed);
-        if (o.state === FOLLOWING) schedule(o);
-      },
-      (e) => {
-        if (op !== o || o.seq !== seq) return;
-        clear(o);
-        to(o, READ_FAILED, e?.message ?? String(e));
-      },
-    );
+  function dispatch(e, draw = true) {
+    const before = s;
+    const next = step(s, e);
+    s = next.s;
+    if (s === null) run++;
+    for (const f of next.fx) {
+      if (f.do === "cancel") cancel();
+      else if (f.do === "schedule") {
+        if (timer !== null) timers.clearTimeout(timer);
+        timer = timers.setTimeout(() => {
+          timer = null;
+          dispatch({ type: "tick" });
+        }, FOLLOW_MS);
+      } else if (f.do === "read") {
+        const mine = ++seq;
+        read().then(
+          (v) => {
+            if (mine !== seq) return;
+            take(v);
+            // drawing it may have found it done (`check`)
+            if (mine === seq) dispatch({ type: "read_ok", v });
+          },
+          (err) => mine === seq && dispatch({ type: "read_err", message: err?.message ?? String(err) }),
+        );
+      } else if (f.do === "ask") {
+        const mine = ++run;
+        ask(s.asked).then(
+          (v) => {
+            if (mine !== run) return;
+            take(v);
+            if (mine === run) dispatch({ type: "ask_ok", v, hidden: hidden() });
+          },
+          (err) => mine === run && dispatch({ type: "ask_err", message: err?.message ?? String(err) }),
+        );
+      }
+    }
+    if (draw && s !== before) changed();
+    return s !== before;
   }
   return {
     // what is shown: null, or { asked, at, state, error }
-    op: () => op && { asked: op.asked, at: op.at, state: op.state, error: op.error },
+    op: () => s && { asked: s.asked, at: s.at, state: s.name, error: s.error },
     // Restart pressed: none runs (or the last one failed), so one begins
     press() {
       const c = view();
-      if (!c || (op && op.state !== FAILED)) return false;
-      if (op) clear(op);
-      const o = { asked: c.generation || 0, at: now(), state: hidden() ? PAUSED : FOLLOWING, error: null, timer: null, seq: 0, askFailed: null };
-      op = o;
-      changed();
-      if (o.state === FOLLOWING) schedule(o);
-      ask(o.asked).then(
-        (v) => {
-          if (op !== o) return;
-          // newer than any read under way
-          o.seq++;
-          take(v);
-          if (op !== o || done()) return;
-          // an answer is a read that worked
-          if (o.state === READ_FAILED) to(o, hidden() ? PAUSED : FOLLOWING);
-          if (o.state === FOLLOWING) schedule(o);
-        },
-        (e) => {
-          if (op !== o) return;
-          // a failed ask is no proof it did not restart (its answer may be
-          // what was lost): one read says
-          o.askFailed = e?.message ?? String(e);
-          clear(o);
-          readNow(o, true);
-        },
-      );
-      return true;
+      if (!c) return false;
+      return dispatch({ type: "press", asked: c.generation || 0, at: now(), hidden: hidden() });
     },
-    // a view the page took from elsewhere (its list's read): done by it?
-    check: () => done(false),
+    // a view the page took from elsewhere (its list's read), while it is
+    // drawing: done by it?
+    check: () => dispatch({ type: "view", v: view() }, false) && s === null,
     // the page hidden or shown again
-    visibility() {
-      if (!op) return;
-      if (hidden() && op.state === FOLLOWING) {
-        clear(op);
-        op.seq++;
-        to(op, PAUSED);
-      } else if (!hidden() && op.state === PAUSED) {
-        to(op, FOLLOWING);
-        readNow(op);
-      }
-    },
+    visibility: () => dispatch({ type: hidden() ? "hidden" : "shown" }),
     // Check again, after a read that failed
-    readAgain() {
-      if (op?.state !== READ_FAILED) return;
-      to(op, hidden() ? PAUSED : FOLLOWING);
-      if (op.state === FOLLOWING) readNow(op);
-    },
-    dispose() {
-      if (!op) return;
-      clear(op);
-      op.seq++;
-      op = null;
-    },
+    readAgain: () => dispatch({ type: "check_again", hidden: hidden() }),
+    dispose: () => dispatch({ type: "dispose" }, false),
   };
 }

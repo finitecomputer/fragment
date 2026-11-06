@@ -2,12 +2,16 @@
 // until the computer says it is done, as one explicit state (FIN-395),
 // driven with a fake clock and reads and asks held until each test
 // answers them (Codex on #1053: it read on hidden and after disposal, said
-// "Starting…" over failed reads, and took a failed ask for done).
+// "Starting…" over failed reads, and took a failed ask for done; then, at
+// fde60d1a, lost a failed ask's decision across a failed read or a pause,
+// read while hidden when its ask failed, and let a failure kept on screen
+// make a later sleep say Saving).
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRestartFollow, FOLLOW_MS, FOLLOWING, PAUSED, READ_FAILED, FAILED } from "../shell/restart-follow.js";
+import { active, createRestartFollow, step, FOLLOW_MS, FOLLOWING, PAUSED, READ_FAILED, FAILED } from "../shell/restart-follow.js";
+import { stateSaid } from "../shell/computer.js";
 
 const ID = "computer:aa";
 const at = (generation, phase) => ({ computer: ID, generation, phase });
@@ -248,4 +252,157 @@ test("found done by the page's own drawing of the view it takes (a read's, or th
   await q.answerAsk(at(5, "wont_wake"));
   assert.equal(q.follow.op(), null, "a newer start that won't start: done, its notice says so");
   assert.equal(q.timers(), 0);
+});
+
+// ---- Codex at fde60d1a: a failed ask's decision belongs to the state ----
+
+const REFUSED = "agents are stopped: the credit is used up";
+
+test("its ask refused, the read that would decide it failing, then Check again reading the computer as it was: failed, with the refusal, and Restart offered again", async () => {
+  const p = page();
+  p.follow.press();
+  await p.answerAsk(null, new Error(REFUSED));
+  await p.answerRead(null, new Error("offline"));
+  assert.equal(p.follow.op().state, READ_FAILED, "the read's failure is said, not the refusal yet");
+  assert.equal(p.follow.press(), false, "undecided: no second restart");
+  p.follow.readAgain();
+  await p.answerRead(at(4, "awake"));
+  assert.deepEqual(p.follow.op(), { asked: 4, at: 0, state: FAILED, error: REFUSED });
+  assert.equal(p.timers(), 0);
+  assert.equal(p.follow.press(), true, "Try again");
+});
+
+test("its ask refused, the page hidden and shown while the deciding read is under way: that read dropped, the next decides", async () => {
+  const p = page();
+  p.follow.press();
+  await p.answerAsk(null, new Error(REFUSED));
+  p.hidden = true;
+  p.follow.visibility();
+  await p.answerRead(at(4, "awake"));
+  assert.equal(p.follow.op().state, PAUSED, "dropped while hidden");
+  p.hidden = false;
+  p.follow.visibility();
+  await p.answerRead(at(4, "awake"));
+  assert.deepEqual(p.follow.op(), { asked: 4, at: 0, state: FAILED, error: REFUSED });
+});
+
+test("its ask refused while hidden: nothing read until shown, then one read decides", async () => {
+  const p = page();
+  p.follow.press();
+  p.hidden = true;
+  p.follow.visibility();
+  await p.answerAsk(null, new Error(REFUSED));
+  assert.equal(p.reads.length, 0, "no read while hidden");
+  assert.equal(p.timers(), 0);
+  assert.equal(p.follow.op().state, PAUSED);
+  await p.tick(60_000);
+  assert.equal(p.reads.length, 0);
+  p.hidden = false;
+  p.follow.visibility();
+  assert.equal(p.reads.length, 1);
+  await p.answerRead(at(4, "awake"));
+  assert.equal(p.follow.op().state, FAILED);
+});
+
+test("its ask refused after a read failed: nothing read until Check again, then it decides", async () => {
+  const p = page();
+  p.follow.press();
+  await p.tick();
+  await p.answerRead(null, new Error("offline"));
+  await p.answerAsk(null, new Error(REFUSED));
+  assert.equal(p.reads.length, 0, "the page said it waits for Check again");
+  assert.deepEqual(p.follow.op(), { asked: 4, at: 0, state: READ_FAILED, error: "offline" });
+  p.follow.readAgain();
+  await p.answerRead(at(5, "starting"));
+  assert.equal(p.follow.op().state, FOLLOWING, "under way after all: followed, the refusal forgotten");
+  await p.tick();
+  await p.answerRead(at(5, "awake"));
+  assert.equal(p.follow.op(), null);
+});
+
+test("a restart failed and kept on screen is no active restart: a later sleep of the same start is Going to sleep, one being followed says Saving", async () => {
+  const p = page();
+  p.follow.press();
+  await p.answerAsk(null, new Error(REFUSED));
+  await p.answerRead(at(4, "awake"));
+  assert.equal(p.follow.op().state, FAILED);
+  assert.equal(active(p.follow.op()), false);
+  assert.equal(stateSaid(at(4, "sleeping"), active(p.follow.op())), "Going to sleep");
+  p.follow.press();
+  assert.equal(stateSaid(at(4, "sleeping"), active(p.follow.op())), "Saving");
+  assert.equal(active(null), false);
+});
+
+// ---- the machine itself ----
+
+test("step is the only judge: unknown events refused, and the same state back when nothing changes", () => {
+  const s = step(null, { type: "press", asked: 4, at: 0, hidden: false }).s;
+  assert.deepEqual(s, { name: FOLLOWING, asked: 4, at: 0, refused: null, error: null });
+  for (const type of ["shown", "check_again", "tick"]) assert.equal(step(s, { type, hidden: false }).s, s, type);
+  assert.equal(step(s, { type: "read_ok", v: at(4, "sleeping") }).s, s);
+  assert.deepEqual(step(s, { type: "read_ok", v: at(5, "awake") }), { s: null, fx: [{ do: "cancel" }] });
+  assert.throws(() => step(s, { type: "nonsense" }));
+  const failed = { name: FAILED, asked: 4, at: 0, error: "x" };
+  for (const type of ["tick", "read_ok", "read_err", "ask_ok", "ask_err", "hidden", "shown", "check_again"]) {
+    assert.equal(step(failed, { type, v: at(4, "awake"), message: "m", hidden: false }).s, failed, `${type} leaves a failure as it is`);
+  }
+  assert.equal(step(step(null, { type: "press", asked: 4, at: 0, hidden: true }).s, { type: "press", asked: 4, at: 0, hidden: false }).fx.length, 0, "pressed again while it runs: nothing");
+});
+
+// Every way its ask can end, every way the read after it can end, the page
+// hidden while the ask settles or not, and Check again pressed or not: no
+// read while hidden, a timer only while following, Restart offered only
+// once failed, and the end the rules give.
+test("table: ask outcomes × read outcomes × visibility × Check again", async () => {
+  const asks = ["answered", "refused", "lost"];
+  const readOuts = ["idle", "underway", "fails"];
+  let n = 0;
+  for (const ask of asks) {
+    for (const readOut of readOuts) {
+      for (const hide of [false, true]) {
+        for (const again of [false, true]) {
+          const name = `${ask} / read ${readOut} / ${hide ? "hidden as it settles" : "shown"} / ${again ? "Check again" : "no Check again"}`;
+          const p = page();
+          p.follow.press();
+          if (hide) {
+            p.hidden = true;
+            p.follow.visibility();
+          }
+          const said = ask === "refused" ? REFUSED : "Failed to fetch";
+          if (ask === "answered") await p.answerAsk(at(4, "starting"));
+          else await p.answerAsk(null, new Error(said));
+          if (hide) {
+            assert.equal(p.reads.length, 0, `${name}: nothing read while hidden`);
+            assert.equal(p.timers(), 0, `${name}: no timer while hidden`);
+            p.hidden = false;
+            p.follow.visibility();
+          } else if (ask === "answered") {
+            await p.tick();
+          }
+          assert.equal(p.reads.length, 1, `${name}: one read`);
+          if (readOut === "fails") await p.answerRead(null, new Error("offline"));
+          else await p.answerRead(readOut === "idle" ? at(4, "awake") : at(5, "starting"));
+          if (readOut === "fails") {
+            assert.equal(p.follow.op().state, READ_FAILED, name);
+            assert.equal(p.timers(), 0, `${name}: no timer after a failed read`);
+            await p.tick(60_000);
+            assert.equal(p.reads.length, 0, `${name}: nothing read until Check again`);
+            if (again) {
+              p.follow.readAgain();
+              assert.equal(p.reads.length, 1, `${name}: Check again reads`);
+              await p.answerRead(at(4, "awake"));
+            }
+          }
+          const want = readOut === "fails" && !again ? READ_FAILED : readOut === "underway" ? FOLLOWING : ask === "answered" ? FOLLOWING : FAILED;
+          const op = p.follow.op();
+          assert.equal(op.state, want, name);
+          if (want === FAILED) assert.equal(op.error, said, `${name}: its own words`);
+          assert.equal(p.timers(), want === FOLLOWING ? 1 : 0, `${name}: a timer only while following`);
+          assert.equal(p.follow.press(), want === FAILED, `${name}: Restart offered only once failed`);
+          n++;
+        }
+      }
+    }
+  }
+  assert.equal(n, 36);
 });
