@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use fragment_core::seed::{self, Effect, Event, Stage, Step};
 use fragment_proto::{ErrorCode, RepoPath, Role};
 use fragment_templates::{blessed, Template, CATALOG};
 use serde_json::{json, Value};
@@ -20,10 +21,10 @@ use crate::js;
 const DEPLOY_ATTEMPTS: usize = 5;
 
 /// The blessed templates whose fragment is answered before its repo is
-/// made: the create answers once its claim and its facts are written, the
-/// fragment runs its template from the release meanwhile
-/// (`install_pending`), and its repo and first commit come right after the
-/// answer (`after_answer`'s seed), else at the alarm's next pass. Only the
+/// made (`seed::Making::SeedsLater`): the create answers once its claim and
+/// its facts are written, the fragment runs its template from the release
+/// meanwhile (`install_pending`), and its repo and first commit come from
+/// its alarm, armed at once by the create, else at a later pass. Only the
 /// chat for now (Paul, 2026-11-04: what a person waits on): each other
 /// template has readers of its repo of its own (a computer syncing its
 /// agent, a brain's sync), to be measured and tested before it joins.
@@ -98,9 +99,39 @@ async fn stamped(env: &Env, t: &'static Template, name: &str, title: Option<&str
 }
 
 impl FragmentCell {
-    /// Commits the template a fragment was made from (`template_pending`)
-    /// and deploys it. Keyed by the fragment's incarnation, so the alarm
-    /// can retry one that failed without committing twice.
+    /// The rows the stage of its making is read from (`seed::Rows`): its
+    /// template's commit is the one keyed by its life, asked only while a
+    /// template is to land.
+    fn seed_rows(&self) -> CellResult<seed::Rows> {
+        let keys = [MetaKey::ClaimedAt, MetaKey::CreatedAt, MetaKey::TemplatePending, MetaKey::Repo, MetaKey::PinLive, MetaKey::LiveReadAt, MetaKey::Blessed];
+        let [claimed_at, created_at, pending, repo, live, live_read_at, blessed] = self.metas(keys)?;
+        let created_at = created_at.map(|at| at.parse::<i64>().map_err(|_| CellError::host(format!("its created_at is not a time: {at:?}")))).transpose()?;
+        let committed = match (created_at, &pending) {
+            (Some(life), Some(_)) => !self.rows("SELECT 1 FROM file_commits WHERE key = ?", vec![format!("template:{life}").into()])?.is_empty(),
+            _ => false,
+        };
+        // a claim that is not a time holds nothing, as a lapsed one
+        let claimed_at = claimed_at.and_then(|at| at.parse().ok());
+        Ok(seed::Rows { now_ms: js::now_ms(), claimed_at, created_at, template_pending: pending.is_some(), repo: repo.is_some(), committed, live, live_read_at, blessed: blessed.is_some() })
+    }
+
+    /// How far its making has got (`fragment_core::seed`), read from its
+    /// rows: the one answer to whether its template is still to land.
+    pub(crate) fn stage(&self) -> CellResult<Stage> {
+        seed::stage(&self.seed_rows()?).map_err(contradiction)
+    }
+
+    /// [`Self::stage`] for a seed that began in `life` (`Stage::Ended` once
+    /// that life is not the fragment's).
+    fn stage_in(&self, life: i64) -> CellResult<Stage> {
+        seed::stage_in(&self.seed_rows()?, life).map_err(contradiction)
+    }
+
+    /// Lands the template a fragment was made from (`template_pending`), a
+    /// step of `fragment_core::seed` at a time from the stage its rows
+    /// say: its repo, its commit (keyed by its life, so a retry commits
+    /// nothing twice), its deploy and install, and its landing. A pass
+    /// after a failure or a restart takes the step that is next.
     ///
     /// One at a time: the create seeds, and the alarm it arms meanwhile
     /// (its index flush) seeds too. On code.storage, a round trip away, the
@@ -110,73 +141,133 @@ impl FragmentCell {
     /// lock the second finds the template landed, and does nothing.
     ///
     /// Landed is installed: the agents that joined meanwhile are told then
-    /// (runs_on.rs `joins_wait`), by whichever seed lands it, the create's
-    /// or a later one.
+    /// (`Stage::joins_wait`), by whichever seed lands it, the create's or a
+    /// later one.
     pub(crate) async fn seed(&self) -> CellResult<()> {
-        if self.seed_locked().await? {
+        for effect in self.seed_locked().await? {
+            assert_eq!(effect, Effect::TellJoined, "only its agents' notice follows a seed's lock");
             self.flush_joined().await;
         }
         Ok(())
     }
 
-    /// [`Self::seed`] under its lock: whether this one landed it.
-    async fn seed_locked(&self) -> CellResult<bool> {
+    /// [`Self::seed`] under its lock: each step carried out, its outcome
+    /// stepped, and the rows read back, which must say the step the
+    /// machine said (a life that ended meanwhile goes no further). Answers
+    /// what is left for after the lock.
+    async fn seed_locked(&self) -> CellResult<Vec<Effect>> {
         let _seeding = self.seeding.lock().await;
-        let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(false) };
+        let Some(life) = self.seed_rows()?.created_at else { return Ok(vec![]) };
+        let mut stage = self.stage_in(life)?;
+        if !stage.waits_template() {
+            return Ok(vec![]);
+        }
+        let (_, mut effects) = seed::step(&stage, &Event::Alarm).map_err(refused)?;
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
-        let life = self.must(MetaKey::CreatedAt)?;
-        let key = format!("template:{life}");
-        let title = self.meta(MetaKey::TemplateTitle)?;
-        let files = match (template(&which), blessed::template(&which)) {
-            (Some(t), _) => stamped(&self.env, t, &name, title.as_deref()).await?,
-            // a blessed template is named, not copied: the release serves it
-            (None, Some(_)) => {
-                let bytes = blessed_manifest_bytes(&which, title.as_deref());
-                vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
+        let mut after = vec![];
+        let mut steps = 0;
+        while !effects.is_empty() {
+            let effect = effects.remove(0);
+            if !effect.is_seed_step() {
+                after.push(effect);
+                continue;
             }
-            (None, None) => return Err(CellError::host(format!("no template {which}"))),
-        };
-        self.same_life(&life, "while its template's files were read")?;
-        // a template that seeds after the create's answer (`seeds_later`)
-        // makes its repo here, once: a later try finds it by its name
-        if self.meta(MetaKey::Repo)?.is_none() {
-            let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, &name, &owner)?).await?;
-            // its life ended while code.storage made the repo: the repo
-            // stays, as a deleted life's does (the same owner making the
-            // name again finds it), and this life's seed goes no further
-            self.same_life(&life, "while its repo was made")?;
-            self.set_meta(MetaKey::Repo, &repo)?;
-            self.event("template.repo", &format!("{name}'s repo is made ({repo})"), json!({ "repo": repo }));
+            steps += 1;
+            assert!(steps <= seed::SEED_STEPS_MAX, "a seed takes each of its steps once: {effect:?} is step {steps}");
+            let events = self.seed_step(effect, life, &name, &owner).await?;
+            let mut want = stage.clone();
+            for event in &events {
+                let (next, more) = seed::step(&want, event).map_err(refused)?;
+                want = next;
+                effects.extend(more);
+            }
+            // the rows say where it is: its life may have ended under an
+            // await (its next life's pending template is that life's own
+            // seed's), and the machine's step must be theirs
+            let read = self.stage_in(life)?;
+            if read == Stage::Ended {
+                return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended during its template's {effect:?}")));
+            }
+            // deployed is not installed: an install its deploy left to the
+            // poll keeps it pending, and the next seed's deploy, from the
+            // same commit, installs it (its agents' joins wait meanwhile)
+            if let Stage::Pending { step: Step::Deployed { live }, .. } = &want {
+                return Err(CellError::host(format!("{name}'s template is deployed (live {live}) but not installed yet")));
+            }
+            if !read.same_step(&want) {
+                return Err(CellError::host(format!("{name}'s template: after {effect:?} its rows say {read:?}, not {want:?}")));
+            }
+            stage = read;
         }
-        let repo = self.must(MetaKey::Repo)?;
-        if let Wrote::Conflict(why) = self.commit_in(&repo, &key, &files, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
-            return Err(CellError::host(why));
+        assert_eq!(stage, Stage::Landed, "a seed whose every step passed lands its template");
+        Ok(after)
+    }
+
+    /// Carries out one seed step in `life` (`seed::Effect`): what happened.
+    async fn seed_step(&self, effect: Effect, life: i64, name: &str, owner: &str) -> CellResult<Vec<Event>> {
+        match effect {
+            // a template that seeds after the create's answer (`seeds_later`)
+            // makes its repo here, once: a later try finds it by its name
+            Effect::EnsureRepo => {
+                let repo = self.cs()?.ensure_repo(&repo_name(self.cfg, name, owner)?).await?;
+                // its life ended while code.storage made the repo: the repo
+                // stays, as a deleted life's does (the same owner making the
+                // name again finds it), and this life's seed goes no further
+                self.same_life(life, "while its repo was made")?;
+                self.set_meta(MetaKey::Repo, &repo)?;
+                self.event("template.repo", &format!("{name}'s repo is made ({repo})"), json!({ "repo": repo }));
+                Ok(vec![Event::RepoMade])
+            }
+            Effect::Commit => {
+                let which = self.must(MetaKey::TemplatePending)?;
+                let title = self.meta(MetaKey::TemplateTitle)?;
+                let files = match (template(&which), blessed::template(&which)) {
+                    (Some(t), _) => stamped(&self.env, t, name, title.as_deref()).await?,
+                    // a blessed template is named, not copied: the release serves it
+                    (None, Some(_)) => {
+                        let bytes = blessed_manifest_bytes(&which, title.as_deref());
+                        vec![FileWrite { path: RepoPath::parse("fragment.json").expect("fragment.json is a repo path"), bytes: Some(bytes) }]
+                    }
+                    (None, None) => return Err(CellError::host(format!("no template {which}"))),
+                };
+                self.same_life(life, "while its template's files were read")?;
+                let repo = self.must(MetaKey::Repo)?;
+                let key = format!("template:{life}");
+                if let Wrote::Conflict(why) = self.commit_in(&repo, &key, &files, &BTreeMap::new(), &format!("start from the {which} template"), owner, 0).await? {
+                    return Err(CellError::host(why));
+                }
+                Ok(vec![Event::Committed])
+            }
+            Effect::Deploy => {
+                let repo = self.must(MetaKey::Repo)?;
+                let live = self.go_live_in(&repo, owner, &format!("deploy {name}")).await?;
+                // what follows live installed from it with the deploy, or
+                // was left to the poll
+                let installed = self.meta(MetaKey::LiveReadAt)?.as_deref() == Some(live.as_str());
+                let mut events = vec![Event::Deployed { live: live.clone() }];
+                if installed {
+                    events.push(Event::Installed { live });
+                }
+                Ok(events)
+            }
+            Effect::Land => {
+                let which = self.must(MetaKey::TemplatePending)?;
+                self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
+                self.del_meta(MetaKey::TemplateTitle)?;
+                self.del_meta(MetaKey::TemplatePending)?;
+                Ok(vec![Event::Landed])
+            }
+            Effect::InstallFromRelease | Effect::FlushIndex | Effect::TellJoined | Effect::Arm { .. } => unreachable!("{effect:?} is not a seed step"),
         }
-        // its life ended while its template was committed: no deploy
-        self.same_life(&life, "while its template was committed")?;
-        let live = self.go_live_in(&repo, &owner, &format!("deploy {name}")).await?;
-        // its life ended while it deployed (each step awaits code.storage):
-        // what is pending now is the next life's, its own seed's to land
-        self.same_life(&life, "while its template was deployed")?;
-        // deployed is not installed: an install go_live left to the poll
-        // keeps it pending, and the alarm's next seed installs it, from the
-        // same commit and deploy (its agents' joins wait meanwhile)
-        if self.meta(MetaKey::LiveReadAt)?.as_deref() != Some(live.as_str()) {
-            return Err(CellError::host(format!("{name}'s {which} template is deployed (live {live}) but not installed yet")));
-        }
-        self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
-        self.del_meta(MetaKey::TemplateTitle)?;
-        self.del_meta(MetaKey::TemplatePending)?;
-        Ok(true)
     }
 
     /// The life a seed began in, `life` (its `CreatedAt`), is still the
     /// fragment's, or the seed goes no further (404): a delete, and the
     /// name made again, between its awaits leaves the next life's pending
-    /// template, title and repo to that life's own seed. Asked after each
-    /// await, so what a seed writes or clears next is its own life's.
-    fn same_life(&self, life: &str, when: &str) -> CellResult<()> {
-        if self.meta(MetaKey::CreatedAt)?.as_deref() == Some(life) {
+    /// template, title and repo to that life's own seed. Asked after an
+    /// await and before what the step writes or commits next.
+    fn same_life(&self, life: i64, when: &str) -> CellResult<()> {
+        if self.meta(MetaKey::CreatedAt)?.and_then(|at| at.parse::<i64>().ok()) == Some(life) {
             return Ok(());
         }
         Err(CellError::new(ErrorCode::NotFound, format!("{} ended {when}", self.name().unwrap_or_default())))
@@ -274,4 +365,14 @@ impl FragmentCell {
         let live = self.go_live(&who, &message).await?;
         json_response(&json!({ "live": live, "canonical": self.cfg.canonical(&caller.url, &name) }))
     }
+}
+
+/// Rows no making leaves: the fragment fails closed, writing nothing.
+fn contradiction(c: seed::Contradiction) -> CellError {
+    CellError::host(format!("its making's rows contradict each other: {c}"))
+}
+
+/// The machine refused a step the cell took: the cell's mistake.
+pub(crate) fn refused(r: seed::Refused) -> CellError {
+    CellError::host(format!("its making's machine refused a step: {r:?}"))
 }

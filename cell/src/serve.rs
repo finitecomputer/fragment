@@ -507,7 +507,7 @@ impl FragmentCell {
         // not its repo is made yet
         let live = match facts.pin_live.as_deref() {
             Some(live) => live,
-            None if self.meta(MetaKey::TemplatePending)?.is_some() && self.meta(MetaKey::Blessed)?.is_some() => "",
+            None if self.stage()?.runs_release() => "",
             None => return Err(CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first"))),
         };
         let public = facts.visibility == Visibility::Public;

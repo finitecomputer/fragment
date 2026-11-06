@@ -59,6 +59,7 @@ pub mod schedule;
 pub mod schema;
 pub mod search;
 pub mod seal;
+pub mod seed;
 pub mod secrets;
 pub mod session;
 pub mod session_search;

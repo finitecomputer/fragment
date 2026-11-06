@@ -58,6 +58,7 @@
 
 use fragment_core::ended::{self as rules, Failure};
 use fragment_core::npub;
+use fragment_core::seed::Stage;
 use fragment_core::wipe::{LifeLeft, LIVES_SHOWN_MAX};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind};
 use futures_util::future::join_all;
@@ -66,7 +67,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{missing, Caller, FragmentCell, MetaKey, CLAIM_TTL_MS};
+use crate::fragment::{missing, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::members::INDEX_FLUSH_MAX;
 use crate::registry::calls;
@@ -528,9 +529,8 @@ impl FragmentCell {
             console_error!("the ended lives' errors were not forgotten ({:?}): {}", e.code, e.message);
         }
         let released = async {
-            let [created_at, claimed_at] = self.metas([MetaKey::CreatedAt, MetaKey::ClaimedAt])?;
-            let claimed = claimed_at.and_then(|c| c.parse::<i64>().ok()).is_some_and(|at| now - at < CLAIM_TTL_MS);
-            if created_at.is_some() || claimed || !self.rows("SELECT 1 FROM ended LIMIT 1", vec![])?.is_empty() {
+            // a life, or a create's claim that holds, keeps its storage
+            if self.stage()? != Stage::Free || !self.rows("SELECT 1 FROM ended LIMIT 1", vec![])?.is_empty() {
                 return Ok(false);
             }
             self.state.storage().delete_all().await?;

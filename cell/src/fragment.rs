@@ -57,6 +57,7 @@ use std::sync::Arc;
 
 use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
+use fragment_core::seed;
 use fragment_proto::{
     limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
     Visibility,
@@ -74,8 +75,6 @@ use crate::error::{CellError, CellResult};
 use crate::js;
 use crate::routed::{Credential, Routed, Signed};
 
-/// How long a create in progress holds its name.
-pub(crate) const CLAIM_TTL_MS: i64 = 120_000;
 /// The alarm fires no sooner than this after it is armed …
 pub(crate) const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
@@ -90,9 +89,10 @@ pub struct FragmentCell {
     pub(crate) cfg: &'static Config,
     /// Serializes pin refreshes: two refreshes racing could leave the older head pinned.
     pub(crate) plane: futures_util::lock::Mutex<()>,
-    /// Serializes `seed`: a create's and the alarm's it arms would both
-    /// commit the template, and the second commit, changing nothing, is
-    /// refused (publish.rs).
+    /// Serializes `seed`: a create's, a writer's and the alarm's would each
+    /// take the same step, and the second commit, changing nothing, is
+    /// refused (publish.rs). Its stage is in its rows, not here
+    /// (`fragment_core::seed`).
     pub(crate) seeding: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
@@ -125,9 +125,6 @@ pub struct FragmentCell {
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
-    /// A create answered before its template's repo was made
-    /// (publish.rs `seeds_later`): `after_answer` seeds it.
-    pub(crate) seed_soon: Cell<bool>,
     /// A test fleet's `hold-install` lever (ops.rs): whether a pending
     /// install waits (plane.rs `install_pending`), and whether one is
     /// waiting now. In memory: a life's end, which remakes its storage,
@@ -170,7 +167,6 @@ impl DurableObject for FragmentCell {
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
-            seed_soon: Cell::new(false),
             test_hold_install: Cell::new((false, false)),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
@@ -1284,18 +1280,22 @@ impl FragmentCell {
             return Err(CellError::invalid("a connector has no editor but its owner: make it without its agent, then add the agent as a viewer"));
         }
         let cs_cfg = self.cfg.codestorage();
-        // its repo made after the answer, by its template's seed (publish.rs)
-        let later = body.template.as_deref().is_some_and(crate::publish::seeds_later);
+        let making = match body.template.as_deref() {
+            None => seed::Making::Plain,
+            Some(t) if crate::publish::seeds_later(t) => seed::Making::SeedsLater,
+            Some(_) => seed::Making::SeedsNow,
+        };
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
-        // A claim left by a create that crashed mid-flight expires.
-        let [created_at, claimed_at] = self.metas([MetaKey::CreatedAt, MetaKey::ClaimedAt])?;
-        let claimed_at: i64 = claimed_at.and_then(|s| s.parse().ok()).unwrap_or(0);
-        if created_at.is_some() || js::now_ms() - claimed_at < CLAIM_TTL_MS {
-            return Err(CellError::new(ErrorCode::AlreadyExists, format!("fragment {} already exists", body.name)));
-        }
+        // A claim left by a create that crashed mid-flight lapses.
+        let claim_at = js::now_ms();
+        let claimed = match seed::step(&self.stage()?, &seed::Event::Claim { at: claim_at }) {
+            Ok((claimed, _)) => claimed,
+            Err(seed::Refused::Taken) => return Err(CellError::new(ErrorCode::AlreadyExists, format!("fragment {} already exists", body.name))),
+            Err(other) => return Err(crate::publish::refused(other)),
+        };
         self.set_meta(MetaKey::Name, &body.name)?;
-        self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
+        self.set_meta(MetaKey::ClaimedAt, &claim_at.to_string())?;
         // what it waited on, for its client (`Server-Timing`, after the router's)
         let mut laps = js::Laps::start();
         // the fragment's own key; its secret is kept sealed for this cell
@@ -1310,13 +1310,14 @@ impl FragmentCell {
                 }
                 None => None,
             };
-            let repo = match later {
-                true => None,
-                false => {
+            // its repo, unless its template's seed makes it after the answer
+            let repo = match making.repo_first() {
+                true => {
                     let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&crate::publish::repo_name(self.cfg, &body.name, &owner)?).await?;
                     laps.lap("repo");
                     Some(repo)
                 }
+                false => None,
             };
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             laps.lap("key");
@@ -1403,52 +1404,65 @@ impl FragmentCell {
         if let Some(target) = &agent {
             self.join_own_agent(target)?;
         }
-        // one that seeds after the answer runs its template from the
-        // release meanwhile; failing that, its seed's install does
-        if later {
-            // under the plane's lock, as every install is (plane.rs
-            // `install_pending`): a delete waits for it, and a writer's seed
-            // installs live wholly before or after it; asked again under the
-            // lock, this life is still the fragment's
-            let installed = {
-                let _held = self.plane.lock().await;
-                if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(created_at.as_str()) {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("{} ended while it was made", body.name)));
-                }
-                self.install_pending().await
-            };
-            if let Err(e) = installed {
-                self.event("template.failed", &format!("its template did not install from the release: {}", e.message), json!({ "code": e.code }));
-            }
-            laps.lap("install");
-        }
+        // its making is written: the stage its rows say is the one its
+        // machine says, and what follows is that step's effects, in order
+        let (made, effects) = seed::step(&claimed, &seed::Event::Made { making, agent: agent.is_some() }).map_err(crate::publish::refused)?;
+        assert_eq!(self.stage()?, made, "a making's rows say the stage it made");
         let shown = repo.as_deref().unwrap_or("made after this answer");
         self.event("create", &format!("fragment {} created by {owner} (repo {shown})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
-        self.flush_index().await;
-        laps.lap("list");
-        if later {
-            // its repo and first commit right after the answer
-            // (`after_answer`), else at the alarm's next pass (its pending
-            // template keeps it busy); its agent's computer is told then
-            self.seed_soon.set(true);
-            self.later();
-        } else {
-            // a template that did not land is retried by the alarm; whichever
-            // seed lands it tells its agents they joined (runs_on.rs `joins_wait`)
-            if let Err(e) = self.seed().await {
-                self.event("template.failed", &e.message, json!({ "code": e.code }));
-            }
-            laps.lap("seed");
-            // its agent's computer told it joined (an outbox the alarm
-            // retries), as after a `PUT members/{agent}`: while its template
-            // is still to land, none is told, and the seed that lands it tells it
-            if agent.is_some() {
-                self.flush_joined().await;
-                laps.lap("joined");
+        for effect in effects {
+            match effect {
+                // a template that seeds after the answer runs from the
+                // release meanwhile; failing that, its seed's install does.
+                // Under the plane's lock, as every install is (plane.rs
+                // `install_pending`): a delete waits for it, and a writer's
+                // seed installs live wholly before or after it; asked again
+                // under the lock, this life is still the fragment's
+                seed::Effect::InstallFromRelease => {
+                    let installed = {
+                        let _held = self.plane.lock().await;
+                        if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(created_at.as_str()) {
+                            return Err(CellError::new(ErrorCode::NotFound, format!("{} ended while it was made", body.name)));
+                        }
+                        self.install_pending().await
+                    };
+                    if let Err(e) = installed {
+                        self.event("template.failed", &format!("its template did not install from the release: {}", e.message), json!({ "code": e.code }));
+                    }
+                    laps.lap("install");
+                }
+                seed::Effect::FlushIndex => {
+                    self.flush_index().await;
+                    laps.lap("list");
+                }
+                // its seed, from its commit on (publish.rs `seed`): one that
+                // did not land is retried by the alarm, and whichever seed
+                // lands it tells its agents they joined
+                seed::Effect::Commit => {
+                    if let Err(e) = self.seed().await {
+                        self.event("template.failed", &e.message, json!({ "code": e.code }));
+                    }
+                    laps.lap("seed");
+                }
+                // its agent's computer told it joined (an outbox the alarm
+                // retries), as after a `PUT members/{agent}`
+                seed::Effect::TellJoined => {
+                    self.flush_joined().await;
+                    laps.lap("joined");
+                }
+                // `soon`: its seed after the answer is its alarm's, due at
+                // once (a pending template keeps it busy after: plane.rs
+                // `busy`), which a restart keeps
+                seed::Effect::Arm { soon } => {
+                    match soon {
+                        true => self.schedule_by(js::now_ms()).await?,
+                        false => self.schedule().await?,
+                    }
+                    laps.lap("alarm");
+                }
+                seed::Effect::EnsureRepo | seed::Effect::Deploy | seed::Effect::Land => unreachable!("a making's own effects never begin its seed at {effect:?}"),
             }
         }
-        self.schedule().await?;
-        laps.lap("alarm");
         let created = json_response(&Created {
             name: body.name.clone(),
             npub: fragment_npub,
@@ -1584,11 +1598,14 @@ impl FragmentCell {
         }
         self.flush_search().await;
         self.search_forget_due().await;
+        // a template still to land takes its next step (publish.rs `seed`);
+        // a chat made a moment ago takes its first here, its create having
+        // armed this pass at once
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         // after its seed: an agent's notice waits until its template is in
-        // (runs_on.rs `joins_wait`)
+        // (`Stage::joins_wait`)
         self.flush_joined().await;
         self.drain_deliveries().await;
         if let Err(e) = self.flush_meters(false).await {
@@ -1688,23 +1705,8 @@ impl FragmentCell {
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        // a create that answered before its template's repo was made
-        // (publish.rs `seeds_later`): made now; failing that, the alarm's
-        // pass tries again (a pending template keeps the fragment busy)
-        let seeded = self.seed_soon.replace(false);
-        if seeded {
-            if let Err(e) = self.seed().await {
-                self.event("template.failed", &e.message, json!({ "code": e.code }));
-            }
-            laps.lap("seed");
-            // then its agent's computer is told it joined: a seed that
-            // landed told it; one that failed leaves the chat running from
-            // the release, its channels there to follow (runs_on.rs `joins_wait`)
-            self.flush_joined().await;
-            laps.lap("joined");
-        }
-        if searched || listed || seeded || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "seeded": seeded, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || drained.queued + drained.woken + launched > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
         }
     }
 
