@@ -1727,8 +1727,10 @@ share link, or a fragment leaving `public` closes the sockets it admitted;
 a role change closes theirs (and an agent's owner's) with 4001, after which
 the library reconnects. A signed-in socket is checked again with the
 registry at its next frame after `LIVE_IDENTITY_MS`: a sign-out, an ended
-session or a revoked key closes it with 4001, as does a fragment waking
-from hibernation or a registry that cannot answer. A page's unsigned
+session or a revoked key closes it with 4001, as does a registry that
+cannot answer, or a fragment that woke from hibernation meanwhile on a
+socket signed in by cookie (its token is never stored; a key's socket is
+asked again as ever). A page's unsigned
 socket that the fragment refuses (401, 403) is opened and closed at once
 with 4003, for good, rather than refused by status (a browser would dial
 again, and Firefox holds back every socket to `/__live` after a refused

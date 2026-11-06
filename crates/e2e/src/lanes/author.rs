@@ -573,20 +573,47 @@ fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         }
     };
     s.ok("a socket whose key was revoked is closed at its next frame once asked again (4001)", closed.contains("4001"), &closed);
-    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "forget-live" })))?;
-    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })))?;
-    o.send(&json!({ "type": "ping" }))?;
-    let closed = loop {
-        match o.next() {
-            Ok(_) => continue,
-            Err(e) => break e.to_string(),
+
+    // The object wakes (a test lever forgets what its activation held). A
+    // key is public and kept in its socket's attachment, so a key's socket
+    // is asked about again with it: the owner's goes on, and a key revoked
+    // while the object slept still closes its own. A cookie's token is
+    // never stored: a page's socket signed in by cookie is closed to
+    // reconnect, never trusted as it was (4001).
+    let closed_by = |sock: &mut Socket| loop {
+        if let Err(e) = sock.next() {
+            break e.to_string();
         }
     };
+    let spare = Keys::generate();
+    let r = api.signed(&signer, "POST", add, Some(&json!({ "proof": api.proof(&spare, "POST", add, &signer) })))?;
+    let mut k = Socket::open(api, &name, "__live", Some(&spare), None)?;
+    let k_hello = k.until("hello", 5)?;
+    let site = format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(owner))?, &name)?);
+    let mut c = Socket::on_host(api, &name, "__live", None, Some(&site), Some(&api.site_origin(&name)))?;
+    let c_hello = c.until("hello", 5)?;
     s.ok(
-        "one the object holds no credential for (it woke) is closed to reconnect, never trusted as it was (4001)",
-        r.status == 200 && closed.contains("4001"),
-        &closed,
+        "(another key of a person's, and the owner's page by its site cookie, open sockets as them)",
+        r.status == 200 && k_hello["principal"] == api.identity(&signer)?.as_str() && c_hello["principal"] == o_hello["principal"],
+        format!("{k_hello} {c_hello}"),
     );
+    let forgot = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "forget-live" })))?;
+    let revoked = api.signed(&signer, "DELETE", &format!("/api/identities/me/keys/{}", fragment_core::npub::encode(spare.pubkey_hex())), None)?;
+    let aged = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })))?;
+    s.ok(
+        "(the test fleet forgets the sockets, as waking does; that key is revoked; the checks are aged)",
+        forgot.status == 200 && revoked.status == 200 && aged.status == 200,
+        format!("{forgot} {revoked} {aged}"),
+    );
+    o.send(&json!({ "type": "ping" }))?;
+    let still = o.until("pong", 5).map_err(|e| e.to_string());
+    s.ok("a key's socket asked again after the object woke goes on: its key is in its attachment", still.as_ref().is_ok_and(|p| p["type"] == "pong"), format!("{still:?}"));
+    k.send(&json!({ "type": "ping" }))?;
+    let closed = closed_by(&mut k);
+    s.ok("a key revoked while the object slept closes its socket at its next frame once asked again (4001)", closed.contains("4001"), &closed);
+    c.send(&json!({ "type": "ping" }))?;
+    let closed = closed_by(&mut c);
+    s.ok("a socket signed in by cookie, its object woken since, is closed to reconnect, never trusted as it was (4001)", closed.contains("4001"), &closed);
 
     // a socket's role is fixed while it is open: a member whose role
     // changes has theirs reopened (4001, which the library reconnects
