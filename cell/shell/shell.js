@@ -36,6 +36,7 @@ import { KIND } from "./frame-messages.js";
 import { answerTo } from "./computer-answer.js";
 import { standIns } from "./frame-standin.js";
 import * as making from "./making.js";
+import { createAsks } from "./asks.js";
 
 const $ = (id) => document.getElementById(id);
 const CURRENT = "shell.chat.v1";
@@ -81,6 +82,8 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
+// What a late answer may still do: one latest ask a kind (asks.js)
+const asks = createAsks();
 const state = { me: null, guest: false, fragments: [], limits: null, invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
@@ -231,17 +234,16 @@ function patch(box, rows) {
   while (box.children.length > next.length) box.lastElementChild.remove();
 }
 
-// The notice's generation: each notice shown, and each one taken away (a
-// chat or settings opened, settings loaded again), is a new one. What
-// finishes later says or takes away a notice only under the generation it
-// began under, never over a newer notice or another page (#457 review).
-let noticeGen = 0;
+// Each notice shown, and each one taken away (a chat or settings opened,
+// settings loaded again), is a new ask of the notice (asks.js): what
+// finishes later says or takes away a notice only under its own, never
+// over a newer notice or another page (#457 review).
 function hideNotice() {
   $("notice").hidden = true;
-  return ++noticeGen;
+  return asks.ask("notice");
 }
 // `text`: a line, or lines and elements; `action`: one, or several in a row;
-// its generation
+// its ask
 function notice(title, text, action = null) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
@@ -252,7 +254,7 @@ function notice(title, text, action = null) {
     n.append(row);
   }
   n.hidden = false;
-  return ++noticeGen;
+  return asks.ask("notice");
 }
 
 // What one of the person's own actions came to when it failed (a New chat
@@ -962,16 +964,11 @@ const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = crea
 // History, a chat being made): a launch's late answer changes the screen
 // only if none was given since (launcher.js), and a chat being made shown
 // there is away from then on (making.js `left`), its room hidden.
-let views = 0;
 let makingRoom = null;
 function newView() {
-  views++;
+  asks.ask("view");
   unsaid();
-  state.making = making.left(state.making);
-  if (!making.holdsView(state.making) && makingRoom) {
-    makingRoom.remove();
-    makingRoom = null;
-  }
+  stepMaking({ type: "left" });
 }
 // `path`: the page of it to show (the session archive's list, or one of
 // its conversations: session-archive.js), its frame sent there.
@@ -1435,20 +1432,19 @@ async function stillBlank(name) {
   const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
   return !firstSaid(r.records);
 }
-let starting = false;
 // The one thing the shell shows before the platform has it (Paul,
 // 2026-11-04: "we don't need to lean on optimistic UI yet", this alone): a
 // chat its agent's New chat is making, at once under that agent, open in
 // the middle column (its empty room's stand-in, frame-standin.js) and
 // titled, until the create answers. Its states and their moves are
 // making.js's; what each move shows is here.
-function showMaking(identity, name) {
+function showMaking(identity, name, by) {
   const before = { page: state.page, current: state.current };
   // its agent's menu (or the launcher's) gone before its room shows
   closeMenu(true);
   newView();
   at("/");
-  state.making = making.start({ agent: identity, name, title: UNTITLED, before });
+  stepMaking({ type: "start", by, agent: identity, name, title: UNTITLED, before });
   state.page = null;
   hideNotice();
   $("layout").classList.remove("settings-view");
@@ -1468,37 +1464,42 @@ function showMaking(identity, name) {
   renderChats();
   leaveSidebar();
 }
-// Its create answered (`made` or `refused`): the screen moves as
-// making.js `settled` says. True when its chat opened.
-function settleMaking(outcome) {
+// A step of the chat being made (making.js `step`): its state after, its
+// room gone once it no longer has the middle column, and what shows
+// (`then`): its chat opened in its place (true), the view it was started
+// from back, or the list drawn as it is.
+//
+// A pair the table does not take (making.js `MakingError`) is the shell's
+// mistake: it never leaves the page stuck in a room. It is logged, the
+// chat being made ends (its room gone), and the list is read again, the
+// truth of what was made.
+function stepMaking(event) {
   const m = state.making;
-  const { next, then } = making.settled(m, outcome, !!m && !!byName(m.name));
+  let stepped;
+  try {
+    stepped = making.step(m, event);
+  } catch (e) {
+    if (!(e instanceof making.MakingError)) throw e;
+    console.error("New chat:", e.message, { phase: m?.phase ?? "none", event: event.type });
+    stepped = { next: null, then: "stay" };
+    load().catch(() => {});
+  }
+  const { next, then } = stepped;
   state.making = next;
-  // made, its list not read yet: its room stays until it is (`load`)
-  if (then === "wait") return false;
-  makingRoom?.remove();
-  makingRoom = null;
+  if (!making.holdsView(next) && makingRoom) {
+    makingRoom.remove();
+    makingRoom = null;
+  }
   if (then === "open") {
     openChat(m.name);
     return true;
   }
   if (then === "restore") restoreView(m.before);
-  else {
+  else if (then === "stay" && m && !next) {
     renderHeading();
     renderChats();
   }
   return false;
-}
-// A list read that has the chat a create made, its room waiting for it
-// (making.js `listed`): it opens in its room's place.
-function listedMade() {
-  if (making.listed(state.making, (name) => !!byName(name)) !== "open") return;
-  const { name } = state.making;
-  state.making = null;
-  makingRoom?.remove();
-  makingRoom = null;
-  openChat(name);
-  leaveSidebar();
 }
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
@@ -1521,8 +1522,13 @@ const NAME_DRAWS = 3;
 // launcher opens it itself, as it posts its first message.
 async function newChat(identity, { quiet = false, open = true } = {}) {
   const agent = state.agents.get(identity);
-  if (!agent || starting) return;
-  starting = true;
+  // one at a time: a second press while one is made starts nothing
+  const start = agent ? asks.hold("start") : null;
+  if (!start) return;
+  // this New chat's own chat being made, if it shows one (its hold is its
+  // token): an earlier one still waiting for its list is not it, and ends
+  // as this one gives the middle column a view (`newView`: `left`)
+  const ours = () => making.owns(state.making, start);
   try {
     let name = blank(identity)?.name;
     // one that cannot be asked is not taken: a new chat is made
@@ -1532,7 +1538,7 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
       // whichever comes first, the list's read or the create's answer
       const label = chatLabel(agent.fragment);
       name = making.drawName(label);
-      if (open) showMaking(identity, name);
+      if (open) showMaking(identity, name, start);
       // made with its agent in it, in one step: its row names its agent
       // from the start, and its computer is told it joined (`joined`)
       for (let draw = 1; ; draw++) {
@@ -1542,51 +1548,53 @@ async function newChat(identity, { quiet = false, open = true } = {}) {
         } catch (e) {
           if (e.status !== 409 || draw >= NAME_DRAWS) throw e;
           name = making.drawName(label);
-          state.making = making.renamed(state.making, name);
+          if (ours()) stepMaking({ type: "renamed", by: start, name });
         }
       }
       // made: a list read that fails says so itself (`load`: the band's
-      // Try again), and its room waits for the next (`listedMade`)
+      // Try again), and its room waits for the next (`load`: `listed`)
       if (open) await load().catch(() => {});
       else await load();
     }
     if (!open) return name;
-    if (!state.making) {
+    // a blank chat taken again, or this one's room given up since: it
+    // opens as any chat does (an earlier room ends there: `left`)
+    if (!ours()) {
       openChat(name);
       leaveSidebar();
-    } else if (settleMaking("made")) leaveSidebar();
+    } else if (stepMaking({ type: "answered", by: start, outcome: "made", listed: !!byName(name) })) leaveSidebar();
     return name;
   } catch (e) {
-    // refused, or its list not read: nothing of it is left shown, and the
-    // view it was started from is back if it was still shown (a chat made
-    // whose list read failed comes with the list's next read)
-    if (state.making) settleMaking("refused");
+    // refused: nothing of it is left shown, and the view it was started
+    // from is back if it was still shown (one made already waits for its
+    // list, and is no refusal)
+    if (ours() && ["shown", "away"].includes(state.making.phase)) stepMaking({ type: "answered", by: start, outcome: "refused" });
     if (quiet) throw e;
     said("The chat was not made", e.message);
   } finally {
-    starting = false;
+    asks.letGo(start);
   }
 }
 // A chat of the person's still titled UNTITLED that has a message is titled
 // from its first message with words (its first line's words, cut to
 // TITLE_MAX_CHARS); one renamed in the meantime keeps its name. Once per
-// chat a page, after the list says it has a message.
-const titling = new Set();
+// chat a page, after the list says it has a message (held while it is
+// titled, and once titled: asks.js `title`).
 async function titleFromFirst(name) {
-  if (titling.has(name)) return;
-  titling.add(name);
+  const title = asks.hold("title", name);
+  if (!title) return;
   try {
     const r = await api("GET", `/api/f/${seg(name)}/channels/chat?after=0&limit=20`);
     // a message is a body with text and no kind but "message" (docs/chat-records.md)
     const said = firstSaid(r.records);
-    if (!said) return titling.delete(name);
+    if (!said) return asks.letGo(title);
     const words = said.trim().split("\n").find((l) => l.trim()).replace(/\s+/g, " ").trim();
-    const title = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
+    const titled = [...words].length > TITLE_MAX_CHARS ? `${[...words].slice(0, TITLE_MAX_CHARS - 1).join("").trimEnd()}…` : words;
     const manifest = await api("GET", `/api/f/${seg(name)}/manifest`);
     if (manifest.meta?.title !== UNTITLED) return;
-    await retitle(name, title, "its title, from its first message");
+    await retitle(name, titled, "its title, from its first message");
   } catch {
-    titling.delete(name);
+    asks.letGo(title);
   }
 }
 
@@ -1699,7 +1707,7 @@ const { retitle, rename } = createTitles({ $, api, seg, byName, titleOf, reload:
 const launcher = createLauncher({
   $, el, api, seg, state, byName, isChat, titleOf, chatTitle, mark, iconOf, primaryAgent, newChatAgent, agentsOwnChat, UNTITLED,
   openChat, openApp, chatFrame, composeIn, newChat, leaveSidebar, closeMenu, notice, prewake: () => prewake(), originOf, offers,
-  views: () => views,
+  views: () => asks.now("view").n,
   busy: (name) => refresh.isBusy(state.frames.get(name)),
   setupChat: () => onboarding.setupChat(),
   dropFrame,
@@ -1708,20 +1716,20 @@ const launcher = createLauncher({
 });
 
 // Each view of the computer taken in from an action's answer (`computerIs`,
-// `made`) is counted, so a list read (`load`) asked before it never shows
-// the computer as it was before: answered after it, the read would undo it.
-let computerTaken = 0;
+// `made`) is a new ask of the computer (asks.js), so a list read (`load`)
+// asked before it never shows the computer as it was before: answered
+// after it, the read would undo it.
 const { computerOf, prewake, renderComputer, restartComputer, computerSection } = createComputer({
   api, el, seg, named, section, line, actionLine, computer: () => state.computer,
   agents: () => state.agents, computerFailed: () => state.computerFailed,
   support: () => state.support, setupPending: () => onboarding.setupPending(),
-  made: (c) => { computerTaken++; state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
+  made: (c) => { asks.ask("computer"); state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
   reads: () => reads, load,
 });
 // The computer as the platform last answered: shown at once.
 function computerIs(v) {
   if (!v?.computer) return;
-  computerTaken++;
+  asks.ask("computer");
   state.computer = v;
   renderComputer();
   renderChats();
@@ -1754,6 +1762,7 @@ addEventListener("popstate", () => {
 // as settings are ----
 const appsPage = createAppsPage($("apps-page"), {
   api,
+  asks,
   el,
   icon,
   named,
@@ -1822,7 +1831,7 @@ function leaveHistory() {
 $("history-link").onclick = () => openHistory();
 
 const settings = createSettings({
-  api, $, seg,
+  api, $, seg, asks,
   account: { person: () => state.me, setPerson: (p) => { state.me = p; }, isGuest: () => state.guest, setGuest,
     setSeat: (seat) => { state.seat = seat; }, support: () => state.support, seatIs,
     switchForm: (...args) => switchForm(...args), noSeatSaid: () => noSeatSaid() },
@@ -1836,7 +1845,7 @@ const settings = createSettings({
       leaveHistory();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
-  notices: { hideNotice, noticeCurrent: (gen) => gen === noticeGen, notice },
+  notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
   sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
@@ -1853,7 +1862,7 @@ const { connectionsSection } = createConnections({
     computerIs(v);
     state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
   },
-  visitOf: () => settings.visit(), isOpen: () => state.page === "Settings", reopenSettings,
+  asks, isOpen: () => state.page === "Settings", reopenSettings,
 });
 
 const onboarding = createOnboarding({
@@ -1883,7 +1892,7 @@ async function shellRead(path) {
 }
 async function load(changed = false) {
   const mine = ++reads.asked;
-  const taken = computerTaken;
+  const taken = asks.now("computer");
   const [listRead, computerRead] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers")]);
   if (mine < reads.shown) return;
   reads.shown = mine;
@@ -1914,14 +1923,15 @@ async function load(changed = false) {
   if (list) state.fragments = list.fragments ?? [];
   // what a message of theirs may carry (the launcher's files): the platform's
   if (list) state.limits = list.limits ?? null;
-  if (list) listedMade();
+  // a chat being made, made, opens once the list has it (making.js `listed`)
+  if (list && stepMaking({ type: "listed", has: (name) => !!byName(name) })) leaveSidebar();
   // failed, it is not "no computer": what was read before stays, and is said to be old
   const unknown = state.computerFailed && !state.computer;
   state.computerFailed = !computers;
   if (computers) {
     // a view taken in while this read was out (an action's answer) is
     // newer than the one it brings: the next read brings the computer on
-    if (computerTaken === taken) {
+    if (asks.current(taken)) {
       state.computer = computers.computers?.[0] ?? null;
       state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
     }
@@ -2005,7 +2015,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 const refresh = createSessionRefresh({
-  held: () => !menu.hidden || writing > 0 || composing.size > 0 || launcher.holds() || starting,
+  held: () => !menu.hidden || writing > 0 || composing.size > 0 || launcher.holds() || asks.held("start"),
   getFrames: () => state.frames.values(), personId: () => state.me?.id,
   viewerKeys: () => viewer.keys, validFragment: (name) => FRAGMENT_NAME.test(name), openApp, originOf,
   endAlerts: () => { alertsEnded = true; }, dropAlerts,
