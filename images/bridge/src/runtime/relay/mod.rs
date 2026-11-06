@@ -92,7 +92,7 @@ use crate::limits;
 use crate::net::{self, Body};
 use crate::records::{Outcome, Step};
 use crate::runtime::{Command, Event, LocalFile, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
-use crate::scratch::Scratch;
+use crate::scratch::{InUse, NoRoom, Reservation, Scratch};
 use crate::transfer::Unreceived;
 use wire::{Action, FromGateway};
 
@@ -130,10 +130,13 @@ pub struct Relay {
     pub listener: std::net::TcpListener,
 }
 
-/// A file Hermes may fetch, or one it uploaded.
+/// A file Hermes may fetch, or one it uploaded. One it uploaded (or that
+/// was fetched for it) is in use while the table keeps it: Hermes may send
+/// it yet. A message's file is its turn's (the driver's).
 #[derive(Debug, Clone)]
 struct Media {
     file: LocalFile,
+    _used: Option<Arc<InUse>>,
 }
 
 #[derive(Default)]
@@ -148,14 +151,31 @@ impl MediaTable {
         if self.by_id.insert(id.clone(), m).is_none() {
             self.order.push(id);
         }
-        // bounded by MEDIA_KEPT_MAX: each pass removes one
+        // bounded by MEDIA_KEPT_MAX: each pass lets one go (its file then
+        // goes when its scratch needs the room, unless a post still uses it)
         while self.order.len() > MEDIA_KEPT_MAX {
             let old = self.order.remove(0);
-            if let Some(m) = self.by_id.remove(&old) {
-                if old.starts_with("up-") {
-                    let _ = std::fs::remove_file(&m.file.path);
-                }
-            }
+            self.by_id.remove(&old);
+        }
+    }
+
+    /// Lets the oldest upload go, for room: whether there was one.
+    fn let_go_oldest_upload(&mut self) -> bool {
+        let Some(at) = self.order.iter().position(|id| id.starts_with("up-")) else { return false };
+        let id = self.order.remove(at);
+        self.by_id.remove(&id);
+        true
+    }
+}
+
+/// Room in the relay's scratch for `size` bytes as `name`: its oldest
+/// uploads let go while it is full of those in use (bounded by the table).
+fn room(media: &Arc<Mutex<MediaTable>>, scratch: &Scratch, name: &str, size: u64) -> Result<Reservation, NoRoom> {
+    // bounded by MEDIA_KEPT_MAX: each pass lets one upload go, or ends
+    loop {
+        match scratch.reserve(name, size) {
+            Err(NoRoom::Full { .. }) if media.lock().expect("the media table").let_go_oldest_upload() => continue,
+            other => return other,
         }
     }
 }
@@ -381,23 +401,32 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
         }
         let media_type = req.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
         let name = req.headers().get("x-media-filename").and_then(|v| v.to_str().ok()).unwrap_or("file").chars().filter(|c| !c.is_control() && *c != '/').take(200).collect::<String>();
+        let too_large = || net::refusal(StatusCode::PAYLOAD_TOO_LARGE, "too_large", &format!("at most {} bytes", limits::ATTACHMENT_MAX_BYTES));
         let declared = req.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+        if declared.is_some_and(|n| n > limits::ATTACHMENT_MAX_BYTES) {
+            return too_large();
+        }
+        // its declared length, or the most it may be
+        let room_for = declared.unwrap_or(limits::ATTACHMENT_MAX_BYTES);
         let id = {
             let mut t = media.lock().expect("the media table");
             t.uploads += 1;
             format!("up-{}", t.uploads)
         };
+        let reserved = match room(&media, &scratch, &id, room_for) {
+            Ok(r) => r,
+            Err(e) => return net::refusal(StatusCode::INSUFFICIENT_STORAGE, "host", &e.to_string()),
+        };
         let path = scratch.dir().join(&id);
-        let size = match crate::transfer::receive(req.into_body(), declared, &scratch, &path, limits::ATTACHMENT_MAX_BYTES).await {
-            Ok(size) => size,
-            Err(Unreceived::TooLarge) => return net::refusal(StatusCode::PAYLOAD_TOO_LARGE, "too_large", &format!("at most {} bytes", limits::ATTACHMENT_MAX_BYTES)),
+        let (size, used) = match crate::transfer::receive(req.into_body(), reserved, &path, room_for).await {
+            Ok(got) => got,
+            Err(Unreceived::TooLarge) => return too_large(),
             Err(Unreceived::Empty) => return net::refusal(StatusCode::BAD_REQUEST, "invalid", "an empty file"),
             Err(Unreceived::Cut(e)) => return net::refusal(StatusCode::BAD_REQUEST, "invalid", &e),
-            Err(Unreceived::NoRoom(e)) => return net::refusal(StatusCode::INSUFFICIENT_STORAGE, "host", &e.to_string()),
             Err(Unreceived::Disk(e)) => return net::refusal(StatusCode::INTERNAL_SERVER_ERROR, "host", &e),
         };
         let file = LocalFile { path, media_type, name: if name.is_empty() { "file".into() } else { name }, size };
-        media.lock().expect("the media table").insert(id.clone(), Media { file });
+        media.lock().expect("the media table").insert(id.clone(), Media { file, _used: Some(Arc::new(used)) });
         crate::ev!("relay.media_uploaded", { "id": id, "size": size });
         return net::json_answer(StatusCode::OK, &json!({ "id": id }));
     }
@@ -441,12 +470,21 @@ async fn keep(media: &Arc<Mutex<MediaTable>>, scratch: &Scratch, f: fetch::Fetch
         t.uploads += 1;
         format!("up-{}", t.uploads)
     };
-    scratch.make_room(f.bytes.len() as u64, &[]).await.map_err(|e| format!("keeping it: {e}"))?;
+    let reserved = room(media, scratch, &id, f.bytes.len() as u64).map_err(|e| format!("keeping it: {e}"))?;
     let path = scratch.dir().join(&id);
-    tokio::fs::write(&path, &f.bytes).await.map_err(|e| format!("keeping it: {e}"))?;
+    let written = async {
+        tokio::fs::write(reserved.part(), &f.bytes).await?;
+        tokio::fs::rename(reserved.part(), &path).await
+    };
+    if let Err(e) = written.await {
+        let _ = tokio::fs::remove_file(reserved.part()).await;
+        return Err(format!("keeping it: {e}"));
+    }
+    let used = Arc::new(InUse::new([path.clone()]));
+    drop(reserved);
     let name = name.filter(|n| !n.trim().is_empty()).or_else(|| f.url.file_name()).unwrap_or_else(|| "file".into());
     let file = LocalFile { path, media_type: f.media_type.to_string(), name, size: f.bytes.len() as u64 };
-    media.lock().expect("the media table").insert(id, Media { file: file.clone() });
+    media.lock().expect("the media table").insert(id, Media { file: file.clone(), _used: Some(used) });
     Ok(file)
 }
 
@@ -693,7 +731,7 @@ impl Loop {
             for (i, f) in ts.files.iter().enumerate().filter(|(_, f)| f.size <= limits::HERMES_MEDIA_MAX_BYTES) {
                 let id = format!("in-{}-{i}", ts.turn);
                 let url = format!("http://{}/relay/media/{id}", self.cfg.listen);
-                t.insert(id, Media { file: f.clone() });
+                t.insert(id, Media { file: f.clone(), _used: None });
                 hosted.push((url, f.media_type.clone()));
             }
         }

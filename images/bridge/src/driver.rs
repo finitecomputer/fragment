@@ -41,7 +41,12 @@ use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Cause, Record};
 use crate::runtime::{Agent, Command, Event, LocalFile, Quote, RuntimeIo, Runtimes, TurnStart};
-use crate::scratch::Scratch;
+use crate::scratch::{InUse, Scratch};
+
+/// Each running turn's files (its message's, its answers'), by turn: in use
+/// until the engine ends the turn (`act`), so no other download makes room
+/// with them while its runtime may still read them.
+type TurnFiles = Arc<Mutex<HashMap<String, Vec<InUse>>>>;
 use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
@@ -53,6 +58,8 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// Scratch for attachments, never kept across a sleep.
     pub media_dir: PathBuf,
+    /// Its bytes, at most (`limits::SCRATCH_MAX_BYTES`; a test's fewer).
+    pub media_max_bytes: u64,
     /// `RESTORE_PENDING=1`: wait for `restored` before reading `/data`.
     pub restore_pending: bool,
     pub restored: PathBuf,
@@ -297,7 +304,9 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     // never before: a restore swaps `/data` into place.
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
-    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), limits::SCRATCH_MAX_BYTES).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?);
+    let scratch = Arc::new(Scratch::new(cfg.media_dir.clone(), cfg.media_max_bytes).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?);
+    // each running turn's files, in use until the engine ends it (scratch.rs)
+    let turn_files: TurnFiles = Arc::new(Mutex::new(HashMap::new()));
     // its answer to the platform's holds, for its whole life (none claims
     // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
@@ -382,13 +391,15 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone()))).collect();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, tx)| (serves, RuntimeLane::spawn(api.clone(), tx, scratch.clone(), turn_files.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
         if step.dirty {
             save(&cfg.state_dir, engine.state())?;
+            // a turn over lets its files go (bounded: the turns open)
+            turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
             *shared.cursors.lock().expect("cursors") = engine.state().cursors.clone();
             *shared.held.lock().expect("held") = engine.held();
         }
@@ -1507,6 +1518,8 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
     // its files, once uploaded: a retried post sends their refs again,
     // never the bytes (a file may be 256 MiB)
     let mut done: Option<Vec<AttachmentRef>> = None;
+    // its files in use until it is posted: a scratch never lets them go
+    let _used = InUse::new(files.iter().map(|f| f.path.clone()));
     for attempt in 1..=tries {
         let uploading = match &done {
             _ if files_refused => Ok(Vec::new()),
@@ -1598,23 +1611,26 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>) -> RuntimeLane {
+    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
             while let Some(mut c) = rx.recv().await {
                 // an answer's files, downloaded as a turn's are, then named
                 // in its words with where each is (`with_files`)
+                let keep = |turn: &str, used: Vec<InUse>| turn_files.lock().expect("turn files").entry(turn.to_string()).or_default().extend(used);
                 match &mut c {
-                    Command::Tell { text, attached, .. } => {
+                    Command::Tell { turn, text, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            let (files, used) = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, used);
                             *text = crate::runtime::with_files(text, &a.by_name, a.refs.len(), &files);
                         }
                     }
-                    Command::Answer { words, attached, .. } => {
+                    Command::Answer { turn, words, attached, .. } => {
                         if let Some(a) = attached.take() {
-                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            let (files, used) = download(&api, &a.agent, &a.fragment, &a.refs, &scratch).await;
+                            keep(turn, used);
                             *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a.by_name, a.refs.len(), &files));
                         }
                     }
@@ -1636,7 +1652,8 @@ impl RuntimeLane {
                             None
                         })
                     };
-                    let (files, note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    let ((files, used), note, quote) = tokio::join!(download(&api, &ts.agent.fragment, ts.attachments_in.as_deref().unwrap_or(&ts.fragment), &ts.attachments, &scratch), note, quote);
+                    keep(&ts.turn, used);
                     ts.files = files;
                     // its age first (a late message's), then a late card
                     // answer's turn's own note (engine.rs `hand`)
@@ -1692,18 +1709,21 @@ fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bo
 }
 
 /// A message's attachments, from the chat's blobs to scratch files, each
-/// streamed (transfer.rs); one that does not download is left out, and the
-/// runtime is told how many (`with_files`).
-async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> Vec<LocalFile> {
-    let mut out: Vec<LocalFile> = Vec::new();
+/// streamed (transfer.rs), and each in use while the `InUse`s live (so one
+/// downloaded never goes for the next); one that does not download is left
+/// out, and the runtime is told how many (`with_files`).
+async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef], scratch: &Scratch) -> (Vec<LocalFile>, Vec<InUse>) {
+    let (mut out, mut used) = (Vec::new(), Vec::new());
     for r in refs.iter().take(limits::ATTACHMENTS_MAX) {
-        let keep: Vec<PathBuf> = out.iter().map(|f| f.path.clone()).collect();
-        match crate::transfer::download(api, agent, fragment, r, scratch, &keep).await {
-            Ok(path) => out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size }),
+        match crate::transfer::download(api, agent, fragment, r, scratch).await {
+            Ok((path, u)) => {
+                out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
+                used.push(u);
+            }
             Err(e) => crate::ev!("attachment.unread", { "sha256": r.sha256, "size": r.size, "error": e.to_string() }),
         }
     }
-    out
+    (out, used)
 }
 
 // ---- the journal read back: a turn's note (note.rs), a late card answer (cards.rs) ----

@@ -13,7 +13,8 @@
 //!   from disk, then streamed up with its length declared.
 //! - **Hermes' upload** to `/relay/media` (`receive`) streams to disk.
 //!
-//! Every write first makes room in its scratch folder (scratch.rs).
+//! Every write first reserves its room in its scratch folder, and what it
+//! wrote is in use as it is handed back (scratch.rs).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,7 +30,7 @@ use tokio::time::Instant;
 use crate::api::{Api, ApiError};
 use crate::limits;
 use crate::records::{self, AttachmentRef};
-use crate::scratch::{self, NoRoom, Scratch};
+use crate::scratch::{InUse, NoRoom, Reservation, Scratch};
 
 /// The bytes read from a file at a time, as it is hashed or sent.
 const CHUNK_BYTES: usize = 64 * 1024;
@@ -87,28 +88,29 @@ impl std::fmt::Display for Cut {
 }
 
 /// A message's file, from the chat's blobs to `<scratch>/<sha256>` (one
-/// downloaded already, of its length, is used again). `keep`: the files
-/// of the same message downloaded before it, which making room never lets
-/// go.
-pub async fn download(api: &Api, agent: &str, fragment: &str, r: &AttachmentRef, scratch: &Scratch, keep: &[PathBuf]) -> Result<PathBuf, Unread> {
-    let path = scratch.dir().join(&r.sha256);
-    if tokio::fs::metadata(&path).await.is_ok_and(|m| m.len() == r.size) {
-        scratch::touch(&path);
-        return Ok(path);
+/// downloaded already, of its length, is used again), in use until the
+/// `InUse` handed back drops: the turn's, whose driver keeps it until the
+/// engine ends the turn.
+pub async fn download(api: &Api, agent: &str, fragment: &str, r: &AttachmentRef, scratch: &Scratch) -> Result<(PathBuf, InUse), Unread> {
+    if let Some(had) = scratch.reuse(&r.sha256, r.size) {
+        return Ok(had);
     }
-    scratch.make_room(r.size, keep).await.map_err(Unread::NoRoom)?;
     // a part of this download's own: two of one blob at once never write
-    // into each other
-    let part = scratch.dir().join(format!("{}.{:016x}.{}", r.sha256, crate::net::jitter_seed(), scratch::PART));
-    let got = fetch_into(api, agent, fragment, r, &part, stall()).await;
-    let got = match got {
-        Ok(()) => tokio::fs::rename(&part, &path).await.map_err(|e| Unread::Disk(e.to_string())),
+    // into each other. Its room is held through every retry and wait.
+    let room = scratch.reserve(&format!("{}.{:016x}", r.sha256, crate::net::jitter_seed()), r.size).map_err(Unread::NoRoom)?;
+    let path = scratch.dir().join(&r.sha256);
+    let got = match fetch_into(api, agent, fragment, r, room.part(), stall()).await {
+        Ok(()) => tokio::fs::rename(room.part(), &path).await.map_err(|e| Unread::Disk(e.to_string())),
         Err(e) => Err(e),
     };
     if got.is_err() {
-        let _ = tokio::fs::remove_file(&part).await;
+        let _ = tokio::fs::remove_file(room.part()).await;
     }
-    got.map(|()| path)
+    got?;
+    // in use before its room is let go: never a moment it may go
+    let used = InUse::new([path.clone()]);
+    drop(room);
+    Ok((path, used))
 }
 
 fn stall() -> Duration {
@@ -203,23 +205,18 @@ pub enum Unreceived {
     TooLarge,
     Empty,
     Cut(String),
-    NoRoom(NoRoom),
     Disk(String),
 }
 
-/// A request's body (Hermes' upload to `/relay/media`) streamed to `path`
-/// in `scratch`, at most `max` bytes (refused at once when its declared
-/// length is past it): its length.
-pub async fn receive<B>(body: B, declared: Option<u64>, scratch: &Scratch, path: &Path, max: u64) -> Result<u64, Unreceived>
+/// A request's body (Hermes' upload to `/relay/media`) streamed through
+/// `room`'s part to `path`, at most the bytes `room` holds: its length, and
+/// the file in use.
+pub async fn receive<B>(body: B, room: Reservation, path: &Path, max: u64) -> Result<(u64, InUse), Unreceived>
 where
     B: hyper::body::Body<Data = Bytes> + Unpin,
     B::Error: std::fmt::Display,
 {
-    if declared.is_some_and(|n| n > max) {
-        return Err(Unreceived::TooLarge);
-    }
-    scratch.make_room(declared.unwrap_or(max), &[]).await.map_err(Unreceived::NoRoom)?;
-    let part = path.with_extension(scratch::PART);
+    let part = room.part().to_path_buf();
     let got = async {
         let mut file = tokio::fs::File::create(&part).await.map_err(|e| Unreceived::Disk(e.to_string()))?;
         let mut have = 0;
@@ -228,7 +225,7 @@ where
             Ok(()) => {
                 file.flush().await.map_err(|e| Unreceived::Disk(e.to_string()))?;
                 tokio::fs::rename(&part, path).await.map_err(|e| Unreceived::Disk(e.to_string()))?;
-                Ok(have)
+                Ok((have, InUse::new([path.to_path_buf()])))
             }
             Err(Cut::TooLarge) => Err(Unreceived::TooLarge),
             Err(Cut::Disk(e)) => Err(Unreceived::Disk(e)),
@@ -239,6 +236,7 @@ where
     if got.is_err() {
         let _ = tokio::fs::remove_file(&part).await;
     }
+    drop(room);
     got
 }
 
@@ -510,13 +508,32 @@ mod tests {
         let api = Api::new(&url).unwrap();
         let dir = part("scratch").with_extension("d");
         let scratch = Scratch::new(dir.clone(), limits::SCRATCH_MAX_BYTES).unwrap();
-        let path = download(&api, "juniper--k3x9", "talk--k3x9", &r, &scratch, &[]).await.unwrap();
+        let (path, _used) = download(&api, "juniper--k3x9", "talk--k3x9", &r, &scratch).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert_eq!(download(&api, "juniper--k3x9", "talk--k3x9", &r, &scratch, &[]).await.unwrap(), path, "one on disk is used again, unasked");
+        assert_eq!(download(&api, "juniper--k3x9", "talk--k3x9", &r, &scratch).await.unwrap().0, path, "one on disk is used again, unasked");
         let (_, gone) = blob(1000);
-        assert!(download(&api, "juniper--k3x9", "talk--k3x9", &gone, &scratch, &[]).await.is_err());
+        assert!(download(&api, "juniper--k3x9", "talk--k3x9", &gone, &scratch).await.is_err());
         let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, vec![r.sha256.clone()], "no part left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_upload_lands_in_its_room_or_gives_it_back() {
+        let dir = part("receive").with_extension("d");
+        let scratch = Scratch::bounded(dir.clone(), 100, 4).unwrap();
+        let body = |n: usize| http_body_util::Full::new(Bytes::from(vec![9u8; n]));
+        let got = receive(body(80), scratch.reserve("up-1", 80).unwrap(), &dir.join("up-1"), 80).await;
+        let (size, used) = got.unwrap();
+        assert_eq!(size, 80);
+        assert!(scratch.reserve("up-2", 30).is_err(), "landed and in use: its room is taken");
+        drop(used);
+        let room = scratch.reserve("up-2", 30).unwrap();
+        assert!(!dir.join("up-1").exists(), "let go, it went for the next");
+        assert!(matches!(receive(body(31), room, &dir.join("up-2"), 30).await, Err(Unreceived::TooLarge)));
+        assert!(!dir.join("up-2").exists() && !dir.join("up-2.part").exists(), "nothing left behind");
+        assert!(matches!(receive(body(0), scratch.reserve("up-3", 100).unwrap(), &dir.join("up-3"), 100).await, Err(Unreceived::Empty)));
+        drop(scratch.reserve("up-4", 100).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

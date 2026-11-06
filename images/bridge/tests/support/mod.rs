@@ -76,7 +76,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None, screen: None, keepalive_ping: Duration::from_millis(fragment_bridge::limits::KEEPALIVE_PING_MS), simplex: None }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), media_max_bytes: fragment_bridge::limits::SCRATCH_MAX_BYTES, restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None, screen: None, keepalive_ping: Duration::from_millis(fragment_bridge::limits::KEEPALIVE_PING_MS), simplex: None }
 }
 
 /// A bridge on the test's runtime, beside the fakes, as the tests have run

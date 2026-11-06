@@ -186,6 +186,7 @@ async fn main() {
                 api,
                 state_dir: PathBuf::from(env_or("BRIDGE_STATE_DIR", "/data/bridge")),
                 media_dir: PathBuf::from(env_or("BRIDGE_MEDIA_DIR", "/tmp/bridge-media")),
+                media_max_bytes: limits::SCRATCH_MAX_BYTES,
                 restore_pending: env("RESTORE_PENDING").is_some_and(|v| v == "1"),
                 restored: PathBuf::from(env_or("BRIDGE_RESTORED", "/run/computer/restored")),
                 hold: PathBuf::from(env_or("BRIDGE_HOLD", "/run/computer/hold")),

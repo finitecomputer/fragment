@@ -585,8 +585,12 @@ signed afresh by the egress. A reply's file is hashed on disk, then
 streamed to `PUT …/blobs/{sha256}` with its length; an upload to
 `/relay/media` streams to disk. Each scratch folder (`BRIDGE_MEDIA_DIR`,
 `BRIDGE_RELAY_MEDIA_DIR`) holds at most one message's most files (2
-GiB) and 1024 files; past that, the files used least lately go
-(`scratch.rs`). SimpleX keeps its own 25 MiB a file (`simplex/run.rs`,
+GiB) and 1024 files (`scratch.rs`). A transfer reserves its room before
+it starts, until it is done; a file in use is never let go (a running
+turn's, until the engine ends it; a reply's while it uploads; an upload
+the relay still keeps for Hermes). Room is made from the rest, those
+used least lately first, the relay's oldest uploads let go when it needs
+theirs; a file with no room left is refused (told as unread, or 507). SimpleX keeps its own 25 MiB a file (`simplex/run.rs`,
 `FILE_BYTES_MAX`).
 
 - **A routine with nothing to tell says nothing.** A model's bare
