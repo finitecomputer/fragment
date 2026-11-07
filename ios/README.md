@@ -73,7 +73,9 @@ A physical phone reaches a platform over HTTPS; Release builds take nothing else
 - Native message author identities, Markdown, timestamps, long-press Reply/Copy/
   Share, quoted replies, file import, and AAC voice memos (five minutes maximum).
   Attachments use the existing blob API and chat record shape: eight per message,
-  25 MiB per file. Download/share and audio playback are native.
+  25 MiB per file. Pictures show inline and full screen, sounds as players (every
+  format that occurs: Chrome's WebM rewrapped as Ogg on the phone), PDFs as their
+  first page, other files as rows opened in Quick Look; see docs/ios.md.
 - Connected accounts follow the signed list watcher and mark visible chats read.
 - Existing HTTP/WebSocket streaming, Stop, same-id retry, independent cursors,
   backwards paging, reconnect and foreground resumption remain.

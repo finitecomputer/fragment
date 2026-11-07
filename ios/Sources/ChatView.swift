@@ -145,8 +145,9 @@ struct ChatView: View {
                 composerAccessories
                 ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
                     // sends go over HTTP: a reconnect never holds the composer
-                    enabled: session.read, busy: session.attaching, recording: voice.recording,
-                    attachPhotos: { photos = true }, attachFiles: { importer = true },
+                    // a memo being recorded holds its place as attaching, and its Finish stays
+                    enabled: session.read, busy: session.attaching && !voice.recording, recording: voice.recording,
+                    attachPhotos: { if session.admits(1) { photos = true } }, attachFiles: { if session.admits(1) { importer = true } },
                     pasteImages: { pasteboard in paste(pasteboard) },
                     record: { Task { await recordVoice() } },
                     send: { await session.send() }, stop: { await session.stop() }, hasAttachments: !session.attachments.isEmpty)
@@ -160,7 +161,7 @@ struct ChatView: View {
         }
         // Photos as the system's picker gives them, its most compatible
         // encoding: a picture the web shows goes as it is, any other as JPEG
-        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - session.attachments.count),
+        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, session.fileRoom),
                       matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
@@ -180,10 +181,11 @@ struct ChatView: View {
         .onDisappear { session.flushDraft() }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.flushDraft() } }
         .task(id: scenePhase) {
-            guard scenePhase == .active else { voice.cancel(); return }
+            guard scenePhase == .active else { voice.cancel(); AudioPlayback.shared.pause(); return }
             await session.run()
         }
-        .onDisappear { voice.cancel() }
+        // a sound playing stops with its chat
+        .onDisappear { voice.cancel(); AudioPlayback.shared.stop() }
     }
 
     private var composerAccessories: some View {
@@ -191,24 +193,17 @@ struct ChatView: View {
             if let quoted = session.replyTo {
                 HStack { Label(quoted.text, systemImage: "arrowshape.turn.up.left").font(.caption).lineLimit(2); Spacer(); Button("Cancel reply", systemImage: "xmark") { session.replyTo = nil }.labelStyle(.iconOnly) }
             }
-            if !session.attachments.isEmpty {
-                ScrollView(.horizontal) { HStack {
-                    ForEach(session.attachments) { file in
-                        Button { session.attachments.removeAll { $0.id == file.id } } label: { Label(file.name, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered)
-                    }
-                } }
-            }
+            ComposerAttachments(session: session)
             if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
             if voice.recording { Label("Recording voice memo…", systemImage: "waveform").foregroundStyle(.red).font(.caption) }
         }.padding(.horizontal, 20)
     }
 
     /// Files picked, read and put as the message's attachments (the
-    /// session's one attaching at a time); its task, to wait on.
-    @discardableResult
-    private func uploadFiles(_ urls: [URL]) -> Task<Void, Never>? {
-        guard session.beginAttaching(urls.count) else { return nil }
-        return Task {
+    /// session's one attaching at a time).
+    private func uploadFiles(_ urls: [URL]) {
+        guard session.beginAttaching(urls.count) else { return }
+        Task {
             await session.attach {
                 try await Task.detached(priority: .userInitiated) {
                     try urls.map { url in
@@ -246,13 +241,12 @@ struct ChatView: View {
         guard session.beginAttaching(pictures.count) else { return }
         Task { await session.attach { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value } }
     }
+    /// A voice memo: its place in the message reserved before it records,
+    /// then attached once finished (by hand, or at its deadline).
     private func recordVoice() async {
-        if voice.recording {
-            if let url = voice.stop() { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) }
-        } else {
-            guard session.attachments.count < ChatAttachment.countMax else { session.error = ChatAttachment.limits.countRefusal; return }
-            await voice.start { url in Task { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) } }
-        }
+        if voice.recording { voice.finish(); return }
+        guard session.beginAttaching(1) else { return }
+        await session.attach { [voice] in try await voice.file() }
     }
 }
 
@@ -305,26 +299,30 @@ struct ChatRow: View, Equatable {
 
     var body: some View {
         if record.isMessage {
+            let files = attachments
             VStack(alignment: .leading, spacing: 8) {
-                MessageView(text: record.text, isYou: isYou, agent: agent)
-                    .contextMenu {
-                        Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
-                        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
-                        ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
-                        if links.count == 1, let link = links.first {
-                            Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
-                            ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
-                        } else if !links.isEmpty {
-                            Menu("Links", systemImage: "link") {
-                                ForEach(links, id: \.self) { link in
-                                    Menu(link.host() ?? link.absoluteString) {
-                                        Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
-                                        ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                // a message of files alone is its files, without an empty bubble
+                if !(isYou && files.count > 0 && record.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                    MessageView(text: record.text, isYou: isYou, agent: agent)
+                        .contextMenu {
+                            Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
+                            Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
+                            ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
+                            if links.count == 1, let link = links.first {
+                                Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
+                                ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                            } else if !links.isEmpty {
+                                Menu("Links", systemImage: "link") {
+                                    ForEach(links, id: \.self) { link in
+                                        Menu(link.host() ?? link.absoluteString) {
+                                            Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
+                                            ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
+                }
                 if !opens.isEmpty {
                     HStack(spacing: 8) {
                         ForEach(opens) { app in
@@ -336,9 +334,7 @@ struct ChatRow: View, Equatable {
                         }
                     }
                 }
-                ForEach(attachments) { attachment in
-                    AttachmentView(attachment: attachment, api: api, fragment: fragment)
-                }
+                if !files.isEmpty { MessageAttachments(attachments: files, isYou: isYou, api: api, fragment: fragment) }
                 Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
             }
         } else if let card {
@@ -363,7 +359,11 @@ private struct PendingRows: View {
     var body: some View {
         ForEach(session.pending) { pending in
             VStack(alignment: .trailing, spacing: 6) {
-                MessageView(text: pending.text, isYou: true)
+                if !pending.text.isEmpty || pending.attachments.isEmpty { MessageView(text: pending.text, isYou: true) }
+                // its files from their bytes on this iPhone, as they will show once sent
+                if !pending.attachments.isEmpty {
+                    MessageAttachments(attachments: pending.attachments, isYou: true, api: session.api, fragment: session.fragment.name)
+                }
                 if let refused = pending.refused {
                     Button("Not sent: \(refused) Tap to edit", systemImage: "pencil") {
                         session.reopen(pending)

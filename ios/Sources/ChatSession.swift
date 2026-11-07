@@ -63,6 +63,11 @@ final class ChatSession {
     /// Files being attached, from their choosing until their upload: the
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
     private(set) var attaching = false
+    /// Files being put, or that failed to be: each shown in the composer
+    /// from its own bytes on this iPhone (`BlobStore.keep`) as it goes, then
+    /// held as an attachment once put. A failed one waits to be put again
+    /// (`retryUpload`) or removed, and the message waits with it.
+    private(set) var uploads: [Upload] = []
     var composer = "" { didSet { scheduleDraftSave() } }
     var attachments: [ChatAttachment] = [] { didSet { scheduleDraftSave() } }
     var replyTo: ChannelRecord? { didSet { scheduleDraftSave() } }
@@ -142,7 +147,8 @@ final class ChatSession {
     /// anew, once the composer is empty (`deliver`).
     func reopen(_ post: PendingPost) {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
-        guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
+        // nor while files are being attached: their places are held (`beginAttaching`)
+        guard composer.isEmpty && attachments.isEmpty && uploads.isEmpty && !attaching else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
         // its own words, files and addressees: the draft's were kept until now
         composer = refused.text; attachments = refused.attachments; recipients = refused.recipients
@@ -357,12 +363,25 @@ final class ChatSession {
         }
     }
 
+    /// The message's files: attached, being put, or failed to be put (which
+    /// waits to go with it). Each takes one of a message's `countMax` places;
+    /// every check of what more it takes counts this, and only this.
+    var fileCount: Int { attachments.count + uploads.count }
+    /// Places the message has left (the photo picker's most).
+    var fileRoom: Int { max(0, ChatAttachment.countMax - fileCount) }
+    /// Whether `count` more files may be attached now, saying why not.
+    func admits(_ count: Int) -> Bool {
+        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return false }
+        return true
+    }
     /// Reserves the attaching of `count` files, at once, before anything is
     /// read: none while others are attaching, none past `countMax` a message.
     /// Then `attach` reads and uploads them; until it ends, nothing sends.
+    /// A voice memo reserves its place before it records (`VoiceMemo.file`),
+    /// so one is refused before it starts, never once it is recorded.
     func beginAttaching(_ count: Int) -> Bool {
-        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + attachments.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
+        guard admits(count) else { return false }
         attaching = true
         return true
     }
@@ -371,20 +390,73 @@ final class ChatSession {
     /// `beginAttaching` began.
     func attach(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
         defer { attaching = false }
+        let files: [OutgoingFile]
+        do { files = try await prepare() }
+        // a voice memo cancelled, or never begun (`VoiceMemo.file`): nothing to say
+        catch is CancellationError { return }
+        catch { self.error = error.localizedDescription; return }
+        guard !files.isEmpty else { error = "This could not be attached."; return }
+        guard files.count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return }
+        var queued: [(OutgoingFile, ChatAttachment)] = []
+        for file in files {
+            let sha256 = await Task.detached(priority: .userInitiated) { sha256Hex(file.data) }.value
+            let attachment = ChatAttachment(sha256: sha256, name: file.name, type: file.type, size: file.data.count)
+            guard !attachments.contains(where: { $0.id == attachment.id }), !uploads.contains(where: { $0.id == attachment.id }),
+                  !queued.contains(where: { $0.1.id == attachment.id }) else { continue }
+            // kept as it is, so it shows at once (and once sent) from these bytes;
+            // one not kept shows once it is read back
+            do { try await BlobStore.shared.keep(file.data, key: BlobKey(api: api, fragment: fragment.name, sha256: attachment.sha256)) } catch {}
+            uploads.append(Upload(attachment: attachment))
+            queued.append((file, attachment))
+        }
+        for (file, attachment) in queued { await put(file.data, attachment) }
+    }
+
+    /// A failed upload put again, from its bytes kept on this iPhone.
+    func retryUpload(_ id: String) async {
+        guard !attaching, let upload = uploads.first(where: { $0.id == id }), upload.failed != nil else { return }
+        attaching = true
+        defer { attaching = false }
+        let attachment = upload.attachment
+        let kept = BlobStore.shared.cached(BlobKey(api: api, fragment: fragment.name, sha256: attachment.sha256))
+        let read = await Task.detached(priority: .userInitiated) { kept.flatMap { try? Data(contentsOf: $0) } }.value
+        // removed meanwhile: nothing to put
+        guard let index = uploads.firstIndex(where: { $0.id == id }) else { return }
+        guard let data = read, data.count == attachment.size else {
+            uploads[index].failed = "This file is no longer on this iPhone. Remove it and attach it again."
+            return
+        }
+        uploads[index].failed = nil
+        uploads[index].progress = 0
+        await put(data, attachment)
+    }
+
+    func removeUpload(_ id: String) {
+        guard !attaching || uploads.first(where: { $0.id == id })?.failed != nil else { return }
+        uploads.removeAll { $0.id == id }
+    }
+
+    private func put(_ data: Data, _ attachment: ChatAttachment) async {
+        let id = attachment.id
         do {
-            let files = try await prepare()
-            guard !files.isEmpty else { error = "This could not be attached."; return }
-            guard files.count + attachments.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
-            for file in files {
-                let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
-                if !attachments.contains(where: { $0.id == put.id }) { attachments.append(put) }
+            let put = try await api.upload(data, name: attachment.name, type: attachment.type, to: fragment.name) { [weak self] fraction in
+                Task { @MainActor in
+                    guard let self, let index = self.uploads.firstIndex(where: { $0.id == id }),
+                          fraction - self.uploads[index].progress >= 0.02 || fraction >= 1 else { return }
+                    self.uploads[index].progress = fraction
+                }
             }
-        } catch { self.error = error.localizedDescription }
+            uploads.removeAll { $0.id == id }
+            if !attachments.contains(where: { $0.id == put.id }) { attachments.append(put) }
+        } catch {
+            if let index = uploads.firstIndex(where: { $0.id == id }) { uploads[index].failed = error.localizedDescription }
+        }
     }
 
     func send() async {
         // what is being attached goes with it, or the message waits
         guard !attaching else { error = "Wait for the files being attached."; return }
+        guard !uploads.contains(where: { $0.failed != nil }) else { error = "A file did not upload. Retry it or remove it."; return }
         // a send goes at the chat's end: a window paged back returns there first
         if timeline.detached { await resetToLatest() }
         guard persistence != nil else {
@@ -568,4 +640,12 @@ final class ChatSession {
 
     /// A page of messages, read older or newer as the chat is scrolled.
     static let page = 50
+}
+
+/// A file of the composer's being put: how much is sent, or why it failed.
+struct Upload: Identifiable, Equatable, Sendable {
+    let attachment: ChatAttachment
+    var progress: Double = 0
+    var failed: String?
+    var id: String { attachment.id }
 }
