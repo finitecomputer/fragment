@@ -406,7 +406,9 @@ impl PrincipalCell {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
                 let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
                 let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
-                Ok(Response::from_json(&FragmentList { fragments, limits: Some(crate::config::Config::from_env(&self.env).uploads) })?)
+                // what its signer's messages carry: the router names an agent's list (`?agent`)
+                let kind = if req.url()?.query() == Some("agent") { fragment_proto::IdentityKind::Agent } else { fragment_proto::IdentityKind::Person };
+                Ok(Response::from_json(&FragmentList { fragments, limits: Some(crate::config::Config::from_env(&self.env).uploads_for(kind)) })?)
             }
             (Method::Put, "/archived") => {
                 let s: SetArchived = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;

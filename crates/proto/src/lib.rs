@@ -1433,9 +1433,10 @@ pub struct AccessAgent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FragmentList {
     pub fragments: Vec<ListedFragment>,
-    /// What a person's message may carry here, which every client checks
-    /// its files against before it sends them (add-only: absent from an
-    /// older platform, and from a list read for an agent or inside).
+    /// What a message of the signer's may carry here, which every client
+    /// checks its files against before it sends them: a person's, the
+    /// deployment's bound; an agent's (`?for=` too), a blob's (add-only:
+    /// absent from an older platform, and from a list read inside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<UploadLimits>,
 }

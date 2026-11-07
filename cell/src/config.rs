@@ -299,6 +299,17 @@ fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragmen
 }
 
 impl Config {
+    /// What one message of `kind`'s may carry, the one choice of it: a
+    /// person's files pass the zone (`uploads`, which the deployment
+    /// names); an agent's go from its computer, which no zone meets, and
+    /// are at most a blob's. The upload route holds it, and the list says it.
+    pub fn uploads_for(&self, kind: fragment_proto::IdentityKind) -> fragment_proto::UploadLimits {
+        match kind {
+            fragment_proto::IdentityKind::Person => self.uploads,
+            fragment_proto::IdentityKind::Agent => fragment_proto::UploadLimits { upload_max_bytes: limits::BLOB_MAX_BYTES, ..self.uploads },
+        }
+    }
+
     /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
     pub fn from_env(env: &Env) -> &'static Config {
         let cfg = CONFIG.get_or_init(|| Config::build(env));

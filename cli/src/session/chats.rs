@@ -407,11 +407,15 @@ pub(crate) mod tests {
         assert_eq!(roomy.media.len(), 1, "a deployment past the default takes it");
     }
 
-    /// Goal: a file past the default upload comes on a deployment that
-    /// takes more, and is left out, said, on one that takes the default.
-    /// Method: a real file one byte past it (sparse, its bytes zeros).
+    /// Goal: a file past a person's default upload comes where the signer
+    /// may send it: an agent's import, acting for its owner (its list names
+    /// a blob's bound; an older platform's names none, and the agent's is a
+    /// blob's still), or a person's where the deployment takes more; it is
+    /// left out, said, where the person's bound is the default. Method: a
+    /// real file one byte past it (sparse, its bytes zeros), each bound
+    /// chosen from a list as the platform answers it (`upload_max`).
     #[test]
-    fn a_file_past_the_default_comes_where_the_platform_takes_it() {
+    fn a_file_past_the_default_comes_where_the_signer_may_send_it() {
         let root = super::super::tempdir();
         let chats = root.join("chats");
         std::fs::create_dir_all(chats.join("media")).unwrap();
@@ -423,15 +427,33 @@ pub(crate) mod tests {
         ] });
         std::fs::write(chats.join("c1.json"), chat.to_string()).unwrap();
         std::fs::write(chats.join("index.json"), json!({ "format": FORMAT, "conversations": [{ "id": "c1", "file": "chats/c1.json" }] }).to_string()).unwrap();
-        let mut roomy = spool();
-        let problems = read(&root, &mut roomy, 2 * UPLOAD_MAX).unwrap();
-        assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(read_back(&roomy, "hermes-c1").messages[0].attachments.len(), 1, "taken where the platform takes more");
-        assert_eq!(std::fs::metadata(&roomy.media[&format!("media/{sha}.tiff")]).unwrap().len(), size);
-        let mut default = spool();
-        let problems = read(&root, &mut default, UPLOAD_MAX).unwrap();
-        assert!(problems.iter().any(|p| p.contains(&format!("is {size} bytes, past the {UPLOAD_MAX} this platform takes"))), "{problems:?}");
-        assert!(read_back(&default, "hermes-c1").messages[0].attachments.is_empty() && default.media.is_empty(), "left out, its message kept");
+        let listed = |limits: Option<u64>| -> fragment_proto::FragmentList {
+            serde_json::from_value(match limits {
+                Some(most) => json!({ "fragments": [], "limits": { "uploadMaxBytes": most, "filesPerMessage": fragment_proto::limits::FILES_PER_MESSAGE } }),
+                None => json!({ "fragments": [] }),
+            })
+            .unwrap()
+        };
+        let blob_max = fragment_proto::limits::BLOB_MAX_BYTES;
+        let cases = [
+            ("an agent, acting for its owner", super::super::upload_max(&listed(Some(blob_max)), true), true),
+            ("an agent, on an older platform", super::super::upload_max(&listed(None), true), true),
+            ("a person, where the deployment takes more", super::super::upload_max(&listed(Some(2 * UPLOAD_MAX)), false), true),
+            ("a person, at the default", super::super::upload_max(&listed(Some(UPLOAD_MAX)), false), false),
+            ("a person, on an older platform", super::super::upload_max(&listed(None), false), false),
+        ];
+        for (who, most, kept) in cases {
+            let mut s = spool();
+            let problems = read(&root, &mut s, most).unwrap();
+            let held = read_back(&s, "hermes-c1").messages[0].attachments.len();
+            if kept {
+                assert!(problems.is_empty() && held == 1, "{who}: {problems:?}");
+                assert_eq!(std::fs::metadata(&s.media[&format!("media/{sha}.tiff")]).unwrap().len(), size, "{who}");
+            } else {
+                assert!(problems.iter().any(|p| p.contains(&format!("is {size} bytes, past the {UPLOAD_MAX} this platform takes"))), "{who}: {problems:?}");
+                assert!(held == 0 && s.media.is_empty(), "{who}: left out, its message kept");
+            }
+        }
     }
 
     /// Goal: a conversation of a kind not asked for has none of its files

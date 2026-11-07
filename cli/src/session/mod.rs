@@ -251,10 +251,8 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
         bail!(usage(format!("{} is no file or folder", path.display())));
     }
     let mut spool = Spool::new(kinds)?;
-    // what the platform takes from a person (its `limits`; an older one
-    // names none, and took a zone's)
     let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
-    let upload_max = list.limits.map_or(fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT, |l| l.upload_max_bytes);
+    let upload_max = upload_max(&list, c.agent().is_some());
     let problems = match source(&path)? {
         Source::Export(root) => chats::read(&root, &mut spool, upload_max)?,
         Source::Hermes(db) => {
@@ -275,6 +273,19 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     let search = search::sync(c, &archive, &spool);
     let refused = std::mem::take(&mut spool.refused);
     Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds, search })
+}
+
+/// One file's bytes this import may send, at most: what the platform's
+/// list says this signer's messages carry (`limits`: a person's, the
+/// deployment's bound; an agent's, acting for its owner, a blob's). An
+/// older platform names none: a person's then passed its zone (the
+/// default), an agent's, from its computer, a blob's.
+fn upload_max(list: &FragmentList, agent: bool) -> u64 {
+    match list.limits {
+        Some(l) => l.upload_max_bytes,
+        None if agent => fragment_proto::limits::BLOB_MAX_BYTES,
+        None => fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT,
+    }
 }
 
 /// Where a path a person names reads from.

@@ -647,7 +647,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
-    Ok(FragmentList { fragments, limits: None })
+    Ok(FragmentList { fragments, limits: Some(Config::from_env(env).uploads_for(agent.identity.kind)) })
 }
 
 /// Whose ledger a signer reads: a person's own; an agent's owner's.
@@ -1262,7 +1262,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             if let Some(asker) = &principal.acting_for {
                 return json_answer(&reachable(env, &principal, asker).await?);
             }
-            let list = Request::new("https://principal.internal/list", Method::Get)?;
+            // the list says what this signer's messages carry (`uploads_for`)
+            let kind = if principal.identity.kind == IdentityKind::Agent { "?agent" } else { "" };
+            let list = Request::new(&format!("https://principal.internal/list{kind}"), Method::Get)?;
             crate::routed::send(env, "PRINCIPAL", &principal.id, list).await
         }
         // the signer's own view of a fragment of theirs (principal.rs): it
@@ -1408,7 +1410,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
-            blob_length(&req, if principal.identity.kind == IdentityKind::Person { cfg.uploads.upload_max_bytes } else { limits::BLOB_MAX_BYTES })?;
+            blob_length(&req, cfg.uploads_for(principal.identity.kind).upload_max_bytes)?;
             let name = named_fragment(name)?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let routed = Routed { name, url: url.clone(), signed: Some(principal), credential: None };
