@@ -19,6 +19,7 @@
 //!   token, connected, the pairing link, the account that answered it
 //!   confirmed, done; its row then Open; its owner's message from Telegram
 //!   reaches the agent.
+//!
 //! The setup page's calls are its own but for where Telegram is: the fake's
 //! address in place of api.telegram.org (its secrets' host, `connect`'s
 //! `api`), set in its frame's `fetch` before Connect (`to_fake`).
@@ -129,15 +130,25 @@ fn paste(b: &mut Browser, token: &str) -> bool {
     framed(b, &format!("(() => {{ const i = document.querySelector('#setup input[type=password]'); if (!i) return false; i.value = {token:?}; i.dispatchEvent(new Event('input')); return true; }})()")) == true && press(b, "Connect")
 }
 
-/// The page as it is, at 1280 wide and at a phone's 390 (`NN-<name>.png`).
-fn shoot(b: &mut Browser, page: &Page, dir: &Path, name: &str) -> Result<()> {
+/// The page as it is, at 1280 wide and at a phone's 390 (`NN-<name>.png`),
+/// `focus` (a selector) in view at each.
+fn shoot(b: &mut Browser, page: &Page, dir: &Path, name: &str, focus: Option<&str>) -> Result<()> {
+    let center = |b: &mut Browser| {
+        if let Some(sel) = focus {
+            let _ = b.eval(page, &format!("(document.querySelector({sel:?})?.scrollIntoView({{ block: 'center' }}), true)"));
+        }
+    };
+    center(b);
     std::thread::sleep(Duration::from_millis(400));
     let _ = b.screenshot(page, &dir.join(format!("1280-{name}.png")));
     b.viewport(page, 390, 844, true)?;
-    std::thread::sleep(Duration::from_millis(600));
+    std::thread::sleep(Duration::from_millis(500));
+    center(b);
+    std::thread::sleep(Duration::from_millis(300));
     let _ = b.screenshot(page, &dir.join(format!("390-{name}.png")));
     b.viewport(page, 1280, 900, false)?;
     std::thread::sleep(Duration::from_millis(300));
+    center(b);
     Ok(())
 }
 
@@ -207,7 +218,7 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
         seen == json!({ "buttons": ["Open", "Set up"], "open": name, "tags": ["Experimental", "Less secure"], "nav": true }),
         &seen,
     );
-    shoot(&mut b, &page, &shots, "a1-settings-connected")?;
+    shoot(&mut b, &page, &shots, "a1-settings-connected", Some("#settings-telegram"))?;
     let dialog = set_up(s, &mut b, &page, c.agent)?;
     let connected = format!("Connected as @{BOT_USERNAME}, paired with Paul.");
     let shown = until_line(s, &mut b, &connected);
@@ -217,12 +228,12 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
         dialog["title"] == "Telegram" && dialog["fragment"] == name && dialog["done"] == json!(["Done"]) && dialog["agent"].as_str().is_some_and(|a| !a.is_empty()) && shown && said["buttons"] == json!(["New token", "Unpair"]),
         json!({ "dialog": dialog, "said": said }),
     );
-    shoot(&mut b, &page, &shots, "a2-dialog-connected")?;
+    shoot(&mut b, &page, &shots, "a2-dialog-connected", None)?;
 
     // reconnecting: the token pasted again (the bot stopped, say)
     let before = state(api, c, name);
     let asks = press(&mut b, "New token") && until_line(s, &mut b, "Make a bot with @BotFather, then paste its token.");
-    shoot(&mut b, &page, &shots, "a3-reconnect-token")?;
+    shoot(&mut b, &page, &shots, "a3-reconnect-token", None)?;
     let pasted = to_fake(&mut b, &c.tg.url) && paste(&mut b, c.token);
     let back = until_line(s, &mut b, &connected);
     let after = state(api, c, name);
@@ -232,7 +243,7 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
         asks && pasted && back && after["checked"].as_i64() > before["checked"].as_i64() && after["paired"]["name"] == "Paul" && c.tg.webhook() == Some((inbox.clone(), hook.to_string())),
         json!({ "before": before, "after": after, "webhook": c.tg.webhook() }),
     );
-    shoot(&mut b, &page, &shots, "a4-reconnected")?;
+    shoot(&mut b, &page, &shots, "a4-reconnected", None)?;
     let relayed = relays(s, api, c, name, 51, "after reconnecting", hook)?;
     s.ok("reconnected, its owner's message from Telegram still reaches its agent, and the reply goes back", relayed["ok"] == true, &relayed);
 
@@ -244,37 +255,37 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
     let mut chat = Value::Null;
     s.eventually(WAIT, || {
         chat = b
-            .eval_in_isolated_frame(&site_url, "({ ready: document.getElementById('say')?.dataset.ready === '1', setup: !!document.querySelector('.telegram, .setup, .setup-tag, input[type=password]'), title: document.title })")
+            .eval_in_isolated_frame(&site_url, "({ ready: document.getElementById('say')?.dataset.ready === '1', setup: !!document.querySelector('.telegram, .setup, .setup-tag, input[type=password]') })")
             .unwrap_or(Value::Null);
         chat["ready"] == true
     });
     let at = b.eval(&page, "location.pathname")?;
-    s.ok("Done closes it; Open is its chat, just a chat, no setup in it", closed && chat == json!({ "ready": true, "setup": false, "title": "Telegram" }) && at != "/settings", json!({ "chat": chat, "at": at }));
-    shoot(&mut b, &page, &shots, "a5-chat")?;
+    s.ok("Done closes it; Open is its chat, just a chat, no setup in it", closed && chat == json!({ "ready": true, "setup": false }) && at != "/settings", json!({ "chat": chat, "at": at }));
+    shoot(&mut b, &page, &shots, "a5-chat", None)?;
     b.close(page)?;
 
-    // where its frame can't sign in (Safari's cookie rule), the dialog says
-    // so, and opens its setup page in a tab
-    let Some(mut safari) = super::frames::safari_like(s)? else {
-        s.ok("Chrome is installed for Settings' Telegram where frames keep no cookie (set CHROME_BIN)", false, "no Chrome found");
-        return Ok(());
-    };
-    safari.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let (page, _) = settings(s, &mut safari, api, c.agent, &["Open", "Set up"])?;
-    set_up(s, &mut safari, &page, c.agent)?;
+    // where its frame can't sign in (Safari 18.5–26.1 keeps no cookie from
+    // it, partitioned or not), its page is refused and says so to the shell
+    // (auth.rs `refused`: frames.rs proves a browser that drops it gets
+    // that): the dialog says it can't sign in there, and opens that same
+    // setup page in a tab
+    let (page, _) = settings(s, &mut b, api, c.agent, &["Open", "Set up"])?;
+    set_up(s, &mut b, &page, c.agent)?;
+    let shown = until_line(s, &mut b, &connected);
+    let refused = b.eval_in_isolated_frame(SETUP, &format!("(parent.postMessage({{ fragment: 'signin-blocked', name: {name:?}, why: 'refused' }}, {:?}), true)", api.base)).unwrap_or_default();
     let note = "(() => { const n = document.querySelector('dialog.connector-setup .frame-note'); const a = n?.querySelector('a.allow'); return n && a ? { text: n.innerText.split('\\n')[0], href: a.getAttribute('href'), target: a.target, frame: getComputedStyle(document.querySelector('dialog.connector-setup iframe')).display } : null; })()";
     let mut said = Value::Null;
     s.eventually(WAIT, || {
-        said = safari.eval(&page, note).unwrap_or(Value::Null);
+        said = b.eval(&page, note).unwrap_or(Value::Null);
         !said.is_null()
     });
     s.ok(
-        "in a browser that keeps no cookie from its frame, the dialog says it can't sign in there, and opens its setup page in a tab",
-        said == json!({ "text": "Telegram can't sign in here", "href": format!("/auth/fragment?name={name}&return=%2Fsetup.html"), "target": "_blank", "frame": "none" }),
-        &said,
+        "where its frame can't sign in (its page refused, as Safari 18.5–26.1 leaves it), the dialog says so in its place, and opens its setup page in a tab",
+        shown && refused == true && said == json!({ "text": "Telegram can't sign in here", "href": format!("/auth/fragment?name={name}&return=%2Fsetup.html"), "target": "_blank", "frame": "none" }),
+        json!({ "refused": refused, "said": said }),
     );
-    shoot(&mut safari, &page, &shots, "a6-dialog-cannot-sign-in")?;
-    safari.close(page)?;
+    shoot(&mut b, &page, &shots, "a6-dialog-cannot-sign-in", None)?;
+    b.close(page)?;
     Ok(())
 }
 
@@ -291,20 +302,20 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>) -> Resu
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let (page, seen) = settings(s, &mut b, api, c.agent, &["Set up"])?;
     s.ok("an agent with no Telegram chat has Set up alone in Settings", seen["buttons"] == json!(["Set up"]) && seen["open"].is_null(), &seen);
-    shoot(&mut b, &page, &shots, "b1-settings-new")?;
+    shoot(&mut b, &page, &shots, "b1-settings-new", Some("#settings-telegram"))?;
 
     // Set up: a connector made, bound as its door, its setup in the dialog
     let dialog = set_up(s, &mut b, &page, c.agent)?;
     let name = dialog["fragment"].as_str().unwrap_or("").to_string();
     let asks = until_line(s, &mut b, "Make a bot with @BotFather, then paste its token.");
     let bound = api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None)?;
-    let manifest = api.signed(c.owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    let listed = api.signed(c.owner, "GET", "/api/fragments", None)?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
     s.ok(
         "its Set up makes a Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot's token",
-        !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && manifest.body["meta"]["title"] == "Telegram",
-        json!({ "dialog": dialog, "bound": bound.body, "manifest": manifest.body["meta"] }),
+        !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && listed["title"] == "Telegram" && listed["kind"] == "chat",
+        json!({ "dialog": dialog, "bound": bound.body, "listed": listed }),
     );
-    shoot(&mut b, &page, &shots, "b2-token")?;
+    shoot(&mut b, &page, &shots, "b2-token", None)?;
 
     // the token: connected
     let pasted = to_fake(&mut b, &c.tg.url) && paste(&mut b, c.token);
@@ -318,24 +329,24 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>) -> Resu
         pasted && connected && said["buttons"] == json!(["Pair your Telegram", "New token"]) && secret.len() == 64,
         json!({ "said": said, "webhook": webhook }),
     );
-    shoot(&mut b, &page, &shots, "b3-connected")?;
+    shoot(&mut b, &page, &shots, "b3-connected", None)?;
 
     // pairing: its link, answered in Telegram, confirmed
     let linked = press(&mut b, "Pair your Telegram") && until_line(s, &mut b, &format!("Open @{BOT_USERNAME} in Telegram and tap Start."));
     let link = framed(&mut b, "document.querySelector('#setup .setup-row a')?.href ?? ''").as_str().unwrap_or("").to_string();
     s.ok("Pair shows its link, which opens the bot in Telegram", linked && link.starts_with(&format!("https://t.me/{BOT_USERNAME}?start=")), &link);
-    shoot(&mut b, &page, &shots, "b4-pair-link")?;
+    shoot(&mut b, &page, &shots, "b4-pair-link", None)?;
     let nonce = link.rsplit("start=").next().unwrap_or("").to_string();
     let answered = ran(api, c, &name, &deliver(api, &name, Telegram::message(60, PAUL, "Paul", &format!("/start {nonce}")), &secret)?);
     let asked = until_line(s, &mut b, "Is Paul your Telegram?");
     s.ok("the account that answers its link is shown there for its owner to confirm", answered["output"]["proposed"] == true && asked && framed(&mut b, SAID)["buttons"] == json!(["Yes, it's me", "No"]), &answered);
-    shoot(&mut b, &page, &shots, "b5-confirm")?;
+    shoot(&mut b, &page, &shots, "b5-confirm", None)?;
     let done = press(&mut b, "Yes, it's me") && until_line(s, &mut b, &format!("Connected as @{BOT_USERNAME}, paired with Paul."));
     s.ok("confirmed, it says the bot and the account, with New token and Unpair", done && framed(&mut b, SAID)["buttons"] == json!(["New token", "Unpair"]) && state(api, c, &name)["paired"]["name"] == "Paul", framed(&mut b, SAID));
-    shoot(&mut b, &page, &shots, "b6-done")?;
+    shoot(&mut b, &page, &shots, "b6-done", None)?;
     // and in dark, as the shell is
     b.color_scheme(&page, "dark")?;
-    shoot(&mut b, &page, &shots, "b6-done-dark")?;
+    shoot(&mut b, &page, &shots, "b6-done-dark", None)?;
     b.color_scheme(&page, "light")?;
 
     // Done: its row Open and Set up; and its owner's word from Telegram reaches the agent
@@ -345,8 +356,9 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>) -> Resu
         seen = b.eval(&page, &row(c.agent)).unwrap_or(Value::Null);
         seen["buttons"] == json!(["Open", "Set up"]) && seen["open"] == name.as_str()
     });
-    s.ok("Done closes it, and its agent's row is Open and Set up", opens && b.eval(&page, "!document.querySelector('dialog.connector-setup')")? == true, &seen);
-    shoot(&mut b, &page, &shots, "b7-settings-done")?;
+    let closed = b.until(&page, "!document.querySelector('dialog.connector-setup')", WAIT);
+    s.ok("Done closes it, and its agent's row is Open and Set up", opens && closed, &seen);
+    shoot(&mut b, &page, &shots, "b7-settings-done", Some("#settings-telegram"))?;
     let relayed = relays(s, api, c, &name, 61, "set up from settings", &secret)?;
     s.ok("its owner's message from Telegram reaches its agent through the chat Settings made, and the reply goes back", relayed["ok"] == true, &relayed);
     b.close(page)?;
