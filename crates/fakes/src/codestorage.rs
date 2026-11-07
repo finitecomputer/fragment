@@ -211,6 +211,12 @@ struct Inner {
     state: Mutex<State>,
     /// How long every call waits before it is served (`set_latency`).
     latency_ms: AtomicU64,
+    /// A read of this one path waits, before it is served, while set
+    /// (`hold_file_read`): a refresh caught between its reads.
+    held_read: Mutex<Option<String>>,
+    released: std::sync::Condvar,
+    /// Reads waiting on `held_read` now.
+    held_waiting: AtomicU64,
 }
 
 pub struct CodeStorage {
@@ -487,6 +493,17 @@ impl Inner {
         let latency = self.latency_ms.load(Ordering::Relaxed);
         if latency > 0 {
             std::thread::sleep(std::time::Duration::from_millis(latency));
+        }
+        // a held path's read waits for its release (each connection is a
+        // thread of its own: nothing else waits with it), two minutes at most
+        if matches!(req.method.as_str(), "GET" | "HEAD") && route_key(req).ends_with(" file") {
+            let held = self.held_read.lock().expect("held read lock");
+            let path = req.query.get("path").cloned();
+            if held.is_some() && *held == path {
+                self.held_waiting.fetch_add(1, Ordering::SeqCst);
+                let (_held, _) = self.released.wait_timeout_while(held, std::time::Duration::from_secs(120), |h| h.is_some() && *h == path).expect("held read lock");
+                self.held_waiting.fetch_sub(1, Ordering::SeqCst);
+            }
         }
         let mut st = self.state.lock().expect("fake state lock");
         *st.requests.entry((bearer_subject(req), repo_of(req), route_key(req))).or_default() += 1;
@@ -1090,6 +1107,9 @@ impl CodeStorage {
             url: url.clone(),
             state: Mutex::new(state),
             latency_ms: AtomicU64::new(0),
+            held_read: Mutex::new(None),
+            released: std::sync::Condvar::new(),
+            held_waiting: AtomicU64::new(0),
         });
         let handler_inner = Arc::clone(&inner);
         let server = Server::serve(listener, Arc::new(move |req: &Request| handler_inner.handle(req)))?;
@@ -1215,6 +1235,18 @@ impl CodeStorage {
     /// file of many failing, wherever it falls in a pull.
     pub fn fail_file_read(&self, path: Option<&str>) {
         self.with(|st| st.read_failing = path.map(str::to_string));
+    }
+
+    /// Reads of `path` wait, unanswered, until this is cleared (`None`):
+    /// a refresh held between two reads, for a test to look meanwhile.
+    pub fn hold_file_read(&self, path: Option<&str>) {
+        *self.inner.held_read.lock().expect("held read lock") = path.map(str::to_string);
+        self.inner.released.notify_all();
+    }
+
+    /// Whether a read is waiting on `hold_file_read` now.
+    pub fn read_held(&self) -> bool {
+        self.inner.held_waiting.load(Ordering::SeqCst) > 0
     }
 
     /// The next `n` commit packs each lose to a competitor commit (409).

@@ -93,8 +93,12 @@ fn kept_then_refused(s: &mut Suite, api: &Api, owner: &Keys, label: &str, manife
 /// and the commit that last changed it before the cut refresh.
 struct Blobbed {
     name: String,
+    /// Its two blob-backed assets.
     path: String,
+    other: String,
+    /// Its live commit, and the next one, whose refresh the caller replays.
     commit: String,
+    next: String,
 }
 
 /// The asset's cache policy by its path and by its version (`__file?v=`):
@@ -107,13 +111,20 @@ fn blob_caching(api: &Api, b: &Blobbed) -> Result<Value> {
     Ok(json!({ "kept": kept, "asset": [asset.status, asset.header("cache-control"), asset.text], "version": [version.status, version.header("cache-control")] }))
 }
 
-/// FIN-391: a blob's bytes come by the pointer table, which a refresh
-/// rewrites path by path before it moves the tree and its pin, so a
-/// declared asset stored as a blob is never kept for good, nor its version:
-/// as deployed, and with a refresh cut between its two pointer reads (the
-/// first asset's pointer the next commit's, the tree and pin still this
-/// one's), whose state the caller checks again after a crash. The read
-/// stays failing until the caller clears it.
+/// The other asset's bytes, by its path (`[status, bytes]`).
+fn other_asset(api: &Api, b: &Blobbed) -> Result<Value> {
+    let r = api.page(&b.name, b.other.strip_prefix("site/").expect("a site file"), None)?;
+    Ok(json!([r.status, r.text]))
+}
+
+/// FIN-391 and FIN-407: a blob's bytes come by the pointer table, which a
+/// refresh publishes with the tree and its pin, all or none, after every
+/// pointer is read: so a refresh mid-read serves the commit before it,
+/// whole, and a refresh cut between two reads (the second failing)
+/// publishes nothing, which the caller checks again after a crash, then
+/// replays. A declared asset stored as a blob is still never kept for
+/// good, nor its version (FIN-391). The cut read stays failing until the
+/// caller clears it.
 fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
     let name = s.named(api, owner, "restart-blobbed")?;
     let c = s.create(api, owner, &name)?;
@@ -129,27 +140,56 @@ fn blobs_never_kept(s: &mut Suite, api: &Api, owner: &Keys) -> Result<Blobbed> {
     let (a1, b1) = (upload("console.log('a, first')")?, upload("console.log('b, first')")?);
     let first = s.commit(&c, &[("fragment.json", Some(br#"{"immutable":["assets/**"]}"#)), ("site/index.html", Some(b"<p>blobs</p>")), (a, Some(a1.as_bytes())), (b, Some(b1.as_bytes()))]);
     s.deploy(&c);
-    let blobbed = Blobbed { name: name.clone(), path: a.into(), commit: first.clone() };
+    let mut blobbed = Blobbed { name: name.clone(), path: a.into(), other: b.into(), commit: first.clone(), next: String::new() };
     let deployed = blob_caching(api, &blobbed)?;
     s.ok(
         "a declared asset stored as a blob is served its bytes, revalidated, and so is its version: never kept for good",
         deployed["kept"] == false && deployed["asset"][2] == "console.log('a, first')" && deployed["version"][0] == 200,
         &deployed,
     );
-    // the next commit's pointers, at main whole; then live's refresh to it
-    // cut at the second's read (main's, had it been cut, would stop the
-    // refresh before live's pointers)
+
+    // a refresh racing a change of both: live's refresh to the next commit
+    // held at its second pointer read, a reader meanwhile served the first
+    // commit whole (its pin, its tree and its pointers); released, the next
     let (a2, b2) = (upload("console.log('a, second')")?, upload("console.log('b, second')")?);
-    s.commit(&c, &[(a, Some(a2.as_bytes())), (b, Some(b2.as_bytes()))]);
-    s.fake.fail_file_read(Some(b));
-    s.deploy(&c);
-    let pins = api.status(owner, &name)?.body["pins"].clone();
-    let cut = blob_caching(api, &blobbed)?;
+    let second = s.commit(&c, &[(a, Some(a2.as_bytes())), (b, Some(b2.as_bytes()))]);
+    let repo = c["repo"].as_str().filter(|r| !r.is_empty()).ok_or_else(|| anyhow::anyhow!("{name}'s repo: {c}"))?.to_string();
+    s.fake.hold_file_read(Some(b));
+    s.fake.set_branch(&repo, "live", &second);
+    let (held, during, released) = std::thread::scope(|scope| -> Result<(bool, Value, Value)> {
+        let refreshing = scope.spawn(|| api.signed(owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({}))));
+        let held = s.eventually(Duration::from_secs(30), || s.fake.read_held());
+        let during = json!({ "pins": api.status(owner, &name)?.body["pins"], "a": blob_caching(api, &blobbed)?, "b": other_asset(api, &blobbed)? });
+        s.fake.hold_file_read(None);
+        let r = refreshing.join().expect("the refresh's thread")?;
+        Ok((held, during, json!({ "status": r.status, "pins": api.status(owner, &name)?.body["pins"], "a": blob_caching(api, &blobbed)?, "b": other_asset(api, &blobbed)? })))
+    })?;
     s.ok(
-        "a refresh cut between two pointer reads (live still the first commit, the first asset's pointer the next's): its bytes are the next's, and neither it nor its version is kept for good",
-        pins["live"] == first.as_str() && cut["asset"][2] == "console.log('a, second')" && cut["kept"] == false && cut["version"][0] == 200,
-        json!({ "pins": pins, "cut": cut }),
+        "a refresh held between its two pointer reads serves the commit before it whole: its pin, and both assets' bytes, the first commit's (FIN-407)",
+        held && during["pins"]["live"] == first.as_str() && during["a"]["asset"][2] == "console.log('a, first')" && during["b"] == json!([200, "console.log('b, first')"]) && during["a"]["kept"] == false,
+        json!({ "held": held, "during": during }),
     );
+    s.ok(
+        "released, the refresh publishes the next commit whole: its pin and both assets' bytes",
+        released["status"] == 200 && released["pins"]["live"] == second.as_str() && released["a"]["asset"][2] == "console.log('a, second')" && released["b"] == json!([200, "console.log('b, second')"]),
+        &released,
+    );
+
+    // a refresh cut between two pointer reads (the second failing): nothing
+    // published, before a crash and after it (the caller's), then replayed
+    let (a3, b3) = (upload("console.log('a, third')")?, upload("console.log('b, third')")?);
+    let third = s.commit(&c, &[(a, Some(a3.as_bytes())), (b, Some(b3.as_bytes()))]);
+    s.fake.fail_file_read(Some(b));
+    s.fake.set_branch(&repo, "live", &third);
+    let refused = api.signed(owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
+    let cut = json!({ "status": refused.status, "pins": api.status(owner, &name)?.body["pins"], "a": blob_caching(api, &blobbed)?, "b": other_asset(api, &blobbed)? });
+    s.ok(
+        "a refresh cut between its two pointer reads publishes nothing: live still the commit before, both assets' bytes its own, neither kept for good",
+        refused.status != 200 && cut["pins"]["live"] == second.as_str() && cut["a"]["asset"][2] == "console.log('a, second')" && cut["b"] == json!([200, "console.log('b, second')"]) && cut["a"]["kept"] == false,
+        &cut,
+    );
+    blobbed.commit = second;
+    blobbed.next = third;
     Ok(blobbed)
 }
 
@@ -525,12 +565,21 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let blobbed = blobs_never_kept(s, &api, &owner)?;
     s.crash()?;
     let api = s.start(false)?;
-    let seen = blob_caching(&api, &blobbed)?;
-    s.fake.fail_file_read(None);
+    let seen = json!({ "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
     s.ok(
-        "after a crash, the refresh cut between its pointer reads still persisted, a declared blob-backed asset and its version are revalidated, never kept for good",
-        seen["kept"] == false && seen["asset"][0] == 200 && seen["version"][0] == 200,
+        "after a crash, a refresh cut between its pointer reads kept nothing of it: live the commit before, both assets' bytes its own, revalidated, never kept for good",
+        seen["pins"]["live"] == blobbed.commit.as_str() && seen["a"]["asset"][2] == "console.log('a, second')" && seen["b"] == json!([200, "console.log('b, second')"]) && seen["a"]["kept"] == false && seen["a"]["version"][0] == 200,
         &seen,
+    );
+    // its replay, the read answering again: the next commit whole; and again, the same
+    s.fake.fail_file_read(None);
+    let refresh = |api: &Api| api.signed(&owner, "POST", &format!("/api/f/{}/refresh", blobbed.name), Some(&json!({})));
+    let (once, twice) = (refresh(&api)?, refresh(&api)?);
+    let replayed = json!({ "once": once.status, "twice": twice.status, "pins": api.status(&owner, &blobbed.name)?.body["pins"], "a": blob_caching(&api, &blobbed)?, "b": other_asset(&api, &blobbed)? });
+    s.ok(
+        "its refresh replayed lands the next commit whole, its pin and both assets' bytes; replayed again, the same",
+        once.status == 200 && twice.status == 200 && replayed["pins"]["live"] == blobbed.next.as_str() && replayed["a"]["asset"][2] == "console.log('a, third')" && replayed["b"] == json!([200, "console.log('b, third')"]),
+        &replayed,
     );
     let after: Vec<Value> = [&unkept, &moved].iter().map(|(name, added)| revalidated(&api, name, &["assets/a-Ikq0sZO3.js", added])).collect::<Result<_>>()?;
     s.ok(
