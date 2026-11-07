@@ -115,8 +115,11 @@ struct OpenCard: Equatable {
 /// record (`touch`: by time, then `n`), at `lastN + 0.5`; a live call's
 /// line after all its turn said, at `Number.MAX_SAFE_INTEGER - live +
 /// index`. Ties keep the web's insertion order (its `sort` is stable):
-/// messages, then turns' records, then drafts, then working lines; then
-/// by turn, so no two draws of the same records differ.
+/// messages, then turns' records, then drafts, then working lines; turns
+/// in the order first seen. The web meets a turn as its records arrive
+/// (a reload, its chat backlog first); here a turn is first seen by its
+/// earliest record, as a live page meets it: the one difference, in ties
+/// between turns alone.
 struct WorkingActivity: Equatable {
     var rows: [ChatItem] = []
     var cards: [String: ToolCard] = [:]
@@ -132,7 +135,7 @@ struct WorkingActivity: Equatable {
     /// JavaScript's `Number.MAX_SAFE_INTEGER`, a live call's `n` base.
     static let safeMax = 9_007_199_254_740_991.0
 
-    init(_ timeline: Timeline, ready: Bool = true, drafting: Set<TurnKey> = [], me: String = "", owned: Set<String> = [], agents chatAgents: [String] = []) {
+    init(_ timeline: Timeline, ready: Bool = true, drafting: Set<TurnKey> = [], me: String = "", owned: Set<String> = [], agents chatAgents: [String] = [], handles: [String: String] = [:]) {
         let lead = chatAgents.first
         let records = timeline.records
         let messages = records.filter { $0.isMessage }
@@ -146,13 +149,27 @@ struct WorkingActivity: Equatable {
             let at: Int64
             let n: Double
             let place: Place
-            let tie: String
+            let tie: Int
             let item: ChatItem
             var step: ToolStep?
             var turn: TurnKey?
         }
+        // Each turn in the order it was first seen (the web's `state.turns`,
+        // a Map in insertion order, breaks the sort's ties so): here by its
+        // earliest record, as a live page meets a turn by its start; then
+        // turns read without one in the window, by their start.
+        var seen: [TurnKey: Int] = [:]
+        for record in records {
+            guard let id = record.turn, record.channel == "work" || record.isMessage else { continue }
+            let key = TurnKey(agent: record.principal, id: id)
+            if seen[key] == nil { seen[key] = seen.count }
+        }
+        for (key, _) in timeline.turns.sorted(by: { ($0.value.startAt ?? 0, $0.key.agent, $0.key.id) < ($1.value.startAt ?? 0, $1.key.agent, $1.key.id) }) where seen[key] == nil {
+            seen[key] = seen.count
+        }
+        let tie = { (key: TurnKey) in seen[key] ?? Int.max }
         func item(_ record: ChannelRecord, place: Place, at: Int64? = nil, n: Double? = nil, step: ToolStep? = nil, turn: TurnKey? = nil) -> Item {
-            Item(at: at ?? record.at, n: n ?? Double(record.seq), place: place, tie: turn.map { "\($0.agent) \($0.id)" } ?? "", item: .record(record), step: step, turn: turn)
+            Item(at: at ?? record.at, n: n ?? Double(record.seq), place: place, tie: turn.map(tie) ?? -1, item: .record(record), step: step, turn: turn)
         }
         var items = (messages + commands).map { item($0, place: .message) }
         // each turn's latest record, by time then `n` (chat.js `touch`): its
@@ -242,7 +259,6 @@ struct WorkingActivity: Equatable {
             if let start = timeline.turns[key]?.startAt { return (start, 0.5) }
             return (Int64.max, 0.5)
         }
-        let tie = { (key: TurnKey) in "\(key.agent) \(key.id)" }
         for key in drafting {
             let place = placed(key)
             items.append(Item(at: place.at, n: place.n, place: .draft, tie: tie(key), item: .draft(key)))
@@ -339,8 +355,13 @@ struct WorkingActivity: Equatable {
         let agents = Set(timeline.turns.keys.map(\.agent)).union(chatAgents)
         for message in messages where message.turn == nil && !agents.contains(message.principal) {
             if timeline.turns.values.contains(where: { $0.cause["channel"].string == "chat" && $0.cause["seq"] == .number(Double(message.seq)) }) { continue }
+            // whom it is for, as its agents' bridges read it (engine.rs
+            // `addressed`, chat.js `queued`): its `to`, else the chat's agents
+            // it @mentions by their handle, else the lead
             let to = message.body["to"].array.compactMap(\.string)
-            let targets = to.isEmpty ? (lead.map { [$0] } ?? []) : to
+            let words = Self.mentions(message.text)
+            let named = chatAgents.filter { agent in handles[agent].map(words.contains) == true }
+            let targets = !to.isEmpty ? to : !named.isEmpty ? named : (lead.map { [$0] } ?? [])
             let waits = ready && timeline.turns.contains { key, state in
                 guard state.running, let start = state.startAt, targets.contains(key.agent), start <= message.at else { return false }
                 let own = work[key] ?? []
@@ -362,6 +383,27 @@ struct WorkingActivity: Equatable {
             }
             if waits { queued.insert(message.id) }
         }
+    }
+
+    /// The `@name` words of a message, lowercased, in order, as an agent's
+    /// bridge reads them (records.rs `mentions`, chat.js `mentions`): a word
+    /// is `[A-Za-z0-9_-]+` right after an `@` that does not follow a word
+    /// character, so an email address is no mention.
+    static func mentions(_ text: String) -> [String] {
+        let bytes = Array(text.utf8)
+        var out: [String] = []
+        var i = 0
+        func word(_ b: UInt8) -> Bool { (48...57).contains(b) || (65...90).contains(b) || (97...122).contains(b) || b == 95 }
+        // bounded by the text's length: each pass moves `i` forward
+        while i < bytes.count {
+            if bytes[i] == 64, i == 0 || !word(bytes[i - 1]) {
+                var end = i + 1
+                while end < bytes.count, word(bytes[end]) || bytes[end] == 45 { end += 1 }
+                if end > i + 1 { out.append(String(decoding: bytes[(i + 1)..<end], as: UTF8.self).lowercased()) }
+                i = max(end, i + 1)
+            } else { i += 1 }
+        }
+        return out
     }
 
     /// A successful post awaiting its agent's claim, as the web's pending
