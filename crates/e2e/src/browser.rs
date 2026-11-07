@@ -821,6 +821,24 @@ impl Browser {
         Ok(())
     }
 
+    /// Fingers on a touch screen (`touch` on): `touchStart`, `touchMove` or
+    /// `touchEnd` with every finger down at its point (none for an end), as
+    /// a phone sends them; the page hears them as pointers.
+    pub fn touches(&mut self, page: &Page, kind: &str, points: &[(f64, f64)]) -> Result<()> {
+        let points: Vec<Value> = points.iter().enumerate().map(|(id, (x, y))| json!({ "x": x, "y": y, "id": id })).collect();
+        self.send("Input.dispatchTouchEvent", json!({ "type": kind, "touchPoints": points }), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// The page frozen (`true`: its scripts and tasks wait, as a phone's
+    /// background tab's do) or running again (`false`), when it hears what
+    /// it missed meanwhile, or reconnects.
+    pub fn freeze(&mut self, page: &Page, frozen: bool) -> Result<()> {
+        let state = if frozen { "frozen" } else { "active" };
+        self.send("Page.setWebLifecycleState", json!({ "state": state }), Some(&page.session))?;
+        Ok(())
+    }
+
     /// The page's viewport, as a phone's (`mobile`) or a desktop's.
     pub fn viewport(&mut self, page: &Page, width: u32, height: u32, mobile: bool) -> Result<()> {
         let params = json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": mobile });
