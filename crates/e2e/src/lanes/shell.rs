@@ -8275,7 +8275,7 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.viewport(page, 1280, 900, false)?;
     // each agent's settings read (agent.json) held until New agent shows,
     // so the cards are drawn reading, however warm the reads
-    b.eval(page, "(() => { const f = window.fetch; window.__held = []; window.fetch = (u, o) => (String(u).includes('path=agent.json') && !window.__release) ? new Promise((res) => window.__held.push(() => res(f(u, o)))) : f(u, o); return true; })()")?;
+    b.eval(page, "(() => { const f = window.fetch; window.__settingsReads = []; window.fetch = (u, o) => (String(u).includes('path=agent.json') && !window.__settingsReadsGo) ? new Promise((res) => window.__settingsReads.push(() => res(f(u, o)))) : f(u, o); return true; })()")?;
     b.click(page, "#settings")?;
     // one button, New agent, opens its dialog. It stays where it showed as
     // each agent's card reads its settings (its Model pick read: Hermes'
@@ -8286,9 +8286,9 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let shown = b.eval(
         page,
         "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); \
-          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__held.length }; })()",
+          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsReads.length }; })()",
     )?;
-    b.eval(page, "(window.__release = true, window.__held.forEach((r) => r()), true)")?;
+    b.eval(page, "(window.__settingsReadsGo = true, window.__settingsReads.forEach((r) => r()), true)")?;
     let models_read = b.until(
         page,
         "(() => { const cards = [...document.querySelectorAll('#settings-page .agent-setting')]; \
