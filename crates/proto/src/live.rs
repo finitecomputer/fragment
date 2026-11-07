@@ -106,8 +106,17 @@ pub enum LiveOut {
     /// fixed while the socket stays open), the platform's origin (the one
     /// page that frames it with its person's session, whose messages a
     /// framed page may take: docs/api.md, The shell), and everyone on the
-    /// page who shares presence.
-    Hello { id: String, principal: String, role: Role, platform: String, presence: Vec<Present> },
+    /// page who shares presence; and what a message of the person's may
+    /// carry (add-only: absent from an older platform).
+    Hello {
+        id: String,
+        principal: String,
+        role: Role,
+        platform: String,
+        presence: Vec<Present>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limits: Option<crate::UploadLimits>,
+    },
     /// A record of a channel: one of a page, or a new one while live.
     Record(#[serde(deserialize_with = "record_through_value")] ChannelRecord),
     /// After each page: the cursor past it, and whether more follow. With
@@ -324,8 +333,9 @@ mod tests {
                     role: Role::Public,
                     platform: "https://fragment.club".into(),
                     presence: vec![Present { id: "cd".into(), principal: "id:y".into(), data: json!({ "name": "paul" }) }],
+                    limits: Some(crate::UploadLimits { upload_max_bytes: 100_000, files_per_message: 8 }),
                 },
-                json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public", "platform": "https://fragment.club", "presence": [{ "id": "cd", "principal": "id:y", "data": { "name": "paul" } }] }),
+                json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public", "platform": "https://fragment.club", "presence": [{ "id": "cd", "principal": "id:y", "data": { "name": "paul" } }], "limits": { "uploadMaxBytes": 100_000, "filesPerMessage": 8 } }),
             ),
             (
                 LiveOut::Record(record),

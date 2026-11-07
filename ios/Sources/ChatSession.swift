@@ -367,7 +367,7 @@ final class ChatSession {
     /// Then `attach` reads and uploads them; until it ends, nothing sends.
     func beginAttaching(_ count: Int) -> Bool {
         guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return false }
+        guard count > 0, count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
         attaching = true
         return true
     }
@@ -379,7 +379,7 @@ final class ChatSession {
         let files: [OutgoingFile]
         do { files = try await prepare() } catch { self.error = error.localizedDescription; return }
         guard !files.isEmpty else { error = "This could not be attached."; return }
-        guard files.count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return }
+        guard files.count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
         var queued: [(OutgoingFile, ChatAttachment)] = []
         for file in files {
             let sha256 = await Task.detached(priority: .userInitiated) { sha256Hex(file.data) }.value

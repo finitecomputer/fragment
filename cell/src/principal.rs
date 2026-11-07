@@ -406,7 +406,9 @@ impl PrincipalCell {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
                 let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
                 let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
-                Ok(Response::from_json(&FragmentList { fragments })?)
+                // what its signer's messages carry: the router names an agent's list (`?agent`)
+                let kind = if req.url()?.query() == Some("agent") { fragment_proto::IdentityKind::Agent } else { fragment_proto::IdentityKind::Person };
+                Ok(Response::from_json(&FragmentList { fragments, limits: Some(crate::config::Config::from_env(&self.env).uploads_for(kind)) })?)
             }
             (Method::Put, "/archived") => {
                 let s: SetArchived = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -494,7 +496,7 @@ impl PrincipalCell {
         assert!(self.wiped.get(), "only a wiped list answers so");
         match (req.method(), req.path().as_str()) {
             (Method::Post, "/index") => Ok(Response::from_json(&json!({ "ok": true, "applied": false }))?),
-            (Method::Get, "/list") => Ok(Response::from_json(&FragmentList { fragments: vec![] })?),
+            (Method::Get, "/list") => Ok(Response::from_json(&FragmentList { fragments: vec![], limits: None })?),
             (Method::Post, "/search/entries") => Ok(Response::from_json(&SearchApplied { member: false, applied: 0 })?),
             (Method::Get, "/search") => Ok(Response::from_json(&SearchAnswer { fragments: vec![], messages: vec![] })?),
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}: this list's person was wiped", m.as_ref()))),

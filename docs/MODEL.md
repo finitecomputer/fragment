@@ -189,5 +189,8 @@ deploy too, and reloads once the platform's release differs from its own
 Every limit is a named constant with its reason beside it, in
 `fragment_proto::limits` (crates/proto/src/lib.rs) unless it belongs to
 one module; each is enforced and tested. A value lives there, never in a
-doc. Channels keep what their constants say (`AUDIT_RETENTION_MS`,
+doc. A limit a client checks before it asks is served to it, never copied
+into it: what a person's message carries is `UploadLimits` (a deployment's
+`upload_max_bytes`, its zone's), on the list and a page's hello, and a
+source guard refuses a file bound written anywhere else (xtask/src/guards.rs). Channels keep what their constants say (`AUDIT_RETENTION_MS`,
 `AUDIT_KEPT`, `POSTED_KEPT`); an app's other channels keep everything.
