@@ -1202,7 +1202,12 @@ export class App extends DurableObject { noop() { return {}; } }
         back && r.status == 403 && r.text.contains("is no connector") && later.status == 403 && later.text.contains("bad inbox secret") && !published && secrets().is_empty(),
         json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
     );
-    // its agent, with no Telegram chat now, set up from Settings (FIN-393)
+    // its agent, with no Telegram chat now, set up from Settings (FIN-393):
+    // this chat, no door for good since its fork, deleted first, so its
+    // agent has no Telegram chat at all, and Settings' shots show only what
+    // Set up makes
+    let gone = api.signed(c.owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    anyhow::ensure!(matches!(gone.status, 200 | 204), "the forked connector deleted: {gone}");
     super::telegram_settings::from_settings(s, api, &settings)?;
     Ok(pokes)
 }

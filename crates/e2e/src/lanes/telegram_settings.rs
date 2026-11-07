@@ -301,7 +301,13 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>) -> Resu
     let session = api.sign_in(&Api::email_of(c.owner))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let (page, seen) = settings(s, &mut b, api, c.agent, &["Set up"])?;
-    s.ok("an agent with no Telegram chat has Set up alone in Settings", seen["buttons"] == json!(["Set up"]) && seen["open"].is_null(), &seen);
+    // no Telegram chat of its at all (the lane's earlier one deleted), so
+    // the sidebar shows what Set up makes, and only that
+    let telegrams = || -> usize {
+        api.signed(c.owner, "GET", "/api/fragments", None).ok().and_then(|r| r.body["fragments"].as_array().map(|l| l.iter().filter(|f| f["title"] == "Telegram").count())).unwrap_or(usize::MAX)
+    };
+    let none = telegrams();
+    s.ok("an agent with no Telegram chat has Set up alone in Settings", seen["buttons"] == json!(["Set up"]) && seen["open"].is_null() && none == 0, json!({ "row": seen, "telegram_chats": none }));
     shoot(&mut b, &page, &shots, "b1-settings-new", Some("#settings-telegram"))?;
 
     // Set up: a connector made, bound as its door, its setup in the dialog
@@ -310,10 +316,11 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>) -> Resu
     let asks = until_line(s, &mut b, "Make a bot with @BotFather, then paste its token.");
     let bound = api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None)?;
     let listed = api.signed(c.owner, "GET", "/api/fragments", None)?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
+    let one = telegrams();
     s.ok(
-        "its Set up makes a Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot's token",
-        !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && listed["title"] == "Telegram" && listed["kind"] == "chat",
-        json!({ "dialog": dialog, "bound": bound.body, "listed": listed }),
+        "its Set up makes one Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot's token",
+        !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && listed["title"] == "Telegram" && listed["kind"] == "chat" && one == 1,
+        json!({ "dialog": dialog, "bound": bound.body, "listed": listed, "telegram_chats": one }),
     );
     shoot(&mut b, &page, &shots, "b2-token", None)?;
 
