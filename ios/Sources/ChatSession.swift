@@ -290,6 +290,7 @@ final class ChatSession {
                                 if !workRead { workRead = true; timelineChanged() }
                                 if chatReadNow && !read { read = true }
                                 await earlierWork()
+                                await recentHelpers()
                                 // drafts kept across the reconnect go once their turn is read to have ended
                                 timeline.settleDrafts()
                             }
@@ -359,6 +360,9 @@ final class ChatSession {
     static let workBatch = 50
     /// Earlier `work` read back at most, a visit.
     static let earlierWorkMax = 1_000
+    /// `work` read back for the helpers working at most, a visit, past
+    /// what the backlog and `earlierWork` read (chat.js's four pages).
+    static let helpersReadMax = 4_000
 
     /// The next batch, sized by what the last one's records took: as many
     /// as half the answer's bound holds at twice their mean, between
@@ -401,6 +405,35 @@ final class ChatSession {
             for record in page.records {
                 if let shownFrom, record.at >= shownFrom { timeline.insert(record, advancingCursor: false) } else { timeline.learn(record) }
             }
+            read += page.records.count
+            if page.records.count < limit { return }
+            batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)
+        }
+    }
+
+    /// The helpers working as the chat opens, whatever it shows: `work`
+    /// read back to `Helpers.readBack` ago, past what the backlog and
+    /// `earlierWork` read, for helpers' records alone (chat.js
+    /// `recentHelpers`). A running helper is noted more often than that
+    /// (docs/chat-records.md, `turn.child`), so this finds each one however
+    /// old its start. Its own cursor: the window, the turns and where
+    /// earlier work goes on from stay as they were. Bounded by
+    /// `helpersReadMax`; a failure, or a helper past it, shows at its next
+    /// note.
+    private func recentHelpers() async {
+        let since = Int64(Date().timeIntervalSince1970 * 1000) - Helpers.readBack
+        guard var oldest = timeline.oldestWork else { return }
+        var read = 0
+        var batch = Self.workBatch
+        while read < Self.helpersReadMax, oldest.at >= since, oldest.seq > 1 {
+            let limit = min(batch, Self.helpersReadMax - read)
+            let page: (records: [ChannelRecord], bytes: Int)
+            do { page = try await api.historyPage(fragment.name, channel: "work", before: oldest.seq, limit: limit) }
+            catch APIError.limitExceeded where limit > Self.workBatch { batch = Self.workBatch; continue }
+            catch { return }
+            for record in page.records { timeline.learnHelper(record) }
+            guard let first = page.records.first else { return }
+            oldest = (first.seq, first.at)
             read += page.records.count
             if page.records.count < limit { return }
             batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)

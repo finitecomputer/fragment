@@ -192,6 +192,14 @@ struct Timeline {
     /// start was read, so no earlier page holds it to begin one again.
     static let maximumTurns = 4_096
 
+    /// A `work` record read back for the helpers working alone
+    /// (`ChatSession.recentHelpers`): what it says of a helper, and nothing
+    /// of the window, the turns or where earlier work goes on from.
+    mutating func learnHelper(_ record: ChannelRecord) {
+        guard record.channel == "work" else { return }
+        if helpers.learn(record) { revision &+= 1 }
+    }
+
     /// What a `work` record says of its poster's turn, wherever it falls:
     /// in the window, or read back for this alone (`ChatSession`).
     mutating func learn(_ record: ChannelRecord) {
