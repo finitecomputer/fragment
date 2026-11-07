@@ -145,9 +145,11 @@ always opens and sends. Draft edits are debounced and flushed on leaving a chat 
 backgrounding. Empty drafts are removed.
 
 The app keeps no copy of a limit the server enforces: it shows the server's
-refusal. Its own bounds are its storage's (above) and what it sends over a
-phone's network: an attachment of at most 25 MiB, and an icon fitted inside
-256×256 on the phone, as the server would fit it.
+refusal, or checks what the server names. Its own bounds are its storage's
+(above) and what it sends over a phone's network: an attachment of at most
+the platform's `limits` (`GET /api/fragments`; an older platform's, naming
+none, its old 25 MiB), and an icon fitted inside 256×256 on the phone, as the
+server would fit it.
 
 JSON text subscriptions match the Worker’s live protocol. A chat reads its last
 50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Its window holds at most
@@ -198,11 +200,32 @@ onto the page it was opened from, so Back returns there; a chat's top bar has no
 New chat (the sidebar's starts one). The composer's + offers Photos (the system's picker,
 several at once) or Files; a picture pasted into its field attaches too (a long
 press offers Paste when one is on the clipboard), as the web's chat takes a
-pasted file. Any file goes, 1 byte to 25 MB, eight a message, as the web's; a
+pasted file. Any file goes, 1 byte to the platform's `limits`, as the web's; a
 picture the web shows (PNG, JPEG, WebP, GIF) goes as it is, any other (a photo's
 HEIC) as JPEG, its metadata carried over, converted off the main thread within 100
 megapixels. One attaching goes at a time, from the choosing until its upload:
-the composer is busy, and nothing sends, until it is done. Jumping to the latest holds scrolling off
+the composer is busy, and nothing sends, until it is done. Each file shows in
+the composer from its own bytes at once (kept on the phone by its hash), as it
+uploads (its share sent) and once it is put; one that fails says so, waits for
+Retry or its removal, and holds the send. A message's files show as Messages
+shows them: pictures inline at their aspect ratio (several in a grid), full
+screen on a tap (pinch or double-tap to zoom, swipe down to close, Share);
+sounds as a player (play and pause, level bars dragged sideways to move its
+place, its time), one at a time, stopped on leaving the chat, aloud on the
+speaker whatever the silent switch, as Messages plays one tapped; a voice memo
+shows no name (a recorder's: `voice-`, `voice_`, `tts_`, `speech`). A PDF shows
+its first page, pages and name; any other file its icon, name, size and type;
+a tap opens either in Quick Look (never its markup), or Share for a type Quick
+Look cannot show. What sounds play is read from their bytes: on iOS 26 AAC in
+MP4 or M4A (fragmented too), MP3, WAV and Opus in Ogg play as they are; Opus in
+WebM (Chrome's MediaRecorder) is rewrapped as Ogg Opus on the phone, its packets
+unchanged (`WebMOpus`); Vorbis is offered as a file. Files are read lazily
+(pictures, sounds and PDF pages by themselves up to 20 MB, larger ones and other
+files on a tap, with progress), to disk under Caches by the server, the chat and
+the hash, never past the size their record names and checked against their hash,
+never named by the server's name (a cleaned last component, in a folder of the
+hash, links to Quick Look and Share). Pictures and PDF pages are decoded at the
+size shown, kept in the shared picture cache. Jumping to the latest holds scrolling off
 for the jump, which stops a fling's momentum, and while following the latest the
 bottom stays pinned as rows are drawn taller than the lazy stack's guess. Connected accounts follow the signed list watcher, discard
 stale list reloads, and mark visible, caught-up chats read. A chat's socket closed (4001 as its object sleeps, 1001, the network)

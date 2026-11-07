@@ -185,11 +185,13 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
         }
         (Method::Post, ["computer"]) => {
-            /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?}`: a lever
-            /// on that computer (computer.rs, `lever`): `times` is
-            /// `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-            /// and `alive-check`'s, `freeze` is `alive-check`'s, `offsetMs`
-            /// is `clock`'s.
+            /// `{computer, op, times?, on?, ms?, freeze?, offsetMs?,
+            /// generation?}`: a lever on that computer (computer.rs, `lever`):
+            /// `times` is `fail-saves`', `fail-starts`' and
+            /// `fail-takeover-destroys`', `on` is `always-on`'s, `ms` is
+            /// `hang-backups`', `alive-check`'s, `slow-tell`'s,
+            /// `stall-failing-start`'s and `alarm-in`'s, `freeze` is `alive-check`'s,
+            /// `offsetMs` is `clock`'s, `generation` is `exit`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -205,6 +207,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 freeze: Option<bool>,
                 #[serde(default, rename = "offsetMs")]
                 offset_ms: Option<i64>,
+                #[serde(default)]
+                generation: Option<u64>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -216,6 +220,12 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 if !is_e2e(env, owner).await? {
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
                 }
+            }
+            if t.op == "exit" {
+                // the runtime's own report that start `generation`'s
+                // container exited (`computer/exited`), sent as it sends it
+                let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
+                return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
             json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms })).await?)
         }

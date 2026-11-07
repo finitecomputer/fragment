@@ -217,6 +217,14 @@ const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
+/// The lever's `stall-failing-start` waits at most this.
+const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
+/// A takeover that failed (`take_over`) is tried again by an alarm within
+/// this: each try is one destroy, or one adopt, of a container, never a
+/// tight loop past a deadline already gone.
+const TAKE_OVER_RETRY_MS: i64 = 60_000;
+/// The lever's `fail-starts` and `fail-takeover-destroys` count at most this.
+const LEVER_FAILS_MAX: u32 = 10;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -320,6 +328,17 @@ enum MetaKey {
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's wait between a failing start's `StartFailing` and
+    /// its destroy (`stall-failing-start`), in ms.
+    StallFailingStart,
+    /// The test lever's starts still to fail (`fail-starts`).
+    FailStarts,
+    /// The test lever's wait before a takeover's destroy (`stall-takeover`),
+    /// in ms.
+    StallTakeOver,
+    /// The test lever's takeover destroys still to fail
+    /// (`fail-takeover-destroys`).
+    FailTakeOverDestroys,
 }
 
 impl MetaKey {
@@ -342,6 +361,10 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::StallFailingStart => "stall_failing_start",
+            MetaKey::FailStarts => "fail_starts",
+            MetaKey::StallTakeOver => "stall_take_over",
+            MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
         }
     }
 }
@@ -385,9 +408,16 @@ pub struct ComputerCell {
     raw: JsValue,
     cfg: &'static Config,
     env: Env,
-    /// Whether this isolate has looked for a container an earlier one left
-    /// running (lesson 6: `adopt`).
+    /// Whether this isolate has taken the computer over: looked for a
+    /// container an earlier one left running (lesson 6: `adopt`), and done
+    /// what that look asked. Set only once it has.
     adopted: std::cell::Cell<bool>,
+    /// Held while this isolate takes the computer over (`take_over`): an
+    /// event that comes meanwhile waits for it, never acting on a lifecycle
+    /// whose takeover is still destroying a container (a second review on
+    /// #1079: a deadline's alarm applied during that destroy failed the
+    /// start for good, its container left running).
+    taking_over: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -408,10 +438,6 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
-    /// The start this isolate found failed, and destroys: its container's
-    /// end is that start's own failure, which the start reports itself
-    /// (`exit_of`), never a crash as well.
-    failing: std::cell::Cell<Option<u64>>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -433,12 +459,12 @@ impl DurableObject for ComputerCell {
             cfg,
             env,
             adopted: std::cell::Cell::new(false),
+            taking_over: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
-            failing: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
         }
@@ -764,7 +790,9 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            // this release's, or the previous one's (`Lifecycle::read`, which
+            // reads its bytes, as `crate::json_text` does)
+            Some(text) => Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
             None => Ok(Lifecycle::new()),
         }
     }
@@ -894,10 +922,16 @@ impl ComputerCell {
     /// The lever's `slow-tell`, taken once: the restart that takes it waits
     /// its ms before its owner is told, as a slow principal answers.
     async fn slow_tell(&self) {
-        let Ok(Some(ms)) = self.meta(MetaKey::SlowTell) else { return };
-        let _ = self.delete_meta(MetaKey::SlowTell);
-        let ms = ms.parse::<u64>().unwrap_or(0).min(SLOW_TELL_MAX_MS);
-        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": "slow-tell", "waits": ms }));
+        self.lever_wait(MetaKey::SlowTell, SLOW_TELL_MAX_MS).await;
+    }
+
+    /// A lever's wait (`key`'s ms, at most `max_ms`), taken once: the wait
+    /// `slow-tell` and `stall-failing-start` put where they say.
+    async fn lever_wait(&self, key: MetaKey, max_ms: u64) {
+        let Ok(Some(ms)) = self.meta(key) else { return };
+        let _ = self.delete_meta(key);
+        let ms = ms.parse::<u64>().unwrap_or(0).min(max_ms);
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": key.key(), "waits": ms }));
         Delay::from(std::time::Duration::from_millis(ms)).await;
     }
 
@@ -1018,11 +1052,40 @@ impl ComputerCell {
 
     /// This isolate's first look, once (`adopt`): the exit to apply when the
     /// container it should find is gone.
+    ///
+    /// Not taken over (any error of `adopt`), it looks again at the next
+    /// event, and an alarm within `TAKE_OVER_RETRY_MS` is one: its caller
+    /// (a request, or the alarm that woke it, which spends itself) stops at
+    /// this error before it sets any alarm of its own, and nothing else may
+    /// come (a start destroying on its last strike: Codex on #1079).
     async fn take_over(&self) -> CellResult<Option<Event>> {
-        if self.adopted.replace(true) {
+        if self.adopted.get() {
             return Ok(None);
         }
-        self.adopt().await
+        let _taking = self.taking_over.lock().await;
+        if self.adopted.get() {
+            // the event it waited for took it over (what that asked is
+            // stored: nothing awaits between this lock's release and it)
+            return Ok(None);
+        }
+        let found = self.adopt().await;
+        if found.is_ok() {
+            self.adopted.set(true);
+        }
+        if let Err(e) = &found {
+            let at = js::now_ms() + TAKE_OVER_RETRY_MS;
+            let kept = self.alarm_by(at).await;
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "take_over": e.message, "again_by": at, "alarm": kept.err().map(|e| e.message) }));
+        }
+        found
+    }
+
+    /// The DO's alarm fires by `at`: one due sooner stays.
+    async fn alarm_by(&self, at: i64) -> CellResult<()> {
+        if self.state.storage().get_alarm().await?.is_some_and(|set| set <= at) {
+            return Ok(());
+        }
+        self.alarm_at(Some(at)).await
     }
 
     /// A new isolate's first look (lesson 6): a container its lifecycle says
@@ -1032,6 +1095,24 @@ impl ComputerCell {
     /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
         let life = self.lifecycle()?;
+        if let Phase::Starting { generation, destroying: true, .. } = life.phase {
+            // a start that failed was destroying what it started when its
+            // isolate went, and its own report (why, and whether it is a
+            // strike) went with it: its container destroyed, one failure.
+            // This isolate's host owns no start yet, so its destroy is of
+            // whatever runs (`0`, as a new start's is): the lifecycle names
+            // no start after this one, so only its container can run. One
+            // still running after its destroy is no failure told yet: the
+            // next event tries again, the alarm `take_over` keeps at the
+            // latest.
+            // (the levers: `stall-takeover` holds it here, an event coming
+            // meanwhile; `fail-takeover-destroys`, one that leaves it running)
+            self.lever_wait(MetaKey::StallTakeOver, STALL_FAILING_START_MAX_MS).await;
+            if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
+                return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
+            }
+            return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
+        }
         let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
@@ -1233,7 +1314,9 @@ impl ComputerCell {
             // what it destroys below ends as this start's failure, reported
             // by the event this answers, so the end is not a crash too: it
             // would count a second strike, and start again with no pause
-            self.failing.set(Some(generation));
+            // (#1004). Stored, so an isolate after this one knows it too.
+            self.start_failing(generation);
+            self.stall_failing_start().await;
         }
         match started {
             Ok(()) => {
@@ -1268,7 +1351,7 @@ impl ComputerCell {
             Err(Unstarted::Dead(why)) => {
                 // as a snapshot that would not start : its snapshot
                 // forgotten and its container destroyed, whose exit is this
-                // report's to make (`exit_of`), and the same wake starts the
+                // report's to make (`start_failing`), and the same wake starts the
                 // image and the save, no strike. Its own line, so the logs
                 // count how often a snapshot's restore comes up dead (#362).
                 let forgot = self.update_saves(|s| s.snapshot_failed());
@@ -1346,6 +1429,10 @@ impl ComputerCell {
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
+        }
+        if self.lever_take(MetaKey::FailStarts) {
+            // the lever's `fail-starts`: a start that fails with its container up
+            return Err(CellError::host(format!("start {generation} failed (the test lever)")).into());
         }
         if planned.freeze {
             // the lever's dead start: its guest stopped once its container is
@@ -1464,16 +1551,51 @@ impl ComputerCell {
     /// stopped on its own before it came up is the start's own failure (the
     /// snapshot is forgotten), never a strike.
     fn exit_of(&self, generation: u64) -> CellResult<Option<Event>> {
-        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
-        if starting && self.failing.get() == Some(generation) {
-            return Ok(None);
-        }
+        // a failing start's own destroy is the lifecycle's to tell from a
+        // crash (`Phase::Starting`'s `destroying`): reported as it is
+        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, destroying: false, .. } if g == generation);
         if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {
             let forgot = self.update_saves(|s| s.snapshot_failed())?;
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "snapshot": "stopped", "generation": generation, "forgot": forgot }));
             return Ok(Some(Event::SnapshotFailed { generation, why: "its container stopped as it started from the snapshot".into() }));
         }
         Ok(Some(Event::Exited { generation }))
+    }
+
+    /// Its start `generation` failed and destroys what it started next:
+    /// the lifecycle keeps that (`Event::StartFailing`), so the container's
+    /// exit is no crash, whichever isolate hears it. Its step changes
+    /// nothing else (no action, the same deadline). Logged, never failed:
+    /// one missed is that exit counted as a crash, as before it was kept.
+    fn start_failing(&self, generation: u64) {
+        let applied = (|| -> CellResult<()> {
+            let mut life = self.lifecycle()?;
+            let event = Event::StartFailing { generation };
+            let logged = json!(event);
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            assert!(step.actions.is_empty() && step.ended.is_none(), "a start's failing asks for nothing");
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)
+        })();
+        if let Err(e) = applied {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start_failing": generation, "error": e.message }));
+        }
+    }
+
+    /// The lever's `stall-failing-start`, taken once: a failing start waits
+    /// its ms between storing that it fails and its destroy, the gap an
+    /// isolate that goes leaves (a test crashes the node in it).
+    /// A lever's count of failures still to make (`key`), one taken:
+    /// whether there was one (`fail-starts`, `fail-takeover-destroys`).
+    fn lever_take(&self, key: MetaKey) -> bool {
+        let Ok(Some(n)) = self.meta(key) else { return false };
+        let n = n.parse::<u32>().unwrap_or(0);
+        let _ = if n <= 1 { self.delete_meta(key) } else { self.set_meta(key, &(n - 1).to_string()) };
+        n > 0
+    }
+
+    async fn stall_failing_start(&self) {
+        self.lever_wait(MetaKey::StallFailingStart, STALL_FAILING_START_MAX_MS).await;
     }
 
     /// Whether a container runs here now.
@@ -2046,12 +2168,12 @@ impl ComputerCell {
         let life = self.lifecycle()?;
         let (phase, why) = match &life.phase {
             // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep => (ComputerPhase::Asleep, None),
+            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
+            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
             Phase::Starting { .. } => (ComputerPhase::Starting, None),
             Phase::Awake { .. } => (ComputerPhase::Awake, None),
             Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why } => (ComputerPhase::WontWake, Some(why.clone())),
+            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
@@ -2255,6 +2377,29 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
                 Ok(json!({ "computer": id, "slowTell": ms }))
             }
+            "fail-starts" | "fail-takeover-destroys" => {
+                // the next `times` starts fail with their container up, or
+                // the next takeovers' destroys leave it running (0: none)
+                let key = if b.op == "fail-starts" { MetaKey::FailStarts } else { MetaKey::FailTakeOverDestroys };
+                let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
+                self.set_meta(key, &times.to_string())?;
+                Ok(json!({ "computer": id }))
+            }
+            "alarm-in" => {
+                // its alarm fires in `ms`, whatever its lifecycle asked for
+                let ms = b.ms.ok_or_else(|| CellError::invalid("alarm-in names its ms"))?;
+                self.alarm_at(Some(js::now_ms() + i64::from(ms))).await?;
+                Ok(json!({ "computer": id }))
+            }
+            "stall-failing-start" | "stall-takeover" => {
+                // its next start that fails waits `ms` between storing that
+                // it fails and destroying its container, or its next
+                // takeover of a start destroying, before its destroy (0: none)
+                let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
+                let ms = b.ms.filter(|ms| u64::from(*ms) <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid("it names its ms, 0 to 600000"))?;
+                self.set_meta(key, &ms.to_string())?;
+                Ok(json!({ "computer": id }))
+            }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
                 // minutes would leave it: its row stays, refused by its expiry
@@ -2314,13 +2459,17 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                v["phase"] = json!(life.phase);
+                v["failures"] = json!(life.failures());
+                // a container runs for this object, whichever start's
+                v["running"] = json!(self.container_running().await);
                 // the keepalives the runtime holds open, beside those it counts
                 v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in or always-on"))),
         }
     }
 

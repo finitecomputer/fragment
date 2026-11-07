@@ -619,4 +619,34 @@ pub(crate) mod tests {
         let raw: serde_json::Value = serde_json::from_slice(file("fragment.json")).expect("json");
         assert_eq!(raw["immutable"], serde_json::json!(["assets/**"]), "its hashed assets are kept for good, and nothing else");
     }
+
+    /// Goal: the board template is plain files, no package and no build;
+    /// its three operations are described (each a tool of `fragment mcp`),
+    /// the manifest readable by whoever opens the board and changed by
+    /// editors; it holds no frame of its own (an agent writes them at
+    /// main), and a frame's page runs only in the board's sandboxed iframe.
+    /// Invalid: a dependency, a build output, a frame shipped, a sandbox
+    /// that lets a frame be this origin, a frame served as this origin's page.
+    #[cfg(feature = "embed")]
+    #[test]
+    fn the_board_template_is_plain_files() {
+        use fragment_proto::Role;
+        let file = |path: &str| BOARD.file(path).unwrap_or_else(|| panic!("board has {path}")).bytes;
+        let text = |path: &str| std::str::from_utf8(file(path)).expect("utf-8");
+        let paths: Vec<&str> = BOARD.files.iter().map(|f| f.path).collect();
+        assert_eq!(paths, ["README.md", "app.mjs", "fragment.json", "site/board.css", "site/board.js", "site/index.html"], "plain files: no package, no build, no frame");
+        let m = fragment_core::manifest::parse(file("fragment.json")).expect("board's fragment.json");
+        assert_eq!(m.operations.keys().map(String::as_str).collect::<Vec<_>>(), ["frames", "put_frame", "remove_frame"]);
+        for (name, op) in &m.operations {
+            let want = if name == "frames" { Role::Public } else { Role::Editor };
+            assert_eq!(op.role, want, "{name}: the board's visibility decides who reads; editors change it");
+            assert!(op.description.as_deref().is_some_and(|d| d.len() > 40), "{name} is described");
+            assert!(text("README.md").contains(&format!("`{name}`")), "the README names {name}");
+        }
+        assert!(m.triggers.is_empty(), "put_frame is the one signal: a trigger pauses itself past its hourly runs");
+        let page = text("site/board.js");
+        assert!(page.contains("const SANDBOX = \"allow-scripts allow-forms\";"), "the board's iframes run scripts and forms");
+        assert!(page.contains("frame.srcdoc = body;") && !text("app.mjs").contains("text/html"), "a page is shown from its bytes, and no frame is served as a page of this origin");
+        assert_eq!(page.matches("setAttribute(\"sandbox\"").count(), 1, "every frame's iframe is made in one place, with SANDBOX (never allow-same-origin)");
+    }
 }

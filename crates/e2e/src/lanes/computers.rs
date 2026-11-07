@@ -288,6 +288,11 @@ const DISK_CHECKS: [&str; 3] = [
 /// Its disk, read (`df`) once its start is ready and after each awake save
 /// (`reads_disk_after`), as the `saves` lever shows it; each read judged
 /// by what made it (a start come up, a save taken), never a fixed wait.
+/// A start's read follows its `Ready`, so its view says awake first: an
+/// owner's wake answers after the read, but a start its alarm made (a
+/// restart's, as the recovery checks before these leave it) does not, so
+/// a start's read is waited for as itself, the read made at or after the
+/// start came up (its `restored.at`), never as its phase.
 /// When a read finds it filling is `disk_filling`'s, proved by the core's
 /// and the shell's tests: a test fleet's computers share their host's
 /// disk. Starts and ends awake. Answers how many replies of its agent it
@@ -298,9 +303,20 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let disk = || lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
     let number = |save: &Value| save["number"].as_u64().unwrap_or(0);
     let at = |d: &Value| d["at"].as_i64().unwrap_or(0);
-    let (v, d) = (view(), disk());
+    // the read of the start that came up at `restored`'s `at`
+    let read_of = |s: &Suite, restored: &Value| {
+        let up = restored["at"].as_i64().unwrap_or(i64::MAX);
+        let mut d = Value::Null;
+        let read = s.eventually(c.wake, || {
+            d = disk();
+            at(&d) >= up
+        });
+        (read, d)
+    };
+    let v = view();
+    let (read, d) = read_of(s, &v["restored"]);
     let (total, free) = (d["total"].as_u64().unwrap_or(0), d["free"].as_u64().unwrap_or(u64::MAX));
-    s.ok(DISK_CHECKS[0], v["phase"] == "awake" && total > 0 && free <= total && at(&d) >= v["restored"]["at"].as_i64().unwrap_or(i64::MAX), json!({ "disk": d, "restored": v["restored"] }));
+    s.ok(DISK_CHECKS[0], v["phase"] == "awake" && read && total > 0 && free <= total, json!({ "disk": d, "restored": v["restored"] }));
     // a turn, then nothing: its end is saved awake, and the disk read after
     let before = number(&newest_save(api, c.id));
     let r = say(509, "a turn whose end is saved awake")?;
@@ -312,10 +328,10 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     // a sleep and a wake: read at the start, once it came up
     api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
-    let started = disk();
+    let (read, started) = read_of(s, &woke.body["restored"]);
     s.ok(
         DISK_CHECKS[2],
-        woke.body["phase"] == "awake" && at(&started) > at(&after_save) && at(&started) >= woke.body["restored"]["at"].as_i64().unwrap_or(i64::MAX),
+        woke.body["phase"] == "awake" && read && at(&started) > at(&after_save),
         json!({ "disk": started, "restored": woke.body["restored"] }),
     );
     Ok(1)
@@ -1585,6 +1601,37 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
+/// What the `saves` lever says of computer `id` (its phase, its failures,
+/// whether a container runs), or null.
+fn saves_of(api: &Api, id: &str) -> Value {
+    lever(api, id, "saves").map(|r| r.body).unwrap_or(Value::Null)
+}
+
+/// Computer `id` brought to its last strike's start, left destroying: two
+/// starts fail (the lever `fail-starts`), and the third's guest is frozen
+/// (`alive-check`) and its failure held between storing that it fails and
+/// its destroy (`stall-failing-start`), as an isolate that goes there
+/// leaves it. Whether it got there, and what it read there.
+fn last_start_destroying(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<(bool, Value)> {
+    std::thread::sleep(QUEUE_DRAIN);
+    api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let two = lever_with(api, id, json!({ "op": "fail-starts", "times": 2 }))?;
+    // its wake waits on what follows: given up on here, as a page's would be
+    let _ = api.impatient(Duration::from_secs(20)).signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let striking = s.eventually(Duration::from_secs(60), || {
+        let v = saves_of(api, id);
+        v["failures"] == 2 && v["phase"]["phase"] == "asleep"
+    });
+    let froze = lever_with(api, id, json!({ "op": "alive-check", "ms": 3_000, "freeze": true }))?;
+    let stall = lever_with(api, id, json!({ "op": "stall-failing-start", "ms": 600_000 }))?;
+    let mut held = Value::Null;
+    let gap = s.eventually(Duration::from_secs(60), || {
+        held = saves_of(api, id);
+        held["phase"]["phase"] == "starting" && held["phase"]["destroying"] == true && held["running"] == true && held["failures"] == 2
+    });
+    Ok((two.status == 200 && striking && froze.status == 200 && stall.status == 200 && gap, held))
+}
+
 /// The computer put to sleep, asked until it is (a turn's last record may
 /// wake it again): whether it slept, and its last view.
 fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, Value) {
@@ -2534,6 +2581,91 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
         return Ok(());
     }
+    // a start's last strike, its isolate gone between storing that it fails
+    // and destroying its container (the node crashed there): a new isolate
+    // and host take the computer over (Codex on #1079: a new host destroyed
+    // no start's container but its own; it kept no alarm when that failed;
+    // a second review: an event during that destroy acted as if it were
+    // done). (A) a request takes it over, its destroy held while an alarm
+    // comes: one strike, the container gone, its exit reported again nothing
+    let (ready, held) = last_start_destroying(s, api, &owner, &id)?;
+    let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
+    s.crash()?;
+    let fresh = s.start(false)?;
+    let api = &fresh;
+    let found = saves_of(api, &id);
+    let generation = found["generation"].as_u64().unwrap_or(0);
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 3_000 }))?;
+    let reported = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let first = saves_of(api, &id);
+    let replayed = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let again = saves_of(api, &id);
+    s.ok(
+        "a start's last strike, its isolate gone before it destroyed its container (the node crashed in that gap): a new isolate and host destroy that container, an alarm coming as they do waiting for it, and count the start failed once; its exit, reported again, counts nothing",
+        ready
+            && stall.status == 200
+            && found["running"] == true
+            && found["phase"]["destroying"] == true
+            && soon.status == 200
+            && reported.status == 200
+            && first["running"] == false
+            && first["failures"] == 3
+            && first["phase"]["phase"] == "failed"
+            && replayed.status == 200
+            && again["failures"] == 3,
+        json!({ "held": held, "found": found, "first": first, "again": again }),
+    );
+    // (B) the same, its destroy failing: the alarm that waited for it takes
+    // the computer over itself, at once, and counts that strike
+    let (ready, _) = last_start_destroying(s, api, &owner, &id)?;
+    let stall = lever_with(api, &id, json!({ "op": "stall-takeover", "ms": 10_000 }))?;
+    let flaky = lever_with(api, &id, json!({ "op": "fail-takeover-destroys", "times": 1 }))?;
+    s.crash()?;
+    let fresh = s.start(false)?;
+    let api = &fresh;
+    let generation = saves_of(api, &id)["generation"].as_u64().unwrap_or(0);
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 3_000 }))?;
+    let t0 = std::time::Instant::now();
+    let reported = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let mut last = Value::Null;
+    let cleaned = s.eventually(Duration::from_secs(40), || {
+        last = saves_of(api, &id);
+        last["phase"]["phase"] == "failed" && last["running"] == false
+    });
+    let took = t0.elapsed();
+    s.ok(
+        "its takeover's destroy failing, the alarm that came as it ran waits for it, then takes the computer over itself: the container gone and the start's last strike counted once, within seconds, not an alarm later",
+        ready && stall.status == 200 && flaky.status == 200 && soon.status == 200 && reported.status >= 500 && cleaned && last["failures"] == 3 && took < Duration::from_secs(40),
+        json!({ "reported": reported.body, "last": last, "tookS": took.as_secs() }),
+    );
+    // (C) the alarm the first to look: its takeover's destroy failing
+    // there keeps an alarm a minute on, which destroys the container and
+    // counts that strike, no request between (Codex on #1079: the alarm
+    // spent itself and nothing came again)
+    let (ready, _) = last_start_destroying(s, api, &owner, &id)?;
+    let flaky = lever_with(api, &id, json!({ "op": "fail-takeover-destroys", "times": 1 }))?;
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 5_000 }))?;
+    s.crash()?;
+    let fresh_again = s.start(false)?;
+    let api = &fresh_again;
+    let t0 = std::time::Instant::now();
+    let mut last = Value::Null;
+    let cleaned = s.eventually(Duration::from_secs(240), || {
+        last = saves_of(api, &id);
+        last["phase"]["phase"] == "failed" && last["running"] == false
+    });
+    let took = t0.elapsed();
+    s.ok(
+        "its last strike, the alarm first to look after its isolate went: the takeover's destroy failing there keeps an alarm a minute on, which destroys the container and counts that strike, with no request between",
+        ready
+            && flaky.status == 200
+            && soon.status == 200
+            && cleaned
+            && last["failures"] == 3
+            && last["phase"]["why"].as_str().is_some_and(|w| w.contains("isolate"))
+            && took >= Duration::from_secs(45),
+        json!({ "last": last, "tookS": took.as_secs() }),
+    );
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once; its
     // agent's routine, the platform's own data, is kept, and fires
