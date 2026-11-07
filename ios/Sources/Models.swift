@@ -424,6 +424,10 @@ struct PendingPost: Codable, Identifiable, Sendable {
     var attachments: [ChatAttachment] = []
     var replyTo: Int64?
     var recipients: [String] = []
+    /// A command of its agent's menu (`steer`), its words `text`, its agent
+    /// `recipients`' one: posted as `{kind: "command"}`, saved and retried
+    /// with the same id as a message is (docs/ios.md).
+    var command: String? = nil
 }
 
 struct ImportedSession: Decodable, Identifiable, Sendable {
