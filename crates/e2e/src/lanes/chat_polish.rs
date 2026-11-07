@@ -1417,7 +1417,8 @@ pub(super) fn history_cursor(s: &mut Suite, api: &Api, owner: &Keys, session: &s
     anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 1 && document.getElementById('scroll').dataset.watching === '1'")), "the cursor chat opens on its newest page");
     let up = walk(chrome, &page, true, &format!("{window} === 'up'"))?;
     chrome.click(&page, "#latest")?;
-    let reset = super::shows(chrome, &page, &format!("{window} === 'live' && {count} === 1"));
+    // (one message after the reset: the sentinel, in view, reads on at once)
+    let reset = super::shows(chrome, &page, &format!("{window} === 'live' && {}", has(1401)));
     let start = walk(chrome, &page, true, &format!("{} && {history} === 'done'", has(1)))?;
     s.ok(
         "Jump to latest onto a page of seen answers and one message, then up: the chat's start is reached",
