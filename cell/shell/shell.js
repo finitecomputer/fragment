@@ -1206,11 +1206,12 @@ function windowActions(name, frame, path, files) {
 const iconHelpers = { api, reload: () => load() };
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
-// Pinned, a chat heads its section of the sidebar (Paul, 2026-10-31): the
+// Pinned, a chat heads its section of the sidebar (Paul, 2026-10-31), and
+// an agent heads the sidebar (chat-list.js `pinnedAgentsFirst`): the
 // person's own view of it, as archiving is (`PUT …/pinned`).
-function pinItem(name) {
+function pinItem(name, pin = "Pin") {
   const pinned = !!byName(name)?.pinned;
-  return { icon: "pin", text: pinned ? "Unpin" : "Pin", onClick: () => setPinned(name, !pinned) };
+  return { icon: "pin", text: pinned ? "Unpin" : pin, onClick: () => setPinned(name, !pinned) };
 }
 async function setPinned(name, pinned) {
   try {

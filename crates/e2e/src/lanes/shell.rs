@@ -8243,8 +8243,8 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let members = shell(api, session, "GET", &format!("/api/f/{made}/members"), None, &[])?;
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
     s.ok(
-        "the Reader's hero opens its menu (New chat, Rename, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
-        offered == ["New chat", "Rename…", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
+        "the Reader's hero opens its menu (New chat, Rename, Pin to top, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
+        offered == ["New chat", "Rename…", "Pin to top", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
         json!({ "offered": offered, "made": made, "agents": agents }),
     );
     // let go, so the newest chats below are the ones they make
@@ -8259,6 +8259,54 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         "renamed elsewhere, its hero follows with no reload, its section where it was; renamed back, nothing the shell draws says the name it had",
         renamed && back && hits == json!([]),
         json!({ "renamed": renamed, "back": back, "hits": hits }),
+    );
+    pinned_agent_ui(s, api, b, page, session, first_title, reader, reader_chat, shots)
+}
+
+/// Their agents' order in the sidebar (FIN-404; Paul, 2026-11-07: a
+/// sidebar matter, nothing deeper): an agent's hero's Pin to top puts its
+/// section first, marked pinned, its chats still under it, and the rest
+/// after it in their computer's order; it is their list's row's `pinned`
+/// (the one order every device of theirs reads). Its Unpin puts it back.
+#[allow(clippy::too_many_arguments)]
+fn pinned_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, first_title: &str, reader: &str, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
+    let order = |names: &str| format!("({HEROES}).map((h) => h.name).join() === {}", js(names));
+    let pick = |b: &mut Browser, text: &str| -> Result<bool> {
+        b.click(page, &hero)?;
+        let open = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
+        Ok(open && menu_item(b, page, text)?)
+    };
+    let pinned = pick(b, "Pin to top")?;
+    let first = b.until(page, &format!("{} && ({HEROES})[0].chats.includes({}) && !!document.querySelector({})", order(&format!("Reader,{first_title}")), js(reader_chat), js(&format!("{hero} .pin-mark"))), wait);
+    let row = own_row_of(api, session, reader);
+    let menu = hero_menu(b, page, &hero)?;
+    let _ = b.screenshot(page, &shots.join("desktop-agent-pinned.png"));
+    s.ok(
+        "an agent's Pin to top puts its section first in the sidebar, marked pinned, its chat still under it, their main agent's after it; it is their list row's pinned, and its menu then offers Unpin",
+        pinned && first && row["pinned"] == json!(true) && menu.iter().any(|m| m == "Unpin"),
+        json!({ "heroes": b.eval(page, HEROES)?, "row": row, "menu": menu }),
+    );
+    // on a phone: the list, the pinned agent first
+    let wide = b.eval(page, "[innerWidth, innerHeight]")?;
+    b.viewport(page, 390, 844, true)?;
+    if b.eval(page, "document.getElementById('layout').classList.contains('left-open')")? != true {
+        b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
+    }
+    let phone = b.until(page, &format!("document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {}", order(&format!("Reader,{first_title}"))), wait);
+    let _ = b.screenshot(page, &shots.join("phone-390-agent-pinned.png"));
+    let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32);
+    b.viewport(page, w, h, false)?;
+    let back = b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), wait);
+    s.ok("on a phone the list shows the pinned agent first too", phone && back, json!({ "heroes": b.eval(page, HEROES)? }));
+    let unpinned = pick(b, "Unpin")?;
+    let again = b.until(page, &format!("{} && !document.querySelector({})", order(&format!("{first_title},Reader")), js(&format!("{hero} .pin-mark"))), wait);
+    let row = own_row_of(api, session, reader);
+    s.ok(
+        "its Unpin puts it back after their main agent, unmarked, and their list's row no longer pins it",
+        unpinned && again && row.get("pinned").is_none_or(|p| p == &json!(false)),
+        json!({ "heroes": b.eval(page, HEROES)?, "row": row }),
     );
     Ok(())
 }
