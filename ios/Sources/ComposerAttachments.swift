@@ -97,33 +97,43 @@ private struct ComposerTile: View {
     }
 }
 
-/// A voice memo in the composer: played (from its kept bytes) before it is sent.
+/// A voice memo in the composer: played before it is sent, from its kept
+/// bytes as iOS plays them (`BlobStore.playable`: a WebM rewrapped as Ogg).
+/// One that cannot play here offers no Play.
 private struct ComposerSound: View {
     let attachment: ChatAttachment
     let key: BlobKey
+    @State private var playable: URL?
     @State private var duration: Double?
+    @State private var unplayable = false
 
     var body: some View {
         let playback = AudioPlayback.shared
         let id = "draft:" + attachment.sha256
         let place = playback.place(id)
         Button {
-            guard let file = BlobStore.shared.cached(key), let named = try? BlobStore.shared.named(attachment, file: file) else { return }
-            playback.toggle(id, url: named)
+            if let playable { playback.toggle(id, url: playable) }
         } label: {
             VStack(spacing: 2) {
-                Image(systemName: place?.playing == true ? "pause.fill" : "play.fill").font(.headline)
-                Text(SoundPlayer.time(place.map(\.elapsed) ?? duration ?? 0)).font(.caption2.monospacedDigit())
+                if unplayable {
+                    // a sound this iPhone cannot play: what it is, and no Play
+                    Image(systemName: "waveform").font(.title2)
+                } else {
+                    Image(systemName: place?.playing == true ? "pause.fill" : "play.fill").font(.headline)
+                    Text(SoundPlayer.time(place.map(\.elapsed) ?? duration ?? 0)).font(.caption2.monospacedDigit())
+                }
             }
-            .foregroundStyle(.primary)
+            .foregroundStyle(playable == nil ? .secondary : .primary)
             .frame(width: ComposerTile.side, height: ComposerTile.side)
         }
         .buttonStyle(.plain)
-        .disabled(playback.recording)
-        .accessibilityLabel(place?.playing == true ? "Pause voice memo" : "Play voice memo")
+        .disabled(playable == nil || playback.recording)
+        .accessibilityLabel(unplayable ? "A sound that can’t play here" : place?.playing == true ? "Pause voice memo" : "Play voice memo")
         .task(id: attachment.sha256) {
-            guard let file = BlobStore.shared.cached(key), let url = await BlobStore.shared.playable(attachment, file: file) else { return }
-            duration = await SoundFacts.shared.facts(attachment.sha256, url: url)?.duration
+            guard let file = BlobStore.shared.cached(key), let url = await BlobStore.shared.playable(attachment, file: file),
+                  let facts = await SoundFacts.shared.facts(attachment.sha256, url: url) else { unplayable = true; return }
+            duration = facts.duration
+            playable = url
         }
     }
 }

@@ -1,19 +1,21 @@
 import Foundation
 import CryptoKit
+import Synchronization
 import Observation
 import UIKit
 import ImageIO
 
-/// A chat's file as this iPhone keeps it: by the server's origin and the
-/// chat it is a blob of (`scope`, a hash of both: no server text in a path),
-/// and its own hash.
+/// A chat's file as this iPhone keeps it: by the account (its server and
+/// this iPhone's key for it), the chat it is a blob of (`scope`, a hash of
+/// them all: no server text in a path, and no file one account read is
+/// another's), and its own hash.
 struct BlobKey: Hashable, Sendable {
     let scope: String
     let sha256: String
 
     init(api: FragmentAPI, fragment: String, sha256: String) {
-        let origin = api.baseURL.absoluteString
-        scope = String(sha256Hex(Data("\(origin)|\(fragment)".utf8)).prefix(32))
+        let account = "\(api.baseURL.absoluteString)|\(api.identity.publicKey)"
+        scope = String(sha256Hex(Data("\(account)|\(fragment)".utf8)).prefix(32))
         self.sha256 = sha256
     }
     /// A key for the image cache, which keeps pictures by URL.
@@ -70,6 +72,13 @@ final class BlobStore {
     private var used: [BlobKey: Date] = [:]
     private var trimming: Task<Void, Never>?
     private var trimAgain = false
+    /// Reads under way, each ended when the store is emptied.
+    private var reading: [BlobKey: Task<Void, Never>] = [:]
+    /// Reads ended by an emptying, until they have stopped (`settled`).
+    private var ending: [Task<Void, Never>] = []
+    /// How many times the store was emptied (`removeAll`): work begun
+    /// before is never put in place after (another account's).
+    private(set) var generation = 0
 
     init(root: URL, diskMax: Int64 = BlobStore.diskMaxDefault, keptRecent: Int = 16) {
         self.root = root
@@ -103,7 +112,7 @@ final class BlobStore {
         load.start = { [weak self, weak load] in
             guard let self, let load else { return }
             load.set(.loading(0))
-            Task { await self.read(attachment, key: key, api: api, fragment: fragment, into: load) }
+            self.reading[key] = Task { await self.read(attachment, key: key, api: api, fragment: fragment, into: load) }
         }
         used[key] = Date()
         if begin { load.begin() }
@@ -117,11 +126,12 @@ final class BlobStore {
     @discardableResult
     func keep(_ data: Data, key: BlobKey) async throws -> URL {
         guard let url = path(key) else { throw APIError.invalidResponse }
-        try await Task.detached(priority: .userInitiated) {
+        let started = generation
+        let staged = try await Task.detached(priority: .userInitiated) {
             guard sha256Hex(data) == key.sha256 else { throw APIError.invalidResponse }
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: url.path) { try data.write(to: url, options: .atomic); Self.seal(url) }
+            return try Self.stage(data)
         }.value
+        try commit(staged, to: url, since: started)
         if let held = loads[key] { held.set(.ready(url)) }
         used[key] = Date()
         scheduleTrim()
@@ -132,7 +142,7 @@ final class BlobStore {
     /// record's name made safe (`SafeFileName`), in a folder of its hash's,
     /// a link to the kept file (no second copy).
     func named(_ attachment: ChatAttachment, file: URL) throws -> URL {
-        guard SafeFileName.isHash(attachment.sha256) else { throw APIError.invalidResponse }
+        guard SafeFileName.isHash(attachment.sha256), FileManager.default.fileExists(atPath: file.path) else { throw APIError.invalidResponse }
         let folder = file.deletingLastPathComponent().appending(path: "named", directoryHint: .isDirectory)
             .appending(path: attachment.sha256, directoryHint: .isDirectory)
         let target = folder.appending(path: SafeFileName.of(attachment.name, type: attachment.type))
@@ -154,28 +164,67 @@ final class BlobStore {
         case .webm:
             let ogg = file.appendingPathExtension("ogg")
             if FileManager.default.fileExists(atPath: ogg.path) { return ogg }
-            let rewrapped = await Task.detached(priority: .userInitiated) { () -> URL? in
+            let started = await generation
+            let staged = await Task.detached(priority: .userInitiated) { () -> URL? in
                 guard let data = try? Data(contentsOf: file, options: .mappedIfSafe), let wrapped = try? WebMOpus.ogg(from: data) else { return nil }
-                do { try wrapped.write(to: ogg, options: .atomic); BlobStore.seal(ogg); return ogg } catch { return nil }
+                return try? Self.stage(wrapped)
             }.value
-            await scheduleTrim()
-            return rewrapped
+            guard let staged else { return nil }
+            return await MainActor.run {
+                defer { scheduleTrim() }
+                return try? commit(staged, to: ogg, since: started)
+            }
         }
     }
 
+    /// Emptied (the account changed): reads under way end, and nothing
+    /// begun before is put in place after (`commit`).
     func removeAll() {
+        generation += 1
+        for task in reading.values { task.cancel() }
+        ending += reading.values
+        reading.removeAll()
         loads.removeAll()
         used.removeAll()
         try? FileManager.default.removeItem(at: root)
     }
 
+    /// Where a file made off the main actor waits to be put in place: never
+    /// in the store, so a store emptied meanwhile is never filled again.
+    nonisolated static func stage(_ data: Data) throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "blob-staging", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appending(path: UUID().uuidString)
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+
+    /// A file made off the main actor (`staged`), put in place here, unless
+    /// the store was emptied since its work began (another account's): then
+    /// it goes.
+    @discardableResult
+    private func commit(_ staged: URL, to target: URL, since started: Int) throws -> URL {
+        guard generation == started else {
+            try? FileManager.default.removeItem(at: staged)
+            throw CancellationError()
+        }
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: target.path) { try? FileManager.default.removeItem(at: staged) }
+        else { try FileManager.default.moveItem(at: staged, to: target); Self.seal(target) }
+        return target
+    }
+
     private func read(_ attachment: ChatAttachment, key: BlobKey, api: FragmentAPI, fragment: String, into load: BlobLoad) async {
+        let started = generation
+        var overran: DownloadProgress?
+        defer { if generation == started { reading[key] = nil } }
         do {
             guard let target = path(key), attachment.size > 0 else { throw APIError.invalidResponse }
             let progress = DownloadProgress(expected: Int64(attachment.size)) { fraction in
                 Task { @MainActor in if case .loading = load.state { load.set(.loading(fraction)) } }
             }
             let request = try api.authorized(URLRequest(url: api.url("api/f/\(fragment)/blobs/\(attachment.sha256)")))
+            overran = progress
             let (temporary, response) = try await api.session.download(for: request, delegate: progress)
             defer { try? FileManager.default.removeItem(at: temporary) }
             if (response as? HTTPURLResponse)?.statusCode == 401 { api.authorizationFailed(); throw APIError.unauthorized }
@@ -185,17 +234,15 @@ final class BlobStore {
             let size = attachment.size
             let whole = try await Task.detached(priority: .utility) { try Self.check(temporary, size: size, sha256: sha256) }.value
             guard whole else { throw APIError.server("This file did not arrive whole.") }
-            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: target.path) { try FileManager.default.removeItem(at: temporary) }
-            else { try FileManager.default.moveItem(at: temporary, to: target); Self.seal(target) }
+            try commit(temporary, to: target, since: started)
             load.set(.ready(target))
             scheduleTrim()
-        } catch is CancellationError {
-            load.set(.idle)
-        } catch let error as URLError where error.code == .cancelled {
-            load.set(.failed("This file was larger than its message says."))
         } catch {
-            load.set(.failed(error.localizedDescription))
+            // emptied meanwhile: what it read is not kept, nor said
+            guard generation == started else { return }
+            if overran?.overran == true { load.set(.failed("This file was larger than its message says.")) }
+            else if error is CancellationError || (error as? URLError)?.code == .cancelled { load.set(.idle) }
+            else { load.set(.failed(error.localizedDescription)) }
         }
     }
 
@@ -230,8 +277,13 @@ final class BlobStore {
         }
     }
 
-    /// Waits for a trim under way (tests).
-    func settled() async { await trimming?.value }
+    /// Waits for a trim under way, and for reads an emptying ended to stop.
+    func settled() async {
+        await trimming?.value
+        let ended = ending
+        ending.removeAll()
+        for task in ended { await task.value }
+    }
 
     /// The files past `diskMax` go, the least recently used first (as asked
     /// this launch, else as written), never a file being read nor one of the
@@ -312,12 +364,16 @@ final class BlobStore {
 final class DownloadProgress: NSObject, URLSessionDownloadDelegate, Sendable {
     let expected: Int64
     let report: @Sendable (Double) -> Void
+    private let past = Mutex(false)
+    /// Whether it was ended for running past `expected`.
+    var overran: Bool { past.withLock { $0 } }
     init(expected: Int64, report: @escaping @Sendable (Double) -> Void) {
         self.expected = expected
         self.report = report
     }
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard totalBytesWritten <= expected, totalBytesExpectedToWrite <= expected || totalBytesExpectedToWrite == NSURLSessionTransferSizeUnknown else {
+            past.withLock { $0 = true }
             downloadTask.cancel(); return
         }
         report(Double(totalBytesWritten) / Double(max(1, expected)))

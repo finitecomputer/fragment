@@ -367,4 +367,59 @@ struct MediaTests {
         }
         return total
     }
+
+    /// An account's reads never outlive it: one answered after the store
+    /// was emptied (another account) puts nothing back, says nothing, and the
+    /// next account, whose files are its own, reads the file again.
+    @Test func anAccountsReadNeverOutlivesItsReset() async throws {
+        let bytes = Data("an old account's memo".utf8)
+        let sha = sha256Hex(bytes)
+        let gate = Gate(), arrived = Gate()
+        let stub = Stub { _, before in
+            if before.isEmpty { arrived.open(); gate.pass() }
+            return (200, "base64:" + bytes.base64EncodedString())
+        }
+        let old = try stub.api(), next = try stub.api()
+        let root = FileManager.default.temporaryDirectory.appending(path: "blobs-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = BlobStore(root: root)
+        let memo = Self.attachment("voice-1.m4a", "audio/mp4", sha256: sha, size: bytes.count)
+        let load = store.load(memo, api: old, fragment: "talk--c1", begin: true)
+        await Task.detached { arrived.pass() }.value
+        // the account changes between the request and its answer
+        store.removeAll()
+        gate.open()
+        await store.settled()
+        #expect(!FileManager.default.fileExists(atPath: root.path), "nothing put back")
+        #expect(load.file == nil && store.cached(BlobKey(api: old, fragment: "talk--c1", sha256: sha)) == nil)
+        // the next account's files are its own (its key), and it reads this one itself
+        #expect(BlobKey(api: next, fragment: "talk--c1", sha256: sha) != BlobKey(api: old, fragment: "talk--c1", sha256: sha))
+        let again = store.load(memo, api: next, fragment: "talk--c1", begin: true)
+        let file = try #require(await Self.settled(again).file)
+        #expect(try Data(contentsOf: file) == bytes && stub.seen.count == 2)
+
+    }
+
+    /// What plays a file as iOS plays it, the composer's Play among them: a
+    /// WebM imported is its Ogg rewrap, a recorded M4A itself, Vorbis nothing.
+    @Test func whatPlaysIsTheRewrapNeverTheWebM() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "blobs-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = BlobStore(root: root)
+        let api = try Stub { _, _ in (404, "{}") }.api()
+        func kept(_ data: Data, _ name: String, _ type: String) async throws -> (ChatAttachment, URL) {
+            let attachment = Self.attachment(name, type, sha256: sha256Hex(data), size: data.count)
+            return (attachment, try await store.keep(data, key: BlobKey(api: api, fragment: "talk--c1", sha256: attachment.sha256)))
+        }
+        let (webm, webmFile) = try await kept(AudioFixtures.chromeWebM, "voice-memo.webm", "audio/webm;codecs=opus")
+        let rewrap = try #require(await store.playable(webm, file: webmFile))
+        let rewrapped = try Data(contentsOf: rewrap)
+        #expect(rewrap.pathExtension == "ogg" && AudioContainer.of(rewrapped) == .native && rewrapped.starts(with: Array("OggS".utf8)))
+        let (m4a, m4aFile) = try await kept(AudioFixtures.m4a, "voice-1.m4a", "audio/mp4")
+        let recorded = try #require(await store.playable(m4a, file: m4aFile))
+        let bytes = try Data(contentsOf: recorded)
+        #expect(recorded.lastPathComponent == "voice-1.m4a" && bytes == AudioFixtures.m4a)
+        let (vorbis, vorbisFile) = try await kept(AudioFixtures.oggVorbis, "note.ogg", "audio/ogg")
+        #expect(await store.playable(vorbis, file: vorbisFile) == nil)
+    }
 }
