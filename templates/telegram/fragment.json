@@ -12,7 +12,7 @@
   },
   "inbox": { "header": "x-telegram-bot-api-secret-token", "secret": "TELEGRAM_WEBHOOK_SECRET" },
   "operations": {
-    "state": { "kind": "query", "role": "owner", "description": "The bot, the Telegram account paired, a pairing waiting, and the attempt the last connect answered: {bot, error, paired, pairing, attempt}." },
+    "state": { "kind": "query", "role": "owner", "description": "The bot, the Telegram account paired, a pairing waiting, and the connect attempts answered lately: {bot, error, paired, pairing, answered}." },
     "connect": { "kind": "job", "role": "owner", "input": { "type": "object", "required": ["platform"], "properties": { "platform": { "type": "string", "maxLength": 200 }, "api": { "type": "string", "maxLength": 200 }, "attempt": { "type": "string", "maxLength": 64 } }, "additionalProperties": false }, "description": "Checks the bot token (TELEGRAM_BOT_TOKEN) and points the bot's webhook at this chat's inbox." },
     "pair": { "kind": "mutation", "role": "owner", "description": "Starts pairing: a link that opens the bot in Telegram, good for ten minutes." },
     "confirm": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["user"], "properties": { "user": { "type": "integer" } }, "additionalProperties": false }, "description": "Its owner, in person, says the Telegram account that answered the pairing link is theirs." },

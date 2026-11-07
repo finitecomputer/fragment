@@ -21,7 +21,7 @@ import { KIND } from "./frame-messages.js";
 
 const TELEGRAM_HOST = "api.telegram.org";
 const POLL_MS = 1000;
-// how long a Connect waits for its job's answer (`state.attempt`)
+// how long a Connect waits for its job's answer (`state.answered`)
 const CONNECT_WAIT_MS = 60_000;
 const JSON_TYPE = { "content-type": "application/json" };
 const framed = window.parent !== window;
@@ -142,7 +142,7 @@ export async function setup(root) {
     await fragment.call("connect", { platform: me.platform, attempt });
     for (const until = Date.now() + CONNECT_WAIT_MS; Date.now() < until; ) {
       await sleep(POLL_MS);
-      if ((await fragment.call("state")).attempt === attempt) {
+      if ((await fragment.call("state")).answered?.includes(attempt)) {
         replacing = false;
         return;
       }

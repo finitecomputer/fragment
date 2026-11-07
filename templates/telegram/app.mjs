@@ -34,6 +34,9 @@ const TEXT_MAX = 4096;
 const PARTS_MAX = 4;
 // Updates remembered, so a delivery Telegram sends again is taken once.
 const SEEN_MAX = 2000;
+// Connect attempts whose answer is kept, the latest last, so a page sees its
+// own however many answered between its polls.
+const ANSWERED_MAX = 16;
 
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const nameOf = (from) => [from?.first_name, from?.last_name].filter((s) => typeof s === "string" && s).join(" ").slice(0, 64) || (from?.username ? `@${from.username}` : "someone");
@@ -87,10 +90,10 @@ export class App extends DurableObject {
     const paired = this.get("paired");
     const p = this.get("pairing");
     const pairing = p && Date.now() <= p.expires ? { link: p.link, expires: p.expires, candidate: p.candidate ? { user: p.candidate.user, name: p.candidate.name } : null } : null;
-    // `attempt`: the attempt `connect`'s last answer was for (a page's own
+    // `answered`: the attempts `connect` answered lately (each a page's own
     // word), so a page that asked sees its own answer come, the same bot's
-    // token again included, whatever another connect answered meanwhile
-    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, attempt: this.get("attempt") };
+    // token again included, whatever other connects answered meanwhile
+    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, answered: this.get("answered") ?? [] };
   }
 
   async connect({ platform, api = TELEGRAM, attempt } = {}, job) {
@@ -115,7 +118,7 @@ export class App extends DurableObject {
 
   known({ bot, api, error, attempt = null }, call) {
     if (call.agent) throw new Error("its owner connects it, in person");
-    this.put("attempt", typeof attempt === "string" ? attempt.slice(0, 64) : null);
+    if (typeof attempt === "string") this.put("answered", [...(this.get("answered") ?? []), attempt.slice(0, 64)].slice(-ANSWERED_MAX));
     if (error) {
       this.put("error", String(error).slice(0, 300));
       return { ok: false };

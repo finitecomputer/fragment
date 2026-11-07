@@ -42,6 +42,8 @@ const DOORS = { "maple-telegram--e5f6": { door: "telegram", agent: "maple--a1b2"
 // `link(name, body, doors)`: the binding's answer (its default binds it)
 function world({ refuse = new Set(), listed = true, link = (name, body, doors) => (doors[name] = { door: "telegram", agent: body.agent }) } = {}) {
   const doors = { ...DOORS };
+  // the person's list as the platform holds it, and as this page last read it
+  const server = listOf();
   const list = listOf();
   const asked = [];
   const opened = [];
@@ -58,11 +60,18 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
     if (method === "POST" && path === "/api/fragments") {
       const name = `${body.label}--n${++at.made}p4`;
       doors[name] = null;
+      server.push({ name, kind: "chat", role: "owner" });
       return { name };
     }
-    if (method === "POST" && door) return link(door, body, doors);
+    if (method === "POST" && door) {
+      const answer = link(door, body, doors);
+      if (doors[door]) server.find((f) => f.name === door).sharing = { reach: true };
+      return answer;
+    }
     if (method === "DELETE") {
-      delete doors[path.split("/")[3]];
+      const name = path.split("/")[3];
+      delete doors[name];
+      server.splice(server.findIndex((f) => f.name === name), 1);
       return {};
     }
     throw new Error(`unexpected ${method} ${path}`);
@@ -82,7 +91,15 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
     computer: () => ({ agents: AGENTS }), fragments: () => list, listed: () => at.listed, own: (f) => f.role === "owner",
     connectorLabel: (agent, door) => `${agent.split("--")[0]}-${door}`, markOffer: (node, agent, what) => Object.assign(node, { offer: [agent, what] }),
     framed: (name, path) => `/auth/frame?name=${name}&return=${path}`, openSetup: (o) => opened.push(o), openChat: () => {},
-    notice: (...n) => notices.push(n), load: async () => { at.loads++; at.listed = true; },
+    notice: (...n) => notices.push(n), load: async () => {
+      at.loads++;
+      if (at.listFails) {
+        at.listed = false;
+        throw new Error("the list did not come");
+      }
+      list.splice(0, list.length, ...structuredClone(server));
+      at.listed = true;
+    },
   });
   let drawn = null;
   globalThis.document = { getElementById: (id) => (id === "settings-telegram" ? drawn : null), querySelector: () => null };
@@ -91,7 +108,12 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
   const said = () => drawn.children.find((c) => c.tag === "p")?.textContent;
   const press = (i, text) => buttons(rows()[i]).find((b) => b.textContent === text).onclick();
   const shown = () => rows().map((r) => buttons(r).map((b) => b.textContent));
-  return { telegram, asked, opened, notices, draw, rows, said, press, shown, doors, list, at, refuse };
+  // another tab's Set up: its connector made and bound, which this page's list does not show yet
+  const elsewhere = (name, agent) => {
+    server.push({ name, kind: "chat", role: "owner", sharing: { reach: true } });
+    doors[name] = { door: "telegram", agent };
+  };
+  return { telegram, asked, opened, notices, draw, rows, said, press, shown, doors, list, server, at, refuse, elsewhere };
 }
 
 test("its own chats with reach are read, and an agent's bound one is Open and Set up; another's Set up alone", async () => {
@@ -142,34 +164,40 @@ test("Set up opens a bound chat's setup page, making nothing", async () => {
   assert.ok(!w.asked.some((a) => a.startsWith("POST")));
 });
 
-test("Set up reads again first: a chat another tab made and bound since is opened, and none made", async () => {
+test("Set up reads the list and its doors anew first: a chat another tab made since, which this page's list does not show yet, is opened, and none made", async () => {
   const w = world();
   await w.telegram.readTelegram();
   w.draw();
-  // another tab's Set up, which this list has not shown yet
-  w.list.push({ name: "wren-telegram--x1y2", kind: "chat", role: "owner", sharing: { reach: true } });
-  w.doors["wren-telegram--x1y2"] = { door: "telegram", agent: "wren--c3d4" };
+  w.elsewhere("wren-telegram--x1y2", "wren--c3d4");
+  assert.ok(!w.list.some((f) => f.name === "wren-telegram--x1y2"), "this page's list is behind");
   await w.press(1, "Set up");
   assert.deepEqual(w.opened.map((o) => o.name), ["wren-telegram--x1y2"]);
   assert.ok(!w.asked.some((a) => a.startsWith("POST")), "none made");
-  // and a list that shows it reads it with no press
+  // and a list that comes showing it reads it, no press
   const v = world();
   await v.telegram.readTelegram();
   v.draw();
-  v.list.push({ name: "wren-telegram--x1y2", kind: "chat", role: "owner", sharing: { reach: true } });
-  v.doors["wren-telegram--x1y2"] = { door: "telegram", agent: "wren--c3d4" };
+  v.elsewhere("wren-telegram--x1y2", "wren--c3d4");
+  v.list.push(structuredClone(v.server.at(-1)));
   await v.telegram.refreshTelegram();
   assert.deepEqual(v.shown(), [["Open", "Set up"], ["Open", "Set up"]]);
 });
 
-test("Set up whose read fails makes nothing, and says so", async () => {
+test("Set up whose list or doors read fails makes nothing, and says so", async () => {
   const w = world();
   await w.telegram.readTelegram();
   w.draw();
   w.refuse.add("keyed-chat--j9k2");
   await w.press(1, "Set up");
-  assert.ok(!w.asked.some((a) => a.startsWith("POST")));
-  assert.deepEqual(w.notices, [["Telegram was not set up", "Couldn't read your Telegram chats. Try again."]]);
+  const v = world();
+  await v.telegram.readTelegram();
+  v.draw();
+  v.at.listFails = true;
+  await v.press(1, "Set up");
+  for (const x of [w, v]) {
+    assert.ok(!x.asked.some((a) => a.startsWith("POST")));
+    assert.deepEqual(x.notices, [["Telegram was not set up", "Couldn't read your Telegram chats. Try again."]]);
+  }
 });
 
 test("with none, Set up makes one, binds it as the agent's door, and opens its setup page, the list read first", async () => {
@@ -178,7 +206,7 @@ test("with none, Set up makes one, binds it as the agent's door, and opens its s
   w.draw();
   await w.press(1, "Set up");
   assert.deepEqual(w.asked.filter((a) => !a.startsWith("GET")), ["POST /api/fragments", "POST /api/f/wren-telegram--n1p4/door"]);
-  assert.equal(w.at.loads, 1);
+  assert.equal(w.at.loads, 2, "the list read before it, and after");
   assert.deepEqual(w.opened.map((o) => [o.name, o.agent]), [["wren-telegram--n1p4", "wren--c3d4"]]);
   assert.deepEqual(w.shown()[1], ["Open", "Set up"], "drawn bound at once");
   // read again, the list not yet knowing it has reach: read all the same
@@ -199,7 +227,7 @@ test("a binding refused deletes the chat it made, and says so; nothing opens", a
   assert.deepEqual(w.shown()[1], ["Set up"]);
 });
 
-test("a binding whose answer was lost is read: bound, it opens; not bound, it goes; unreadable, it is kept", async () => {
+test("a binding whose answer was lost is read: bound to its agent, it opens; to another meanwhile, it is theirs; not bound, it goes; unreadable, it is kept", async () => {
   const lost = (commit) => (name, body, doors) => {
     if (commit) doors[name] = { door: "telegram", agent: body.agent };
     throw Object.assign(new Error("Failed to fetch"), { status: commit === null ? 502 : undefined });
@@ -225,4 +253,15 @@ test("a binding whose answer was lost is read: bound, it opens; not bound, it go
   await u.press(1, "Set up");
   assert.ok(!u.asked.some((a) => a.startsWith("DELETE")), "kept");
   assert.deepEqual(u.notices, [["Telegram was not set up", "Couldn't tell whether it was set up. Try again."]]);
+  // bound, its answer lost, then bound again elsewhere to another agent before it was read: theirs, kept
+  const t = world({ link: (name, body, doors) => {
+    doors[name] = { door: "telegram", agent: "maple--a1b2" };
+    throw Object.assign(new Error("Failed to fetch"), {});
+  } });
+  await t.telegram.readTelegram();
+  t.draw();
+  await t.press(1, "Set up");
+  assert.ok(!t.asked.some((a) => a.startsWith("DELETE")), "kept: another agent's now");
+  assert.equal(t.opened.length, 0);
+  assert.deepEqual(t.notices, [["Telegram was not set up", "It was linked to another agent meanwhile."]]);
 });

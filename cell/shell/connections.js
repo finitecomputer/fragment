@@ -784,13 +784,15 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
 // chats with reach (a door is reach: reach.rs) and each this page bound,
 // its door as its owner reads it (`GET /api/f/{name}/door`), as Settings
 // opens, as the list's chats with reach change, and again as Set up is
-// pressed (another tab may have made one since). Its doors are the latest
+// pressed, the list read anew first (another tab may have made one since,
+// which this page's list may not show yet). Its doors are the latest
 // read's, whole, or none: while that read failed (or the list was not
 // read) its rows say Try again, which reads the list again first.
 // A connector Set up makes whose binding is refused (a 4xx) is deleted
-// again; one whose binding's answer was lost is read: bound, it is set up,
-// not bound, deleted, and unreadable, kept (its row finds it once its door
-// reads), so a press never leaves one it could not account for.
+// again; one whose binding's answer was lost is read: bound to its agent,
+// it is set up; bound to another meanwhile (its owner, elsewhere), kept as
+// theirs; not bound, deleted; unreadable, kept (its row finds it once its
+// door reads). So a press never deletes one it could not account for.
 export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, openSetup, openChat, notice, load }) {
   const DOOR = "telegram";
   const TITLE = "Telegram";
@@ -827,16 +829,18 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
   const openConnector = (name, agent) => openSetup({ src: framed(name, SETUP), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
   // Its binding, as `POST …/door` answers or, its answer lost, as its door
-  // reads: the binding, or null when it is not bound; a refusal throws, and
-  // so does a read that fails (`unknown`: kept).
+  // reads: the binding to `agent`; a refusal, or no binding, throws (the
+  // connector deleted), and so do a read that fails and a binding to
+  // another agent (`keep`: the connector is left be).
   async function bind(name, agent) {
     try {
       return await api("POST", `/api/f/${seg(name)}/door`, { act: "link", agent });
     } catch (e) {
       if (e.status >= 400 && e.status < 500) throw e;
       const now = await api("GET", `/api/f/${seg(name)}/door`).then((r) => r.bound ?? null, () => undefined);
-      if (now === undefined) throw Object.assign(new Error("Couldn't tell whether it was set up. Try again."), { unknown: true });
+      if (now === undefined) throw Object.assign(new Error("Couldn't tell whether it was set up. Try again."), { keep: true });
       if (now?.door === DOOR && now.agent === agent) return now;
+      if (now) throw Object.assign(new Error("It was linked to another agent meanwhile."), { keep: true });
       throw e;
     }
   }
@@ -846,6 +850,9 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
     refreshTelegram();
     let made = null;
     try {
+      // the list read anew, then its doors: a connector another tab made is
+      // found, whatever this page's list said (a list that fails, none made)
+      await load().catch(() => {});
       if (!(await readTelegram())) throw new Error("Couldn't read your Telegram chats. Try again.");
       const connector = boundOf(agent);
       if (connector) {
@@ -862,7 +869,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       await load().catch(() => {});
       openConnector(made.name, agent);
     } catch (e) {
-      if (made && !e.unknown) {
+      if (made && !e.keep) {
         bound.delete(made.name);
         await api("DELETE", `/api/f/${seg(made.name)}`).catch(() => {});
       }

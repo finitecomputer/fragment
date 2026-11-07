@@ -44,41 +44,41 @@ function world(bots) {
 
 const BOTS = { good: { id: 7, username: "maple_bot" }, other: { id: 8, username: "wren_bot" } };
 
-test("a connector that never connected on this code says no attempt (an older one's state reads as before)", () => {
+test("a connector that never connected on this code has answered no attempt (an older one's state reads as before)", () => {
   const { app } = world(BOTS);
-  assert.equal(app.state().attempt, null);
+  assert.deepEqual(app.state().answered, []);
   assert.equal(app.state().bot, null);
 });
 
-test("each answer names its attempt: its bot, or why not, the bot before kept and its account still paired", async () => {
+test("each answer is kept with its attempt: its bot, or why not, the bot before kept and its account still paired", async () => {
   const { app, connect } = world(BOTS);
   await connect("good", "a1");
-  assert.deepEqual([app.state().attempt, app.state().bot, app.state().error], ["a1", { username: "maple_bot" }, null]);
+  assert.deepEqual([app.state().answered, app.state().bot, app.state().error], [["a1"], { username: "maple_bot" }, null]);
   // paired, then another form's token Telegram refuses
   app.put("paired", { user: 1, chat: 1, name: "Robin", bot: 7 });
   await connect("nope", "b2");
-  assert.deepEqual([app.state().attempt, app.state().bot, app.state().paired], ["b2", { username: "maple_bot" }, { name: "Robin" }]);
+  assert.deepEqual([app.state().answered, app.state().bot, app.state().paired], [["a1", "b2"], { username: "maple_bot" }, { name: "Robin" }]);
   assert.match(app.state().error, /didn't take that bot token/);
   // the same bot's token again: its own answer, the error gone, still paired
   await connect("good", "c3");
-  assert.deepEqual([app.state().attempt, app.state().error, app.state().paired], ["c3", null, { name: "Robin" }]);
+  assert.deepEqual([app.state().answered.at(-1), app.state().error, app.state().paired], ["c3", null, { name: "Robin" }]);
 });
 
-test("two attempts overlapping: each page sees its own answer, never the other's", async () => {
+test("two answers before a page looks: each page still finds its own, never another's in its place", async () => {
   const { app, connect } = world(BOTS);
-  // the first form's job answers last
-  const seen = [];
-  await connect("other", "late");
-  seen.push(app.state().attempt);
-  await connect("nope", "early");
-  seen.push(app.state().attempt);
-  assert.deepEqual(seen, ["late", "early"], "an answer names only its own attempt");
-  assert.notEqual(app.state().attempt, "late", "the form waiting on `late` is not answered by `early`'s");
+  // this dialog's reconnect, then another's, both answered before its first poll
+  await connect("good", "mine");
+  await connect("good", "theirs");
+  const answered = app.state().answered;
+  assert.ok(answered.includes("mine") && answered.includes("theirs"));
+  assert.ok(!answered.includes("never"), "a page whose attempt had no answer keeps waiting");
 });
 
-test("a connect naming no attempt (a call of the API's own) answers with none", async () => {
+test("the attempts kept are the latest few, and a connect naming none (a call of the API's own) adds none", async () => {
   const { app, connect } = world(BOTS);
-  await connect("good", "a1");
+  for (let i = 0; i < 20; i++) await connect("good", `a${i}`);
   await connect("good");
-  assert.equal(app.state().attempt, null);
+  const answered = app.state().answered;
+  assert.equal(answered.length, 16);
+  assert.deepEqual([answered[0], answered.at(-1)], ["a4", "a19"]);
 });
