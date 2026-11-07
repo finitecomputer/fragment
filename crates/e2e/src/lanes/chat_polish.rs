@@ -65,18 +65,6 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
     Ok(())
 }
 
-/// The timeline's items on screen, measured as drawn (each skipped off
-/// screen, `content-visibility: auto`) and again with that containment
-/// off: `{skipped, items, differ}`, `differ` the items whose height or
-/// place changed. A child's margin no longer collapsing through its item,
-/// or a part clipped to it, shows here.
-const SAME_LAYOUT: &str = "(() => { const s = document.getElementById('scroll').getBoundingClientRect();     const items = [...document.getElementById('messages').children].filter((n) => { const r = n.getBoundingClientRect(); return r.bottom > s.top && r.top < s.bottom; });     const box = (n) => { const r = n.getBoundingClientRect(); return [r.top, r.height]; };     const drawn = items.map(box);     const off = document.createElement('style'); off.textContent = '#messages > * { content-visibility: visible !important; contain: none !important; }'; document.head.append(off);     const plain = items.map(box); off.remove();     const differ = items.map((n, i) => [n.className, drawn[i], plain[i]]).filter(([, a, b]) => Math.abs(a[0] - b[0]) > 0.5 || Math.abs(a[1] - b[1]) > 0.5);     return { skipped: items.length > 0 && getComputedStyle(items[0]).contentVisibility === 'auto', items: items.length, differ }; })()";
-
-fn same_layout(chrome: &mut Browser, page: &crate::browser::Page) -> Result<(bool, Value)> {
-    let v = chrome.eval(page, SAME_LAYOUT)?;
-    Ok((v["skipped"] == true && v["items"].as_u64().is_some_and(|n| n > 0) && v["differ"] == json!([]), v))
-}
-
 pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, label: &str) -> Result<()> {
     let name = s.named(api, owner, "chat-polish")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
@@ -206,8 +194,6 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
         json!({ "shown": shown, "reads": reads }),
     );
     s.ok("loading earlier history fills the quote above its message", super::shows(chrome, &page, "document.querySelector('.msg[data-seq=\"416\"] .quote .quote-text')?.textContent === 'History 000' && !document.querySelector('.msg[data-seq=\"416\"] .quote').disabled"), "");
-    let (same, seen) = same_layout(chrome, &page)?;
-    s.ok("each timeline item off screen is skipped, and those on screen lay out as without that", same, &seen);
     s.ok("earlier messages also bring their older work records beyond the initial 1000", super::shows(chrome, &page, "!!document.querySelector('.notice.stopped[data-turn=\"old-progress\"]')"), "");
     chrome.screenshot(&page, &shots.join("history-desktop.png"))?;
     s.ok("jump to latest appears while reading earlier messages", super::shows(chrome, &page, "!document.getElementById('latest').hidden"), "");
@@ -768,12 +754,6 @@ pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &st
         &seen,
     );
     chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes.png"))?;
-    // each shape lays out as it would with no item skipped: at the end, then
-    // from the top (the steps and prompts above)
-    let (end, at_end) = same_layout(chrome, &page)?;
-    chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
-    let (top, at_top) = same_layout(chrome, &page)?;
-    s.ok("every record shape on screen lays out as without its item's containment: no item moved or resized", end && top, json!({ "end": at_end, "top": at_top }));
     chrome.close(page)?;
     let page = chrome.open_with_script(&api.site_url(&name, ""), &format!("delete Object.hasOwn; {probe}"))?;
     super::fit(chrome, &page, 1280, 860, false)?;

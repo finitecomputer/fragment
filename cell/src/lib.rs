@@ -647,7 +647,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
         })
         .collect();
-    Ok(FragmentList { fragments })
+    Ok(FragmentList { fragments, limits: Some(Config::from_env(env).uploads_for(agent.identity.kind)) })
 }
 
 /// Whose ledger a signer reads: a person's own; an agent's owner's.
@@ -890,14 +890,15 @@ struct Forward {
     extra: Vec<(String, String)>,
 }
 
-/// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
-/// past that it is refused unread (the API's upload, and a page's at
-/// `__blob/<sha256>`).
-fn blob_length(req: &Request) -> CellResult<()> {
+/// A blob upload declares its length, at most `most`: past that it is
+/// refused unread (the API's upload, and a page's at `__blob/<sha256>`).
+/// A person's bound is the deployment's (`Config::uploads`, which clients
+/// are told); an agent's, through its computer's egress, a blob's.
+fn blob_length(req: &Request, most: u64) -> CellResult<()> {
     let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
     match declared {
         None => Err(CellError::invalid("a blob upload declares its content-length")),
-        Some(n) if n > limits::BLOB_MAX_BYTES => Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
+        Some(n) if n > most => Err(CellError::too_large("a blob", n as usize, most as usize)),
         Some(_) => Ok(()),
     }
 }
@@ -1018,7 +1019,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     // never holds its bytes (the fragment checks who uploads, and the hash)
     let upload = match (req.method(), rest.strip_prefix("__blob/")) {
         (Method::Put, Some(sha)) => {
-            blob_length(&req)?;
+            blob_length(&req, cfg.uploads.upload_max_bytes)?;
             Some(sha)
         }
         _ => None,
@@ -1261,7 +1262,9 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             if let Some(asker) = &principal.acting_for {
                 return json_answer(&reachable(env, &principal, asker).await?);
             }
-            let list = Request::new("https://principal.internal/list", Method::Get)?;
+            // the list says what this signer's messages carry (`uploads_for`)
+            let kind = if principal.identity.kind == IdentityKind::Agent { "?agent" } else { "" };
+            let list = Request::new(&format!("https://principal.internal/list{kind}"), Method::Get)?;
             crate::routed::send(env, "PRINCIPAL", &principal.id, list).await
         }
         // the signer's own view of a fragment of theirs (principal.rs): it
@@ -1406,8 +1409,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // fragment checks the hash as they arrive. A payload tag may name
         // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
-            blob_length(&req)?;
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
+            blob_length(&req, cfg.uploads_for(principal.identity.kind).upload_max_bytes)?;
             let name = named_fragment(name)?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let routed = Routed { name, url: url.clone(), signed: Some(principal), credential: None };

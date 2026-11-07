@@ -58,6 +58,7 @@ import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
 import { moreOf } from "./pages.js";
+import { over, refusal } from "./limits.js";
 import { noteSaid, relayedOwner as relayedOwnerOf, saidSince, speakerOf } from "./speakers.js";
 
 // A message's text and files (docs/chat-records.md).
@@ -66,8 +67,6 @@ const TEXT_MAX_BYTES = 32 * 1024;
 // kept this long after a change.
 const DRAFT_KEY = "fragment.chat.draft.v1";
 const DRAFT_SAVE_MS = 300;
-const ATTACHMENTS_MAX = 8;
-const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // The backlog a page reads: the chat's last messages, and enough of `work`
 // for their turns (each turn writes two records or more there). Older
 // messages come a page of CHAT_LAST at a time as the reader scrolls up.
@@ -320,13 +319,13 @@ function avatar(color, extra = "", picture = null) {
   return mark;
 }
 
-/// A record's files, as docs/chat-records.md names them: at most 8, each
-/// a blob of this fragment by its hash.
+/// A record's files, as docs/chat-records.md names them: at most the
+/// platform's `filesPerMessage`, each a blob of this fragment by its hash.
 function attachmentsOf(body) {
   if (!Array.isArray(body.attachments)) return [];
   return body.attachments
     .filter((a) => a && typeof a === "object" && SHA256.test(a.sha256))
-    .slice(0, ATTACHMENTS_MAX)
+    .slice(0, fragment.limits()?.filesPerMessage)
     .map((a) => ({ sha256: a.sha256, size: Number(a.size), type: typeof a.type === "string" ? a.type : "", name: typeof a.name === "string" ? a.name : "" }));
 }
 
@@ -2226,9 +2225,8 @@ export function mount(root) {
   let latestSeq = 0;
   let newMessages = 0;
   // The reader's item and where it was, as last scrolled or drawn: an item
-  // above it drawn at its own height (one skipped off screen is laid out at
-  // an estimate, chat.css) moves it back, as a browser's scroll anchoring
-  // would; Safari has none.
+  // above it that grows (a picture that loaded) moves it back, as a
+  // browser's scroll anchoring would; Safari before 27 has none.
   let held = null;
   function keepPlace() {
     if (!held?.node?.isConnected) return;
@@ -2482,15 +2480,16 @@ export function mount(root) {
       }),
     );
   }
+  // the platform's word now (limits.js): a deploy may change it while the
+  // page is open, and `send` checks the files again
   function addFiles(files) {
     if (!canAttach()) return;
+    const limits = fragment.limits();
     for (const file of files) {
-      if (attachments.length >= ATTACHMENTS_MAX) {
-        problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
-        break;
-      }
-      if (file.size > ATTACHMENT_MAX_BYTES) {
-        problem(`${file.name} is over 25 MB, the most a chat takes.`);
+      const why = refusal(limits, [file], attachments.length);
+      if (why) {
+        problem(why);
+        if (attachments.length >= limits.filesPerMessage) break;
         continue;
       }
       attachments.push({ file, name: file.name || "a file", size: file.size, type: file.type, uploading: false });
@@ -2550,8 +2549,9 @@ export function mount(root) {
   }
   async function startMemo() {
     if (ended || recording || !canAttach() || !recordable()) return;
-    if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
-    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
+    const full = refusal(fragment.limits(), [{ size: 0 }], attachments.length);
+    if (full) return problem(full);
+    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: null };
     // held while the browser asks for the microphone, so a second press waits
     recording = memo;
     renderRecording();
@@ -2575,8 +2575,9 @@ export function mount(root) {
       if (!e.data?.size) return;
       memo.chunks.push(e.data);
       memo.bytes += e.data.size;
-      if (memo.bytes > ATTACHMENT_MAX_BYTES && memo.recorder.state !== "inactive") {
-        memo.tooLarge = true;
+      const limits = fragment.limits();
+      if (limits && memo.bytes > limits.uploadMaxBytes && memo.recorder.state !== "inactive") {
+        memo.tooLarge = limits;
         memo.recorder.stop();
       }
     };
@@ -2611,7 +2612,7 @@ export function mount(root) {
     renderRecording();
     if (memo.discard) return;
     if (memo.failed) return problem(`Your voice memo was not kept: ${memo.failed}`);
-    if (memo.tooLarge) return problem("That voice memo is over 25 MB, the most a chat takes.");
+    if (memo.tooLarge) return problem(`That voice memo is ${over(memo.tooLarge)}.`);
     const type = essence(memo.recorder?.mimeType || memo.chunks[0]?.type);
     if (!memo.bytes || !SHOWN_AUDIO.test(type)) return problem("Nothing was recorded.");
     const file = new File(memo.chunks, `voice-memo.${MEMO_EXT[type]}`, { type });
@@ -2985,6 +2986,10 @@ export function mount(root) {
         tellSaid();
         return;
       }
+      // its files against the platform's word now, which a deploy may have
+      // changed since they were taken: refused, the message stays to send
+      const why = refusal(fragment.limits(), files);
+      if (why) throw new Error(why);
       const to = addressed(text);
       // an agent of the owner's not in the chat yet is added first, so its
       // bridge follows the chat and takes the message (bounded: the roster)
@@ -2999,7 +3004,7 @@ export function mount(root) {
       }
       if (outside.length) await readMembers();
       const named = [];
-      // bounded: at most ATTACHMENTS_MAX files
+      // bounded: at most the platform's filesPerMessage (just checked)
       for (const f of files) named.push(await fragment.blob(f.file, { name: f.name }));
       const replyTo = state.replyTo?.seq ?? null;
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}), ...(replyTo ? { reply_to: replyTo } : {}) };
