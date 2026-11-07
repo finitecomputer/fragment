@@ -4,6 +4,7 @@
 use fragment_proto::{ErrorBody, ErrorCode};
 use worker::{Request, Response};
 
+use crate::ReadJson;
 use crate::{config::Config, error::CellResult, shell};
 
 /// Explicit fetch metadata wins over Accept: a fetch asking for HTML is
@@ -39,7 +40,7 @@ pub(crate) async fn answer(mut resp: Response, env: &worker::Env, platform: bool
     if resp.status_code() != 503 || !resp.headers().get("content-type")?.is_some_and(|t| t.starts_with("application/json")) {
         return Ok(resp);
     }
-    let body = resp.cloned()?.json::<ErrorBody>().await;
+    let body = resp.cloned()?.read_json::<ErrorBody>().await;
     if !matches!(body, Ok(b) if b.error == ErrorCode::Deploying) {
         return Ok(resp);
     }

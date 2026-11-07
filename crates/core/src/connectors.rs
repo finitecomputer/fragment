@@ -79,7 +79,7 @@ impl Policy {
 
     /// `FRAGMENT_CONNECTORS`, as a deploy writes it.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        Policy::new(serde_json::from_str(raw).map_err(|e| e.to_string())?)
+        Policy::new(serde_json::from_slice(raw.as_bytes()).map_err(|e| e.to_string())?)
     }
 
     pub fn entries(&self) -> &[Connector] {

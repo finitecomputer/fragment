@@ -21,6 +21,7 @@ use futures_util::future::join_all;
 use serde_json::{json, Value};
 use worker::*;
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::models::{embedded, Embedding};
@@ -107,5 +108,5 @@ async fn ask(env: &Env, url: &Url, who: &Signed, name: &str, inner: &str) -> Cel
     };
     let mut resp = crate::routed::send_again(env, "FRAGMENT", name, make).await?;
     let status = resp.status_code();
-    Ok((status, resp.json().await.unwrap_or(Value::Null)))
+    Ok((status, resp.read_json().await.unwrap_or(Value::Null)))
 }

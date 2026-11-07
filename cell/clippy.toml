@@ -1,0 +1,8 @@
+# The cell's Wasm holds one serde_json decoder per type: from bytes
+# (`SliceRead`). A decode from `&str` (`StrRead`) compiles a second copy of
+# each type's decoder (about 44 KB across the cell when it had both), so
+# text goes through the bytes decoder instead (cell/src/lib.rs).
+disallowed-methods = [
+    { path = "serde_json::from_str", reason = "use crate::json_text, the bytes decoder each type already has" },
+    { path = "worker::Response::json", reason = "use crate::ReadJson::read_json, the bytes decoder each type already has" },
+]

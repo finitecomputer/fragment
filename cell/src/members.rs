@@ -320,7 +320,7 @@ impl FragmentCell {
                 match self.meta(MetaKey::Face) {
                     Ok(stored) => {
                         let shown = stored.unwrap_or_else(|| face(FragmentKind::App, None, None, None));
-                        body["face"] = serde_json::from_str(&shown).unwrap_or(Value::Null);
+                        body["face"] = crate::json_text(&shown).unwrap_or(Value::Null);
                         body["face"]["agents"] = json!(agents);
                     }
                     Err(e) => console_error!("{name}: its face did not read ({:?}): {}", e.code, e.message),
@@ -424,7 +424,7 @@ impl FragmentCell {
     /// has; `Other` for a kind a newer release stored, read after a
     /// rollback).
     pub(crate) fn kind(&self) -> CellResult<FragmentKind> {
-        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| serde_json::from_value(f["kind"].clone()).ok()).unwrap_or_default())
     }
 
@@ -768,14 +768,14 @@ impl FragmentCell {
 
     /// Its title as its members' lists show it, if it has one.
     pub(crate) fn title(&self) -> CellResult<Option<String>> {
-        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
 
     /// An agent fragment's role, as its face keeps it (`face`): none for
     /// any other fragment.
     pub(crate) fn agent_role(&self) -> CellResult<Option<String>> {
-        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
+        let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
         Ok(face.and_then(|f| f["role"].as_str().map(str::to_string)))
     }
 
