@@ -514,8 +514,10 @@ struct TransportTests {
         func add() { value.withLock { $0 += 1 } }
         var now: Int { value.withLock { $0 } }
     }
+    /// `lost`: a post whose acknowledgement is lost, after it committed.
     private func launchStub(created: Count, gate: Gate? = nil, holdAt: String? = nil,
-                            blob: @escaping @Sendable (Seen, [Seen]) -> (Int, String) = { _, _ in (200, #"{"ok":true,"stored":true}"#) }) -> Stub {
+                            blob: @escaping @Sendable (Seen, [Seen]) -> (Int, String) = { _, _ in (200, #"{"ok":true,"stored":true}"#) },
+                            lost: @escaping @Sendable (Seen, [Seen]) -> Bool = { _, _ in false }) -> Stub {
         let chatRoute = "POST /api/f/mobile-chat--c1/channels/chat"
         return Stub { seen, before in
             if let holdAt, seen.route.hasPrefix(holdAt) { gate?.pass() }
@@ -524,7 +526,7 @@ struct TransportTests {
             case "GET /api/f/juniper--a2/status": return (200, #"{"npub":"npub1juniper","urls":{"canonical":"https://juniper--a2.finite.test/"}}"#)
             case "POST /api/fragments": created.add(); return (200, #"{"name":"mobile-chat--c1"}"#)
             case "PUT /api/f/mobile-chat--c1/members/npub1juniper": return (200, "{}")
-            case chatRoute: return posted(seen, seq: 1, replayed: false)
+            case chatRoute: return lost(seen, before) ? (503, #"{"error":"unavailable","message":"Try again shortly."}"#) : posted(seen, seq: 1, replayed: false)
             default:
                 if seen.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") { return blob(seen, before) }
                 return (404, #"{"error":"not_found","message":"no route"}"#)
@@ -640,6 +642,104 @@ struct TransportTests {
         let body = try #require(stub.seen.first { $0.route.hasSuffix("/channels/chat") }).json["body"]
         #expect(body["text"] == .string("As submitted") && body["attachments"].array.count == 1)
         #expect(session.composer == "Typed in the chat meanwhile" && session.pending.isEmpty)
+    }
+
+    /// While the first message's file uploads (held open here), the chat
+    /// sends nothing else: a follow-up waits, said so, its words kept, and
+    /// goes once the first is posted, after it.
+    @Test func aFollowUpWaitsForTheFirstMessageBeingUploaded() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/")
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        let session = try #require(library.sessions["mobile-chat--c1"])
+        #expect(session.sendingFirst)
+        session.edit("A follow-up")
+        await session.send()
+        #expect(session.error == "Wait for the message being sent." && session.composer == "A follow-up" && session.pending.isEmpty)
+        #expect(!stub.seen.contains { $0.route.hasSuffix("/channels/chat") })
+        gate.open()
+        try await launch.value
+        #expect(!session.sendingFirst)
+        await session.send()
+        let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }.map { $0.json["body"]["text"] }
+        #expect(posts == [.string("The original task"), .string("A follow-up")])
+        #expect(session.pending.isEmpty && session.composer.isEmpty && session.error == nil)
+    }
+
+    /// The outbox's last place is the first message's: nothing sent while
+    /// its upload is held open takes it, and saved there, its post whose
+    /// answer was lost is retried after a relaunch with the same id and body.
+    @Test func aFirstMessageKeepsItsPlaceInTheOutbox() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/", lost: { seen, before in
+            let text = seen.json["body"]["text"].string ?? ""
+            return text.hasPrefix("Lost") || (text == "The original task" && !before.contains { $0.json["id"] == seen.json["id"] })
+        })
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
+        let session = try library.session(for: chat, api: api)
+        for index in 1..<SavedChat.pendingMax { session.edit("Lost \(index)"); await session.send() }
+        #expect(session.pending.count == SavedChat.pendingMax - 1 && session.pending.allSatisfy(\.failed))
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        #expect(try library.session(for: chat, api: api) === session && session.sendingFirst)
+        session.edit("Lost meanwhile")
+        await session.send()
+        #expect(session.pending.count == SavedChat.pendingMax - 1 && session.composer == "Lost meanwhile")
+        gate.open()
+        try await launch.value
+        let first = try #require(session.pending.last)
+        #expect(session.pending.count == SavedChat.pendingMax && first.text == "The original task" && first.failed)
+        // relaunched: the first message is in the saved outbox, retried as it was
+        let again = ChatSession(fragment: chat, api: api)
+        let restored = try #require(again.pending.first { $0.id == first.id })
+        #expect(again.pending.count == SavedChat.pendingMax && restored.attachments == first.attachments)
+        await again.retry(restored)
+        let sent = stub.seen.filter { $0.route.hasSuffix("/channels/chat") && $0.json["body"]["text"] == .string("The original task") }
+        #expect(sent.count == 2 && sent[0].json == sent[1].json && sent[0].json["id"].string == first.id)
+        #expect(!again.pending.contains { $0.id == first.id })
+    }
+
+    /// An outbox full where the first message would be saved, its upload
+    /// held open until then: it is refused there, never posted unsaved, and
+    /// all of it stays on Home with why.
+    @Test func aFullOutboxRefusesTheFirstMessageWhereItIsSaved() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/", lost: { seen, _ in
+            seen.json["body"]["text"].string?.hasPrefix("Lost") == true
+        })
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
+        let session = try library.session(for: chat, api: api)
+        for index in 0..<SavedChat.pendingMax { session.edit("Lost \(index)"); await session.send() }
+        #expect(session.pending.count == SavedChat.pendingMax)
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        #expect(session.sendingFirst)
+        gate.open()
+        await #expect(throws: (any Error).self) { try await launch.value }
+        #expect(!stub.seen.contains { $0.route.hasSuffix("/channels/chat") && $0.json["body"]["text"] == .string("The original task") })
+        #expect(library.home.text == "The original task" && library.home.files.count == 1)
+        #expect(library.home.error == "Your message wasn't sent. Wait for the messages still sending, or edit the ones not sent.")
+        #expect(session.pending.count == SavedChat.pendingMax && !session.sendingFirst)
+        #expect(ChatSession(fragment: chat, api: api).pending.map(\.text) == session.pending.map(\.text))
     }
 
     /// Every way to start a chat from Home waits for a voice memo being

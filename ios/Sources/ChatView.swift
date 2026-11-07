@@ -138,8 +138,9 @@ struct ChatView: View {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
                 ComposerBar(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
-                    // sends go over HTTP: a reconnect never holds the composer
-                    enabled: session.read, busy: session.attaching,
+                    // sends go over HTTP: a reconnect never holds the composer;
+                    // a first message from Home being sent here does, so it goes first
+                    enabled: session.read && !session.sendingFirst, busy: session.attaching,
                     placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
                     attached: session.attachments.map { ($0.id, $0.name) },
                     remove: { id in session.attachments.removeAll { $0.id == id } },
