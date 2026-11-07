@@ -239,7 +239,7 @@ fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
     }
     let owed: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
     for (turn, id) in owed {
-        let more = e.step(Input::Posted { turn, id, kept: true }, now);
+        let more = e.step(Input::Posted { turn, id, kept: true, given_up: false }, now);
         s.dirty |= more.dirty;
         s.effects.extend(more.effects);
     }
@@ -381,7 +381,7 @@ fn a_late_message_is_told_its_age() {
     n.step(Input::Agents(vec![a.clone()]), now + minute);
     n.recover(now + minute);
     n.step(heard(Event::Connected(true)), now + minute);
-    let s = n.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true }, now + minute);
+    let s = n.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true, given_up: false }, now + minute);
     let continued = started(&answered(&mut n, s, now + minute)).expect("its continuation, handed");
     assert_eq!(continued.continues.as_deref(), Some(cut.as_str()));
     assert_eq!(continued.age.as_deref(), Some("What that turn was answering was sent about 2 hours ago. If it may no longer be wanted, check before acting on it."));
@@ -465,7 +465,7 @@ fn a_reply_streams_then_posts() {
     let t = &e.state().turns[&turn];
     assert_eq!((t.phase, t.owed.len()), (Phase::Ended, 1));
     assert!(e.step(heard(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
-    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end"), kept: true }, T0 + 4);
+    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end"), kept: true, given_up: false }, T0 + 4);
     assert!(done.dirty && done.effects.is_empty());
     assert!(e.state().turns.is_empty(), "let go once its end is answered");
     // replay: a late event for the ended turn is dropped
@@ -560,8 +560,8 @@ fn helpers_are_recorded_under_their_turn() {
     ];
     assert_eq!(posts(&r), want, "its own end again, and the running one lost");
     assert!(r.dirty);
-    e2.step(Input::Posted { turn: turn.clone(), id: want[0].0.clone(), kept: true }, T0 + 6);
-    e2.step(Input::Posted { turn: turn.clone(), id: want[1].0.clone(), kept: false }, T0 + 6);
+    e2.step(Input::Posted { turn: turn.clone(), id: want[0].0.clone(), kept: true, given_up: false }, T0 + 6);
+    e2.step(Input::Posted { turn: turn.clone(), id: want[1].0.clone(), kept: false, given_up: false }, T0 + 6);
     assert!(e2.state().children.is_empty(), "a 409 is an end all the same");
     assert!(posts(&e2.step(heard(end("s-3", ChildOutcome::Completed)), T0 + 7)).is_empty(), "an earlier life's helper ends nothing here");
     // the bound, a turn's
@@ -579,6 +579,36 @@ fn helpers_are_recorded_under_their_turn() {
     let mut bad = e2.state().clone();
     bad.children[0].child = "not-hex".into();
     assert!(Engine::new(bad, Settings::default(), LIFE).is_err());
+}
+
+/// Goal (Alex on #1086): a helper's end the platform did not answer
+/// within its tries (it was down: ten 503s) is no end. It stays owed, is
+/// posted again at the next tick, and by the next life; only an answer
+/// (appended, a replay, a 409, a refusal) lets it go.
+#[test]
+fn a_helpers_end_not_answered_is_owed_again() {
+    use crate::records::ChildOutcome;
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "go" }), T0)).expect("started").turn;
+    e.step(heard(Event::Child { child: "s-1".into(), change: ChildChange::Started { turn: turn.clone(), goal: "Find venues".into() } }), T0 + 1);
+    let s = e.step(heard(Event::Child { child: "s-1".into(), change: ChildChange::Ended(ChildOutcome::Completed) }), T0 + 2);
+    let end = records::child_end_id(&turn, &records::child_id("s-1"));
+    assert_eq!(posts(&s).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), vec![end.clone()]);
+    let gave_up = e.step(Input::Posted { turn: turn.clone(), id: end.clone(), kept: false, given_up: true }, T0 + 3);
+    assert!(posts(&gave_up).is_empty() && e.state().children.len() == 1, "still owed");
+    let again = e.step(Input::Tick, T0 + 4);
+    assert_eq!(posts(&again).into_iter().filter(|(id, _)| *id == end).count(), 1, "posted again at the next tick");
+    assert!(posts(&e.step(Input::Tick, T0 + 5)).iter().all(|(id, _)| *id != end), "once a give-up, not every tick");
+    // the life ends before it lands: the next life posts it, as it was
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    e2.step(Input::Agents(vec![a.clone()]), T0 + 6);
+    let r = e2.recover(T0 + 6);
+    assert!(posts(&r).iter().any(|(id, body)| *id == end && body["outcome"] == "completed"), "{:?}", posts(&r));
+    e2.step(Input::Posted { turn: turn.clone(), id: end, kept: true, given_up: false }, T0 + 7);
+    assert!(e2.state().children.is_empty());
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
@@ -1040,7 +1070,7 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
             let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
             for (turn, id) in owed {
                 // a 409 too: that life ended it
-                e.step(Input::Posted { turn, id, kept: false }, T0 + 1);
+                e.step(Input::Posted { turn, id, kept: false, given_up: false }, T0 + 1);
             }
         }
         claims
@@ -2059,7 +2089,7 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
     assert_eq!((by.as_str(), on.as_str()), (juniper.fragment.as_str(), juniper.fragment.as_str()), "posted as juniper, on its own tasks");
     assert_eq!((&body["outcome"], &body["error"], &body["by"]), (&json!("error"), &json!(LEFT), &json!(rowan.identity)), "{body}");
     assert!(posts(&left).iter().all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?}", posts(&left));
-    let landed = e.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
+    let landed = e.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true, given_up: false }, T0 + 2);
     assert!(landed.dirty && e.state().turns.is_empty(), "let go once its answer landed");
 
     // over, its answer not yet landed: kept, and owed again by the next life
@@ -2101,7 +2131,7 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
             assert_eq!((&body["turn"], &body["error"], &body["by"], &body["name"]), (&json!(t), &json!(LEFT), &json!(rowan.identity), &json!(rowan.name)), "running {running}: {body}");
         }
         assert!(posts(&roster).iter().chain(&posts(&recovered)).all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?} {:?}", posts(&roster), posts(&recovered));
-        next.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
+        next.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true, given_up: false }, T0 + 2);
         assert!(next.state().turns.is_empty(), "let go once its answer landed: {:?}", next.state().turns);
     }
 
@@ -2796,7 +2826,7 @@ impl World {
             Effect::Fence { turn, prompt, .. } => self.step(Input::Fenced { turn: turn.clone(), prompt: prompt.clone(), answer }),
             // this life's on the journal when appended or replayed, not
             // another life's (409)
-            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: matches!(answer, ClaimAnswer::Ours { .. }) }),
+            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: matches!(answer, ClaimAnswer::Ours { .. }), given_up: false }),
             _ => {}
         }
     }
@@ -2874,7 +2904,7 @@ impl World {
             Effect::Owed { turn, id, .. } => {
                 self.lane.pop_front();
                 self.given_up.push(id.clone());
-                self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: false });
+                self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: false, given_up: false });
             }
             Effect::Post { id, .. } => {
                 self.lane.pop_front();
@@ -3648,9 +3678,9 @@ fn a_cut_turn_is_continued_once() {
     next.step(Input::Agents(vec![a.clone()]), T0 + 1);
     let r = next.recover(T0 + 1);
     let end = r.effects.iter().find_map(|x| match x { Effect::Owed { turn, id, .. } if *turn == ran.turn => Some(id.clone()), _ => None }).expect("its lost end");
-    let posted = next.step(Input::Posted { turn: ran.turn.clone(), id: end.clone(), kept: true }, T0 + 2);
+    let posted = next.step(Input::Posted { turn: ran.turn.clone(), id: end.clone(), kept: true, given_up: false }, T0 + 2);
     assert!(!posted.effects.iter().any(|x| matches!(x, Effect::Claim { .. })), "a command is not continued: {posted:?}");
-    let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true }, T0 + 3);
+    let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true, given_up: false }, T0 + 3);
     assert_eq!(again, Step::default(), "answered again: nothing");
 }
 
@@ -3833,7 +3863,7 @@ fn a_late_answer_to_a_cut_turns_card_is_its_next_turn_wherever_its_read_falls() 
         if when == "before its lost end lands" {
             take(next.step(late.clone(), T0 + 2));
         }
-        let landed = take(next.step(Input::Posted { turn: old.clone(), id: end, kept: true }, T0 + 2));
+        let landed = take(next.step(Input::Posted { turn: old.clone(), id: end, kept: true, given_up: false }, T0 + 2));
         let asked = landed.effects.iter().any(|x| matches!(x, Effect::ReadCut { turn, .. } if *turn == old));
         assert_eq!(asked, when != "before its lost end lands", "{when}: its read asked for once its end is this life's, unless its card was closed late already");
         match when {

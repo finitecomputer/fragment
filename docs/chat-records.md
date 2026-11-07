@@ -387,7 +387,8 @@ of at most 140 characters. An end has `outcome`: `completed`, `failed`,
 the next start of the computer's bridge ends it so). A reader treats any
 other outcome as ended. A helper outlives its turn: its end is posted
 under the turn that started it, after that turn's `turn.end`, as a late
-notice is. A turn records at most 32 helpers. A page shows the helpers
+notice is. Helpers the agent grouped (Hermes' task `group`) end
+together, when their group reports. A turn records at most 32 helpers. A page shows the helpers
 started and not ended as working (a bar above the composer); a helper's
 result comes back as a reply of the agent's own. Only our Hermes image's
 helpers are recorded; older bridges post none. Known gap: the helpers of

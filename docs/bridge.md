@@ -273,7 +273,10 @@ it, and the hook returns only then:
   Their results come back as ordinary Relay replies, a turn of the
   runtime's own. Our image sets Hermes' `delegation.independent_completions`,
   so each background child ends and reports as it finishes, not when the
-  last of its batch does.
+  last of its batch does. A `group` the model gives tasks is one
+  completion: Hermes reports it once, and stops its children only when
+  the whole group joins (no supported hook says one child of a group
+  finished), so its helpers end together.
 - Beside `working`, optionally, a helper (docs/chat-records.md,
   `turn.child`): `{working, turn, child, goal}` as a child of a person's
   turn starts (Hermes' `subagent_start`: `turn` is ours, the plugin's map
@@ -289,10 +292,14 @@ it, and the hook returns only then:
   until its end is posted: under the same turn, after its `turn.end` if
   it outlived it, owed as a turn's end is. A child of no turn of ours (a
   nested one's) holds the computer, and is recorded nowhere.
-- **A helper's end, however its process ends.** A new bridge life ends
-  each helper its state holds still running as `lost`, and posts again an
-  end not yet posted (a 409, another life's end of it, ends it all the
-  same); a later stop of one ends nothing. The bridge never outlives the
+- **A helper's end, however its process ends.** The plugin keeps each
+  end it said until the bridge answers it, and says it again on the
+  socket opened again. The engine keeps an end the platform did not
+  answer within its tries (`driver::Sent::GaveUp`) and posts it again at
+  the next tick. A new bridge life ends each helper its state holds still
+  running as `lost`, and posts again an end not yet posted (a 409,
+  another life's end of it, ends it all the same); a later stop of one
+  ends nothing. The bridge never outlives the
   gateway: `hermes-boot` stops it and exits when the gateway exits, so the
   next start ends those helpers. A bridge restarted under a live gateway
   ends them as lost too; their results still come back as replies. Known

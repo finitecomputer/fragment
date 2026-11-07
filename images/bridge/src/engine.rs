@@ -540,7 +540,9 @@ pub enum Input {
     /// (appended, a replay, or refused), or given up after its tries.
     /// `kept`: the platform holds its body as this life's (appended, or a
     /// replay of this body), not another life's (409) nor refused.
-    Posted { turn: String, id: String, kept: bool },
+    /// `given_up`: not answered within its tries (the platform down or
+    /// failing): a helper's end is posted again (`posted`).
+    Posted { turn: String, id: String, kept: bool, given_up: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
@@ -685,6 +687,10 @@ pub struct Engine {
     /// `NOTICE_CHATS_MAX`). Never written to `/data`: a turn runs in one
     /// life, and a notice no turn of this life's is there for goes unposted.
     noticed: VecDeque<Noticed>,
+    /// Helpers whose end was not answered within its tries (`posted`):
+    /// owed again at the next tick. Never written to `/data`: a new life
+    /// owes every end its state holds. At most `CHILDREN_OPEN_MAX`.
+    ends_again: BTreeSet<String>,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
@@ -768,6 +774,7 @@ impl Engine {
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
+            ends_again: BTreeSet::new(),
             out: Vec::new(),
             dirty: false,
             now: 0,
@@ -870,7 +877,7 @@ impl Engine {
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::CutRead { turn, waited } => self.cut_read(&turn, waited),
             Input::Fenced { turn, prompt, answer } => self.fenced(&turn, &prompt, answer),
-            Input::Posted { turn, id, kept } => self.posted(&turn, &id, kept),
+            Input::Posted { turn, id, kept, given_up } => self.posted(&turn, &id, kept, given_up),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
             Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
@@ -1555,12 +1562,19 @@ impl Engine {
     /// (`limits::POST_TRIES_MAX`, with jitter, on a transport error, 429 or
     /// 5xx), so a record that keeps failing holds its turn for one life's
     /// tries at most, then goes.
-    fn posted(&mut self, id: &str, post: &str, kept: bool) {
-        // a helper's end: done, whoever's it is (a 409 is another life's end
-        // of it, which ended it all the same)
+    fn posted(&mut self, id: &str, post: &str, kept: bool, given_up: bool) {
+        // a helper's end: done once answered, whoever's it is (a 409 is
+        // another life's end of it, which ended it all the same); one not
+        // answered within its tries stays owed, posted again at the next
+        // tick (and by the next life)
         if let Some(at) = self.state.children.iter().position(|c| c.outcome.is_some() && c.turn == id && records::child_end_id(&c.turn, &c.child) == post) {
-            self.state.children.remove(at);
-            self.dirty = true;
+            if given_up {
+                crate::ev!("child.end_again", { "turn": id, "child": self.state.children[at].child });
+                self.ends_again.insert(self.state.children[at].child.clone());
+            } else {
+                self.state.children.remove(at);
+                self.dirty = true;
+            }
             return;
         }
         let Some(t) = self.state.turns.get_mut(id) else {
@@ -2524,6 +2538,11 @@ impl Engine {
 
     fn tick(&mut self) {
         let now = self.now;
+        for child in std::mem::take(&mut self.ends_again) {
+            if let Some(c) = self.state.children.iter().find(|c| c.child == child && c.outcome.is_some()).cloned() {
+                self.owe_child_end(&c);
+            }
+        }
         let mut expired: Vec<(String, String)> = Vec::new();
         let mut quiet: Vec<String> = Vec::new();
         for t in self.state.turns.values() {

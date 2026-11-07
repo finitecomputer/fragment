@@ -2154,7 +2154,7 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
             crate::driver::Sent::Stopped => return,
             // its file kept: the message is read again at the next start's
             // catch-up (by the same id), and carried then if it can be
-            crate::driver::Sent::Refused => {
+            crate::driver::Sent::Refused | crate::driver::Sent::GaveUp => {
                 crate::ev!("simplex.unposted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
                 let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: false }).await;
                 if !ensure_until(&api, &agent, &chat, &manager, &stop).await {
