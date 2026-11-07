@@ -98,7 +98,7 @@ struct HelpersTests {
         #expect(timeline.activeTurns.isEmpty)
         let activity = WorkingActivity(timeline)
         #expect(activity.hints.isEmpty)
-        #expect(!activity.rows.contains { $0.body["kind"].string == "turn.child" })
+        #expect(!activity.rows.contains { $0.record?.body["kind"].string == "turn.child" })
         #expect(activity.cards.values.allSatisfy { !$0.running })
         #expect(timeline.helpers.running.map(\.child) == ["h9"])
     }
