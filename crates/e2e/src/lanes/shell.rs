@@ -8285,8 +8285,24 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     // each agent's settings read (agent.json) held until New agent shows,
-    // so the cards are drawn reading, however warm the reads
-    b.eval(page, "(() => { const f = window.fetch; window.__settingsReads = []; window.fetch = (u, o) => (String(u).includes('path=agent.json') && !window.__settingsReadsGo) ? new Promise((res) => window.__settingsReads.push(() => res(f(u, o)))) : f(u, o); return true; })()")?;
+    // so the cards are drawn reading, however warm the reads; and each read
+    // of the computer asked from here on (the list's `load`, a wake, its
+    // notices: all that changes Settings' Computer, above Agents) held
+    // through both measurings and the press, so only the cards' reads land
+    // between them. Settings' own read of what the computer used (`/uses`)
+    // goes, as Settings draws only once it answers.
+    b.eval(
+        page,
+        "(() => { const f = window.fetch; \
+          const kind = (u) => { const p = new URL(String(u), location.href); \
+            return p.searchParams.get('path') === 'agent.json' ? 'agent' : p.pathname.startsWith('/api/computers') && !p.pathname.endsWith('/uses') ? 'computer' : null; }; \
+          const held = { agent: [], computer: [] }, going = new Set(); \
+          window.__settingsHeld = { count: (k) => held[k].length, urls: (k) => held[k].map((h) => h.url), \
+            go: (k) => { going.add(k); held[k].splice(0).forEach((h) => h.go()); if (going.size === 2) window.fetch = f; return true; } }; \
+          window.fetch = (u, o) => { const k = kind(u); if (!k || going.has(k)) return f(u, o); \
+            return new Promise((res) => held[k].push({ url: String(u), go: () => res(f(u, o)) })); }; \
+          return true; })()",
+    )?;
     b.click(page, "#settings")?;
     // one button, New agent, opens its dialog. It stays where it showed as
     // each agent's card reads its settings (its Model pick read: Hermes'
@@ -8297,9 +8313,9 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let shown = b.eval(
         page,
         "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); \
-          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsReads.length }; })()",
+          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsHeld.count('agent') }; })()",
     )?;
-    b.eval(page, "(window.__settingsReadsGo = true, window.__settingsReads.forEach((r) => r()), true)")?;
+    b.eval(page, "window.__settingsHeld.go('agent')")?;
     let models_read = b.until(
         page,
         "(() => { const cards = [...document.querySelectorAll('#settings-page .agent-setting')]; \
@@ -8314,9 +8330,10 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
             && shown["reading"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|t| t == "Reading…"))
             && models_read
             && shown["at"] == read,
-        json!({ "shown": shown, "read": read }),
+        json!({ "shown": shown, "read": read, "computer_held": b.eval(page, "window.__settingsHeld.urls('computer')")? }),
     );
     b.click(page, "#settings-page .agent-add-open")?;
+    b.eval(page, "window.__settingsHeld.go('computer')")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
     // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)
@@ -8410,7 +8427,10 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     // Wren's card gone here: the main agent's save lands, its dialog closed
     b.eval(page, "(window.__writing = true, window.__writes.forEach((w) => w()), true)")?;
     let saved = b.until(page, &format!("{pick}?.dataset.saved === {value:?}"), wait);
-    b.eval(page, "(document.getElementById('edit-agent').close(), true)")?;
+    // closed, once its `close` has fired: a dialog's close event comes in a
+    // task after `close()`, and its fields go back to their card on it
+    // (agent-settings.js `editTenancy`), whose handlers were added before this one
+    b.eval(page, "new Promise((done) => { const d = document.getElementById('edit-agent'); if (!d.open) return done(false); d.addEventListener('close', () => done(true), { once: true }); d.close(); })")?;
     let home_pick = js(&format!(".agent-edit-home [data-model-for={}]", js(&lead)));
     let after_save = b.eval(page, &format!("({{ kept: {card}?.__kept === true, summary: {card}?.querySelector('.agent-summary')?.textContent ?? null, home: !!{card}?.querySelector({home_pick}) }})"))?;
     // opened again: its pick says the change
