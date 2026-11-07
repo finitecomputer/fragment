@@ -139,10 +139,13 @@ pub const QUEUED_EVENTS_MAX: usize = 1024;
 /// A failed turn's error, at most.
 pub const ERROR_MAX_CHARS: usize = 300;
 
-/// Attachments one message or reply carries, at most.
+/// Attachments one message or reply carries, at most: the platform's
+/// (`fragment_proto::limits::FILES_PER_MESSAGE`; a copy, held to it by
+/// xtask/src/guards.rs until the bridge depends on proto).
 pub const ATTACHMENTS_MAX: usize = 8;
 /// One attachment's bytes, at most: the platform's blob cap
-/// (`fragment_proto::limits::BLOB_MAX_BYTES`, its own workspace: a copy).
+/// (`fragment_proto::limits::BLOB_MAX_BYTES`; a copy, held to it the same
+/// way), not a person's upload's bound, which a computer's never meets.
 /// Each streams to disk (transfer.rs), never whole in memory.
 pub const ATTACHMENT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// A file Hermes takes as media, at most: its own cap (its

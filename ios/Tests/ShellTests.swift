@@ -308,7 +308,7 @@ struct ShellTests {
 
     /// Pictures attach as the web's chat shows them: PNG, JPEG, WebP and GIF
     /// as they are, any other (a photo's HEIC) as JPEG; files by their
-    /// extension's type; nothing empty or past 25 MB.
+    /// extension's type; nothing empty or past the platform's bound.
     @Test func aPictureOrFileAttachesAsTheWebTakesIt() throws {
         let picture = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
             UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
@@ -332,6 +332,17 @@ struct ShellTests {
         #expect(throws: APIError.self) { try AttachmentInput.file(Data(count: ChatAttachment.bytesMax + 1), name: "big.bin", type: nil) }
         #expect(try AttachmentInput.file(Data("a,b".utf8), name: "t.csv", type: UTType(filenameExtension: "csv")).type == "text/csv")
         #expect(try AttachmentInput.file(Data([1]), name: "x.unknownext", type: UTType(filenameExtension: "unknownext")).type == "application/octet-stream")
+    }
+
+    /// What a message carries is the platform's, as its list names it, said
+    /// in its own numbers; an older platform names none.
+    @Test func whatAMessageCarriesIsThePlatforms() throws {
+        struct Listed: Decodable { let limits: UploadLimits? }
+        let named = try JSONDecoder().decode(Listed.self, from: Data(#"{"fragments":[],"limits":{"uploadMaxBytes":50000000,"filesPerMessage":3}}"#.utf8)).limits
+        #expect(named == UploadLimits(uploadMaxBytes: 50_000_000, filesPerMessage: 3))
+        #expect(named?.sizeRefusal == "Files must be between 1 byte and 50 MB.")
+        #expect(named?.countRefusal == "Attach at most 3 files per message.")
+        #expect(try JSONDecoder().decode(Listed.self, from: Data(#"{"fragments":[]}"#.utf8)).limits == nil)
     }
 
     /// A paste of pictures attaches each, as `image` makes it; words on the

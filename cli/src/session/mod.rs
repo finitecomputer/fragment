@@ -251,8 +251,10 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
         bail!(usage(format!("{} is no file or folder", path.display())));
     }
     let mut spool = Spool::new(kinds)?;
+    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+    let upload_max = upload_max(&list, c.agent().is_some());
     let problems = match source(&path)? {
-        Source::Export(root) => chats::read(&root, &mut spool)?,
+        Source::Export(root) => chats::read(&root, &mut spool, upload_max)?,
         Source::Hermes(db) => {
             // on a platform computer (as its agent), its own Hermes home's
             // databases are its chats here already; a person's own Hermes is theirs
@@ -262,7 +264,7 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
             Vec::new()
         }
     };
-    let (archive, made) = archive(c)?;
+    let (archive, made) = archive(c, &list)?;
     let written = write(c, &archive, &spool)?;
     let mut holds: BTreeMap<String, usize> = Kind::KNOWN.iter().map(|k| (k.as_str().to_string(), 0)).collect();
     for e in written.entries.values() {
@@ -271,6 +273,19 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     let search = search::sync(c, &archive, &spool);
     let refused = std::mem::take(&mut spool.refused);
     Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds, search })
+}
+
+/// One file's bytes this import may send, at most: what the platform's
+/// list says this signer's messages carry (`limits`: a person's, the
+/// deployment's bound; an agent's, acting for its owner, a blob's). An
+/// older platform names none: a person's then passed its zone (the
+/// default), an agent's, from its computer, a blob's.
+fn upload_max(list: &FragmentList, agent: bool) -> u64 {
+    match list.limits {
+        Some(l) => l.upload_max_bytes,
+        None if agent => fragment_proto::limits::BLOB_MAX_BYTES,
+        None => fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT,
+    }
 }
 
 /// Where a path a person names reads from.
@@ -298,8 +313,7 @@ fn source(path: &std::path::Path) -> Result<Source> {
 /// imports at once have made one each), or made now. Asked only once what
 /// was read is within an archive's limits (`Spool::add`), so a refused
 /// import makes none.
-fn archive(c: &Client) -> Result<(String, bool)> {
-    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+fn archive(c: &Client, list: &FragmentList) -> Result<(String, bool)> {
     let theirs = list.fragments.iter().filter(|f| f.kind == FragmentKind::Sessions && (f.role == Role::Owner || f.owned)).map(|f| f.name.clone()).min();
     if let Some(name) = theirs {
         return Ok((name, false));

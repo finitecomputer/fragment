@@ -466,7 +466,10 @@ what it missed, from these records alone (docs/bridge.md, "Restarts").
 
 A file is one of the chat fragment's blobs (docs/api.md, Blobs). Its
 poster uploads it first, then posts the record naming it, which keeps the
-blob. A record has at most 8 files, each at most 25 MiB. The agent's
+blob. A record has at most `FILES_PER_MESSAGE` files (proto `limits`): a
+person's each at most the deployment's `uploadMaxBytes`, which clients read
+(docs/api.md, `GET /api/fragments`; a page's hello), and a computer's each at
+most `BLOB_MAX_BYTES`. The agent's
 runtime gets each as a local file, named by its `name` and `type`
 (docs/bridge.md, "Hermes' Relay").
 
