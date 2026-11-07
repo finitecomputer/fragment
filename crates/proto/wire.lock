@@ -1,5 +1,6 @@
-# The wire's facts (docs/wire/openapi.json), one a line: what clients
-# call and the shapes they send and read. `cargo xtask wire` writes it
+# The wire's facts (docs/wire/openapi.json, and serde's source for what a
+# schema cannot say: `other`), one a line: what clients call and the
+# shapes they send and read. `cargo xtask wire` writes it
 # from crates/proto; `cargo xtask check` fails when it is not what proto
 # makes, or when it breaks a fact master's holds in a way an older
 # client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
@@ -300,6 +301,7 @@ field fragments.status.path.name required string
 field live.open.path.name required string
 field members.list.path.name required string
 field search.find.query.q required string
+other FragmentKind other
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft
 route channels.draft accepts nip98
 route channels.draft accepts session

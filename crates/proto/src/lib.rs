@@ -2968,4 +2968,24 @@ mod tests {
         assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");
         assert_eq!(ErrorCode::Deploying.status(), 503, "a deploy going out is tried again, as a 503 is");
     }
+
+    /// Each `skip_serializing_if` predicate the wire's writers use omits
+    /// exactly its field's default, so what a reader fills in for a field
+    /// left out is the value written (xtask/src/wire/source.rs, `SKIPS`):
+    /// for each value of a boolean; for the rest, the default, and values
+    /// beside it and at its type's ends (each predicate is its type's own
+    /// emptiness, or `*n == 0`).
+    #[test]
+    fn skip_predicates_omit_their_default_alone() {
+        for b in [false, true] {
+            assert_eq!(std::ops::Not::not(&b), b == bool::default(), "{b}");
+            assert_eq!(is_on_the_dock(&b), b == on_the_dock(), "{b}");
+        }
+        assert!(is_zero(&u32::default()));
+        for n in [1, 2, 9, 10, 1 << 16, u32::MAX - 1, u32::MAX] {
+            assert!(!is_zero(&n), "{n}");
+        }
+        assert!(Vec::<u8>::new().is_empty() && !vec![0u8].is_empty());
+        assert!(std::collections::BTreeMap::<String, u8>::new().is_empty() && !std::collections::BTreeMap::from([(String::new(), 0u8)]).is_empty());
+    }
 }

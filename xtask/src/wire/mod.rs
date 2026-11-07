@@ -55,8 +55,9 @@ pub fn generate() -> Result<Generated> {
     // the refusal every route may answer
     roots.push((syn::parse_str("ErrorBody").context("a refusal's type")?, "crate".to_string()));
     let components: Vec<String> = doc["components"]["schemas"].as_object().context("the document has components")?.keys().cloned().collect();
-    source::guard(&src, &roots, &components, &source::Allowed::wire())?;
-    let lock = lock::project(&doc)?;
+    let guarded = source::guard(&src, &roots, &components, &source::Allowed::wire())?;
+    // with the facts serde's source says that the schema does not
+    let lock = lock::project_with(&doc, &guarded.facts)?;
     // each default it states is what serde reads of its field left out
     defaults::hold(&doc, &lock)?;
     let mut openapi = serde_json::to_string_pretty(&doc).context("the document is JSON")?;

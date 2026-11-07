@@ -18,6 +18,7 @@
 //! | narrow a bound                                   | pass | fail | fail |
 //! | widen a bound                                    | fail | pass | fail |
 //! | change the default of a field one may leave out  | fail | fail | fail |
+//! | stop reading an unknown value as one (`other`)   | fail | fail | fail |
 //!
 //! `out` is what the cell writes and clients read (answers, the frames
 //! they receive); `in` what clients write and the cell reads (requests,
@@ -56,6 +57,11 @@
 //! they are described. Integers' ranges compare
 //! exactly; a u128's would not, and is refused.
 //!
+//! A fact the schema cannot hold comes from serde's source (source.rs):
+//! `other <type> <value>`, a reader that reads a value of `type` it does
+//! not know as `value` (`#[serde(other)]`), so dropping it fails and
+//! adding it passes.
+//!
 //! The projection is closed: every keyword of every schema is a fact
 //! (`STRUCTURAL`, `BOUNDS`) or says nothing a reader decodes by
 //! (`DOCUMENTARY`), and a schema with any other is refused, so a
@@ -71,8 +77,9 @@ use serde_json::{Map, Value};
 use super::openapi::{Direction, COMPONENTS};
 
 pub const HEADER: &str = "\
-# The wire's facts (docs/wire/openapi.json), one a line: what clients
-# call and the shapes they send and read. `cargo xtask wire` writes it
+# The wire's facts (docs/wire/openapi.json, and serde's source for what a
+# schema cannot say: `other`), one a line: what clients call and the
+# shapes they send and read. `cargo xtask wire` writes it
 # from crates/proto; `cargo xtask check` fails when it is not what proto
 # makes, or when it breaks a fact master's holds in a way an older
 # client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
@@ -103,8 +110,16 @@ const BOUNDS: [&str; 15] = [
 const DOCUMENTARY: [&str; 9] = ["description", "title", "examples", "deprecated", "readOnly", "writeOnly", "$comment", "x-fragment-direction", "x-fragment-open"];
 
 /// Every fact of the document, sorted, after the header.
+#[cfg(test)]
 pub fn project(doc: &Value) -> Result<String> {
-    let mut lines = BTreeSet::new();
+    project_with(doc, &[])
+}
+
+/// `project`, with facts the document cannot say: serde's source's
+/// (source.rs), `other <type> <value>`: a reader reads a value of `type`
+/// it does not know as `value`.
+pub fn project_with(doc: &Value, extra: &[String]) -> Result<String> {
+    let mut lines: BTreeSet<String> = extra.iter().cloned().collect();
     let paths = doc["paths"].as_object().context("the document has paths")?;
     for (path, item) in paths {
         for (method, op) in item.as_object().context("a path item is an object")? {
@@ -685,6 +700,8 @@ struct TypeFacts {
     branches: Option<String>,
     fields: BTreeMap<String, (bool, String)>,
     values: BTreeSet<String>,
+    /// The value its reader reads one it does not know as (`#[serde(other)]`).
+    other: Option<String>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -706,6 +723,9 @@ pub fn parse(text: &str) -> Result<Facts> {
     for (name, t) in &f.types {
         if t.direction.is_none() {
             bail!("wire.lock: facts of `{name}`, which no `type` line declares");
+        }
+        if let Some(v) = t.other.as_ref().filter(|v| !t.values.contains(*v)) {
+            bail!("wire.lock: `other {name} {v}`, of a value `{name}` does not have");
         }
     }
     for (path, kind) in f.bounds.keys() {
@@ -762,6 +782,9 @@ pub(super) fn facts(text: &str) -> Result<Facts> {
             }
             ["value", name, v] => {
                 f.types.entry(name.to_string()).or_default().values.insert(v.to_string());
+            }
+            ["other", name, v] => {
+                f.types.entry(name.to_string()).or_default().other = Some(v.to_string());
             }
             ["extends", name, base] => {
                 f.types.entry(name.to_string()).or_default().extends = Some(base.to_string());
@@ -825,6 +848,9 @@ fn resolved(facts: &Facts) -> Facts {
                     target.fields.entry(field.clone()).or_insert_with(|| held.clone());
                 }
                 target.values.extend(t.values.iter().cloned());
+                if target.other.is_none() {
+                    target.other = t.other.clone();
+                }
                 if target.branches.is_none() {
                     target.branches = t.branches.clone();
                 }
@@ -931,6 +957,11 @@ pub fn breaches(base: &Facts, head: &Facts, retired: &BTreeSet<String>) -> Vec<B
             } else if read && (old_reader_closed || closed_now) {
                 breach(field_line(f, now_f), "a new field of a closed shape: an older client that refuses fields it does not know fails on it");
             }
+        }
+        // a reader that read an unknown value as one no longer does: an older
+        // client that sends one is refused, and so is a value it was open to
+        if let Some(v) = was.other.as_ref().filter(|v| now.other.as_ref() != Some(*v)) {
+            breach(format!("other {name} {v}"), "a reader no longer reads a value it does not know as this one: an older client that sends one is refused, and a new value it took is a break");
         }
         for v in was.values.difference(&now.values) {
             breach(format!("value {name} {v}"), "the value or branch is gone: an older client sends or expects it");

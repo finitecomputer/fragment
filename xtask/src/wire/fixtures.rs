@@ -413,3 +413,183 @@ pub mod refused {
         pub n: u8,
     }
 }
+
+/// Review 6 (`375914c1`, 1): an input fallback, then not.
+pub mod other {
+    pub mod old {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        #[serde(tag = "kind")]
+        pub enum Row {
+            A,
+            #[serde(other)]
+            Other,
+        }
+    }
+    pub mod new {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        #[serde(tag = "kind")]
+        pub enum Row {
+            A,
+            Other,
+        }
+    }
+}
+
+/// Review 7 (2): a skip predicate that omits a value other than the default.
+pub mod skipped {
+    pub mod old {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        fn skip(_: &bool) -> bool {
+            false
+        }
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            #[serde(default, skip_serializing_if = "skip")]
+            #[schemars(extend("default" = false))]
+            pub flag: bool,
+        }
+    }
+    pub mod new {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        fn skip(b: &bool) -> bool {
+            *b
+        }
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            #[serde(default, skip_serializing_if = "skip")]
+            #[schemars(extend("default" = false))]
+            pub flag: bool,
+        }
+    }
+}
+
+/// Review 8 (3a): two definitions of one type, a `cfg` choosing the one
+/// compiled; the alias is on the one compiled before.
+pub mod twice {
+    pub mod old {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        #[cfg(not(any()))]
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            #[serde(alias = "legacy")]
+            pub flag: bool,
+        }
+        #[cfg(any())]
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            pub flag: bool,
+        }
+    }
+    pub mod new {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        #[cfg(not(any()))]
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            pub flag: bool,
+        }
+        #[cfg(any())]
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            pub flag: bool,
+        }
+    }
+}
+
+/// Review 9 (4): a `Debug` written by hand that prints no field, so two
+/// readings of it look the same.
+pub mod debugged {
+    fn skip(_: &bool) -> bool {
+        true
+    }
+    pub mod old {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        use super::skip;
+        fn selected() -> bool {
+            false
+        }
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            #[serde(default = "selected", skip_serializing_if = "skip")]
+            #[schemars(extend("default" = false))]
+            pub flag: bool,
+        }
+        impl std::fmt::Debug for Row {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("Row")
+            }
+        }
+    }
+    pub mod new {
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        use super::skip;
+        fn selected() -> bool {
+            true
+        }
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        pub struct Row {
+            #[serde(default = "selected", skip_serializing_if = "skip")]
+            #[schemars(extend("default" = false))]
+            pub flag: bool,
+        }
+        impl std::fmt::Debug for Row {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("Row")
+            }
+        }
+    }
+}
+
+/// The second review at `375914c1`: a reader written by hand under a
+/// renamed trait; it read `legacy` too, then not.
+pub mod renamed {
+    pub mod old {
+        use schemars::JsonSchema;
+        use serde::Deserialize as De;
+        use serde::{Deserializer, Serialize};
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            flag: Option<bool>,
+            #[serde(default)]
+            legacy: Option<bool>,
+        }
+        #[derive(Debug, Serialize, JsonSchema)]
+        pub struct Row {
+            pub flag: bool,
+        }
+        impl<'de> De<'de> for Row {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Row, D::Error> {
+                let raw = Raw::deserialize(d)?;
+                raw.flag.or(raw.legacy).map(|flag| Row { flag }).ok_or_else(|| serde::de::Error::missing_field("flag"))
+            }
+        }
+    }
+    pub mod new {
+        use schemars::JsonSchema;
+        use serde::Deserialize as De;
+        use serde::{Deserializer, Serialize};
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            flag: bool,
+        }
+        #[derive(Debug, Serialize, JsonSchema)]
+        pub struct Row {
+            pub flag: bool,
+        }
+        impl<'de> De<'de> for Row {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Row, D::Error> {
+                Raw::deserialize(d).map(|r| Row { flag: r.flag })
+            }
+        }
+    }
+}

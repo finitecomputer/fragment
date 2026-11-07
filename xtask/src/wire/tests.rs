@@ -1492,12 +1492,12 @@ fn false_passes_tried_are_refused() {
 
 /// The source guard over fixtures.rs (or other files), from one root type
 /// as `module` names it.
-fn guarded(files: &[(&str, &str)], root: &str, module: &str, components: &[&str], hand: &[(&str, &str)]) -> anyhow::Result<BTreeSet<String>> {
+fn guarded(files: &[(&str, &str)], root: &str, module: &str, components: &[&str], hand: &[(&str, &str)]) -> anyhow::Result<super::source::Guarded> {
     let files: Vec<(String, String)> = files.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect();
     let src = super::source::Source::read(&files)?;
     let roots = vec![(syn::parse_str::<syn::Type>(root)?, module.to_string())];
     let components: Vec<String> = components.iter().map(|c| c.to_string()).collect();
-    super::source::guard(&src, &roots, &components, &super::source::Allowed { hand_written: hand, flattened: &[], open: &[] })
+    super::source::guard(&src, &roots, &components, &super::source::Allowed { hand_written: hand, open: &[], skips: &[] })
 }
 
 const FIXTURES: [(&str, &str); 1] = [("lib.rs", include_str!("fixtures.rs"))];
@@ -1566,10 +1566,10 @@ fn each_source_rule_refuses_its_fixture() {
         ("Shadow", "crate::shadow::old", "`#[schemars(extend(\"const\" = …))]`"),
         ("Alias", "crate::alias::old", "`#[serde(alias)]`: the schema does not hold an alias"),
         ("Row", "crate::dotted::new", "serde(rename = \"settings.mode\"): a wire name of letters, digits"),
-        ("Dotted", "crate::refused", "Dotted::A: serde(rename = \"a.b\")"),
+        ("Dotted", "crate::refused", "Dotted::A: `#[serde(rename)]`: an attribute the wire does not support"),
         ("Lying", "crate::lying::old", "impl JsonSchema for Lying: written by hand"),
         ("Hooked", "crate::hooked::old", "Hooked.n: serde(deserialize_with = \"lenient\"): written by hand"),
-        ("Flat", "crate::refused", "Flat.inner: serde(flatten): a flattened field"),
+        ("Flat", "crate::refused", "Flat.inner: `#[serde(flatten)]`: serde reads a flattened field by buffering"),
         ("Skipped", "crate::refused", "Skipped.n: `#[serde(skip_deserializing)]`"),
         ("External", "crate::refused", "External: an enum with data and no `#[serde(tag = …)]`"),
         ("Timed", "crate::refused", "Timed.after: a type `std::time::Duration` the source guard cannot read"),
@@ -1598,7 +1598,23 @@ fn each_source_rule_refuses_its_fixture() {
         ("pub struct S { pub a: u8 }\nfn f() { macro_rules! m { () => {} } }\n", "lib.rs: macro_rules!: a macro at item level"),
         ("use serde_repr::Deserialize_repr;\n#[derive(Deserialize_repr)]\npub struct S { pub a: u8 }\n", "S: `#[derive(serde_repr::Deserialize_repr)]`, a derive the source guard does not know"),
         ("pub struct S { pub v: toml::Value }\n", "S.v: a type `toml::Value` the source guard cannot read"),
-        ("#[cfg_attr(a, cfg_attr(b, serde(untagged)))]\npub enum S { A { n: u8 } }\n", "S: `#[serde(untagged)]`"),
+        ("#[cfg_attr(a, cfg_attr(b, serde(untagged)))]\npub enum S { A { n: u8 } }\n", "S: `#[cfg_attr(a, …)]`: the guard evaluates `feature = \"schema\"` alone"),
+        ("#[derive(Debug)]\n#[cfg_attr(feature = \"schema\", serde(rename_all = \"camelCase\"))]\npub struct S { pub a: u8 }\n", "S: `serde` under `cfg_attr(feature = \"schema\", …)`"),
+        ("#[derive(Debug)]\npub struct S { pub a: u8 }\n#[cfg(unix)]\nimpl serde::Serialize for S { fn serialize<T: serde::Serializer>(&self, s: T) -> Result<T::Ok, T::Error> { s.serialize_u8(self.a) } }\n", "lib.rs: an impl under `#[cfg(unix)]`"),
+        ("#[derive(Debug)]\npub struct S { pub a: u8 }\n#[cfg(unix)]\npub mod m {}\n", "crate::m: a module under `#[cfg(unix)]`"),
+        ("#[derive(Debug)]\npub struct S { pub a: u8 }\npub mod gone;\n", "crate::gone: no file for the module"),
+        ("#[derive(Debug)]\npub struct S { pub m: std::collections::BTreeMap<u8, u8> }\n", "S.m: a map whose keys are not `String`"),
+        ("#[derive(Debug)]\npub struct S { #[cfg(unix)] pub a: u8 }\n", "S.a: a field under a `cfg`"),
+        ("#[derive(Debug)]\npub struct S { pub a: &'static str }\n", "S.a: a type the source guard cannot read (a reference"),
+        ("#[derive(Debug)]\npub struct S { pub a: u16 }\nimpl Unknown for S {}\n", "impl Unknown for S: a trait the source guard cannot name"),
+        ("use serde::Serialize as Ser;\n#[derive(Debug)]\npub struct S { pub a: u16 }\nimpl Ser for S {}\n", "impl Serialize for S: written by hand"),
+        ("use schemars::JsonSchema as Shape;\n#[derive(Debug)]\npub struct S { pub a: u16 }\nimpl Shape for S {}\n", "impl JsonSchema for S: written by hand"),
+        ("use std::fmt;\n#[derive(Debug)]\npub struct S { pub a: u16 }\nimpl fmt::Debug for S {}\n", "impl Debug for S: written by hand"),
+        ("use std::fmt::Debug as Shown;\npub struct S { pub a: u16 }\nimpl Shown for S {}\n", "S: no `#[derive(Debug)]`"),
+        ("#[derive(Debug)]\n#[serde(rename_all(serialize = \"camelCase\"))]\npub struct S { pub a: u16 }\n", "S: a `rename_all` of another form"),
+        ("#[derive(Debug)]\npub struct S(pub u16);\n", "S: a tuple or unit struct"),
+        ("#[derive(Debug)]\npub struct S { pub a: Option<Option<u16>> }\n", "S.a: an `Option` of an `Option`"),
+        ("#[derive(Debug)]\n#[serde(tag = \"type\")]\npub enum S { A(String) }\n", "S::A: a tagged variant holding no struct"),
         ("pub struct S { #[validate(length(min = 1))] pub a: String }\n", "S.a: `#[validate(…)]`, which schemars writes as bounds serde never checks"),
         ("use serde::Serialize;\npub struct S { pub a: u8 }\nfn f() { impl Serialize for S { fn serialize<T: serde::Serializer>(&self, s: T) -> Result<T::Ok, T::Error> { s.serialize_u8(self.a) } } }\n", "impl Serialize for S: written by hand"),
     ];
@@ -1611,8 +1627,8 @@ fn each_source_rule_refuses_its_fixture() {
     let refused = guarded(&[("lib.rs", open)], "S", "crate", &[], &[]).unwrap_err().to_string();
     assert!(refused.contains("S: marked open, so the lock lets a new value of it pass: list it in OPEN"), "{refused}");
     // a path through `super::super` resolves where it names
-    let nested = "pub mod a { pub mod b { pub struct S { pub t: super::super::T } } }\npub struct T { pub n: u8, pub v: serde_json::Value }\n";
-    assert_eq!(guarded(&[("lib.rs", nested)], "S", "crate::a::b", &[], &[]).unwrap().into_iter().collect::<Vec<_>>(), ["crate::T", "crate::a::b::S"]);
+    let nested = "pub mod a { pub mod b { #[derive(Debug)] pub struct S { pub t: super::super::T } } }\n#[derive(Debug)] pub struct T { pub n: u16, pub v: serde_json::Value }\n";
+    assert_eq!(guarded(&[("lib.rs", nested)], "S", "crate::a::b", &[], &[]).unwrap().reached.into_iter().collect::<Vec<_>>(), ["crate::T", "crate::a::b::S"]);
     // a component of the document no type it read is named for
     let refused = guarded(&FIXTURES, "Row", "crate::dotted::old", &["Ghost"], &[]).unwrap_err().to_string();
     assert!(refused.contains("component Ghost: no type the source guard read"), "{refused}");
@@ -1622,7 +1638,7 @@ fn each_source_rule_refuses_its_fixture() {
     let refused = guarded(&FIXTURES, "Lying", "crate::lying::old", &[], &[("impl JsonSchema for Lying", "no_such_test")]).unwrap_err().to_string();
     assert!(refused.contains("HAND_WRITTEN names its test `no_such_test`, which crates/proto does not have"), "{refused}");
     // what passes: the review's dotted fixture's old version
-    assert_eq!(guarded(&FIXTURES, "Row", "crate::dotted::old", &["Row"], &[]).unwrap().into_iter().collect::<Vec<_>>(), ["crate::dotted::old::Row"]);
+    assert_eq!(guarded(&FIXTURES, "Row", "crate::dotted::old", &["Row"], &[]).unwrap().reached.into_iter().collect::<Vec<_>>(), ["crate::dotted::old::Row"]);
 }
 
 /// The wire's own types pass the guard, read from crates/proto's source:
@@ -1635,11 +1651,76 @@ fn the_wires_types_are_read_from_their_source() {
     let mut roots = src.route_types();
     roots.push((syn::parse_str("ErrorBody").unwrap(), "crate".into()));
     let components: Vec<String> = doc["components"]["schemas"].as_object().unwrap().keys().cloned().collect();
-    let reached = super::source::guard(&src, &roots, &components, &super::source::Allowed::wire()).unwrap();
+    let guarded = super::source::guard(&src, &roots, &components, &super::source::Allowed::wire()).unwrap();
+    assert_eq!(guarded.facts, ["other FragmentKind other"], "the wire's one input fallback");
+    let reached = guarded.reached;
     for t in ["crate::live::Answer", "crate::live::AnswerFrame", "crate::live::SubscribeFrame", "crate::live::Query", "crate::Reason", "crate::ErrorBody", "crate::routes::ListWatchFrame"] {
         assert!(reached.contains(t), "{t} reached: {reached:?}");
     }
     for t in ["crate::routes::Answer", "crate::search::Query", "crate::live::Cursor"] {
         assert!(!reached.contains(t), "{t} is no wire type: {reached:?}");
     }
+}
+
+/// A row's source, with an alias and without (not compiled: read alone).
+const PLAIN: &str = "use schemars::JsonSchema;\nuse serde::{Deserialize, Serialize};\n#[derive(Debug, Serialize, Deserialize, JsonSchema)]\npub struct Row { pub flag: bool }\n";
+const ALIASED: &str = "use schemars::JsonSchema;\nuse serde::{Deserialize, Serialize};\n#[derive(Debug, Serialize, Deserialize, JsonSchema)]\npub struct Row { #[serde(alias = \"legacy\")] pub flag: bool }\n";
+
+/// The review's five false passes at `375914c1`, and the second review's:
+/// serde shows each a break; each is refused, or, `serde(other)`, a lock
+/// fact that breaches; and without the rule each would pass.
+#[test]
+fn the_round_nine_false_passes_are_refused() {
+    use super::fixtures::*;
+    use serde_json::from_value;
+    let none = BTreeSet::new();
+    let guard = |root: &str, module: &str| guarded(&FIXTURES, root, module, &[], &[]).unwrap_err().to_string();
+    // 1. an input fallback: a fact now, so dropping it breaches, and adding it does not
+    assert!(from_value::<other::old::Row>(json!({ "kind": "Future" })).is_ok() && from_value::<other::new::Row>(json!({ "kind": "Future" })).is_err());
+    let facts = |module: &str| guarded(&FIXTURES, "Row", module, &["Row"], &[]).unwrap().facts;
+    assert_eq!(facts("crate::other::old"), ["other Row Other"]);
+    assert!(facts("crate::other::new").is_empty());
+    let was = parse(&super::lock::project_with(&doc_of::<other::old::Row>(false).0, &facts("crate::other::old")).unwrap()).unwrap();
+    let now = parse(&super::lock::project_with(&doc_of::<other::new::Row>(false).0, &facts("crate::other::new")).unwrap()).unwrap();
+    assert_eq!(facts_of(&breaches(&was, &now, &none)), ["other Row Other"]);
+    assert!(breaches(&now, &was, &none).is_empty(), "adding it is no break");
+    assert!(breaches(&lock_of::<other::old::Row>(false), &lock_of::<other::new::Row>(false), &none).is_empty(), "the schema alone does not hold it");
+    let refused = parse("type R in union(kind)\nvalue R A\nother R B\n").unwrap_err().to_string();
+    assert!(refused.contains("`other R B`, of a value `R` does not have"), "{refused}");
+    // 2. a skip predicate that omits a value not the default: refused; without
+    // the rule both versions hold and nothing breaks, though `true` is lost
+    let written = serde_json::to_value(skipped::new::Row { flag: true }).unwrap();
+    assert_eq!(written, json!({}));
+    assert!(!from_value::<skipped::old::Row>(written).unwrap().flag, "true written, false read");
+    for m in ["crate::skipped::old", "crate::skipped::new"] {
+        let refused = guard("Row", m);
+        assert!(refused.contains("Row.flag: `skip_serializing_if = \"skip\"` (skip on bool = default)"), "{refused}");
+    }
+    assert!(defaults_hold::<skipped::old::Row>().is_ok() && defaults_hold::<skipped::new::Row>().is_ok());
+    assert!(breaches(&lock_of::<skipped::old::Row>(true), &lock_of::<skipped::new::Row>(true), &none).is_empty());
+    // 3a. two definitions of one type, a `cfg` choosing the one compiled
+    assert!(from_value::<twice::old::Row>(json!({ "legacy": true })).is_ok() && from_value::<twice::new::Row>(json!({ "legacy": true })).is_err());
+    let refused = guard("Row", "crate::twice::old");
+    assert!(refused.contains("Row: two items of one name in its module") && refused.contains("Row: a wire type under a `cfg`"), "{refused}");
+    assert!(breaches(&lock_of::<twice::old::Row>(false), &lock_of::<twice::new::Row>(false), &none).is_empty());
+    // 3b. a `#[path]` module is refused, and a file no `mod` reaches is not read
+    let pathed = [("lib.rs", "#[path = \"actual.rs\"]\npub mod row;\n"), ("actual.rs", ALIASED), ("row.rs", PLAIN)];
+    let refused = guarded(&pathed, "row::Row", "crate", &[], &[]).unwrap_err().to_string();
+    assert!(refused.contains("crate::row: a `#[path]` module"), "{refused}");
+    let stray = [("lib.rs", "pub mod row;\n"), ("row.rs", PLAIN), ("stray.rs", "macro_rules! m { () => {} }\n")];
+    assert_eq!(guarded(&stray, "row::Row", "crate", &["Row"], &[]).unwrap().reached.into_iter().collect::<Vec<_>>(), ["crate::row::Row"]);
+    let refused = guarded(&[("lib.rs", "pub mod row;\n"), ("row.rs", ALIASED)], "row::Row", "crate", &[], &[]).unwrap_err().to_string();
+    assert!(refused.contains("Row.flag: `#[serde(alias)]`"), "the module's own file is read: {refused}");
+    // 4. a `Debug` by hand that prints no field: refused; without the rule
+    // both versions hold, though `{}` reads false before and true after
+    assert!(!from_value::<debugged::old::Row>(json!({})).unwrap().flag && from_value::<debugged::new::Row>(json!({})).unwrap().flag);
+    let refused = guard("Row", "crate::debugged::new");
+    assert!(refused.contains("Row: no `#[derive(Debug)]`") && refused.contains("impl Debug for Row: written by hand"), "{refused}");
+    assert!(defaults_hold::<debugged::old::Row>().is_ok() && defaults_hold::<debugged::new::Row>().is_ok());
+    assert!(breaches(&lock_of::<debugged::old::Row>(true), &lock_of::<debugged::new::Row>(true), &none).is_empty());
+    // the second review: a reader by hand under a renamed trait
+    assert!(from_value::<renamed::old::Row>(json!({ "legacy": true })).is_ok() && from_value::<renamed::new::Row>(json!({ "legacy": true })).is_err());
+    let refused = guard("Row", "crate::renamed::old");
+    assert!(refused.contains("impl Deserialize for Row: written by hand"), "{refused}");
+    assert!(breaches(&lock_of::<renamed::old::Row>(false), &lock_of::<renamed::new::Row>(false), &none).is_empty());
 }
