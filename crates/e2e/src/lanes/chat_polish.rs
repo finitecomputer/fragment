@@ -1394,7 +1394,9 @@ pub(super) fn history_cursor(s: &mut Suite, api: &Api, owner: &Keys, session: &s
     let name = blocks_fixture(s, api, owner, "chat-cursor", &[("m", 600), ("r", 100), ("m", 600), ("r", 100), ("m", 1)])?;
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
-    anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 1 && document.getElementById('scroll').dataset.watching === '1'")), "the cursor chat opens on its newest page");
+    // (its newest drawn and watched: its one message alone shows only until
+    // the sentinel, in view, reads the page above, as the watch begins)
+    anyhow::ensure!(super::shows(chrome, &page, &format!("{} && document.getElementById('scroll').dataset.watching === '1'", has(1401))), "the cursor chat opens on its newest page");
     let up = walk(chrome, &page, true, &format!("{window} === 'up'"))?;
     chrome.click(&page, "#latest")?;
     // (one message after the reset: the sentinel, in view, reads on at once)
