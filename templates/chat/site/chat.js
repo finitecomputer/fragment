@@ -85,6 +85,14 @@ const DRAFT_STALE_MS = 120000;
 const HERE_FACES_MAX = 5;
 // Helpers the open bar lists, the oldest first; more are counted.
 const HELPERS_SHOWN_MAX = 4;
+// A helper shows as working while its newest start or note is at most this
+// old, and a page opening reads `work` back this far for them: a running
+// helper's bridge notes it every 10 minutes (docs/chat-records.md,
+// `turn.child`; the contract's `CHILD_READ_BACK_MS`, images/bridge's
+// limits.rs). At most HELPERS_PAGES_MAX pages of WORK_LAST past the
+// history's.
+const HELPERS_READ_BACK_MS = 15 * 60 * 1000;
+const HELPERS_PAGES_MAX = 4;
 // The `work` kinds of a turn this page reads (docs/chat-records.md). Any
 // other (a later bridge's) is kept for paging, and changes nothing shown.
 const TURN_KINDS = new Set(["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]);
@@ -419,7 +427,7 @@ export function mount(root) {
     sending: new Map(), // post id -> a message of this page's the platform has not answered yet
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
-    helpers: new Map(), // `poster|turn|child` -> { principal, goal, at, ended }: each helper a turn started (`turn.child`)
+    helpers: new Map(), // `poster|parent|child` -> { principal, goal, at, started, seen, ended }: each helper a turn started (`turn.child`), ended ones kept
     helpersOpen: false, // the helpers' bar shows each one's task
   };
   const sendReducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -489,6 +497,25 @@ export function mount(root) {
       // (the cursor moves past the page whatever it held)
       if (page.records.length) history.first.work = Math.min(history.first.work ?? Infinity, page.records[0].seq);
       history.workDone = !moreOf(page, WORK_LAST);
+    }
+  }
+  // The helpers working as the page opens, whatever history it shows: `work`
+  // read back to HELPERS_READ_BACK_MS ago, past what the subscription and
+  // `earlierWork` read, for helpers' records alone. A running helper is
+  // noted at least that often, so this finds each one however old its
+  // start. Apart from the history's cursor: the turns of messages not
+  // shown stay unread. At most HELPERS_PAGES_MAX pages; past them, a
+  // helper shows at its next note.
+  async function recentHelpers() {
+    const since = Date.now() - HELPERS_READ_BACK_MS;
+    let before = history.first.work;
+    let at = history.workAt;
+    for (let pages = 0; pages < HELPERS_PAGES_MAX && before !== null && !history.workDone && at >= since; pages++) {
+      const page = await fragment.read("work", { before, limit: WORK_LAST });
+      for (const record of page.records) if (record.body?.kind === "turn.child") onHelper(record, record.body);
+      if (!page.records.length || !moreOf(page, WORK_LAST)) break;
+      before = page.records[0].seq;
+      at = page.records[0].at;
     }
   }
   // Older messages come as the reader nears the top: a sentinel above the
@@ -894,9 +921,11 @@ export function mount(root) {
     remember("work", record);
     const b = record.body;
     if (b?.kind === "commands") return onMenu(record, b);
+    // a helper's records move nothing in the chat: its bar alone (they name
+    // their turn `parent`, never `turn`, so pages from before them pass
+    // them over)
+    if (b?.kind === "turn.child") return onHelper(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
-    // a helper's start or end moves nothing in the chat: its bar alone
-    if (b.kind === "turn.child") return onHelper(record, b);
     // a kind this page does not know moves nothing: no turn, no place, no question
     if (!TURN_KINDS.has(b.kind)) return;
     // A turn is its poster's: the platform stamps `record.principal`, and
@@ -947,19 +976,31 @@ export function mount(root) {
     schedule();
   }
 
-  // A helper an agent's turn started, or its end (`turn.child`), in either
-  // order (a page of earlier records brings a start after its end): it is
+  // A helper an agent's turn started (`turn.child`): its start, a note that
+  // it still works (its start again, with `since`), or its end, in any
+  // order and however often (a page of earlier records brings a start after
+  // its end; `recentHelpers` reads again records the history reads). It is
   // its poster's, whatever a body names, and works from its start until any
-  // outcome. One seen whole (both) is let go.
+  // outcome, shown while its newest start or note is at most
+  // HELPERS_READ_BACK_MS old. An ended one is kept, so a start or note read
+  // again never brings it back. A note with no task, or a `since` that is
+  // no time at or before its record's, is none.
   function onHelper(record, b) {
-    if (typeof b.child !== "string" || !b.child) return;
-    const key = `${record.principal}|${b.turn}|${b.child}`;
-    const h = state.helpers.get(key) ?? { principal: record.principal, goal: null, at: 0, ended: false };
-    if (typeof b.outcome === "string") h.ended = true;
-    else if (typeof b.goal === "string") Object.assign(h, { goal: b.goal, at: record.at });
-    else return;
-    if (h.ended && h.goal !== null) state.helpers.delete(key);
-    else state.helpers.set(key, h);
+    if (typeof b.parent !== "string" || typeof b.child !== "string" || !b.child) return;
+    const ended = typeof b.outcome === "string";
+    const noted = Object.hasOwn(b, "since");
+    if (!ended && (typeof b.goal !== "string" || noted && !(Number.isSafeInteger(b.since) && b.since > 0 && b.since <= record.at))) return;
+    const key = `${record.principal}|${b.parent}|${b.child}`;
+    const h = state.helpers.get(key) ?? { principal: record.principal, goal: null, at: 0, started: false, seen: 0, ended: false };
+    if (ended) h.ended = true;
+    else {
+      h.goal = b.goal;
+      // how long it has run: from its start's record, else a note's `since`
+      if (!noted) Object.assign(h, { at: record.at, started: true });
+      else if (!h.started) h.at = b.since;
+      h.seen = Math.max(h.seen, record.at);
+    }
+    state.helpers.set(key, h);
     want(record.principal);
     // an agent this page did not know is in the chat: it was added since
     if (!state.members.some((m) => m.principal === record.principal)) membersAgain();
@@ -1612,6 +1653,8 @@ export function mount(root) {
     for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
     for (const n of $("messages").querySelectorAll(".tools [data-running-since]")) n.textContent = took(Date.now() - Number(n.dataset.runningSince));
     for (const n of $("helpers").querySelectorAll("[data-since]")) n.textContent = minutes(Date.now() - Number(n.dataset.since));
+    // (a helper no note has come for in HELPERS_READ_BACK_MS leaves the bar)
+    renderHelpers();
   }, 1000);
   // Where a card's work ends: the first record of its own turn after its
   // last step (a reply, a card, a notice, its next step), else the turn's
@@ -2078,7 +2121,8 @@ export function mount(root) {
   let helpersSig = "";
   function renderHelpers() {
     const bar = $("helpers");
-    const running = [...state.helpers.values()].filter((h) => h.goal !== null && !h.ended).sort((a, b) => a.at - b.at);
+    const fresh = Date.now() - HELPERS_READ_BACK_MS;
+    const running = [...state.helpers.values()].filter((h) => h.goal !== null && !h.ended && h.seen >= fresh).sort((a, b) => a.at - b.at);
     if (!running.length) state.helpersOpen = false;
     const agents = [...new Set(running.map((h) => h.principal))];
     const group = agents.length > 1 || chatAgents().length > 1;
@@ -3209,6 +3253,9 @@ export function mount(root) {
       history.workReady = true;
       schedule();
       await readWork();
+      // (a failure shows no helper that only this finds, until its next note)
+      await recentHelpers().catch((err) => console.error("chat: helpers working", err));
+      schedule();
     } });
     // what they had typed here before the page last went (any reload), theirs alone; anyone else's goes
     restoreDraft(hello.principal);

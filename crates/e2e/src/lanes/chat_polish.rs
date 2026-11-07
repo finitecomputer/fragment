@@ -633,10 +633,10 @@ pub(super) fn asked_outlasts_helpers(s: &mut Suite, api: &Api, owner: &Keys, chr
     super::fit(chrome, &page, 1280, 860, false)?;
     let waits = "[...document.querySelectorAll('.msg.working.asked')].some((w) => w.textContent === 'Waiting for your answer') && !document.querySelector('.msg.working:not(.asked)')";
     anyhow::ensure!(super::shows(chrome, &page, waits), "the turn waits for its owner's answer");
-    post(&ada, "work", "wk:ask:c:h1", json!({ "kind": "turn.child", "turn": "ask", "child": "h1", "goal": "Check the venues' calendars" }))?;
-    post(&ada, "work", "wk:ask:ce:h1", json!({ "kind": "turn.child", "turn": "ask", "child": "h1", "outcome": "completed" }))?;
+    post(&ada, "work", "wk:ask:c:h1", json!({ "kind": "turn.child", "parent": "ask", "child": "h1", "goal": "Check the venues' calendars" }))?;
+    post(&ada, "work", "wk:ask:ce:h1", json!({ "kind": "turn.child", "parent": "ask", "child": "h1", "outcome": "completed" }))?;
     post(&ada, "work", "wk:ask:later", json!({ "kind": "turn.later-kind", "turn": "ask", "what": "a later bridge's" }))?;
-    post(&ada, "work", "wk:ask:c:h2", json!({ "kind": "turn.child", "turn": "ask", "child": "h2", "goal": "Draft the poll" }))?;
+    post(&ada, "work", "wk:ask:c:h2", json!({ "kind": "turn.child", "parent": "ask", "child": "h2", "goal": "Draft the poll" }))?;
     let helper = "document.getElementById('helpers').querySelector('.helpers-said')?.textContent === '1 helper working'";
     anyhow::ensure!(super::shows(chrome, &page, helper), "the records arrived");
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -685,7 +685,7 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
         "Book a table for Friday",
     ];
     for (i, goal) in goals.iter().enumerate() {
-        post(&ada, &format!("wk:ada-turn:c:h{i}"), json!({ "kind": "turn.child", "turn": "ada-turn", "child": format!("h{i}"), "goal": goal }))?;
+        post(&ada, &format!("wk:ada-turn:c:h{i}"), json!({ "kind": "turn.child", "parent": "ada-turn", "child": format!("h{i}"), "goal": goal }))?;
     }
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
@@ -706,8 +706,8 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
     s.ok("a page opened mid-work shows them, closed", super::shows(chrome, &page, &collapsed), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     // any end takes a helper off: done, lost
-    post(&ada, "wk:ada-turn:ce:h0", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h0", "outcome": "completed" }))?;
-    post(&ada, "wk:ada-turn:ce:h3", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h3", "outcome": "lost" }))?;
+    post(&ada, "wk:ada-turn:ce:h0", json!({ "kind": "turn.child", "parent": "ada-turn", "child": "h0", "outcome": "completed" }))?;
+    post(&ada, "wk:ada-turn:ce:h3", json!({ "kind": "turn.child", "parent": "ada-turn", "child": "h3", "outcome": "lost" }))?;
     s.ok("a helper that ended, or was lost, leaves the bar", super::shows(chrome, &page, &format!("{said} === '3 helpers working'")), chrome.eval(&page, &said)?);
     // a phone: one row, the composer on screen
     super::fit(chrome, &page, 390, 844, true)?;
@@ -721,8 +721,8 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     // first's helper ends nothing
     let (bo, bo_id) = quiet_agent(api, owner, &name)?;
     post(&bo, "wk:bo-turn:start", json!({ "kind": "turn.start", "turn": "bo-turn", "agent": bo_id }))?;
-    post(&bo, "wk:bo-turn:c:b0", json!({ "kind": "turn.child", "turn": "bo-turn", "child": "b0", "goal": "Summarise the reviews" }))?;
-    post(&bo, "wk:ada-turn:ce:h1", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h1", "outcome": "completed" }))?;
+    post(&bo, "wk:bo-turn:c:b0", json!({ "kind": "turn.child", "parent": "bo-turn", "child": "b0", "goal": "Summarise the reviews" }))?;
+    post(&bo, "wk:ada-turn:ce:h1", json!({ "kind": "turn.child", "parent": "ada-turn", "child": "h1", "outcome": "completed" }))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let group = format!("/^.+ and .+: 4 helpers working$/.test({said} ?? '') && {head}.querySelectorAll('.faces > *').length === 2 && !{head}.querySelector('.helpers-icon')");
     s.ok("in a chat of two agents, the row names whose helpers they are, by face, and one agent's end never ends another's helper", super::shows(chrome, &page, &group), chrome.eval(&page, &said)?);
@@ -730,10 +730,95 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     s.ok("opened, each task starts with its agent's face", super::shows(chrome, &page, &format!("{lines}.length === 4 && {lines}.every((n) => n.firstElementChild.matches('.face, .agent-avatar'))")), chrome.eval(&page, &format!("{lines}.map((n) => n.innerHTML)"))?);
     chrome.screenshot(&page, &shots.join("desktop-group.png"))?;
     for (who, turn, child) in [(&ada, "ada-turn", "h1"), (&ada, "ada-turn", "h2"), (&ada, "ada-turn", "h4"), (&bo, "bo-turn", "b0")] {
-        post(who, &format!("wk:{turn}:ce:{child}:end"), json!({ "kind": "turn.child", "turn": turn, "child": child, "outcome": "failed" }))?;
+        post(who, &format!("wk:{turn}:ce:{child}:end"), json!({ "kind": "turn.child", "parent": turn, "child": child, "outcome": "failed" }))?;
     }
     s.ok("none working, the bar hides", super::shows(chrome, &page, &format!("{bar}.hidden && !{bar}.children.length")), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     println!("      (helpers bar screenshots in {})", shots.display());
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// Goal (FIN-432, Paul's (b) of 11-07): a helper whose start is far out of
+/// what a page reads still shows as the page opens, from its newest note
+/// (`since`: how long it has run), found by reading `work` back 15 minutes
+/// past the page's window. Invalid: a note with no task, or a `since` that
+/// is no time at or before its record's, is none. Replay: notes said again
+/// count once, and a note after its helper's end starts nothing, live and
+/// on a reload. Restart: once no note has come for 15 minutes (its
+/// computer crashed), the bar clears. Method: a quiet agent posts the
+/// records itself, then more than a window of other work; the page's clock
+/// is moved on for the last.
+pub(super) fn helpers_outlast_the_window(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "helpers-window")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the helpers' window chat: {made}");
+    s.owned(&made.body, owner);
+    let (ada, _) = quiet_agent(api, owner, &name)?;
+    let work = format!("/api/f/{name}/channels/work");
+    let post = |id: &str, body: Value| -> Result<()> {
+        let r = api.signed(&ada, "POST", &work, Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id}: {r}");
+        Ok(())
+    };
+    let now = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
+    let since = now - 40 * 60_000;
+    let goal = "Read every review of the three venues";
+    let note = |child: &str, goal: &str, since: i64| json!({ "kind": "turn.child", "parent": "long", "child": child, "goal": goal, "since": since });
+    // its start long gone from any window: its note alone
+    post("wk:long:cw:h1:4", note("h1", goal, since))?;
+    let bad = [
+        json!({ "since": "soon", "goal": "A" }),
+        json!({ "since": -5, "goal": "B" }),
+        json!({ "since": 1.5, "goal": "C" }),
+        json!({ "since": now + 3_600_000, "goal": "D" }),
+        json!({ "since": since }),
+    ];
+    for (i, fields) in bad.into_iter().enumerate() {
+        let mut body = json!({ "kind": "turn.child", "parent": "long", "child": format!("bad{i}") });
+        if let (Some(b), Some(f)) = (body.as_object_mut(), fields.as_object()) {
+            b.extend(f.clone());
+        }
+        post(&format!("wk:long:cw:bad{i}:1"), body)?;
+    }
+    // then more than a page's window of other work
+    for i in 0..1005 {
+        post(&format!("wk:busy:{i}"), json!({ "kind": "turn.busy", "n": i }))?;
+    }
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let bar = "document.getElementById('helpers')";
+    let head = format!("{bar}.querySelector('.helpers-head')");
+    let said = format!("{bar}.querySelector('.helpers-said')?.textContent");
+    let lines = format!("[...{bar}.querySelectorAll('.helper')]");
+    let listed = format!("{lines}.map((n) => [n.querySelector('.helper-goal').title, n.querySelector('.helper-since').textContent])");
+    s.ok(
+        "a helper whose start is far out of the window shows as the page opens, from its note; malformed notes are none",
+        super::shows(chrome, &page, &format!("{said} === '1 helper working'")),
+        chrome.eval(&page, &format!("{bar}.outerHTML"))?,
+    );
+    chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
+    let one = json!([[goal, "40 min"]]).to_string();
+    s.ok(
+        "opened, its task, and how long it has run since its start (the note's `since`)",
+        super::shows(chrome, &page, &format!("JSON.stringify({listed}) === {}", super::js(&one))),
+        chrome.eval(&page, &listed)?,
+    );
+    // replay: a note said again (the platform's same record), a later one,
+    // and a note after its helper's end
+    post("wk:long:cw:h1:4", note("h1", goal, since))?;
+    post("wk:long:cw:h1:5", note("h1", goal, since))?;
+    post("wk:long:c:h2", json!({ "kind": "turn.child", "parent": "long", "child": "h2", "goal": "Draft the poll" }))?;
+    post("wk:long:ce:h2", json!({ "kind": "turn.child", "parent": "long", "child": "h2", "outcome": "completed" }))?;
+    post("wk:long:cw:h2:1", note("h2", "Draft the poll", now))?;
+    post("wk:long:c:h3", json!({ "kind": "turn.child", "parent": "long", "child": "h3", "goal": "Book the train" }))?;
+    let two = format!("(() => {{ const l = {listed}; return {said} === '2 helpers working' && l.length === 2 && l[0][0] === {} && l[0][1] === '40 min' && l[1][0] === 'Book the train'; }})()", super::js(goal));
+    s.ok("its notes again count once, and a note after a helper's end starts nothing", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
+    chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
+    chrome.eval(&page, "new Promise((resolve) => { const t = setInterval(() => { const h = document.querySelector('#helpers .helpers-head'); if (h) { clearInterval(t); h.click(); resolve(true); } }, 50); })")?;
+    s.ok("a reload finds the same: the long helper from its notes, the ended one ended", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
+    // its computer crashed: no note comes, and 15 minutes on, the bar clears
+    chrome.eval(&page, "(() => { const now = Date.now; Date.now = () => now() + 16 * 60_000; return true; })()")?;
+    s.ok("15 minutes with no note (its computer gone), the bar clears", super::shows(chrome, &page, &format!("{bar}.hidden && !{bar}.children.length")), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     chrome.close(page)?;
     Ok(())
 }

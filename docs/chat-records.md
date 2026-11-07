@@ -428,6 +428,11 @@ above, it relies on:
 - **The window it reads**: the last `CHAT_LAST` records of `chat` and,
   for a viewer, the last `WORK_LAST` of `work` (the reason a menu is
   posted again each life).
+- **The helpers working** (`turn.child`): as it opens, `work` read back
+  to 15 minutes ago past that window, for helpers' records alone, at most
+  `HELPERS_PAGES_MAX` pages more. A helper shows while its newest start or
+  note is at most 15 minutes old (the bounded version; a durable listing
+  of the helpers running may come later).
 - **The launcher's chat**: `?sent=1` shows no new chat's start, only the
   message just sent and its waiting line.
 - **The first run**: `?setup=1` shows the making as the shell reports
