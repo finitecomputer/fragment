@@ -58,6 +58,7 @@ import { share, feedback } from "./response-actions.js";
 import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
 import { moreOf } from "./pages.js";
+import { noteSaid, relayedOwner as relayedOwnerOf, saidSince, speakerOf } from "./speakers.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -887,13 +888,9 @@ export function mount(root) {
   const doorId = (v) => typeof v === "string" && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$/.test(v);
   const DOOR_NAMES = { simplex: "SimpleX", telegram: "Telegram" };
   const doorName = (v) => DOOR_NAMES[v] ?? v;
-  const relayedOwner = (m) => {
-    if (!m.relayed || !state.members.length) return null;
-    const by = state.members.find((x) => x.principal === m.relayed.by);
-    return !by || (by.kind === "agent" && by.owner === m.relayed.for) ? m.relayed.for : null;
-  };
-  const speaker = (m) => relayedOwner(m) ?? m.principal;
-  const waitsOnWords = (t) => running(t) && !!t.asked && ![...state.spoke.values()].some((x) => x.at >= t.asked.at && speaker(x.m) === t.asked.asks);
+  const relayedOwner = (m) => relayedOwnerOf(m, state.members);
+  const speaker = (m) => speakerOf(m, state.members);
+  const waitsOnWords = (t) => running(t) && !!t.asked && !saidSince(state.spoke, state.members, t.asked.asks, t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
@@ -913,12 +910,7 @@ export function mount(root) {
   // up the chat is kept aside (and read again as the window reaches it).
   // At the end, the window lets its oldest go as new ones come.
   function keep(record, historical, m) {
-    if (!m.turn) {
-      // (by who posted it and for whom: whose words they are is read as the
-      // members say when asked, so a relay's owner known later counts)
-      const key = `${m.principal} ${m.relayed?.by ?? ""} ${m.relayed?.for ?? ""}`;
-      if (!(state.spoke.get(key)?.at >= m.at)) state.spoke.set(key, { m: { principal: m.principal, relayed: m.relayed ?? null }, at: m.at });
-    }
+    noteSaid(state.spoke, m);
     if (!historical && !history.live && record.seq > history.last) {
       state.seen.delete(record.seq);
       history.aside.push(record);

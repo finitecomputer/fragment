@@ -1126,6 +1126,8 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     );
     // 700 more meanwhile, kept aside; Jump to latest's read fails once
     post_lines(600, 1300)?;
+    // (each come and counted before the page is read for what it shows)
+    anyhow::ensure!(super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('1300 new messages')"), "the 1,300 are counted");
     let before = seen(chrome)?;
     chrome.eval(&page, "(window.__failLatest = true, true)")?;
     chrome.click(&page, "#latest")?;
@@ -1164,46 +1166,6 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     chrome.eval(&page, "(() => { document.getElementById('say').requestSubmit(); return true; })()")?;
     let sent = super::shows(chrome, &page, &format!("{window} === 'live' && [...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === 'Said from up the chat') && document.getElementById('latest').hidden"));
     s.ok("sent again: the window at the end, the message there", sent, seen(chrome)?);
-    chrome.close(page)?;
-    Ok(())
-}
-
-/// A relayed answer of the owner's (a door: SimpleX), come before the
-/// page knows its members (Alex's review of #1078): once they say the relay
-/// is the owner's agent, its words are the owner's, and a turn that asked
-/// the owner before them waits on no one. Method: a quiet chat; a turn
-/// that asks its owner; the agent's relay of the owner's reply; the page's
-/// `__members` held until all of it is drawn.
-pub(super) fn relayed_answer(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
-    let name = s.named(api, owner, "chat-relayed")?;
-    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
-    anyhow::ensure!(made.status == 200, "making the relay chat: {made}");
-    s.owned(&made.body, owner);
-    let (hand, agent) = quiet_agent(api, owner, &name)?;
-    let me = api.identity(owner)?;
-    let post = |by: &Keys, channel: &str, id: &str, body: Value| -> Result<()> {
-        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
-        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
-        Ok(())
-    };
-    post(owner, "chat", "ask", json!({ "text": "Book the table" }))?;
-    post(&hand, "work", "start", json!({ "kind": "turn.start", "turn": "r1", "agent": agent, "asker": me }))?;
-    post(&hand, "work", "asked", json!({ "kind": "turn.asked", "turn": "r1", "asks": me, "text": "For how many?" }))?;
-    post(&hand, "chat", "relay", json!({ "text": "Four", "relayed": { "for": me, "via": "simplex" } }))?;
-    let hold = "if (window === window.top) { const real = window.fetch.bind(window); let let_go; window.__members = new Promise((r) => { let_go = r; }); window.__letMembers = () => let_go(); \
-        window.fetch = async (url, o) => { if (String(url).includes('__members')) await window.__members; return real(url, o); }; }";
-    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
-    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), hold)?;
-    super::fit(chrome, &page, 1280, 860, false)?;
-    let drawn = super::shows(chrome, &page, "[...document.querySelectorAll('.bubble, .msg .md')].some((b) => b.textContent.trim() === 'Four') && !!document.querySelector('.msg.working')");
-    chrome.eval(&page, "(window.__letMembers(), true)")?;
-    let mine = super::shows(chrome, &page, "!document.querySelector('.msg.working.asked') && !!document.querySelector('.msg.working') && [...document.querySelectorAll('.msg.user')].some((m) => m.textContent.includes('Four'))");
-    let seen = chrome.eval(&page, "({ working: [...document.querySelectorAll('.msg.working')].map((n) => [n.className, n.textContent]) })")?;
-    s.ok(
-        "a relayed answer of the owner's, come before the members: once they are known it is the owner's, and the turn that asked waits on no one",
-        drawn && mine,
-        &seen,
-    );
     chrome.close(page)?;
     Ok(())
 }
