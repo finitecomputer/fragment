@@ -609,6 +609,135 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     Ok(())
 }
 
+/// Goal (Codex on #1086): a turn that asks its owner something in words
+/// keeps waiting for the answer while records that do not say it went on
+/// come: a helper's start and end (`turn.child`), a kind this page does not
+/// know. The owner's answer in the chat ends the wait. Method: a quiet
+/// agent posts the records itself; read on the owner's page.
+pub(super) fn asked_outlasts_helpers(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "asked-helpers")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the asked chat: {made}");
+    s.owned(&made.body, owner);
+    let (ada, ada_id) = quiet_agent(api, owner, &name)?;
+    let owner_id = api.identity(owner)?;
+    let post = |who: &Keys, channel: &str, id: &str, body: Value| -> Result<()> {
+        let r = api.signed(who, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id}: {r}");
+        Ok(())
+    };
+    post(&ada, "work", "wk:ask:start", json!({ "kind": "turn.start", "turn": "ask", "agent": ada_id, "asker": owner_id }))?;
+    post(&ada, "chat", "rp:ask:1", json!({ "text": "Which month suits the team?", "turn": "ask" }))?;
+    post(&ada, "work", "wk:ask:q1", json!({ "kind": "turn.asked", "turn": "ask", "asks": owner_id }))?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let waits = "[...document.querySelectorAll('.msg.working.asked')].some((w) => w.textContent === 'Waiting for your answer') && !document.querySelector('.msg.working:not(.asked)')";
+    anyhow::ensure!(super::shows(chrome, &page, waits), "the turn waits for its owner's answer");
+    post(&ada, "work", "wk:ask:c:h1", json!({ "kind": "turn.child", "turn": "ask", "child": "h1", "goal": "Check the venues' calendars" }))?;
+    post(&ada, "work", "wk:ask:ce:h1", json!({ "kind": "turn.child", "turn": "ask", "child": "h1", "outcome": "completed" }))?;
+    post(&ada, "work", "wk:ask:later", json!({ "kind": "turn.later-kind", "turn": "ask", "what": "a later bridge's" }))?;
+    post(&ada, "work", "wk:ask:c:h2", json!({ "kind": "turn.child", "turn": "ask", "child": "h2", "goal": "Draft the poll" }))?;
+    let helper = "document.getElementById('helpers').querySelector('.helpers-said')?.textContent === '1 helper working'";
+    anyhow::ensure!(super::shows(chrome, &page, helper), "the records arrived");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    s.ok(
+        "a helper's start and end, and a kind the page does not know, leave the turn waiting for its owner's answer",
+        chrome.eval(&page, waits)? == true,
+        chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?,
+    );
+    post(owner, "chat", "answer", json!({ "text": "March" }))?;
+    s.ok(
+        "the owner's answer ends the wait; the helper still working stays on its bar",
+        super::shows(chrome, &page, &format!("!document.querySelector('.msg.working.asked') && {helper}")),
+        chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?,
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// Goal (FIN-432): the helpers an agent's turns started (`turn.child`)
+/// show in one quiet row just above the composer while they work: how
+/// many, and opened, each one's task on one line (cut short) with how long
+/// it has run, at most four, then how many more. A page opened mid-work
+/// shows them (they are records). Any end takes a helper off (`lost` too);
+/// none left, the bar hides. In a chat of two agents the row names whose
+/// they are, by face; an agent's end never ends another's helper. On a
+/// phone it stays one row and the composer stays on screen. Method: two
+/// quiet agents post the records themselves; read on the owner's page.
+pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "helpers-bar")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the helpers chat: {made}");
+    s.owned(&made.body, owner);
+    let (ada, ada_id) = quiet_agent(api, owner, &name)?;
+    let work = format!("/api/f/{name}/channels/work");
+    let post = |who: &Keys, id: &str, body: Value| -> Result<()> {
+        let r = api.signed(who, "POST", &work, Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id}: {r}");
+        Ok(())
+    };
+    post(&ada, "wk:ada-turn:start", json!({ "kind": "turn.start", "turn": "ada-turn", "agent": ada_id }))?;
+    let goals = [
+        "Find three venues near Lisbon for a team offsite in March, with prices, transport and a short note on each so the team can choose quickly",
+        "Compare the two catering quotes",
+        "Draft the invitation",
+        "Check the train times",
+        "Book a table for Friday",
+    ];
+    for (i, goal) in goals.iter().enumerate() {
+        post(&ada, &format!("wk:ada-turn:c:h{i}"), json!({ "kind": "turn.child", "turn": "ada-turn", "child": format!("h{i}"), "goal": goal }))?;
+    }
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let bar = "document.getElementById('helpers')";
+    let head = format!("{bar}.querySelector('.helpers-head')");
+    let said = format!("{bar}.querySelector('.helpers-said')?.textContent");
+    let lines = format!("[...{bar}.querySelectorAll('.helper')]");
+    let placed = format!("(() => {{ const b = {bar}.getBoundingClientRect(); const c = document.getElementById('say').getBoundingClientRect(); return !{bar}.hidden && b.height <= 40 && b.bottom <= c.top && c.top - b.bottom <= 12 && c.bottom <= innerHeight; }})()");
+    let collapsed = format!("{said} === '5 helpers working' && {head}.getAttribute('aria-expanded') === 'false' && !{bar}.querySelector('.helpers-list') && !!{head}.querySelector('svg') && {placed}");
+    s.ok("five helpers working show as one quiet row just above the composer, closed: how many", super::shows(chrome, &page, &collapsed), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
+    let shots = s.dir("helpers-bar");
+    chrome.screenshot(&page, &shots.join("desktop-closed.png"))?;
+    chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
+    let opened = format!("(() => {{ const l = {lines}; const one = (n) => n.getBoundingClientRect().height <= parseFloat(getComputedStyle(n).lineHeight) + 1; return {head}.getAttribute('aria-expanded') === 'true' && l.length === 4 && l.map((n) => n.querySelector('.helper-goal').title).join('|') === {} && l.every((n) => one(n.querySelector('.helper-goal')) && n.querySelector('.helper-since').textContent === '<1 min') && l[0].querySelector('.helper-goal').scrollWidth > l[0].querySelector('.helper-goal').clientWidth && {bar}.querySelector('.helpers-more')?.textContent === 'and 1 more' && !{bar}.querySelector('.helper .face, .helper .agent-avatar'); }})()", super::js(&goals[..4].join("|")));
+    s.ok("tapped, it lists each task on one line, cut short, oldest first, with how long it has run: four, then how many more", super::shows(chrome, &page, &opened), chrome.eval(&page, &format!("{lines}.map((n) => n.textContent)"))?);
+    chrome.screenshot(&page, &shots.join("desktop-open.png"))?;
+    // opened mid-work: the records say so
+    chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
+    s.ok("a page opened mid-work shows them, closed", super::shows(chrome, &page, &collapsed), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
+    // any end takes a helper off: done, lost
+    post(&ada, "wk:ada-turn:ce:h0", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h0", "outcome": "completed" }))?;
+    post(&ada, "wk:ada-turn:ce:h3", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h3", "outcome": "lost" }))?;
+    s.ok("a helper that ended, or was lost, leaves the bar", super::shows(chrome, &page, &format!("{said} === '3 helpers working'")), chrome.eval(&page, &said)?);
+    // a phone: one row, the composer on screen
+    super::fit(chrome, &page, 390, 844, true)?;
+    chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
+    let phone = format!("(() => {{ const b = {bar}.getBoundingClientRect(); const c = document.getElementById('say').getBoundingClientRect(); return {lines}.length === 3 && !{bar}.querySelector('.helpers-more') && {head}.getBoundingClientRect().height <= 34 && b.bottom <= c.top && c.bottom <= innerHeight && document.documentElement.scrollWidth <= innerWidth && {lines}.every((n) => n.getBoundingClientRect().right <= b.right); }})()");
+    s.ok("on a phone, its row stays one line, opened it fits the width, and the composer stays on screen", super::shows(chrome, &page, &phone), chrome.eval(&page, &format!("[{bar}.getBoundingClientRect().toJSON(), document.getElementById('say').getBoundingClientRect().toJSON(), innerHeight]"))?);
+    chrome.screenshot(&page, &shots.join("phone-open.png"))?;
+    chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
+    chrome.screenshot(&page, &shots.join("phone-closed.png"))?;
+    // a second agent in the chat: whose helpers, by face; its end of the
+    // first's helper ends nothing
+    let (bo, bo_id) = quiet_agent(api, owner, &name)?;
+    post(&bo, "wk:bo-turn:start", json!({ "kind": "turn.start", "turn": "bo-turn", "agent": bo_id }))?;
+    post(&bo, "wk:bo-turn:c:b0", json!({ "kind": "turn.child", "turn": "bo-turn", "child": "b0", "goal": "Summarise the reviews" }))?;
+    post(&bo, "wk:ada-turn:ce:h1", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h1", "outcome": "completed" }))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let group = format!("/^.+ and .+: 4 helpers working$/.test({said} ?? '') && {head}.querySelectorAll('.faces > *').length === 2 && !{head}.querySelector('.helpers-icon')");
+    s.ok("in a chat of two agents, the row names whose helpers they are, by face, and one agent's end never ends another's helper", super::shows(chrome, &page, &group), chrome.eval(&page, &said)?);
+    chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
+    s.ok("opened, each task starts with its agent's face", super::shows(chrome, &page, &format!("{lines}.length === 4 && {lines}.every((n) => n.firstElementChild.matches('.face, .agent-avatar'))")), chrome.eval(&page, &format!("{lines}.map((n) => n.innerHTML)"))?);
+    chrome.screenshot(&page, &shots.join("desktop-group.png"))?;
+    for (who, turn, child) in [(&ada, "ada-turn", "h1"), (&ada, "ada-turn", "h2"), (&ada, "ada-turn", "h4"), (&bo, "bo-turn", "b0")] {
+        post(who, &format!("wk:{turn}:ce:{child}:end"), json!({ "kind": "turn.child", "turn": turn, "child": child, "outcome": "failed" }))?;
+    }
+    s.ok("none working, the bar hides", super::shows(chrome, &page, &format!("{bar}.hidden && !{bar}.children.length")), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
+    println!("      (helpers bar screenshots in {})", shots.display());
+    chrome.close(page)?;
+    Ok(())
+}
+
 /// Goal (#725, FIN-262): a tool call shows while it runs, from its intent
 /// (`turn.call`, recorded before it runs), and its step takes its place;
 /// real state only. Live: its latest response's call is the card's live

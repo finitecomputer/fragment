@@ -83,6 +83,14 @@ const TYPING_MS = 4000;
 const DRAFT_STALE_MS = 120000;
 // Faces shown in the "here" line; more are counted.
 const HERE_FACES_MAX = 5;
+// Helpers the open bar lists, the oldest first; more are counted.
+const HELPERS_SHOWN_MAX = 4;
+// The `work` kinds of a turn this page reads (docs/chat-records.md). Any
+// other (a later bridge's) is kept for paging, and changes nothing shown.
+const TURN_KINDS = new Set(["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]);
+// Those that say a turn went on past its question in words (`turn.asked`):
+// it waits on no one then. Its asker's answer is read from the chat.
+const WENT_ON = new Set(["turn.step", "turn.call", "turn.end"]);
 // Identities one `__people` call names (the platform's limit).
 const PROFILES_PER_ASK = 64;
 // The members are read again at most this often (an agent added later).
@@ -169,6 +177,14 @@ export function stepSays(s, now = false, joined = true) {
   const [icon, doing, did, joins] = STEP_SAYS[s.category];
   const verb = failed ? `${failed}${doing.charAt(0).toLowerCase()}${doing.slice(1)}` : now ? doing : did;
   return { icon, verb: `${verb}${args && joined ? joins : ""}`, args };
+}
+
+// How long a helper has run, as its bar says it: "<1 min", "4 min", "1h 5m".
+function minutes(ms) {
+  const m = Math.floor(Math.max(0, ms) / 60000);
+  if (m < 1) return "<1 min";
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 // How long, as a card's head says it: "40s", "3m 05s", "1h 5m".
@@ -403,6 +419,8 @@ export function mount(root) {
     sending: new Map(), // post id -> a message of this page's the platform has not answered yet
     menus: new Map(), // agent -> { seq, commands: [{ name, description, args }] }: what its runtime takes from its owner
     replyTo: null, // { seq, principal, m }: the message the composer quotes
+    helpers: new Map(), // `poster|turn|child` -> { principal, goal, at, ended }: each helper a turn started (`turn.child`)
+    helpersOpen: false, // the helpers' bar shows each one's task
   };
   const sendReducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const outgoingOrigins = new Map(); // post id -> the composer's place as it was sent: its bubble's one entrance
@@ -877,6 +895,10 @@ export function mount(root) {
     const b = record.body;
     if (b?.kind === "commands") return onMenu(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
+    // a helper's start or end moves nothing in the chat: its bar alone
+    if (b.kind === "turn.child") return onHelper(record, b);
+    // a kind this page does not know moves nothing: no turn, no place, no question
+    if (!TURN_KINDS.has(b.kind)) return;
     // A turn is its poster's: the platform stamps `record.principal`, and
     // only the chat's agents post on `work` (`"from": "agent"`). Whatever a
     // body says of an agent, a record counts toward, and can replace a card
@@ -890,7 +912,7 @@ export function mount(root) {
     const n = record.seq;
     touch(t, record.at, n);
     // the turn went on past its question: it waits on no one now
-    if (t.asked && b.kind !== "turn.asked" && record.seq > t.asked.seq) t.asked = null;
+    if (t.asked && WENT_ON.has(b.kind) && record.seq > t.asked.seq) t.asked = null;
     if (b.kind === "turn.asked" && typeof b.asks === "string") {
       if (!t.asked || record.seq > t.asked.seq) t.asked = { asks: b.asks, at: record.at, seq: record.seq };
       want(b.asks);
@@ -922,6 +944,25 @@ export function mount(root) {
     want(t.agent);
     // an agent this page did not know is in the chat: it was added since
     if (t.agent && !state.members.some((m) => m.principal === t.agent)) membersAgain();
+    schedule();
+  }
+
+  // A helper an agent's turn started, or its end (`turn.child`), in either
+  // order (a page of earlier records brings a start after its end): it is
+  // its poster's, whatever a body names, and works from its start until any
+  // outcome. One seen whole (both) is let go.
+  function onHelper(record, b) {
+    if (typeof b.child !== "string" || !b.child) return;
+    const key = `${record.principal}|${b.turn}|${b.child}`;
+    const h = state.helpers.get(key) ?? { principal: record.principal, goal: null, at: 0, ended: false };
+    if (typeof b.outcome === "string") h.ended = true;
+    else if (typeof b.goal === "string") Object.assign(h, { goal: b.goal, at: record.at });
+    else return;
+    if (h.ended && h.goal !== null) state.helpers.delete(key);
+    else state.helpers.set(key, h);
+    want(record.principal);
+    // an agent this page did not know is in the chat: it was added since
+    if (!state.members.some((m) => m.principal === record.principal)) membersAgain();
     schedule();
   }
 
@@ -1147,6 +1188,7 @@ export function mount(root) {
     fresh.clear();
     renderChrome();
     renderHere();
+    renderHelpers();
     // The reader's place is its item, not its node: one made again in this
     // draw (its poster's name come since, say, while earlier messages load)
     // is found by its key, so the place holds through the draw that adds
@@ -1569,6 +1611,7 @@ export function mount(root) {
   setInterval(() => {
     for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
     for (const n of $("messages").querySelectorAll(".tools [data-running-since]")) n.textContent = took(Date.now() - Number(n.dataset.runningSince));
+    for (const n of $("helpers").querySelectorAll("[data-since]")) n.textContent = minutes(Date.now() - Number(n.dataset.since));
   }, 1000);
   // Where a card's work ends: the first record of its own turn after its
   // last step (a reply, a card, a notice, its next step), else the turn's
@@ -2026,6 +2069,63 @@ export function mount(root) {
     const list = (xs) => (xs.length === 1 ? xs[0] : xs.length === 2 ? `${xs[0]} and ${xs[1]}` : `${xs[0]} and ${xs.length - 1} others`);
     const said = typing.length ? `${list(typing)} ${typing.length === 1 ? "is" : "are"} writing…` : `${list(names)} ${names.length === 1 ? "is" : "are"} here`;
     line.replaceChildren(faces, el("span", null, said));
+  }
+
+  // The helpers working now (`turn.child` started, not ended), in a bar
+  // above the composer: how many, and opened, each one's task (the oldest
+  // first, at most HELPERS_SHOWN_MAX) and how long it has run. In a chat of
+  // several agents, whose they are, by face. None working, it hides.
+  let helpersSig = "";
+  function renderHelpers() {
+    const bar = $("helpers");
+    const running = [...state.helpers.values()].filter((h) => h.goal !== null && !h.ended).sort((a, b) => a.at - b.at);
+    if (!running.length) state.helpersOpen = false;
+    const agents = [...new Set(running.map((h) => h.principal))];
+    const group = agents.length > 1 || chatAgents().length > 1;
+    const sig = JSON.stringify([state.helpersOpen, group, running.map((h) => [h.principal, h.goal, h.at]), agents.map((a) => [who(a).name, who(a).picture ?? ""])]);
+    if (sig === helpersSig) return;
+    helpersSig = sig;
+    bar.hidden = !running.length;
+    bar.classList.toggle("open", state.helpersOpen);
+    if (!running.length) return bar.replaceChildren();
+    const focused = bar.contains(document.activeElement);
+    const head = el("button", "helpers-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(state.helpersOpen));
+    head.setAttribute("aria-controls", "helpers-list");
+    head.addEventListener("click", () => {
+      state.helpersOpen = !state.helpersOpen;
+      renderHelpers();
+    });
+    const count = `${plural(running.length, "helper")} working`;
+    if (group) {
+      const faces = el("span", "faces");
+      for (const a of agents.slice(0, HERE_FACES_MAX)) faces.append(face(a));
+      const names = agents.map((a) => who(a).name);
+      const list = names.length === 1 ? names[0] : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names[0]} and ${names.length - 1} others`;
+      head.append(faces, el("span", "helpers-said", `${list}: ${count}`));
+    } else head.append(icon("users", "helpers-icon"), el("span", "helpers-said", count));
+    head.append(icon("chevron", "chev"));
+    const parts = [head];
+    if (state.helpersOpen) {
+      const list = el("ul", "helpers-list");
+      list.id = "helpers-list";
+      for (const h of running.slice(0, HELPERS_SHOWN_MAX)) {
+        const line = el("li", "helper");
+        if (group) line.append(face(h.principal));
+        const goal = el("span", "helper-goal", h.goal || "A task");
+        goal.title = h.goal;
+        const since = el("span", "helper-since", minutes(Date.now() - h.at));
+        since.dataset.since = String(h.at);
+        line.append(goal, since);
+        list.append(line);
+      }
+      const more = running.length - HELPERS_SHOWN_MAX;
+      if (more > 0) list.append(el("li", "helpers-more", `and ${more} more`));
+      parts.push(list);
+    }
+    bar.replaceChildren(...parts);
+    if (focused) head.focus();
   }
 
   // A wrapped bubble shrinks to its longest line, not the width cap.
