@@ -151,6 +151,7 @@ struct ChatView: View {
                         Task { await session.attach(read) }
                         return true
                     },
+                    room: session.fileRoom,
                     send: { await session.send() }, stop: { await session.stop() },
                     steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
                     quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })

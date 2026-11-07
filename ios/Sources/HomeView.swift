@@ -35,22 +35,28 @@ final class HomeDraft {
     /// start one (Send, the Start a new chat row).
     var ready: Bool { (!words.isEmpty || !files.isEmpty) && text.utf8.count <= 32_768 && !launching && !reading && !recording }
 
+    /// Places the first message has left for files, of what a message carries.
+    var room: Int { max(0, ChatAttachment.countMax - files.count) }
     /// Files for the first message, read now and held: at most what a
     /// message carries, one reading at a time, none while a launch sends.
+    /// A voice memo's place is held from before it records (`VoiceMemo.file`).
     func hold(_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
         guard !launching else { error = "Wait for the message being sent."; return false }
         guard !reading else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + files.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
+        guard count > 0, count <= room else { error = ChatAttachment.limits.countRefusal; return false }
         reading = true
         Task {
             defer { reading = false }
             do {
                 let read = try await read()
                 guard !read.isEmpty else { error = "This could not be attached."; return }
-                guard read.count + files.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
+                guard read.count <= room else { error = ChatAttachment.limits.countRefusal; return }
                 files += read.map { Held(id: UUID(), file: $0) }
                 error = nil
-            } catch { self.error = error.localizedDescription }
+            }
+            // a voice memo cancelled, or never begun: nothing to say
+            catch is CancellationError {}
+            catch { self.error = error.localizedDescription }
         }
         return true
     }
@@ -96,7 +102,7 @@ struct HomeView: View {
                                 placeholder: "Ask, or find a chat or app",
                                 attached: home.files.map { ($0.id.uuidString, $0.file.name) },
                                 remove: { id in if let id = UUID(uuidString: id) { home.remove(id) } },
-                                attach: { home.hold($0, $1) }, send: { await launch() },
+                                attach: { home.hold($0, $1) }, room: home.room, send: { await launch() },
                                 editable: !home.launching, recordingChanged: { home.recording = $0 }, chrome: false)
                         .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, 4)
                     if let error = home.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
@@ -230,6 +236,9 @@ struct ComposerBar: View {
     /// Takes `count` files that `read` will make, or refuses them (saying
     /// why itself): the composer is busy from the choosing on.
     let attach: (_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool
+    /// Places the message has left for files, as its owner counts them (a
+    /// chat's uploads, failed ones too, `ChatSession.fileRoom`).
+    let room: Int
     let send: () async -> Void
     var stop: () async -> Void = {}
     /// Steer, given whether a voice memo is being recorded: none, no Steer.
@@ -268,9 +277,10 @@ struct ComposerBar: View {
                 if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
                 if voice.recording { Label("Recording voice memo…", systemImage: "waveform").foregroundStyle(.red).font(.caption) }
             }.padding(.horizontal, chrome ? 20 : 12)
-            ComposerView(text: $text, working: working, enabled: enabled, busy: busy, recording: voice.recording, placeholder: placeholder,
-                         attachPhotos: { photos = true }, attachFiles: { importer = true },
-                         pasteImages: { paste($0) }, record: { Task { await recordVoice() } },
+            // a memo being recorded holds its place as attaching, and its Finish stays
+            ComposerView(text: $text, working: working, enabled: enabled, busy: busy && !voice.recording, recording: voice.recording, placeholder: placeholder,
+                         attachPhotos: { if roomy() { photos = true } }, attachFiles: { if roomy() { importer = true } },
+                         pasteImages: { paste($0) }, record: { recordVoice() },
                          send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, editable: editable, chrome: chrome)
         }
         .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
@@ -281,7 +291,7 @@ struct ComposerBar: View {
         }
         // Photos as the system's picker gives them, its most compatible
         // encoding: a picture the web shows goes as it is, any other as JPEG
-        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - attached.count),
+        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, room),
                       matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
@@ -300,24 +310,17 @@ struct ComposerBar: View {
         guard !pictures.isEmpty else { voice.error = "This picture could not be attached."; return }
         _ = attach(pictures.count) { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value }
     }
-    /// A voice memo, attached as a file once finished; its recording goes
-    /// once read (or refused).
-    private func recordVoice() async {
-        if voice.recording {
-            if let url = voice.stop() { attachMemo(url) }
-        } else {
-            guard attached.count < ChatAttachment.countMax else { voice.error = ChatAttachment.limits.countRefusal; return }
-            await voice.start { url in attachMemo(url) }
-        }
+    /// Whether a file has a place left, saying so if not.
+    private func roomy() -> Bool {
+        guard room > 0 else { voice.error = ChatAttachment.limits.countRefusal; return false }
+        return true
     }
-    private func attachMemo(_ url: URL) {
-        // its length, read before its file goes
-        ComposerMemos.remember(url)
-        let taken = attach(1) {
-            defer { try? FileManager.default.removeItem(at: url) }
-            return try await ComposerFiles.read([url])
-        }
-        if !taken { try? FileManager.default.removeItem(at: url) }
+    /// A voice memo: its place taken before it records (`attach(1)`), so a
+    /// message with no room refuses it before it starts, never once it is
+    /// recorded; attached once finished, by hand or at its deadline.
+    private func recordVoice() {
+        if voice.recording { voice.finish(); return }
+        _ = attach(1) { [voice] in try await voice.file() }
     }
 }
 
