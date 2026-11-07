@@ -1317,50 +1317,118 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     super::posts::browser(s, api, &mut chrome)
 }
 
-/// The harness's `click` (browser.rs) reaches the element it aims at, or
-/// nothing. Valid: a still button, pressed once. Invalid: one the page
-/// moves under the mouse between the aim and the press (two buttons swap
-/// places as the pointer comes, as a list drawn again moves its rows): the
-/// press on the other is stopped before the page hears it, and the next aim
-/// presses the button where it is now, once; and one covered for good is an
-/// error naming its cover, which hears nothing either.
+/// The harness's `click` (browser.rs `CLICK_GUARD`) reaches the element it
+/// aims at, or nothing. A listener the page put on its window before the
+/// click hears only the press that reaches it. Valid: a still button,
+/// pressed once; a frame aimed at, its press the frame's; a disabled
+/// button, pressed and never clicked, as a hand's; a link that takes the
+/// page to another document. Invalid: one the page moves under the mouse
+/// between the aim and the press (two buttons swap places as the pointer
+/// comes, as a list drawn again moves its rows): the press on the other is
+/// stopped before the page hears it, and the next aim presses the button
+/// where it is now, once; the same aimed once (`click_strict`), an error
+/// and nothing pressed; one covered for good, by an element or a frame, an
+/// error naming its cover, which hears nothing; a frame drawn over the
+/// point meanwhile, which hears nothing of the press; and a press that
+/// fails to dispatch, which leaves no guard armed to take a later one.
 fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
     chrome.eval(
         page,
-        "(() => { window.__heard = []; const box = document.createElement('div'); box.id = 'aims'; \
-         Object.assign(box.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: 'white' }); \
-         const put = (tag, id, top) => { const e = document.createElement(tag); e.id = id; e.textContent = id; \
-           Object.assign(e.style, { position: 'absolute', left: '20px', top: `${top}px`, width: '200px', height: '40px', margin: '0' }); \
-           for (const k of ['pointerdown', 'click']) e.addEventListener(k, () => window.__heard.push(`${k} ${id}`)); box.append(e); return e; }; \
-         put('button', 'still', 20); const moving = put('button', 'moving', 100), other = put('button', 'other', 160); \
-         moving.addEventListener('pointermove', () => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; moving.style.top = '160px'; other.style.top = '100px'; }); \
-         put('button', 'covered', 240); put('div', 'cover', 240); \
-         document.body.append(box); return true; })()",
+        "(() => { window.__heard = []; const heard = (what) => window.__heard.push(what); const box = document.createElement('div'); box.id = 'aims'; \
+         Object.assign(box.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: 'white' }); document.body.append(box); \
+         const put = (tag, id, left, top) => { const e = document.createElement(tag); e.id = id; if (tag !== 'iframe') e.textContent = id; \
+           Object.assign(e.style, { position: 'absolute', left: `${left}px`, top: `${top}px`, width: '200px', height: '40px', margin: '0', padding: '0', border: '0', boxSizing: 'border-box' }); \
+           box.append(e); if (tag === 'iframe') e.contentWindow.addEventListener('pointerdown', (ev) => { if (ev.isTrusted) heard(`frame ${id}`); }, true); \
+           else for (const k of ['pointerdown', 'click']) e.addEventListener(k, () => heard(`${k} ${id}`)); return e; }; \
+         const swap = (a, b) => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; [a.style.top, b.style.top, a.style.left, b.style.left] = [b.style.top, a.style.top, b.style.left, a.style.left]; }; \
+         put('button', 'still', 20, 20); const moving = put('button', 'moving', 20, 80), other = put('button', 'other', 20, 140); \
+         moving.addEventListener('pointermove', () => swap(moving, other)); \
+         put('button', 'covered', 20, 200); put('div', 'cover', 20, 200); put('button', 'off', 20, 260).disabled = true; \
+         const away = put('a', 'away', 20, 320); away.href = `${location.pathname}?clicked`; \
+         put('button', 'framed', 300, 20); put('iframe', 'frame-cover', 300, 20); \
+         const late = put('button', 'framed-late', 300, 80), lateFrame = put('iframe', 'frame-late', 540, 80); \
+         late.addEventListener('pointermove', () => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; lateFrame.style.left = '300px'; }); put('iframe', 'frame-target', 300, 140); \
+         addEventListener('pointerdown', (ev) => { if (ev.isTrusted) heard(`window ${ev.target.id}`); }, true); return true; })()",
     )?;
     let heard = |chrome: &mut crate::browser::Browser| -> Result<Value> { chrome.eval(page, "(() => { const h = window.__heard; window.__heard = []; return h; })()") };
+    let arm = |chrome: &mut crate::browser::Browser| chrome.eval(page, "(document.getElementById('aims').dataset.swap = 'armed', true)");
+    let err = |r: &Result<()>| r.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
 
     chrome.click(page, "#still")?;
     let still = heard(chrome)?;
-    s.ok("a click aimed at a still button presses it, once", still == json!(["pointerdown still", "click still"]), &still);
+    s.ok("a click aimed at a still button presses it, once", still == json!(["window still", "pointerdown still", "click still"]), &still);
 
-    chrome.eval(page, "(document.getElementById('aims').dataset.swap = 'armed', true)")?;
+    arm(chrome)?;
     chrome.click(page, "#moving")?;
     let moved = heard(chrome)?;
     let swapped = chrome.eval(page, "document.getElementById('aims').dataset.swap")?;
     s.ok(
-        "one moved under the mouse between its aim and its press: the other button hears nothing of the press, and the next aim presses it where it is, once",
-        swapped == "done" && moved == json!(["pointerdown moving", "click moving"]),
+        "one moved under the mouse between its aim and its press: neither the other button nor the page's own window listener hears that press, and the next aim presses it where it is, once",
+        swapped == "done" && moved == json!(["window moving", "pointerdown moving", "click moving"]),
         json!({ "swapped": swapped, "heard": moved }),
+    );
+
+    arm(chrome)?;
+    let strict = chrome.click_strict(page, "#moving");
+    let none = heard(chrome)?;
+    s.ok(
+        "the same aimed once (click_strict): an error naming what it would have pressed, and nothing pressed",
+        err(&strict).contains("<button#other>") && none == json!([]),
+        json!({ "click": err(&strict), "heard": none }),
+    );
+
+    let failed = chrome.click_aimed(page, "#moving", 1, |_, _, _| anyhow::bail!("a press that failed to dispatch"));
+    let armed = chrome.eval(page, "window.__clickGuard.armed()")?;
+    let at = chrome.eval(page, "(() => { const r = document.getElementById('still').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")?;
+    chrome.click_at(page, (at[0].as_f64().unwrap_or(0.0), at[1].as_f64().unwrap_or(0.0)))?;
+    let after = heard(chrome)?;
+    s.ok(
+        "a press that fails to dispatch is the click's error, and leaves no guard armed: a later press elsewhere is the page's",
+        err(&failed).contains("a press that failed to dispatch") && armed == false && after == json!(["window still", "pointerdown still", "click still"]),
+        json!({ "click": err(&failed), "armed": armed, "heard": after }),
     );
 
     let covered = chrome.click(page, "#covered");
     let under = heard(chrome)?;
     s.ok(
-        "one covered for good: the click is an error naming its cover, and the cover heard nothing",
-        covered.as_ref().is_err_and(|e| e.to_string().contains("<div#cover>")) && under == json!([]),
-        json!({ "click": covered.err().map(|e| e.to_string()), "heard": under }),
+        "one covered for good: the click is an error naming its cover, which heard nothing",
+        err(&covered).contains("<div#cover>") && under == json!([]),
+        json!({ "click": err(&covered), "heard": under }),
     );
-    chrome.eval(page, "(document.getElementById('aims').remove(), true)")?;
+
+    let framed = chrome.click(page, "#framed");
+    let under = heard(chrome)?;
+    s.ok(
+        "one covered by a frame: the click is an error naming the frame, which heard nothing",
+        err(&framed).contains("<iframe#frame-cover>") && under == json!([]),
+        json!({ "click": err(&framed), "heard": under }),
+    );
+
+    arm(chrome)?;
+    chrome.click(page, "#framed-late")?;
+    let late = heard(chrome)?;
+    s.ok(
+        "a frame drawn over the point between the aim and the press hears none of it: the press is the button's",
+        late == json!(["window framed-late", "pointerdown framed-late", "click framed-late"]),
+        &late,
+    );
+
+    chrome.click(page, "#frame-target")?;
+    let into = heard(chrome)?;
+    s.ok("a frame aimed at: its press is the frame's, which this page never hears", into == json!(["frame frame-target"]), &into);
+
+    let off = chrome.click(page, "#off");
+    let pressed = heard(chrome)?;
+    s.ok(
+        "a disabled button: pressed as a hand presses it, and never clicked",
+        off.is_ok() && !pressed.as_array().into_iter().flatten().any(|h| h == "click off"),
+        json!({ "click": err(&off), "heard": pressed }),
+    );
+
+    let path = chrome.eval(page, "location.pathname")?;
+    chrome.click(page, "#away")?;
+    let landed = chrome.until(page, "location.search === '?clicked' && document.readyState === 'complete' && !document.getElementById('aims')", Duration::from_secs(15));
+    s.ok("a link that takes the page to another document: the click is done, the page there", landed, json!({ "from": path }));
     Ok(())
 }
 
