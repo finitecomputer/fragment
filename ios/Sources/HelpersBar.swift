@@ -2,9 +2,10 @@ import SwiftUI
 
 /// The helpers (children an agent's runtime delegated work to) its turns
 /// started (`turn.child`, docs/chat-records.md), from every `work` record
-/// read, in either order: a page of earlier records brings a start after
-/// its end, which stays ended. A helper is its poster's, whatever a body
-/// names, and works from its start until any outcome.
+/// read, in either order and however often (an earlier page, a window paged
+/// back to, earlier work read again): a start read after its end, or again
+/// after it, stays ended. A helper is its poster's, whatever a body names,
+/// and works from its start until any outcome.
 struct Helpers: Equatable, Sendable {
     struct Helper: Equatable, Identifiable, Sendable {
         let agent: String
@@ -13,31 +14,35 @@ struct Helpers: Equatable, Sendable {
         var goal: String?
         var at: Int64 = 0
         var ended = false
+        /// The newest of its records learned: what goes first past `keptMax`.
+        var seq: Int64 = 0
         var id: String { "\(agent)|\(turn)|\(child)" }
     }
-    /// Those half read (a start, or an end, alone), by `id`: one read
-    /// whole is let go, so this holds the running and what an earlier page
-    /// may still finish. Past `keptMax`, the oldest go.
-    private(set) var open: [String: Helper] = [:]
-    static let keptMax = 1_024
+    /// Every helper read, ended ones too: an ended one kept is what keeps
+    /// its start, read again, from working once more. Past `keptMax` (as
+    /// many as the turns a timeline keeps), those learned longest ago go.
+    private(set) var known: [String: Helper] = [:]
+    static let keptMax = 4_096
 
     /// Whether the record changed what is known.
     mutating func learn(_ record: ChannelRecord) -> Bool {
         guard record.channel == "work", record.body["kind"].string == "turn.child",
               let turn = record.turn, let child = record.body["child"].string, !child.isEmpty else { return false }
         let id = "\(record.principal)|\(turn)|\(child)"
-        var helper = open[id] ?? Helper(agent: record.principal, turn: turn, child: child)
+        var helper = known[id] ?? Helper(agent: record.principal, turn: turn, child: child)
         if record.body["outcome"].string != nil { helper.ended = true }
         else if let goal = record.body["goal"].string { helper.goal = goal; helper.at = record.at }
         else { return false }
-        if helper.ended && helper.goal != nil { open.removeValue(forKey: id) } else { open[id] = helper }
-        if open.count > Self.keptMax, let oldest = open.values.min(by: { ($0.at, $0.id) < ($1.at, $1.id) }) { open.removeValue(forKey: oldest.id) }
+        helper.seq = max(helper.seq, record.seq)
+        guard known[id] != helper else { return false }
+        known[id] = helper
+        if known.count > Self.keptMax, let oldest = known.values.min(by: { ($0.seq, $0.id) < ($1.seq, $1.id) }) { known.removeValue(forKey: oldest.id) }
         return true
     }
 
     /// The helpers working now, the oldest first.
     var running: [Helper] {
-        open.values.filter { $0.goal != nil && !$0.ended }.sorted { ($0.at, $0.id) < ($1.at, $1.id) }
+        known.values.filter { $0.goal != nil && !$0.ended }.sorted { ($0.at, $0.id) < ($1.at, $1.id) }
     }
 }
 

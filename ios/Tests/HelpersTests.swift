@@ -33,7 +33,7 @@ struct HelpersTests {
         timeline.insert(try end(6, "h3", "something-new"))
         timeline.insert(try end(7, "h2", "lost"))
         #expect(timeline.helpers.running.isEmpty)
-        #expect(timeline.helpers.open.isEmpty, "each read whole is let go")
+        #expect(timeline.helpers.known.count == 3, "each kept, ended")
     }
 
     @Test func anEarlierPagesStartAfterItsEndStaysEnded() throws {
@@ -41,7 +41,32 @@ struct HelpersTests {
         timeline.insert(try end(9, "h1", "failed"))
         #expect(timeline.helpers.running.isEmpty)
         timeline.insert(try start(2, "h1", "Find venues"), advancingCursor: false)
-        #expect(timeline.helpers.running.isEmpty && timeline.helpers.open.isEmpty)
+        #expect(timeline.helpers.running.isEmpty)
+        // and read again (earlier work read once more): still ended
+        timeline.learn(try start(2, "h1", "Find venues"))
+        #expect(timeline.helpers.running.isEmpty)
+    }
+
+    /// Alex on #1089: a helper read whole, then its start read again (a
+    /// window paged back to after its start was let go, or earlier work
+    /// read again) stays ended, however the start comes back.
+    @Test func aStartReadAgainAfterItsEndStaysEnded() throws {
+        var timeline = Timeline()
+        let venues = try start(2, "h1", "Find venues")
+        timeline.insert(venues)
+        timeline.insert(try end(3, "h1", "completed"))
+        timeline.learn(venues)
+        timeline.insert(venues, advancingCursor: false)
+        timeline.insertOlder([venues])
+        #expect(timeline.helpers.running.isEmpty)
+        // past the window's bound, its start long gone from it, then paged back to
+        var long = Timeline()
+        long.insert(venues)
+        long.insert(try end(3, "h1", "completed"))
+        for n in 0...Timeline.chatMax { long.insert(ChannelRecord(channel: "chat", seq: Int64(10 + n), at: Int64(10_000 + n), principal: "npub1paul", kind: "message", body: .string("message \(n)"))) }
+        #expect(!long.records.contains { $0.id == venues.id }, "its start was let go from the window")
+        long.insertOlder([venues])
+        #expect(long.helpers.running.isEmpty)
     }
 
     @Test func aHelperIsItsPostersAndAMalformedOneIsNone() throws {
@@ -56,7 +81,7 @@ struct HelpersTests {
         }
         let chat = ChannelRecord(channel: "chat", seq: 8, at: 8, principal: "npub1ada", kind: "message", body: .object(["kind": .string("turn.child"), "turn": .string("t1"), "child": .string("h8"), "goal": .string("not work")]))
         timeline.insert(chat)
-        #expect(timeline.helpers.running.map(\.child) == ["h1"] && timeline.helpers.open.count == 1)
+        #expect(timeline.helpers.running.map(\.child) == ["h1"] && timeline.helpers.known.count == 2)
     }
 
     /// What an older app reads too: the records start no turn, end none,
@@ -81,8 +106,8 @@ struct HelpersTests {
     @Test func heldToItsBound() throws {
         var timeline = Timeline()
         for n in 0...Helpers.keptMax { timeline.insert(try start(Int64(n + 1), "h\(n)", "task \(n)")) }
-        #expect(timeline.helpers.open.count == Helpers.keptMax)
-        #expect(timeline.helpers.running.first?.child == "h1", "the oldest went")
+        #expect(timeline.helpers.known.count == Helpers.keptMax)
+        #expect(timeline.helpers.running.first?.child == "h1", "the one learned longest ago went")
     }
 
     @Test func theBarSaysHowManyAndWhose() throws {
