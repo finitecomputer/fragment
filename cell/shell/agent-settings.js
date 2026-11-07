@@ -520,12 +520,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       return item;
     });
   }
-  function agentSettings(a, row, modeled) {
+  // What an agent's settings show: its agent.json, none (404: the
+  // defaults), or unread (null). Settings await it before drawing its card
+  // (settings.js `agentsRead`), which `agentSettings` is given as `read`.
+  const readSettings = (agent) => agentJson(agent).catch((e) => (e.status === 404 ? {} : null));
+  function agentSettings(a, row, modeled, read) {
     const box = el("div", "agent-setting");
     box.dataset.agent = a.fragment;
     const said = el("span", "muted agent-model-said");
-    // what the picks show: agent.json, none (404: the defaults), or unread (null)
-    const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
     read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
     const write = (change) => writeAgentJson(a.fragment, change);
     // the model pick: when there may be a choice, a route the deployment
@@ -780,5 +782,5 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       return row;
     });
   }
-  return { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption, removeAgent, removable };
+  return { faceControls, renderAgentFaces, agentSettings, readSettings, addAgentForm, agentJson, writeAgentJson, savePick, settingLabel, modelOption, removeAgent, removable };
 }

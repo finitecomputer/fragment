@@ -8274,8 +8274,22 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
-    // one button, New agent, opens its dialog
-    let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
+    // one button, New agent, opens its dialog; when it shows, each agent's
+    // card above it has read its settings (`select[data-read]`), so nothing
+    // moves it under the press measured for it (FIN-424: a card that grew
+    // as its read answered took New agent from under that press)
+    let offered = b.until(
+        page,
+        "(() => { if (!document.querySelector('#settings-page .agent-add-open') || document.getElementById('new-agent')?.open) return false; \
+          window.__cardsRead ??= [...document.querySelectorAll('#settings-page .agent-setting')].map((c) => !!c.querySelector('select[data-read]')); return true; })()",
+        wait,
+    );
+    let cards_read = b.eval(page, "window.__cardsRead")?;
+    s.ok(
+        "Settings draw each agent's card as it stays: when New agent shows, every card above it has read its agent's settings",
+        offered && cards_read.as_array().is_some_and(|c| !c.is_empty() && c.iter().all(|r| r == true)),
+        &cards_read,
+    );
     b.click(page, "#settings-page .agent-add-open")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
@@ -8284,7 +8298,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.eval(page, &fill("#new-agent .agent-add-name", "Wren"))?;
     b.eval(page, &fill("#new-agent .agent-add-role", "editor"))?;
     let _ = b.screenshot(page, &shots.join("settings-add-agent.png"));
-    b.eval(page, "(document.querySelector('#new-agent .agent-add').requestSubmit(), true)")?;
+    // its dialog not open, nothing is asked: the check below says so
+    b.eval(page, "(document.querySelector('#new-agent .agent-add')?.requestSubmit(), true)")?;
     let mut chat = String::new();
     let made = s.eventually(wait, || own_named(api, session, "wren-chat").map(|c| chat = c).is_ok());
     let opened = made && b.until(page, &format!("!document.getElementById('new-agent')?.open && location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
