@@ -1207,3 +1207,146 @@ pub(super) fn relayed_answer(s: &mut Suite, api: &Api, owner: &Keys, session: &s
     chrome.close(page)?;
     Ok(())
 }
+
+/// A chat whose work must be read back page after page as older pages of
+/// it come in: its first message and a stopped turn after it (deep), 1,500
+/// records of work, messages 2–60; message 61 and a stopped turn after it
+/// (near); messages 62–160, each with 11 records of work. Its newest page
+/// (61–160) needs a read of work back; its start, two more.
+fn history_fixture(s: &mut Suite, api: &Api, owner: &Keys) -> Result<String> {
+    let name = s.named(api, owner, "chat-history")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the history chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let post = |by: &Keys, channel: &str, id: String, body: Value| -> Result<()> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        Ok(())
+    };
+    let turn = |id: &str| -> Result<()> {
+        post(&hand, "work", format!("{id}-start"), json!({ "kind": "turn.start", "turn": id, "agent": agent }))?;
+        post(&hand, "work", format!("{id}-end"), json!({ "kind": "turn.end", "turn": id, "agent": agent, "outcome": "stopped" }))
+    };
+    let filler = |from: usize, n: usize| -> Result<()> {
+        let posted: Vec<Result<()>> = std::thread::scope(|scope| {
+            let posters: Vec<_> = (0..8)
+                .map(|t| {
+                    let (post, hand, agent) = (&post, &hand, &agent);
+                    scope.spawn(move || -> Result<()> {
+                        for i in (from + t..from + n).step_by(8) {
+                            post(hand, "work", format!("filler-{i}"), json!({ "kind": "history.marker", "turn": "filler", "agent": agent }))?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            posters.into_iter().map(|p| p.join().expect("a poster's thread")).collect()
+        });
+        posted.into_iter().collect()
+    };
+    post(owner, "chat", "m1".into(), json!({ "text": "Message 1" }))?;
+    turn("deep-progress")?;
+    filler(0, 1500)?;
+    for i in 2..=60 {
+        post(owner, "chat", format!("m{i}"), json!({ "text": format!("Message {i}") }))?;
+    }
+    post(owner, "chat", "m61".into(), json!({ "text": "Message 61" }))?;
+    turn("near-progress")?;
+    filler(1500, 9)?;
+    for i in 62..=160 {
+        post(owner, "chat", format!("m{i}"), json!({ "text": format!("Message {i}") }))?;
+        filler(1509 + (i - 62) * 11, 11)?;
+    }
+    Ok(name)
+}
+
+/// Reads of older messages and of their work that overlap (reviews of
+/// #1075). Valid, each with responses held or failed by the page's own
+/// fetch, never a timer:
+/// - the first read of work back held while the reader reads up to the
+///   chat's start: let go, the work read goes on to the start's work;
+/// - the same during a read of work tried again after one failed;
+/// - a read of work that failed, and is said, before the chat is ready:
+///   ready, the page reads it again by itself, no Try again pressed.
+pub(super) fn history_overlaps(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    let name = history_fixture(s, api, owner)?;
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let count = "document.querySelectorAll('.msg.user').length";
+    let history = "document.getElementById('scroll').dataset.history";
+    let deep = "!!document.querySelector('.notice.stopped[data-turn=\"deep-progress\"]')";
+    let near = "!!document.querySelector('.notice.stopped[data-turn=\"near-progress\"]')";
+    let quiet = "document.getElementById('history-status').textContent === '' && document.getElementById('earlier-again').hidden";
+    // `__failWork`: reads of older work that fail, the first ones;
+    // `__holdWork`: the next read of it then held until `__letWork()`
+    let hooks = |fail: u32, hold: bool| {
+        format!(
+            "if (window === window.top) {{ window.__failWork = {fail}; window.__holdWork = {hold}; window.__heldWork = false; let go; const gate = new Promise((r) => {{ go = r; }}); window.__letWork = () => go(); \
+             window.__workReads = []; const real = window.fetch.bind(window); window.fetch = async (url, o) => {{ const u = String(url); if (u.includes('__channel/work') && u.includes('before=')) {{ window.__workReads.push(u.replace(/^.*before=/, '')); \
+             if (window.__failWork > 0) {{ window.__failWork -= 1; throw new TypeError('Failed to fetch'); }} if (window.__holdWork) {{ window.__holdWork = false; window.__heldWork = true; await gate; }} }} return real(url, o); }}; }}"
+        )
+    };
+    let to_start = |chrome: &mut Browser, page: &crate::browser::Page| -> Result<bool> {
+        for _ in 0..3 {
+            chrome.eval(page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+            // (every message drawn; the history says done once their work is in)
+            if super::shows(chrome, page, &format!("{count} === 160")) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+
+    // the first read of work back held, the reader up to the chat's start
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), &hooks(0, true))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let held = super::shows(chrome, &page, &format!("{count} === 100 && window.__heldWork === true"));
+    let started = to_start(chrome, &page)?;
+    chrome.eval(&page, "(window.__letWork(), true)")?;
+    let came = super::shows(chrome, &page, &format!("{deep} && {near} && {quiet}"));
+    s.ok(
+        "the first read of work back held while the reader reads up to the chat's start: let go, it goes on to the start's work",
+        held && started && came,
+        json!({ "held": held, "started": started, "seen": chrome.eval(&page, &format!("({{ deep: {deep}, near: {near}, history: {history}, said: document.getElementById('history-status').textContent, reads: window.__workReads }})"))? }),
+    );
+    chrome.close(page)?;
+
+    // the same during a read of work tried again after one failed
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), &hooks(1, true))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let offered = "document.getElementById('history-status').textContent === \"Couldn't load earlier progress.\" && !document.getElementById('earlier-again').hidden";
+    // tried again by itself as the chat is ready, else by Try again
+    anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 100 && window.__failWork === 0 && (window.__heldWork === true || ({offered}))")), "the first read of work failed");
+    if chrome.eval(&page, "window.__heldWork")? != true {
+        chrome.click(&page, "#earlier-again")?;
+    }
+    let held = super::shows(chrome, &page, "window.__heldWork === true");
+    let started = to_start(chrome, &page)?;
+    chrome.eval(&page, "(window.__letWork(), true)")?;
+    let came = super::shows(chrome, &page, &format!("{deep} && {near} && {quiet}"));
+    s.ok(
+        "the same during a read of work tried again after one failed: let go, it goes on to the start's work",
+        held && started && came,
+        json!({ "held": held, "started": started, "seen": chrome.eval(&page, &format!("({{ deep: {deep}, near: {near}, history: {history}, said: document.getElementById('history-status').textContent, reads: window.__workReads }})"))? }),
+    );
+    chrome.close(page)?;
+
+    // a read of work that failed, and is said, before the chat is ready:
+    // the chat's readiness (its `subscribed`) held until the page says it
+    let gate = "if (window === window.top) { let said; window.__said = new Promise((r) => { said = r; }); \
+        new MutationObserver(() => { if (document.getElementById('history-status')?.textContent === \"Couldn't load earlier progress.\" && !document.getElementById('earlier-again')?.hidden) said(); }).observe(document, { subtree: true, childList: true, characterData: true, attributes: true }); \
+        const d = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage'); \
+        Object.defineProperty(WebSocket.prototype, 'onmessage', { configurable: true, get() { return d.get.call(this); }, set(fn) { d.set.call(this, fn && function (e) { let f = null; try { f = JSON.parse(e.data); } catch {} \
+          if (f?.type === 'subscribed' && f.channel === 'chat' && !window.__ready) { window.__ready = true; window.__said.then(() => { window.__readyAfterSaid = true; fn.call(this, e); }); return; } return fn.call(this, e); }); } }); }";
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), &format!("{}{gate}", hooks(1, false)))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let ready_after = super::shows(chrome, &page, "window.__readyAfterSaid === true");
+    let came = super::shows(chrome, &page, &format!("{near} && {quiet}"));
+    s.ok(
+        "a read of work that failed and was said before the chat was ready: ready, the page reads it again by itself (no Try again pressed), and the work comes in",
+        ready_after && came,
+        json!({ "readyAfterSaid": ready_after, "seen": chrome.eval(&page, &format!("({{ near: {near}, history: {history}, said: document.getElementById('history-status').textContent }})"))? }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}

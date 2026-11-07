@@ -472,8 +472,10 @@ export function mount(root) {
   // records a message), whether or not older messages remain. Bounded by
   // the channel: each page moves its cursor back.
   async function earlierWork() {
-    const oldest = Math.min(...state.chat.map((m) => m.at));
-    while (history.workReady && !history.workDone && history.workAt >= oldest) {
+    // (the oldest shown read again before each page: one shown meanwhile, an
+    // older page of messages come while a read was out, widens it)
+    const oldest = () => Math.min(...state.chat.map((m) => m.at));
+    while (history.workReady && !history.workDone && history.workAt >= oldest()) {
       const page = await fragment.read("work", { before: history.first.work ?? Number.MAX_SAFE_INTEGER, limit: WORK_LAST });
       for (const record of page.records) onWork(record);
       // (the cursor moves past the page whatever it held)
@@ -500,21 +502,34 @@ export function mount(root) {
     $("scroll").dataset.history = history.loading ? "loading" : history.failed || history.workFailed ? "failed" : history.done ? "done" : "more";
   }
   // The work of the oldest message shown read back, once at a time (its
-  // subscription's readiness, a page of older messages, a retry); a failure
-  // is said, with Try again, until a read of it succeeds.
+  // subscription's readiness, a page of older messages, a retry). A caller
+  // that comes while a read is out asks for a pass more, made before that
+  // read's promise settles, so none sees the work as read before it covers
+  // what it shows. A failure is said, with Try again, until a read succeeds.
   let readingWork = null;
+  let workAgain = false;
   function readWork() {
-    readingWork ??= earlierWork()
-      .then(() => { history.workFailed = false; })
-      .catch((err) => {
+    if (readingWork) {
+      workAgain = true;
+      return readingWork;
+    }
+    readingWork = (async () => {
+      try {
+        // bounded: a pass more only when asked during the one before
+        do {
+          workAgain = false;
+          await earlierWork();
+        } while (workAgain);
+        history.workFailed = false;
+      } catch (err) {
         history.workFailed = true;
         console.error("chat: earlier progress", err);
-      })
-      .finally(() => {
+      } finally {
         readingWork = null;
         historyStatus();
         schedule();
-      });
+      }
+    })();
     return readingWork;
   }
   async function earlier() {

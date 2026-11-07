@@ -556,6 +556,22 @@ fn js(s: &str) -> String {
     serde_json::to_string(s).expect("a string encodes")
 }
 
+/// Overlapping reads of a chat's older messages and their work, in a
+/// browser (chat_polish.rs `history_overlaps`): a section of its own, so a
+/// change there is proved in minutes, against the head before it too.
+pub fn chat_history(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("chat-history", &[crate::Need::Fakes, crate::Need::Chrome, crate::Need::Levers]) {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let session = api.sign_in(&Api::email_of(&owner))?;
+    let Some(mut chrome) = s.browser()? else {
+        s.ok("Chrome is installed for the chat-history section (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    polish::history_overlaps(s, api, &owner, &session, &mut chrome)
+}
+
 pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("chat", &[crate::Need::Fakes, crate::Need::LocalDocker, crate::Need::Chrome, crate::Need::Levers]) {
         return Ok(());
