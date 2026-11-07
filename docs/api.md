@@ -65,7 +65,7 @@ otherwise); the registry's and the mail lever are no route.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?}` |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |

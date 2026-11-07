@@ -9,21 +9,43 @@ final class ChatSession {
     /// (`rows`, `drafts`, `activeTurns`), each set only when it changes: a
     /// draft's next words redraw its draft alone, never the chat's rows.
     @ObservationIgnored private(set) var timeline = Timeline() { didSet { timelineChanged() } }
-    /// The records a chat shows (WorkingActivity), in order.
-    private(set) var rows: [ChannelRecord] = []
+    /// What a chat shows (WorkingActivity), in the web's order: its
+    /// records, and the replies being written and working lines in their places.
+    private(set) var rows: [ChatItem] = []
     private(set) var activity = WorkingActivity(Timeline())
     private(set) var presence: [String: String] = [:]
     private(set) var awaitingReply: WorkingHint?
     @ObservationIgnored private var activityReady = false
+    /// The replies being written, by turn, as the activity was last made
+    /// with them: their words change nothing of it, their coming and going does.
+    @ObservationIgnored private var activityDrafting: Set<TurnKey> = []
+    @ObservationIgnored private var activityPrincipal = ""
+    /// The identities of the person's own agents (`Library`): whose menus
+    /// they may use (chat.js `menuOf`, by `__members`' owner) and whose
+    /// routines' turns are theirs (control.js `controllerOf`).
+    var owned: Set<String> = [] { didSet { if owned != oldValue { activityOwned = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityOwned: Set<String>?
+    /// The word that @mentions each agent the person's list names, by its
+    /// identity: its fragment's label (chat.js `handleOf`, bridge `answers_to`).
+    var handles: [String: String] = [:] { didSet { if handles != oldValue { activityHandles = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityHandles: [String: String]?
+    /// The chat's agents, its lead first, as the person's list names them
+    /// now (`Library.fragments`), not as when it opened: whom a message is
+    /// for, so one added through Agents in this chat counts at once.
+    var agents: [String] = [] { didSet { if agents != oldValue { activityAgents = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityAgents: [String]?
+    /// A post awaiting its agent's claim, at the chat's end (the web's
+    /// pending line): each running turn's line is in the rows.
     var workingHints: [WorkingHint] {
-        guard workRead else { return [] }
-        var hints = activity.hints.filter { hint in !drafts.contains { $0.turn == hint.id.id && $0.principal == hint.id.agent } }
-        if let pending = awaitingReply, !hints.contains(where: { $0.id.agent == pending.id.agent }) { hints.append(pending) }
-        return hints
+        guard workRead, let pending = awaitingReply, !activity.hints.contains(where: { $0.id.agent == pending.id.agent }) else { return [] }
+        return [pending]
     }
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
+    /// Each agent's menu, its commands' names (`Timeline.menus`), as the
+    /// composer observes it: a menu that comes or changes alone redraws Steer.
+    private(set) var menus: [String: [String]] = [:]
     private(set) var chatCursor: Int64 = 0
     /// Whether the chat was ever read to its end here, both its channels
     /// (`chat` and the `work` it shows): before, it is loading, never shown
@@ -63,6 +85,16 @@ final class ChatSession {
     /// Files being attached, from their choosing until their upload: the
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
     private(set) var attaching = false
+    /// A first message from Home being sent here (`sendFirst`), from its
+    /// uploads to its post: until then nothing else sends, so it goes first.
+    /// Typing and attaching stay the person's.
+    private(set) var sendingFirst = false
+    static let waitForFirst = "Wait for the message being sent."
+    /// Files being put, or that failed to be: each shown in the composer
+    /// from its own bytes on this iPhone (`BlobStore.keep`) as it goes, then
+    /// held as an attachment once put. A failed one waits to be put again
+    /// (`retryUpload`) or removed, and the message waits with it.
+    private(set) var uploads: [Upload] = []
     var composer = "" { didSet { scheduleDraftSave() } }
     var attachments: [ChatAttachment] = [] { didSet { scheduleDraftSave() } }
     var replyTo: ChannelRecord? { didSet { scheduleDraftSave() } }
@@ -74,6 +106,7 @@ final class ChatSession {
     init(fragment: FragmentSummary, api: FragmentAPI) {
         self.fragment = fragment
         self.api = api
+        agents = fragment.agents ?? []
         do { persistence = try ChatDraftStore(api: api, fragment: fragment.name) }
         catch { self.error = "The local draft could not be opened: " + error.localizedDescription; return }
         // What was saved, within its bounds; a file that is none is cleared.
@@ -89,13 +122,21 @@ final class ChatSession {
         } catch { self.error = error.localizedDescription }
     }
     private func timelineChanged() {
-        if rowsRevision != timeline.revision || activityReady != workRead {
+        // a reply being written is at the chat's end, which a window paged back does not show
+        let drafting = timeline.detached ? [] : Set(timeline.drafts.values.map { TurnKey(agent: $0.principal, id: $0.turn) })
+        if rowsRevision != timeline.revision || activityReady != workRead || activityDrafting != drafting
+            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles || activityAgents != agents {
             rowsRevision = timeline.revision
             activityReady = workRead
-            let next = WorkingActivity(timeline, ready: workRead)
+            activityDrafting = drafting
+            activityPrincipal = principal
+            activityOwned = owned
+            activityHandles = handles
+            activityAgents = agents
+            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: agents, handles: handles)
             if next != activity { activity = next }
-            if !next.rows.elementsEqual(rows, by: { $0.id == $1.id }) { rows = next.rows }
-            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: fragment.agents?.first)
+            if next.rows != rows { rows = next.rows }
+            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: agents.first)
             if let candidate, case .pending(let since) = candidate.kind,
                candidate.id == awaitingReply?.id || Int64(Date().timeIntervalSince1970 * 1000) - since < 90_000 { awaitingReply = candidate }
             else { awaitingReply = nil }
@@ -104,6 +145,8 @@ final class ChatSession {
         if writing != drafts { drafts = writing }
         let running = workRead ? timeline.activeTurns : []
         if running != activeTurns { activeTurns = running }
+        let offered = timeline.menus.mapValues(\.commands)
+        if offered != menus { menus = offered }
         let cursor = timeline.cursors["chat"] ?? 0
         if cursor != chatCursor { chatCursor = cursor }
         if timeline.detached != detached { detached = timeline.detached }
@@ -142,10 +185,13 @@ final class ChatSession {
     /// anew, once the composer is empty (`deliver`).
     func reopen(_ post: PendingPost) {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
-        guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
+        // nor while files are being attached: their places are held (`beginAttaching`)
+        guard composer.isEmpty && attachments.isEmpty && uploads.isEmpty && !attaching else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
-        // its own words, files and addressees: the draft's were kept until now
-        composer = refused.text; attachments = refused.attachments; recipients = refused.recipients
+        // its own words, files and addressees: the draft's were kept until
+        // now (a command's words alone: its agent is no addressee of theirs)
+        composer = refused.text; attachments = refused.attachments
+        if refused.command == nil { recipients = refused.recipients }
         replyTo = timeline.records.first { $0.channel == "chat" && $0.seq == refused.replyTo }
         error = nil
     }
@@ -357,12 +403,25 @@ final class ChatSession {
         }
     }
 
+    /// The message's files: attached, being put, or failed to be put (which
+    /// waits to go with it). Each takes one of a message's `countMax` places;
+    /// every check of what more it takes counts this, and only this.
+    var fileCount: Int { attachments.count + uploads.count }
+    /// Places the message has left (the photo picker's most).
+    var fileRoom: Int { max(0, ChatAttachment.countMax - fileCount) }
+    /// Whether `count` more files may be attached now, saying why not.
+    func admits(_ count: Int) -> Bool {
+        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return false }
+        return true
+    }
     /// Reserves the attaching of `count` files, at once, before anything is
     /// read: none while others are attaching, none past `countMax` a message.
     /// Then `attach` reads and uploads them; until it ends, nothing sends.
+    /// A voice memo reserves its place before it records (`VoiceMemo.file`),
+    /// so one is refused before it starts, never once it is recorded.
     func beginAttaching(_ count: Int) -> Bool {
-        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + attachments.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
+        guard admits(count) else { return false }
         attaching = true
         return true
     }
@@ -371,20 +430,75 @@ final class ChatSession {
     /// `beginAttaching` began.
     func attach(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
         defer { attaching = false }
+        let files: [OutgoingFile]
+        do { files = try await prepare() }
+        // a voice memo cancelled, or never begun (`VoiceMemo.file`): nothing to say
+        catch is CancellationError { return }
+        catch { self.error = error.localizedDescription; return }
+        guard !files.isEmpty else { error = "This could not be attached."; return }
+        guard files.count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return }
+        var queued: [(OutgoingFile, ChatAttachment)] = []
+        for file in files {
+            let sha256 = await Task.detached(priority: .userInitiated) { sha256Hex(file.data) }.value
+            let attachment = ChatAttachment(sha256: sha256, name: file.name, type: file.type, size: file.data.count)
+            guard !attachments.contains(where: { $0.id == attachment.id }), !uploads.contains(where: { $0.id == attachment.id }),
+                  !queued.contains(where: { $0.1.id == attachment.id }) else { continue }
+            // kept as it is, so it shows at once (and once sent) from these bytes;
+            // one not kept shows once it is read back
+            do { try await BlobStore.shared.keep(file.data, key: BlobKey(api: api, fragment: fragment.name, sha256: attachment.sha256)) } catch {}
+            uploads.append(Upload(attachment: attachment))
+            queued.append((file, attachment))
+        }
+        for (file, attachment) in queued { await put(file.data, attachment) }
+    }
+
+    /// A failed upload put again, from its bytes kept on this iPhone.
+    func retryUpload(_ id: String) async {
+        guard !attaching, let upload = uploads.first(where: { $0.id == id }), upload.failed != nil else { return }
+        attaching = true
+        defer { attaching = false }
+        let attachment = upload.attachment
+        let kept = BlobStore.shared.cached(BlobKey(api: api, fragment: fragment.name, sha256: attachment.sha256))
+        let read = await Task.detached(priority: .userInitiated) { kept.flatMap { try? Data(contentsOf: $0) } }.value
+        // removed meanwhile: nothing to put
+        guard let index = uploads.firstIndex(where: { $0.id == id }) else { return }
+        guard let data = read, data.count == attachment.size else {
+            uploads[index].failed = "This file is no longer on this iPhone. Remove it and attach it again."
+            return
+        }
+        uploads[index].failed = nil
+        uploads[index].progress = 0
+        await put(data, attachment)
+    }
+
+    func removeUpload(_ id: String) {
+        guard !attaching || uploads.first(where: { $0.id == id })?.failed != nil else { return }
+        uploads.removeAll { $0.id == id }
+    }
+
+    private func put(_ data: Data, _ attachment: ChatAttachment) async {
+        let id = attachment.id
         do {
-            let files = try await prepare()
-            guard !files.isEmpty else { error = "This could not be attached."; return }
-            guard files.count + attachments.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
-            for file in files {
-                let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
-                if !attachments.contains(where: { $0.id == put.id }) { attachments.append(put) }
+            let put = try await api.upload(data, name: attachment.name, type: attachment.type, to: fragment.name) { [weak self] fraction in
+                Task { @MainActor in
+                    guard let self, let index = self.uploads.firstIndex(where: { $0.id == id }),
+                          fraction - self.uploads[index].progress >= 0.02 || fraction >= 1 else { return }
+                    self.uploads[index].progress = fraction
+                }
             }
-        } catch { self.error = error.localizedDescription }
+            uploads.removeAll { $0.id == id }
+            if !attachments.contains(where: { $0.id == put.id }) { attachments.append(put) }
+        } catch {
+            if let index = uploads.firstIndex(where: { $0.id == id }) { uploads[index].failed = error.localizedDescription }
+        }
     }
 
     func send() async {
+        // nothing overtakes a first message from Home being sent (`sendFirst`)
+        guard !sendingFirst else { error = Self.waitForFirst; return }
         // what is being attached goes with it, or the message waits
         guard !attaching else { error = "Wait for the files being attached."; return }
+        guard !uploads.contains(where: { $0.failed != nil }) else { error = "A file did not upload. Retry it or remove it."; return }
         // a send goes at the chat's end: a window paged back returns there first
         if timeline.detached { await resetToLatest() }
         guard persistence != nil else {
@@ -405,6 +519,37 @@ final class ChatSession {
         await deliver(post)
     }
 
+    /// A new chat's first message from the home screen, as submitted there
+    /// (`Library.launch`): its files, held on the phone until this chat was
+    /// made, put in this chat's blobs, then its words and them posted as one
+    /// message through the outbox, as a message is sent here (saved with
+    /// `id` before any request; the web's launcher, `startFromSearch`).
+    /// Each upload is checked as it answers: one that fails throws, and
+    /// nothing is posted, so the whole message is tried again, never words
+    /// alone or some of its files. Files of the same bytes go once, as this
+    /// composer attaches them. It neither reads nor clears what is typed
+    /// here meanwhile, but nothing else sends until it is posted
+    /// (`sendingFirst`): no follow-up typed here goes before it.
+    func sendFirst(id: String, text: String, files: [OutgoingFile]) async throws {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty || !files.isEmpty else { return }
+        guard persistence != nil else { throw APIError.server("The local draft could not be opened. Reopen this chat before sending.") }
+        guard !sendingFirst else { throw APIError.server(Self.waitForFirst) }
+        sendingFirst = true
+        defer { sendingFirst = false }
+        var uploaded: [ChatAttachment] = []
+        for file in files {
+            let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
+            if !uploaded.contains(where: { $0.id == put.id }) { uploaded.append(put) }
+        }
+        // the outbox's room, where the send is saved: a full one would leave it unsaved
+        guard pending.count < SavedChat.pendingMax else { throw APIError.server("Wait for the messages still sending, or edit the ones not sent.") }
+        let post = PendingPost(id: id, text: words, attachments: uploaded)
+        try persistence?.save(SavedChat(composer: composer, attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
+        pending.append(post)
+        await deliver(post)
+    }
+
     func retry(_ post: PendingPost) async {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].failed, pending[index].refused == nil else { return }
         pending[index].failed = false
@@ -413,11 +558,7 @@ final class ChatSession {
 
     private func deliver(_ post: PendingPost) async {
         do {
-            var body: [String: JSONValue] = ["text": .string(post.text), "client_id": .string(post.id)]
-            if !post.attachments.isEmpty { body["attachments"] = .array(post.attachments.map(\.json)) }
-            if let replyTo = post.replyTo { body["reply_to"] = .number(Double(replyTo)) }
-            if !post.recipients.isEmpty { body["to"] = .array(post.recipients.map { .string($0) }) }
-            let record = try await api.post(fragment.name, id: post.id, body: .object(body))
+            let record = try await api.post(fragment.name, id: post.id, body: Self.body(of: post))
             timeline.insert(record, advancingCursor: false)
             pending.removeAll { $0.id == post.id }
             error = nil
@@ -438,6 +579,96 @@ final class ChatSession {
             pending[index].failed = true
             self.error = error.localizedDescription
         }
+    }
+
+    // ---- the composer while turns run (chat.js `refreshSend`, `render`) ----
+
+    /// Who controls a turn (control.js `controllerOf`): its asker, but the
+    /// agent's owner for a turn caused on its own `tasks` (a routine's).
+    private func controller(of key: TurnKey, _ state: TurnState) -> String? {
+        state.cause["channel"].string == "tasks" ? (owned.contains(key.agent) ? principal : nil) : state.asker
+    }
+    /// The newest running turn this person controls (control.js `controlledBy`).
+    var myTurn: TurnKey? {
+        guard workRead, !principal.isEmpty else { return nil }
+        return timeline.turns.filter { $0.value.running && controller(of: $0.key, $0.value) == principal }
+            .max { ($0.value.startAt!, $0.key.id) < ($1.value.startAt!, $1.key.id) }?.key
+    }
+    /// Whom a command goes to: the agent working for this person, else the lead.
+    var commandTarget: String? { myTurn?.agent ?? agents.first }
+    /// Whether `agent`'s runtime takes `command` from this person: its
+    /// menu's, offered to its owner alone (chat.js `menuOf`).
+    func offers(_ command: String, _ agent: String?) -> Bool {
+        guard let agent, owned.contains(agent) else { return false }
+        return menus[agent]?.contains(command) == true
+    }
+    /// Whether what is typed may Steer the running turn instead of waiting
+    /// its turn (chat.js `refreshSend`): words, no command, no files, its
+    /// target working, and its runtime offering `steer`. A file still
+    /// uploading, or failed, is one of the composer's files too (#1088).
+    func steers(recording: Bool) -> Bool {
+        let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty, !words.hasPrefix("/"), attachments.isEmpty, uploads.isEmpty, !recording, workRead, let target = commandTarget,
+              timeline.turns.contains(where: { $0.key.agent == target && $0.value.running }) else { return false }
+        return offers("steer", target)
+    }
+    /// A running turn waiting on this person's words: its question
+    /// (`turn.asked`), or its card that takes words (chat.js `askedMe`).
+    func answering(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> TurnKey? {
+        guard workRead, !principal.isEmpty else { return nil }
+        if let asked = activity.asking.filter({ $0.value == principal }).keys.min(by: { ($0.agent, $0.id) < ($1.agent, $1.id) }) { return asked }
+        return activity.openCards.first { card in
+            card.takesWords && card.asks == principal && (card.expiresAt.map { now <= $0 } ?? true) && timeline.turns[card.turn]?.running == true
+        }?.turn
+    }
+    /// The composer's words, as the web's say what it does now (chat.js
+    /// `render`). While their turn runs, the web's whole sentence ("<name>
+    /// is working: a message waits its turn, or Steer it now") is cut on a
+    /// phone: the chat already says who works, and Steer shows beside Send
+    /// once words are typed, so it says what sending does alone.
+    func placeholder(name: (String) -> String, now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        if let asked = answering(now: now) { return "Your answer for \(name(asked.agent))" }
+        if workRead, let card = activity.openCards.first(where: { $0.asks == principal && !$0.stopped && ($0.expiresAt.map { now <= $0 } ?? true) }) {
+            return "\(name(card.turn.agent)) is waiting for you"
+        }
+        if myTurn != nil { return "A message waits its turn" }
+        return agents.first.map { "Message \(name($0))" } ?? "Message your agent"
+    }
+
+    /// The running turn told what is typed, at once (`/steer <words>`, a
+    /// command of its runtime's menu, as the web's Steer sends it). It goes
+    /// as a message goes: saved with its id before any request, shown
+    /// sending, and, its answer lost, retried only by hand with that same
+    /// id and body (docs/ios.md), so it never runs twice.
+    func steer(recording: Bool = false) async {
+        guard steers(recording: recording), let target = commandTarget else { return }
+        guard !sendingFirst else { error = Self.waitForFirst; return }
+        guard persistence != nil else { error = "The local draft could not be opened. Reopen this chat before sending."; return }
+        guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
+        let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let post = PendingPost(id: UUID().uuidString, text: words, recipients: [target], command: "steer")
+        do {
+            try persistence?.save(SavedChat(composer: "", attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
+        } catch { self.error = "The command could not be saved on this iPhone: " + error.localizedDescription; return }
+        pending.append(post)
+        composer = ""
+        await deliver(post)
+    }
+    /// What a post sends: a command (docs/chat-records.md, "A command"),
+    /// or a message.
+    static func body(of post: PendingPost) -> JSONValue {
+        if let command = post.command, let target = post.recipients.first { return Self.command(command, args: post.text, to: target) }
+        var body: [String: JSONValue] = ["text": .string(post.text), "client_id": .string(post.id)]
+        if !post.attachments.isEmpty { body["attachments"] = .array(post.attachments.map(\.json)) }
+        if let replyTo = post.replyTo { body["reply_to"] = .number(Double(replyTo)) }
+        if !post.recipients.isEmpty { body["to"] = .array(post.recipients.map { .string($0) }) }
+        return .object(body)
+    }
+    /// A command's body (docs/chat-records.md, "A command"): its words only if any.
+    static func command(_ name: String, args: String, to target: String) -> JSONValue {
+        var body: [String: JSONValue] = ["kind": .string("command"), "command": .string(name), "to": .array([.string(target)])]
+        if !args.isEmpty { body["args"] = .string(args) }
+        return .object(body)
     }
 
     func stop() async {
@@ -568,4 +799,12 @@ final class ChatSession {
 
     /// A page of messages, read older or newer as the chat is scrolled.
     static let page = 50
+}
+
+/// A file of the composer's being put: how much is sent, or why it failed.
+struct Upload: Identifiable, Equatable, Sendable {
+    let attachment: ChatAttachment
+    var progress: Double = 0
+    var failed: String?
+    var id: String { attachment.id }
 }
