@@ -499,6 +499,19 @@ struct TransportTests {
         #expect(other.composer == "Too much" && other.error == "too big here")
     }
 
+    /// A voice memo's chip in the composer says what it is and how long,
+    /// never the name it is sent with; any other file keeps its name.
+    @Test func aVoiceMemoChipSaysItsLengthNotItsFileName() {
+        let memo = "voice-1CC2B6D3-CAD8-4497-8692-C753A0C7C3B1.m4a"
+        #expect(ComposerMemos.label(memo) == "Voice memo", "its length unknown (a draft from before a relaunch)")
+        ComposerMemos.remember(memo, seconds: 7)
+        #expect(ComposerMemos.label(memo) == "Voice memo · 0:07")
+        ComposerMemos.remember("voice-0A0A0A0A-0A0A-0A0A-0A0A-0A0A0A0A0A0A.m4a", seconds: 65)
+        #expect(ComposerMemos.label("voice-0A0A0A0A-0A0A-0A0A-0A0A-0A0A0A0A0A0A.m4a") == "Voice memo · 1:05")
+        #expect(ComposerMemos.label("photo-1.jpg") == "photo-1.jpg")
+        #expect(ComposerMemos.label("voice-notes.m4a") == "voice-notes.m4a", "a file of theirs so named is theirs")
+    }
+
     /// A turn begun before the backlog (a start, then more steps than one
     /// page holds) still runs, and Stop stops it, opening the chat and
     /// opening it again: its start is read back from earlier work.

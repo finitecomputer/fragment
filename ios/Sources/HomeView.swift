@@ -1,5 +1,7 @@
+import AVFoundation
 import PhotosUI
 import SwiftUI
+import Synchronization
 import UniformTypeIdentifiers
 
 struct HomeView: View {
@@ -205,7 +207,9 @@ struct ComposerBar: View {
                 if !attached.isEmpty {
                     ScrollView(.horizontal) { HStack {
                         ForEach(attached, id: \.id) { file in
-                            Button { remove(file.id) } label: { Label(file.name, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered)
+                            let shown = ComposerMemos.label(file.name)
+                            Button { remove(file.id) } label: { Label(shown, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered)
+                                .accessibilityLabel("Remove \(shown)")
                                 .accessibilityIdentifier("attached")
                         }
                     } }
@@ -255,11 +259,40 @@ struct ComposerBar: View {
         }
     }
     private func attachMemo(_ url: URL) {
+        // its length, read before its file goes
+        ComposerMemos.remember(url)
         let taken = attach(1) {
             defer { try? FileManager.default.removeItem(at: url) }
             return try await ComposerFiles.read([url])
         }
         if !taken { try? FileManager.default.removeItem(at: url) }
+    }
+}
+
+/// The composer's voice memos, by the name each is sent with (`VoiceMemo`'s
+/// `voice-<UUID>.m4a`, which the web and agents see): its chip says "Voice
+/// memo · 0:07", never that name. Lengths are kept while the app runs; a
+/// draft's memo from before a relaunch says "Voice memo".
+enum ComposerMemos {
+    private static let lengths = Mutex<[String: Int]>([:])
+    /// Lengths kept at most: a bound on memory alone.
+    static let keptMax = 64
+    /// A memo's length in seconds, read from its file.
+    static func remember(_ url: URL) {
+        guard let player = try? AVAudioPlayer(contentsOf: url), player.duration.isFinite else { return }
+        remember(url.lastPathComponent, seconds: Int(player.duration.rounded()))
+    }
+    static func remember(_ name: String, seconds: Int) {
+        lengths.withLock { kept in
+            if kept.count >= keptMax { kept.removeAll() }
+            kept[name] = max(0, seconds)
+        }
+    }
+    /// What a chip says for an attached file of this name.
+    static func label(_ name: String) -> String {
+        guard name.wholeMatch(of: /voice-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\.m4a/) != nil else { return name }
+        guard let seconds = lengths.withLock({ $0[name] }) else { return "Voice memo" }
+        return "Voice memo · \(seconds / 60):" + String(format: "%02d", seconds % 60)
     }
 }
 
