@@ -1798,6 +1798,9 @@ fn only_plain_forms_are_read() {
         ("#[derive(Debug)]\npub struct S { #[some::rewrite] pub a: u16 }\n", "S.a: `#[some::rewrite]`, an attribute the guard does not read"),
         ("#[derive(Debug)]\npub struct S { pub a: u16 }\n#[rewrite]\nimpl Clone for S { fn clone(&self) -> S { S { a: self.a } } }\n", "an impl for S under `#[rewrite]`"),
         ("#[inline]\nfn is_true(b: &bool) -> bool { *b }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::is_true: under `#[inline]`"),
+        ("#[derive(Debug)]\npub struct S { pub a: u16 }\npub type Wire = S;\nimpl<'de> serde::Deserialize<'de> for Wire { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { todo!() } }\n", "impl serde::Deserialize for `crate::Wire`, a type alias"),
+        ("#[derive(Debug)]\npub struct S { pub a: u16 }\nimpl<T: Clone> serde::Serialize for T { fn serialize<Z: serde::Serializer>(&self, s: Z) -> Result<Z::Ok, Z::Error> { todo!() } }\n", "impl serde::Serialize in crate for a type the guard cannot name"),
+        ("pub type Num = u16;\n#[derive(Debug)]\npub struct S { pub a: Num }\n", "S.a: `crate::Num`, a type alias"),
     ];
     for (text, says) in rows {
         let found = refused(text, "S", "crate");

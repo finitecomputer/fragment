@@ -1174,7 +1174,22 @@ pub fn guard(source: &Source, roots: &[(Type, String)], components: &[String], a
     // each impl of a type reached: serde's, schemars' and `Debug` by hand
     // are listed; a trait the guard cannot name is refused
     for i in &source.impls {
-        let Some(Resolved::Def(path)) = source.resolve(&i.self_ty, &i.module) else { continue };
+        let t = source.path_of(&i.trait_path, &i.module);
+        let guarded = matches!(t.as_str(), "std::fmt::Debug" | "core::fmt::Debug") || t.starts_with("serde::") || t.starts_with("schemars::");
+        let path = match source.resolve(&i.self_ty, &i.module) {
+            Some(Resolved::Def(path)) => path,
+            // an impl names its type itself: an alias, a generic or blanket
+            // `T`, or a type the guard cannot name could stand for a wire type
+            Some(Resolved::Alias(a)) => {
+                g.refusals.push(format!("impl {t} for `{a}`, a type alias: an impl names its type itself"));
+                continue;
+            }
+            _ if guarded => {
+                g.refusals.push(format!("impl {t} in {} for a type the guard cannot name (a generic or blanket impl), which could be a wire type's", i.module));
+                continue;
+            }
+            _ => continue,
+        };
         if !g.reached.contains(&path) {
             continue;
         }
@@ -1182,7 +1197,6 @@ pub fn guard(source: &Source, roots: &[(Type, String)], components: &[String], a
         if let Some(a) = i.attrs.iter().find(|a| !a.path().is_ident("doc") && !a.path().is_ident("cfg")) {
             g.refusals.push(format!("an impl for {name} under `#[{}]`, an attribute that could rewrite it", a.path().get_ident().map(ToString::to_string).unwrap_or_default()));
         }
-        let t = source.path_of(&i.trait_path, &i.module);
         let kind = match t.as_str() {
             "serde::Serialize" | "serde::ser::Serialize" => Some("Serialize"),
             "serde::Deserialize" | "serde::de::Deserialize" => Some("Deserialize"),
@@ -1295,8 +1309,7 @@ impl Guard<'_> {
                         }
                     }
                     Some(Resolved::Alias(path)) => {
-                        let (m, target) = self.source.aliases[&path].clone();
-                        self.ty(&target, at, &m, formatted);
+                        self.refusals.push(format!("{at}: `{path}`, a type alias: a wire type's field names its type itself"));
                     }
                     Some(Resolved::Foreign(name)) if FOREIGN.contains(&name.as_str()) => {
                         // a map's keys are strings, as its schema says
