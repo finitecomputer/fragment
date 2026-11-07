@@ -351,7 +351,7 @@ body.reordering iframe { pointer-events: none; }
 .connector-setup .rename-actions { margin-top: 12px; }
 .connector-setup .frame-note { margin-top: 20px; background: none; }
 .connector-setup .frame-note .notice { margin: 0; padding: 0; max-width: none; text-align: left; }
-.connector-setup-frame.tall { height: 352px; }
+.connector-setup-frame.tall { height: 316px; }
 @media (max-width: 520px) { .connector-setup-frame, .connector-setup-frame.tall { height: 140px; } }
 /* a dialog's buttons: pills that keep their size and colours in every state
    (disabled while it saves or arms: fragment-title.js holds its width) */
