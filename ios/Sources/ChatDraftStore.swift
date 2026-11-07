@@ -11,9 +11,10 @@ struct SavedChat: Codable {
     var isEmpty: Bool { composer.isEmpty && attachments.isEmpty && pending.isEmpty && replyTo == nil }
 
     /// One chat's bounds, which editing, saving and loading all hold it to:
-    /// a message's words, its attachments, and the sends waiting.
+    /// a message's words, its attachments (the platform's, as a message
+    /// carries them), and the sends waiting.
     static let textMax = 32_768
-    static let attachmentsMax = 8
+    static var attachmentsMax: Int { ChatAttachment.countMax }
     static let pendingMax = 16
     /// A saved file's size at most: the bounds above, with room for JSON's
     /// escapes.

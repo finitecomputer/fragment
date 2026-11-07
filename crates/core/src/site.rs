@@ -168,7 +168,7 @@ pub struct Declared {
 /// like aside: a dated, versioned or hand-made name (`report-Nov2024a.pdf`,
 /// `menu-Summer24.css`) is revalidated.
 pub fn declared_immutable(stored: Option<&str>, live: &str, site_path: &str) -> bool {
-    let Some(declared) = stored.and_then(|text| serde_json::from_str::<Declared>(text).ok()) else { return false };
+    let Some(declared) = stored.and_then(|text| serde_json::from_slice::<Declared>(text.as_bytes()).ok()) else { return false };
     declared.commit == live && !live.is_empty() && !mime_for_path(site_path).starts_with("text/html") && declared.paths.iter().any(|p| crate::glob::matches_path(p, site_path))
 }
 

@@ -406,7 +406,9 @@ impl PrincipalCell {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
                 let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
                 let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
-                Ok(Response::from_json(&FragmentList { fragments })?)
+                // what its signer's messages carry: the router names an agent's list (`?agent`)
+                let kind = if req.url()?.query() == Some("agent") { fragment_proto::IdentityKind::Agent } else { fragment_proto::IdentityKind::Person };
+                Ok(Response::from_json(&FragmentList { fragments, limits: Some(crate::config::Config::from_env(&self.env).uploads_for(kind)) })?)
             }
             (Method::Put, "/archived") => {
                 let s: SetArchived = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -494,7 +496,7 @@ impl PrincipalCell {
         assert!(self.wiped.get(), "only a wiped list answers so");
         match (req.method(), req.path().as_str()) {
             (Method::Post, "/index") => Ok(Response::from_json(&json!({ "ok": true, "applied": false }))?),
-            (Method::Get, "/list") => Ok(Response::from_json(&FragmentList { fragments: vec![] })?),
+            (Method::Get, "/list") => Ok(Response::from_json(&FragmentList { fragments: vec![], limits: None })?),
             (Method::Post, "/search/entries") => Ok(Response::from_json(&SearchApplied { member: false, applied: 0 })?),
             (Method::Get, "/search") => Ok(Response::from_json(&SearchAnswer { fragments: vec![], messages: vec![] })?),
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}: this list's person was wiped", m.as_ref()))),
@@ -748,7 +750,7 @@ impl PrincipalCell {
             return Ok(SearchApplied { member: false, applied: 0 });
         };
         let searched = row["searched"].as_str().expect("a fenced row names its searched channels");
-        let searched: Vec<String> = serde_json::from_str(searched).map_err(|e| CellError::host(format!("{}'s stored searched channels: {e}", b.fragment)))?;
+        let searched: Vec<String> = crate::json_text(searched).map_err(|e| CellError::host(format!("{}'s stored searched channels: {e}", b.fragment)))?;
         let chat = row["chat"].as_i64() == Some(1);
         let mut applied = 0u64;
         for e in b.entries.iter().filter(|e| searched.contains(&e.channel)) {
@@ -865,18 +867,18 @@ fn listed_binds() -> Vec<SqlStorageValue> {
 
 /// A row as a list shows it.
 fn listed(r: Listed) -> CellResult<ListedFragment> {
-    let sharing = match r.sharing.as_deref().map(serde_json::from_str::<Sharing>) {
+    let sharing = match r.sharing.as_deref().map(crate::json_text::<Sharing>) {
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => return Err(CellError::host(format!("{}'s stored sharing: {e}", r.name))),
         None => None,
     };
-    let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
+    let face = r.face.as_deref().and_then(|f| crate::json_text::<Face>(f).ok());
     let (kind, title, picture, agent_role, agents) = face.map_or((FragmentKind::App, None, None, None, Vec::new()), |f| (f.kind, f.title, f.picture, f.role, f.agents));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
     let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
     let unread = unread.ok_or_else(|| CellError::host(format!("{}'s unread count {} is outside its bound", r.name, r.unread)))?;
-    let listed: Vec<ListedRecord> = match r.listed.as_deref().map(serde_json::from_str) {
+    let listed: Vec<ListedRecord> = match r.listed.as_deref().map(crate::json_text) {
         Some(Ok(records)) => records,
         Some(Err(e)) => return Err(CellError::host(format!("{}'s stored listed records: {e}", r.name))),
         None => vec![],

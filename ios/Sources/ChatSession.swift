@@ -362,7 +362,7 @@ final class ChatSession {
     /// Then `attach` reads and uploads them; until it ends, nothing sends.
     func beginAttaching(_ count: Int) -> Bool {
         guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + attachments.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return false }
+        guard count > 0, count + attachments.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
         attaching = true
         return true
     }
@@ -374,7 +374,7 @@ final class ChatSession {
         do {
             let files = try await prepare()
             guard !files.isEmpty else { error = "This could not be attached."; return }
-            guard files.count + attachments.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return }
+            guard files.count + attachments.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
             for file in files {
                 let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
                 if !attachments.contains(where: { $0.id == put.id }) { attachments.append(put) }

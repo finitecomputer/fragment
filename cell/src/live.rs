@@ -253,7 +253,7 @@ impl FragmentCell {
             self.live.borrow_mut().credentials.insert(st.id.clone(), cookie);
         }
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, platform: self.cfg.platform(), presence });
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, platform: self.cfg.platform(), presence, limits: Some(self.cfg.uploads) });
         Ok(Response::from_websocket(pair.client)?)
     }
 
@@ -380,7 +380,7 @@ impl FragmentCell {
         if !self.still_who(ws, &mut st).await {
             return;
         }
-        let answered = match serde_json::from_str::<LiveIn>(text) {
+        let answered = match crate::json_text::<LiveIn>(text) {
             Ok(LiveIn::Query(query)) => {
                 send(ws, &LiveOut::Result(self.live_query(&st, query).await));
                 Ok(())

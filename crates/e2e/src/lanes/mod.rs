@@ -151,6 +151,7 @@ const LANES: &[Lane] = &[
     search_bench::search_bench,
     import_release::import_release,
     chat::chat,
+    chat::chat_history,
     shell::shell_ui,
     wipe::wipe,
     hermes::hermes,
@@ -195,7 +196,7 @@ pub const SHARDS: [&[&str]; 5] = [
     ],
     &[
         "auth", "create", "chat-seed", "reach", "share", "effects", "appfiles", "sessions-ui", "ai", "billing", "governance", "billing-page", "admin", "shell",
-        "chat",
+        "chat", "chat-history",
     ],
     &["identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart"],
 ];

@@ -62,7 +62,7 @@ impl Row {
 
     /// Only the cell writes `record_schedules`, from a JSON value.
     fn record(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("record_schedules.body is the JSON the cell wrote: {e}"))
+        crate::json_text(&self.body).unwrap_or_else(|e| panic!("record_schedules.body is the JSON the cell wrote: {e}"))
     }
 
     fn view(self) -> Schedule {

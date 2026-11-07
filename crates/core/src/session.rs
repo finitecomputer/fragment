@@ -50,9 +50,6 @@ const _: () = assert!(SESSIONS_MAX + 2_000 <= crate::export::limits::FILES_MAX, 
 const _: () = assert!(2 * ARCHIVE_MAX_BYTES <= crate::export::limits::FRAGMENT_MAX_BYTES, "an archive's bytes fit its person's export");
 /// One conversation's file: one larger is refused, and the rest imported.
 pub const SESSION_MAX_BYTES: usize = 8 * 1024 * 1024;
-/// One file a message held (`Attachment`): one larger is left out, its
-/// message kept. An archive's bytes count every one (`ARCHIVE_MAX_BYTES`).
-pub const MEDIA_FILE_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// A tool's output, an assistant's reasoning, and a tool call's arguments
 /// are cut to this many characters (what the person and the agent said
 /// never is), as the old Finite's export cuts them.
@@ -180,12 +177,14 @@ pub fn media_path(sha256: &str, name: &str) -> String {
 
 impl Attachment {
     /// Whether it names a file an archive keeps: a SHA-256, a size of at
-    /// most `MEDIA_FILE_MAX_BYTES`, a name and a type.
+    /// most a blob's (`limits::BLOB_MAX_BYTES`), a name and a type. An
+    /// archive's bytes count every one (`ARCHIVE_MAX_BYTES`); an import
+    /// sends only what its platform takes from a person (its `limits`).
     pub fn valid(&self) -> bool {
         let sha = self.sha256.len() == 64 && self.sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
         let name = !self.name.trim().is_empty() && self.name.chars().count() <= FIELD_MAX_CHARS && !self.name.chars().any(char::is_control);
         let kind = (1..=100).contains(&self.media_type.len()) && self.media_type.bytes().all(|b| b.is_ascii_graphic());
-        sha && name && kind && (1..=MEDIA_FILE_MAX_BYTES).contains(&self.size)
+        sha && name && kind && (1..=fragment_proto::limits::BLOB_MAX_BYTES).contains(&self.size)
     }
 }
 
@@ -610,7 +609,7 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
 /// each image, recording or file it held (`[image]`); anything else as it
 /// is. The old Finite's export copied such values as they were stored.
 pub fn text_of(text: &str) -> String {
-    match text.strip_prefix("\u{0}json:").and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) {
+    match text.strip_prefix("\u{0}json:").and_then(|j| serde_json::from_slice::<serde_json::Value>(j.as_bytes()).ok()) {
         Some(serde_json::Value::String(s)) => s,
         Some(v @ serde_json::Value::Array(_)) => parts_text(&v).unwrap_or_else(|| text.to_string()),
         _ => text.to_string(),
@@ -868,13 +867,16 @@ mod tests {
     fn a_messages_files_are_kept_by_their_hash() {
         let file = |name: &str, sha: &str, size: u64| Attachment { name: name.into(), media_type: "image/png".into(), size, sha256: sha.into(), path: String::new() };
         let sha = "a".repeat(64);
-        let photo = Message { role: "user".into(), at: Some("2026-10-01T09:00:00Z".into()), attachments: vec![file("plot.PNG", &sha, 10), file("x", "nope", 10), file("big.png", &sha, MEDIA_FILE_MAX_BYTES + 1), file("", &sha, 10), file("a\u{7}b", &sha, 10), file("UP", &"A".repeat(64), 10)], ..Default::default() };
+        let photo = Message { role: "user".into(), at: Some("2026-10-01T09:00:00Z".into()), attachments: vec![file("plot.PNG", &sha, 10), file("x", "nope", 10), file("big.png", &sha, fragment_proto::limits::BLOB_MAX_BYTES + 1), file("", &sha, 10), file("a\u{7}b", &sha, 10), file("UP", &"A".repeat(64), 10)], ..Default::default() };
         let (e, bytes) = filed(chat("p", vec![photo]));
         let back: Session = serde_json::from_slice(&bytes).unwrap();
         let kept = &back.messages[0].attachments;
         assert_eq!(kept.len(), 1, "{kept:?}");
         assert_eq!(kept[0].path, format!("media/{sha}.png"));
         assert_eq!((e.messages, e.media), (1, 10), "a photo with no words is said, and its bytes counted");
+        // past a person's default upload is still a file an archive keeps
+        // (a deployment may take more: its import's to decide)
+        assert!(file("mural.png", &sha, fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT + 1).valid());
         assert_eq!(media_path(&sha, "notes"), format!("media/{sha}.bin"));
         assert_eq!(media_path(&sha, "a.tar.gz"), format!("media/{sha}.gz"));
     }

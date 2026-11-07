@@ -506,7 +506,7 @@ pub struct Catalog {
 impl Catalog {
     /// The catalog `json` (`FRAGMENT_PROVIDERS`) names: a list of rows.
     pub fn parse(json: &str) -> Result<Catalog, CatalogError> {
-        let rows: Vec<Provider> = serde_json::from_str(json).map_err(|e| CatalogError::Shape(e.to_string()))?;
+        let rows: Vec<Provider> = serde_json::from_slice(json.as_bytes()).map_err(|e| CatalogError::Shape(e.to_string()))?;
         Catalog::of(rows)
     }
 

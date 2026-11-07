@@ -748,7 +748,7 @@ mod tests {
         assert_eq!(timeout_for(0), REQUEST_TIMEOUT_BASE);
         assert_eq!(timeout_for(UPLOAD_BYTES_PER_S_MIN * 90), REQUEST_TIMEOUT_BASE + Duration::from_secs(90));
         // the largest blob gets hours, not 30 seconds
-        assert!(timeout_for(256 * 1024 * 1024) > Duration::from_secs(2 * 3600));
+        assert!(timeout_for(fragment_proto::limits::BLOB_MAX_BYTES) > Duration::from_secs(2 * 3600));
     }
 
     /// One percent-encoder for the query values and path segments the CLI
