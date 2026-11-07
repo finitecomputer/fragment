@@ -147,7 +147,8 @@ final class ChatSession {
     /// anew, once the composer is empty (`deliver`).
     func reopen(_ post: PendingPost) {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
-        guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
+        // nor while files are being attached: their places are held (`beginAttaching`)
+        guard composer.isEmpty && attachments.isEmpty && uploads.isEmpty && !attaching else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
         // its own words, files and addressees: the draft's were kept until now
         composer = refused.text; attachments = refused.attachments; recipients = refused.recipients
@@ -362,12 +363,25 @@ final class ChatSession {
         }
     }
 
+    /// The message's files: attached, being put, or failed to be put (which
+    /// waits to go with it). Each takes one of a message's `countMax` places;
+    /// every check of what more it takes counts this, and only this.
+    var fileCount: Int { attachments.count + uploads.count }
+    /// Places the message has left (the photo picker's most).
+    var fileRoom: Int { max(0, ChatAttachment.countMax - fileCount) }
+    /// Whether `count` more files may be attached now, saying why not.
+    func admits(_ count: Int) -> Bool {
+        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return false }
+        return true
+    }
     /// Reserves the attaching of `count` files, at once, before anything is
     /// read: none while others are attaching, none past `countMax` a message.
     /// Then `attach` reads and uploads them; until it ends, nothing sends.
+    /// A voice memo reserves its place before it records (`VoiceMemo.file`),
+    /// so one is refused before it starts, never once it is recorded.
     func beginAttaching(_ count: Int) -> Bool {
-        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
+        guard admits(count) else { return false }
         attaching = true
         return true
     }
@@ -377,9 +391,12 @@ final class ChatSession {
     func attach(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
         defer { attaching = false }
         let files: [OutgoingFile]
-        do { files = try await prepare() } catch { self.error = error.localizedDescription; return }
+        do { files = try await prepare() }
+        // a voice memo cancelled, or never begun (`VoiceMemo.file`): nothing to say
+        catch is CancellationError { return }
+        catch { self.error = error.localizedDescription; return }
         guard !files.isEmpty else { error = "This could not be attached."; return }
-        guard files.count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
+        guard files.count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return }
         var queued: [(OutgoingFile, ChatAttachment)] = []
         for file in files {
             let sha256 = await Task.detached(priority: .userInitiated) { sha256Hex(file.data) }.value
