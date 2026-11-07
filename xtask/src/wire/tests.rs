@@ -1497,7 +1497,9 @@ fn guarded(files: &[(&str, &str)], root: &str, module: &str, components: &[&str]
     let src = super::source::Source::read(&files)?;
     let roots = vec![(syn::parse_str::<syn::Type>(root)?, module.to_string())];
     let components: Vec<String> = components.iter().map(|c| c.to_string()).collect();
-    super::source::guard(&src, &roots, &components, &super::source::Allowed { hand_written: hand, open: &[], skips: &[] })
+    // wire types allowed in every module here (`WIRE_MODULES`' own test is apart)
+    let modules = src.modules();
+    super::source::guard(&src, &roots, &components, &super::source::Allowed { hand_written: hand, open: &[], wire_modules: &modules })
 }
 
 const FIXTURES: [(&str, &str); 1] = [("lib.rs", include_str!("fixtures.rs"))];
@@ -1601,7 +1603,7 @@ fn each_source_rule_refuses_its_fixture() {
         ("#[cfg_attr(a, cfg_attr(b, serde(untagged)))]\npub enum S { A { n: u8 } }\n", "S: `#[cfg_attr(a, …)]`: the guard evaluates `feature = \"schema\"` alone"),
         ("#[derive(Debug)]\n#[cfg_attr(feature = \"schema\", serde(rename_all = \"camelCase\"))]\npub struct S { pub a: u8 }\n", "S: `serde` under `cfg_attr(feature = \"schema\", …)`"),
         ("#[derive(Debug)]\npub struct S { pub a: u8 }\n#[cfg(unix)]\nimpl serde::Serialize for S { fn serialize<T: serde::Serializer>(&self, s: T) -> Result<T::Ok, T::Error> { s.serialize_u8(self.a) } }\n", "lib.rs: an impl under `#[cfg(unix)]`"),
-        ("#[derive(Debug)]\npub struct S { pub a: u8 }\n#[cfg(unix)]\npub mod m {}\n", "crate::m: a module under `#[cfg(unix)]`"),
+        ("#[derive(Debug)]\npub struct S { pub a: u16 }\n#[cfg(unix)]\npub mod m {}\n", "crate::m: a `mod` with `#[cfg(unix)]`"),
         ("#[derive(Debug)]\npub struct S { pub a: u8 }\npub mod gone;\n", "crate::gone: no file for the module"),
         ("#[derive(Debug)]\npub struct S { pub m: std::collections::BTreeMap<u8, u8> }\n", "S.m: a map whose keys are not `String`"),
         ("#[derive(Debug)]\npub struct S { #[cfg(unix)] pub a: u8 }\n", "S.a: a field under a `cfg`"),
@@ -1694,19 +1696,18 @@ fn the_round_nine_false_passes_are_refused() {
     assert!(!from_value::<skipped::old::Row>(written).unwrap().flag, "true written, false read");
     for m in ["crate::skipped::old", "crate::skipped::new"] {
         let refused = guard("Row", m);
-        assert!(refused.contains("Row.flag: `skip_serializing_if = \"skip\"` (skip on bool = default)"), "{refused}");
+        assert!(refused.contains(&format!("Row.flag: `skip_serializing_if = \"skip\"` ({m}::skip, on `bool`, beside default)")), "{refused}");
     }
     assert!(defaults_hold::<skipped::old::Row>().is_ok() && defaults_hold::<skipped::new::Row>().is_ok());
     assert!(breaches(&lock_of::<skipped::old::Row>(true), &lock_of::<skipped::new::Row>(true), &none).is_empty());
     // 3a. two definitions of one type, a `cfg` choosing the one compiled
-    assert!(from_value::<twice::old::Row>(json!({ "legacy": true })).is_ok() && from_value::<twice::new::Row>(json!({ "legacy": true })).is_err());
-    let refused = guard("Row", "crate::twice::old");
-    assert!(refused.contains("Row: two items of one name in its module") && refused.contains("Row: a wire type under a `cfg`"), "{refused}");
-    assert!(breaches(&lock_of::<twice::old::Row>(false), &lock_of::<twice::new::Row>(false), &none).is_empty());
+    let twice = "#[cfg(not(any()))]\n#[derive(Debug)]\npub struct Row { #[serde(alias = \"legacy\")] pub flag: bool }\n#[cfg(any())]\n#[derive(Debug)]\npub struct Row { pub flag: bool }\n";
+    let refused = guarded(&[("lib.rs", twice)], "Row", "crate", &[], &[]).unwrap_err().to_string();
+    assert!(refused.contains("crate::Row: two bindings of one name in one scope") && refused.contains("Row: a wire type under a `cfg`"), "{refused}");
     // 3b. a `#[path]` module is refused, and a file no `mod` reaches is not read
     let pathed = [("lib.rs", "#[path = \"actual.rs\"]\npub mod row;\n"), ("actual.rs", ALIASED), ("row.rs", PLAIN)];
     let refused = guarded(&pathed, "row::Row", "crate", &[], &[]).unwrap_err().to_string();
-    assert!(refused.contains("crate::row: a `#[path]` module"), "{refused}");
+    assert!(refused.contains("crate::row: a `mod` with `#[path]`"), "{refused}");
     let stray = [("lib.rs", "pub mod row;\n"), ("row.rs", PLAIN), ("stray.rs", "macro_rules! m { () => {} }\n")];
     assert_eq!(guarded(&stray, "row::Row", "crate", &["Row"], &[]).unwrap().reached.into_iter().collect::<Vec<_>>(), ["crate::row::Row"]);
     let refused = guarded(&[("lib.rs", "pub mod row;\n"), ("row.rs", ALIASED)], "row::Row", "crate", &[], &[]).unwrap_err().to_string();
@@ -1723,4 +1724,114 @@ fn the_round_nine_false_passes_are_refused() {
     let refused = guard("Row", "crate::renamed::old");
     assert!(refused.contains("impl Deserialize for Row: written by hand"), "{refused}");
     assert!(breaches(&lock_of::<renamed::old::Row>(false), &lock_of::<renamed::new::Row>(false), &none).is_empty());
+}
+
+/// The review's six false passes at `4d93eafa`, each refused: the guard
+/// accepts only forms it resolves without evaluating Rust.
+#[test]
+fn the_round_ten_false_passes_are_refused() {
+    let refused = |files: &[(&str, &str)], root: &str, module: &str| guarded(files, root, module, &[], &[]).unwrap_err().to_string();
+    let row = |attrs: &str| format!("#[derive(Debug)]\npub struct Row {{ {attrs} pub dock: bool }}\n");
+    // 1. a predicate of a known name in another module: names resolve to their
+    // full paths, and only the pinned ones (at the crate's root) are known
+    let nested = format!("fn on_the_dock() -> bool {{ true }}\nfn is_on_the_dock(b: &bool) -> bool {{ *b }}\npub mod nested {{\nfn on_the_dock() -> bool {{ true }}\nfn is_on_the_dock(_: &bool) -> bool {{ true }}\n{}}}\n", row("#[serde(default = \"on_the_dock\", skip_serializing_if = \"is_on_the_dock\")]"));
+    let found = refused(&[("lib.rs", &nested)], "Row", "crate::nested");
+    assert!(found.contains("`#[serde(default = …)]` naming `crate::nested::on_the_dock`") && found.contains("(crate::nested::is_on_the_dock, on `bool`"), "{found}");
+    let shadow = format!("fn default_true() -> bool {{ true }}\nfn is_true(b: &bool) -> bool {{ *b }}\npub mod nested {{\nfn is_true(_: &bool) -> bool {{ true }}\n{}}}\n", row("#[serde(default = \"crate::default_true\", skip_serializing_if = \"is_true\")]"));
+    let found = refused(&[("lib.rs", &shadow)], "Row", "crate::nested");
+    assert!(found.contains("crate::nested::is_true: a function of a pinned name outside the crate's root") && found.contains("(crate::nested::is_true, on `bool`"), "{found}");
+    // 2. a predicate whose body omits more than the default: `is_zero` is no
+    // known predicate, and the pinned `is_default` is its text alone
+    let zero = "fn is_zero(n: &u32) -> bool { *n == 0 || *n == 42 }\n#[derive(Debug)]\npub struct Row { #[serde(default, skip_serializing_if = \"is_zero\")] pub n: u32 }\n";
+    assert!(refused(&[("lib.rs", zero)], "Row", "crate").contains("(crate::is_zero, on `u32`, beside default)"));
+    let edited = "fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() || true }\n#[derive(Debug)]\npub struct Row { #[serde(default, skip_serializing_if = \"is_default\")] pub n: u32 }\n";
+    assert!(refused(&[("lib.rs", edited)], "Row", "crate").contains("crate::is_default: not its pinned text"));
+    // 3. imports under `cfg`s, binding one name twice
+    let imports = "pub mod actual { #[derive(Debug)] pub struct Row { #[serde(alias = \"legacy\")] pub flag: bool } }\npub mod safe { #[derive(Debug)] pub struct Row { pub flag: bool } }\n#[cfg(not(any()))]\npub use actual::Row;\n#[cfg(any())]\npub use safe::Row;\n";
+    let found = refused(&[("lib.rs", imports)], "Row", "crate");
+    assert!(found.contains("crate: a `use` with an attribute") && found.contains("crate::Row: two bindings of one name in one scope"), "{found}");
+    // 4. a module's file chosen by a `cfg_attr`
+    let pathed = [("lib.rs", "#[cfg_attr(feature = \"schema\", path = \"actual.rs\")]\npub mod row;\n"), ("actual.rs", ALIASED), ("row.rs", PLAIN)];
+    let found = refused(&pathed, "row::Row", "crate");
+    assert!(found.contains("crate::row: a `mod` with `#[cfg_attr(") && found.contains("path = \"actual.rs\""), "{found}");
+    // 5. a route constant of a block with its own items: a module and an import,
+    // or a macro
+    let block = "pub mod routes {\n#[derive(Debug)]\npub struct Row { pub flag: bool }\npub const T: u8 = { mod hidden { #[derive(Debug)] pub struct Row { #[serde(alias = \"legacy\")] pub flag: bool } } use hidden::Row; ty::<Row>() };\n}\n";
+    let found = refused(&[("lib.rs", block)], "Row", "crate::routes");
+    assert!(found.contains("crate::routes::T: `mod hidden` inside a constant's initializer") && found.contains("crate::routes::T: a `use` inside a constant's initializer") && found.contains("crate::routes::T: a route constant of another form"), "{found}");
+    let macro_block = "pub mod routes {\n#[derive(Debug)]\npub struct Row { pub flag: bool }\npub const T: u8 = { macro_rules! row { () => {} } row!(); ty::<Row>() };\n}\n";
+    let found = refused(&[("lib.rs", macro_block)], "Row", "crate::routes");
+    assert!(found.contains("crate::routes::T: a macro inside a constant's initializer") && found.contains("a route constant of another form"), "{found}");
+}
+
+/// Each of round ten's refusals of a form the guard does not resolve, on
+/// its fixture; and what the plain forms accept.
+#[test]
+fn only_plain_forms_are_read() {
+    let refused = |text: &str, root: &str, module: &str| guarded(&[("lib.rs", text)], root, module, &[], &[]).unwrap_err().to_string();
+    let rows = [
+        ("#[allow(dead_code)]\nmod m {}\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::m: a `mod` with `#[allow(dead_code)]`"),
+        ("#[cfg(feature = \"schema\")]\nmod m {}\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::m: a `mod` with `#[cfg(feature = \"schema\")]`"),
+        ("fn f() { mod inner {} }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "`mod inner` inside a function's body"),
+        ("#[allow(unused_imports)]\nuse std::fmt;\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate: a `use` with an attribute"),
+        ("pub mod a { #[derive(Debug)] pub struct S { pub a: u16 } }\nuse a::S;\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::S: two bindings of one name in one scope"),
+        ("const N: u8 = { struct Hidden; 0 };\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::N: an item inside a constant's initializer"),
+        ("pub mod routes {\n#[derive(Debug)]\npub struct S { pub a: u16 }\npub const T: u8 = ty::<Vec<S>>();\n}\n", "crate::routes::T: `ty::<…>` of another type than a plain path"),
+        ("pub mod routes {\n#[derive(Debug)]\npub struct S { pub a: u16 }\npub const T: u8 = (|| ty::<S>())();\n}\n", "crate::routes::T: a call of something other than a path"),
+        ("pub mod other { pub const T: u8 = 0; }\npub mod routes {\n#[derive(Debug)]\npub struct S { pub a: u16 }\npub const R: u8 = crate::other::T;\n}\n", "crate::routes::R: `crate::other::T`, a value of another form"),
+        ("pub mod other { pub const fn hidden() -> u8 { 0 } }\npub mod routes {\nuse crate::other::hidden;\n#[derive(Debug)]\npub struct S { pub a: u16 }\npub const R: u8 = hidden();\n}\n", "crate::routes::R: `hidden`, a value of another form"),
+        ("fn default_true() -> bool { false }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::default_true: not its pinned text"),
+        ("pub mod m { pub fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() } }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::m::is_default: a function of a pinned name outside the crate's root"),
+        ("fn yes() -> bool { true }\n#[derive(Debug)]\npub struct S { #[serde(default = \"yes\")] pub a: bool }\n", "`#[serde(default = …)]` naming `crate::yes`"),
+        ("pub struct Vec;\n#[derive(Debug)]\npub struct S { #[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub a: Vec<u16> }\n", "`skip_serializing_if = \"Vec::is_empty\"` (a function the guard cannot resolve"),
+        ("fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }\n#[derive(Debug, Default, PartialEq)]\npub struct Inner { pub n: u16 }\n#[derive(Debug)]\npub struct S { #[serde(default, skip_serializing_if = \"is_default\")] pub a: Inner }\n", "(crate::is_default, on `?`, beside default)"),
+        ("fn is_true(b: &bool) -> bool { *b }\n#[derive(Debug)]\npub struct S { #[serde(default, skip_serializing_if = \"is_true\")] pub a: bool }\n", "(crate::is_true, on `bool`, beside default)"),
+        ("use std::collections::*;\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate: a glob import"),
+        ("extern crate serde as other;\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate: `extern crate serde`"),
+        ("#![cfg(any())]\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "lib.rs: an inner `#![cfg]`"),
+        ("fn f() { use std::fmt; }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "a `use` inside a function's body"),
+        ("fn f() { make!(); }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "lib.rs: make!, a macro the guard does not know"),
+        ("fn f() -> String { format!(\"{}\", make!()) }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "lib.rs: make!, a macro the guard does not know"),
+        ("const N: u8 = make!();\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::N: make!, a macro the guard does not know"),
+        ("use other::vec;\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate: `use other::vec`, an import of a macro's name"),
+        ("#[derive(Debug)]\n#[rewrite]\npub struct S { pub a: u16 }\n", "S: `#[rewrite]`, an attribute the guard does not read"),
+        ("#[derive(Debug)]\npub struct S { #[some::rewrite] pub a: u16 }\n", "S.a: `#[some::rewrite]`, an attribute the guard does not read"),
+        ("#[derive(Debug)]\npub struct S { pub a: u16 }\n#[rewrite]\nimpl Clone for S { fn clone(&self) -> S { S { a: self.a } } }\n", "an impl for S under `#[rewrite]`"),
+        ("#[inline]\nfn is_true(b: &bool) -> bool { *b }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::is_true: under `#[inline]`"),
+    ];
+    for (text, says) in rows {
+        let found = refused(text, "S", "crate");
+        assert!(found.contains(says), "{text}\n{found}");
+    }
+    // a manifest that could make `serde::` another crate
+    for (manifest, text, says) in [
+        ("crates/proto/Cargo.toml", "[dependencies]\nserde = { package = \"other\", version = \"1\" }\n", "`package`"),
+        ("Cargo.toml", "[workspace]\n[patch.crates-io]\nserde = { path = \"other\" }\n", "`[patch`"),
+    ] {
+        let root = scratch(&format!("manifest-{}", says.trim_matches(|c: char| !c.is_alphanumeric())));
+        std::fs::create_dir_all(root.join("crates/proto/src")).unwrap();
+        std::fs::write(root.join("crates/proto/src/lib.rs"), "#[derive(Debug)]\npub struct S { pub a: u16 }\n").unwrap();
+        for m in ["Cargo.toml", "crates/proto/Cargo.toml"] {
+            std::fs::write(root.join(m), if m == manifest { text } else { "[package]\nname = \"x\"\n" }).unwrap();
+        }
+        let src = super::source::Source::read_dir(&root.join("crates/proto/src")).unwrap();
+        let roots = vec![(syn::parse_str("S").unwrap(), "crate".to_string())];
+        let found = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &["crate"] }).unwrap_err().to_string();
+        assert!(found.contains(says), "{manifest}: {found}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    // a wire type outside WIRE_MODULES, or below one's top level
+    let src = super::source::Source::read(&[("lib.rs".into(), "pub mod deep { #[derive(Debug)] pub struct S { pub a: u16 } }\n".into())]).unwrap();
+    let roots = vec![(syn::parse_str("deep::S").unwrap(), "crate".to_string())];
+    let found = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &["crate"] }).unwrap_err().to_string();
+    assert!(found.contains("S: a wire type in `crate::deep`: wire types live at the top level of [\"crate\"] alone"), "{found}");
+    // the plain forms: the pinned functions, the standard library's predicates,
+    // and a route constant of literals
+    let plain = "fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }\nfn is_true(b: &bool) -> bool { *b }\nfn default_true() -> bool { true }\npub mod routes {\n#[derive(Debug)]\npub struct S {\n#[serde(default, skip_serializing_if = \"crate::is_default\")] pub n: u32,\n#[serde(default = \"crate::default_true\", skip_serializing_if = \"crate::is_true\")] pub dock: bool,\n#[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub list: Vec<u16>,\n#[serde(default, skip_serializing_if = \"Option::is_none\")] pub maybe: Option<u16>,\n}\npub const T: &[(u8, &str)] = &[(1, \"a\")];\npub const R: u8 = ty::<S>();\n}\n";
+    let src = super::source::Source::read(&[("lib.rs".into(), plain.into())]).unwrap();
+    let roots = src.route_types();
+    assert_eq!(roots.len(), 1, "one route root");
+    let modules = src.modules();
+    let held = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &modules }).unwrap();
+    assert_eq!(held.reached.into_iter().collect::<Vec<_>>(), ["crate::routes::S"]);
 }

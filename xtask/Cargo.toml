@@ -15,7 +15,9 @@ fragment-core = { path = "../crates/core", features = ["sqlite"] }
 fragment-proto = { path = "../crates/proto", features = ["schema"] }
 schemars = { version = "1.2.3", default-features = false, features = ["derive", "std"] }
 # the wire's types' serde attributes, read from crates/proto's source (wire/source.rs)
-syn = { version = "2.0.119", features = ["full", "visit"] }
+syn = { version = "2.0.119", features = ["full", "visit", "extra-traits"] }
+# a macro's tokens, scanned for the macros inside them (wire/source.rs)
+proc-macro2 = "1.0.107"
 fragment-devstack = { path = "../crates/devstack" }
 # dev's operator key (main.rs `dev`), which `fragment operator wipe` signs with
 fragment-nip98 = { path = "../crates/nip98" }

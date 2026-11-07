@@ -13,6 +13,7 @@
 
 mod defaults;
 #[cfg(test)]
+#[allow(dead_code)]
 mod fixtures;
 mod lock;
 mod openapi;

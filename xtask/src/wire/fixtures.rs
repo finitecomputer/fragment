@@ -2,8 +2,8 @@
 //! (`include_str!`, so the guard reads the code that runs): the review's
 //! five false passes at `8672f486`, each in two versions, and one for each
 //! of the guard's other refusals. No macro at item level: the guard
-//! refuses one.
-#![allow(dead_code)]
+//! refuses one, nor an inner attribute (its `dead_code` lint is allowed
+//! where `mod.rs` declares it).
 
 /// Review 1: a default stated once beside `oneOf[a, oneOf[b, c]]`, of a
 /// field each variant reads its own way; `c` reads `true` before and
@@ -40,7 +40,7 @@ pub mod nested {
     }
 
     pub mod old {
-        use super::*;
+        use super::{is_yes, schema, yes, Cow, Deserialize, JsonSchema, Schema, SchemaGenerator, Serialize};
         #[derive(Debug, Serialize, Deserialize)]
         #[serde(tag = "kind", rename_all = "lowercase")]
         pub enum Nested {
@@ -68,7 +68,7 @@ pub mod nested {
     }
 
     pub mod new {
-        use super::*;
+        use super::{is_no, is_yes, no, schema, yes, Cow, Deserialize, JsonSchema, Schema, SchemaGenerator, Serialize};
         #[derive(Debug, Serialize, Deserialize)]
         #[serde(tag = "kind", rename_all = "lowercase")]
         pub enum Nested {
@@ -123,11 +123,11 @@ pub mod mode {
     }
 
     pub mod old {
-        use super::*;
+        use super::{schema, Cow, Deserialize, JsonSchema, Mode, Schema, SchemaGenerator, Serialize};
         fn default_mode() -> Mode {
             Mode::Red
         }
-        fn is_default(m: &Mode) -> bool {
+        fn is_default_mode(m: &Mode) -> bool {
             *m == Mode::Red
         }
         #[derive(Debug, Serialize, Deserialize)]
@@ -137,7 +137,7 @@ pub mod mode {
                 mode: String,
             },
             B {
-                #[serde(default = "default_mode", skip_serializing_if = "is_default")]
+                #[serde(default = "default_mode", skip_serializing_if = "is_default_mode")]
                 mode: Mode,
             },
         }
@@ -152,11 +152,11 @@ pub mod mode {
     }
 
     pub mod new {
-        use super::*;
+        use super::{schema, Cow, Deserialize, JsonSchema, Mode, Schema, SchemaGenerator, Serialize};
         fn default_mode() -> Mode {
             Mode::Blue
         }
-        fn is_default(m: &Mode) -> bool {
+        fn is_default_mode(m: &Mode) -> bool {
             *m == Mode::Blue
         }
         #[derive(Debug, Serialize, Deserialize)]
@@ -166,7 +166,7 @@ pub mod mode {
                 mode: String,
             },
             B {
-                #[serde(default = "default_mode", skip_serializing_if = "is_default")]
+                #[serde(default = "default_mode", skip_serializing_if = "is_default_mode")]
                 mode: Mode,
             },
         }
@@ -223,7 +223,7 @@ pub mod shadow {
     }
 
     pub mod old {
-        use super::*;
+        use super::{is_yes, yes, Deserialize, JsonSchema, Serialize};
         #[derive(Debug, Serialize, Deserialize, JsonSchema)]
         #[serde(untagged)]
         pub enum Shadow {
@@ -249,7 +249,7 @@ pub mod shadow {
     }
 
     pub mod new {
-        use super::*;
+        use super::{is_no, is_yes, no, yes, Deserialize, JsonSchema, Serialize};
         #[derive(Debug, Serialize, Deserialize, JsonSchema)]
         #[serde(untagged)]
         pub enum Shadow {
@@ -309,7 +309,7 @@ pub mod lying {
     }
 
     pub mod old {
-        use super::*;
+        use super::{schema, Cow, Deserialize, JsonSchema, Schema, SchemaGenerator, Serialize};
         #[derive(Debug, Serialize, Deserialize)]
         pub struct Lying {
             pub b: u8,
@@ -324,7 +324,7 @@ pub mod lying {
         }
     }
     pub mod new {
-        use super::*;
+        use super::{schema, Cow, Deserialize, JsonSchema, Schema, SchemaGenerator, Serialize};
         #[derive(Debug, Serialize, Deserialize)]
         pub struct Lying {
             pub c: u8,
@@ -464,40 +464,6 @@ pub mod skipped {
         pub struct Row {
             #[serde(default, skip_serializing_if = "skip")]
             #[schemars(extend("default" = false))]
-            pub flag: bool,
-        }
-    }
-}
-
-/// Review 8 (3a): two definitions of one type, a `cfg` choosing the one
-/// compiled; the alias is on the one compiled before.
-pub mod twice {
-    pub mod old {
-        use schemars::JsonSchema;
-        use serde::{Deserialize, Serialize};
-        #[cfg(not(any()))]
-        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-        pub struct Row {
-            #[serde(alias = "legacy")]
-            pub flag: bool,
-        }
-        #[cfg(any())]
-        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-        pub struct Row {
-            pub flag: bool,
-        }
-    }
-    pub mod new {
-        use schemars::JsonSchema;
-        use serde::{Deserialize, Serialize};
-        #[cfg(not(any()))]
-        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-        pub struct Row {
-            pub flag: bool,
-        }
-        #[cfg(any())]
-        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-        pub struct Row {
             pub flag: bool,
         }
     }

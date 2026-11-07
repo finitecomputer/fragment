@@ -1141,7 +1141,7 @@ pub struct FragmentStatus {
     /// It holds a secret or a door, so it is shared with no one but its
     /// owner and their own agents (FIN-352, `Sharing::reach`): the share
     /// sheet says so. Add-only: left out when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
     /// Editors and up see the inbox token.
@@ -1249,7 +1249,7 @@ pub struct ListedFragment {
     /// A chat's messages the signer's search holds that came after the
     /// last they saw (`PUT /api/fragments/{name}/seen`), at most
     /// `limits::LISTED_UNREAD_MAX`; left out at 0.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = 0)))]
     pub unread: u32,
     /// Its owner's row only: who else is in it, as the fragment last said
@@ -1259,7 +1259,7 @@ pub struct ListedFragment {
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
     /// shell's sidebar leaves it out; search still finds it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub archived: bool,
     /// On the signer's dock: their own choice, not the fragment's (`PUT
@@ -1267,19 +1267,19 @@ pub struct ListedFragment {
     /// shell's dock shows apps and brains, less these and the archived).
     /// Left out while true, so a row from before the choice, or from an
     /// older platform, reads as on it.
-    #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = true)))]
     pub dock: bool,
     /// The signer pinned it: their own view, not the fragment's (`PUT
     /// /api/fragments/{name}/pinned`; the shell's sidebar shows it first in
     /// its section). Left out while false, so a row from an older platform
     /// reads as not pinned.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub pinned: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub owned: bool,
     /// What its members are doing, as its channels that declare `listed`
@@ -1339,14 +1339,14 @@ pub struct Docked {
     pub dock: bool,
 }
 
-/// A row's `dock` when it names none: on it.
-fn on_the_dock() -> bool {
+/// A default of `true` (a row's `dock` that names none is on the dock).
+fn default_true() -> bool {
     true
 }
 
-/// A row on the dock leaves `dock` out.
-fn is_on_the_dock(dock: &bool) -> bool {
-    *dock
+/// A `true` is left out, as its default is `true` (`default_true`).
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// `PUT /api/fragments/{name}/seen`'s answer: the signer has seen the
@@ -1359,8 +1359,8 @@ pub struct Seen {
     pub unread: u32,
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 /// `GET /api/search?q=` (any signer): the signer's fragments whose title
@@ -1405,7 +1405,7 @@ pub struct Sharing {
     /// owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,
     /// `Reason::UnshareFirst`). Add-only: left out when false, and a row
     /// from before it reads none.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
 }
@@ -1942,7 +1942,7 @@ pub struct OpDecl {
     pub input: Option<Value>,
     /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
     /// no replay (the same id runs again) and no effects (docs/api.md, Apps).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub ephemeral: bool,
     /// What it does, in plain text, for a person or an agent choosing it
@@ -2967,25 +2967,5 @@ mod tests {
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
         assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");
         assert_eq!(ErrorCode::Deploying.status(), 503, "a deploy going out is tried again, as a 503 is");
-    }
-
-    /// Each `skip_serializing_if` predicate the wire's writers use omits
-    /// exactly its field's default, so what a reader fills in for a field
-    /// left out is the value written (xtask/src/wire/source.rs, `SKIPS`):
-    /// for each value of a boolean; for the rest, the default, and values
-    /// beside it and at its type's ends (each predicate is its type's own
-    /// emptiness, or `*n == 0`).
-    #[test]
-    fn skip_predicates_omit_their_default_alone() {
-        for b in [false, true] {
-            assert_eq!(std::ops::Not::not(&b), b == bool::default(), "{b}");
-            assert_eq!(is_on_the_dock(&b), b == on_the_dock(), "{b}");
-        }
-        assert!(is_zero(&u32::default()));
-        for n in [1, 2, 9, 10, 1 << 16, u32::MAX - 1, u32::MAX] {
-            assert!(!is_zero(&n), "{n}");
-        }
-        assert!(Vec::<u8>::new().is_empty() && !vec![0u8].is_empty());
-        assert!(std::collections::BTreeMap::<String, u8>::new().is_empty() && !std::collections::BTreeMap::from([(String::new(), 0u8)]).is_empty());
     }
 }
