@@ -3,6 +3,7 @@ import CryptoKit
 import AVFoundation
 import UniformTypeIdentifiers
 import ImageIO
+import Synchronization
 
 struct ChatAttachment: Codable, Identifiable, Equatable, Sendable {
     let sha256: String
@@ -13,13 +14,30 @@ struct ChatAttachment: Codable, Identifiable, Equatable, Sendable {
     var json: JSONValue { .object(["sha256": .string(sha256), "name": .string(name), "type": .string(type), "size": .number(Double(size))]) }
 }
 
+/// What one message carries, at most: the platform's own (`limits` on
+/// `GET /api/fragments`, docs/api.md), which the web's chat reads too.
+struct UploadLimits: Decodable, Equatable, Sendable {
+    let uploadMaxBytes: Int
+    let filesPerMessage: Int
+    /// A platform older than `limits` names none: what it took then.
+    /// Gone once production names them (docs/technical-debt-ledger.md).
+    static let olderPlatform = UploadLimits(uploadMaxBytes: 25 * 1_024 * 1_024, filesPerMessage: 8)
+    /// Why a file is refused, its bound in the platform's words ("100 MB").
+    var sizeRefusal: String { "Files must be between 1 byte and \(ByteCountFormatter.string(fromByteCount: Int64(uploadMaxBytes), countStyle: .file))." }
+    var countRefusal: String { "Attach at most \(filesPerMessage) files per message." }
+}
+
 extension ChatAttachment {
-    /// The app's own bound on one attachment: it is read whole into memory,
-    /// and sent over a phone's network. The server takes up to
-    /// `limits::BLOB_MAX_BYTES` (crates/proto).
-    static let bytesMax = 25 * 1_024 * 1_024
-    /// Files a message carries at most, as the web's chat (`ATTACHMENTS_MAX`).
-    static let countMax = 8
+    private static let held = Mutex(UploadLimits.olderPlatform)
+    /// The platform's limits, as its list last named them (`FragmentAPI.fragments`).
+    static var limits: UploadLimits {
+        get { held.withLock { $0 } }
+        set { held.withLock { $0 = newValue } }
+    }
+    /// One attachment's bytes, at most: it is read whole into memory.
+    static var bytesMax: Int { limits.uploadMaxBytes }
+    /// Files a message carries, at most.
+    static var countMax: Int { limits.filesPerMessage }
 }
 
 /// A file about to be attached, read whole: its bytes, name and type.
@@ -116,7 +134,8 @@ nonisolated enum AttachmentInput {
         return (base.isEmpty ? name : base) + "." + ext
     }
     private static func bounded(_ file: OutgoingFile) throws -> OutgoingFile {
-        guard !file.data.isEmpty, file.data.count <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
+        let limits = ChatAttachment.limits
+        guard !file.data.isEmpty, file.data.count <= limits.uploadMaxBytes else { throw APIError.server(limits.sizeRefusal) }
         return file
     }
 }
@@ -201,7 +220,9 @@ struct AttachmentView: View {
         loading = true; defer { loading = false }
         do {
             let (data, response) = try await api.data(for: URLRequest(url: api.url("api/f/\(fragment)/blobs/\(attachment.sha256)")))
-            guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 25 * 1_024 * 1_024 else { throw APIError.invalidResponse }
+            // a blob is as large as its record names it (a computer's up to
+            // `BLOB_MAX_BYTES`), read whole by then: no bound of the app's here
+            guard (response as? HTTPURLResponse)?.statusCode == 200, data.count == attachment.size else { throw APIError.invalidResponse }
             // The server's name is display-only; never let it choose a filesystem path.
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(attachment.sha256, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

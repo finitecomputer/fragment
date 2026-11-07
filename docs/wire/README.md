@@ -250,6 +250,7 @@ out. `GET /api/fragments` (any signer).
 | field | type | | |
 | --- | --- | --- | --- |
 | `fragments` | `array` of [`ListedFragment`](#listedfragment) | required |  |
+| `limits` | [`UploadLimits`](#uploadlimits) or `null` | optional | What a message of the signer's may carry here, which every client checks its files against before it sends them: a person's, the deployment's bound; an agent's (`?for=` too), a blob's (add-only: absent from an older platform, and from a list read inside). |
 
 ### `FragmentStatus`
 
@@ -370,11 +371,12 @@ Exactly one of these holds:
 
 out, open. A frame the fragment sends. Open (`x-fragment-open`, docs/wire): a reader skips a frame it does not know (the CLI's `channel --follow`, cell/client.mjs, the iOS app).
 
-`type: "hello"`. First on every socket: who the page is to the fragment (the role is fixed while the socket stays open), the platform's origin (the one page that frames it with its person's session, whose messages a framed page may take: docs/api.md, The shell), and everyone on the page who shares presence.
+`type: "hello"`. First on every socket: who the page is to the fragment (the role is fixed while the socket stays open), the platform's origin (the one page that frames it with its person's session, whose messages a framed page may take: docs/api.md, The shell), and everyone on the page who shares presence; and what a message of the person's may carry (add-only: absent from an older platform).
 
 | field | type | | |
 | --- | --- | --- | --- |
 | `id` | `string` | required |  |
+| `limits` | [`UploadLimits`](#uploadlimits) or `null` | optional |  |
 | `platform` | `string` | required |  |
 | `presence` | `array` of [`Present`](#present) | required |  |
 | `principal` | `string` | required |  |
@@ -634,6 +636,15 @@ out. A fragment's sharing, in its owner's list (the platform's page): who may op
 | `members` | `integer` | required |  |
 | `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
+
+### `UploadLimits`
+
+out. The one statement of what a person's message may carry, as the deployment sets it: on `GET /api/fragments` (the shell, the app) and a page's hello (`fragment.me()`). A file over `uploadMaxBytes`, or more files than `filesPerMessage`, is refused before it is sent.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `filesPerMessage` | `integer` | required | `limits::FILES_PER_MESSAGE`. |
+| `uploadMaxBytes` | `integer` | required | One file's bytes (`limits::UPLOAD_MAX_BYTES_DEFAULT` unless named). |
 
 ### `Urls`
 

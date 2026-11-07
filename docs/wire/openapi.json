@@ -379,6 +379,18 @@
               "$ref": "#/components/schemas/ListedFragment"
             },
             "type": "array"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UploadLimits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "What a message of the signer's may carry here, which every client\nchecks its files against before it sends them: a person's, the\ndeployment's bound; an agent's (`?for=` too), a blob's (add-only:\nabsent from an older platform, and from a list read inside)."
           }
         },
         "required": [
@@ -862,10 +874,21 @@
         "description": "A frame the fragment sends.\n\nOpen (`x-fragment-open`, docs/wire): a reader skips a frame it does not\nknow (the CLI's `channel --follow`, cell/client.mjs, the iOS app).",
         "oneOf": [
           {
-            "description": "First on every socket: who the page is to the fragment (the role is\nfixed while the socket stays open), the platform's origin (the one\npage that frames it with its person's session, whose messages a\nframed page may take: docs/api.md, The shell), and everyone on the\npage who shares presence.",
+            "description": "First on every socket: who the page is to the fragment (the role is\nfixed while the socket stays open), the platform's origin (the one\npage that frames it with its person's session, whose messages a\nframed page may take: docs/api.md, The shell), and everyone on the\npage who shares presence; and what a message of the person's may\ncarry (add-only: absent from an older platform).",
             "properties": {
               "id": {
                 "type": "string"
+              },
+              "limits": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UploadLimits"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
               },
               "platform": {
                 "type": "string"
@@ -1821,6 +1844,29 @@
           "visibility",
           "members",
           "guests"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "UploadLimits": {
+        "description": "The one statement of what a person's message may carry, as the\ndeployment sets it: on `GET /api/fragments` (the shell, the app) and\na page's hello (`fragment.me()`). A file over `uploadMaxBytes`, or\nmore files than `filesPerMessage`, is refused before it is sent.",
+        "properties": {
+          "filesPerMessage": {
+            "description": "`limits::FILES_PER_MESSAGE`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploadMaxBytes": {
+            "description": "One file's bytes (`limits::UPLOAD_MAX_BYTES_DEFAULT` unless named).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "uploadMaxBytes",
+          "filesPerMessage"
         ],
         "type": "object",
         "x-fragment-direction": "out"

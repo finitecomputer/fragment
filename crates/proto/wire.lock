@@ -16,6 +16,7 @@ bound Counts.members range u64
 bound ErrorBody.reason default null
 bound ErrorBody.retry_after_ms default null
 bound ErrorBody.retry_after_ms range u64
+bound FragmentList.limits default null
 bound FragmentStatus.agentRole default null
 bound FragmentStatus.blobMinBytes default null
 bound FragmentStatus.blobMinBytes range u64
@@ -50,6 +51,7 @@ bound LiveIn.subscribe.last range i64
 bound LiveOut.draft.at range i64
 bound LiveOut.draft.thinking default null
 bound LiveOut.draft.thinking range u64
+bound LiveOut.hello.limits default null
 bound LiveOut.result.error default null
 bound LiveOut.result.message default null
 bound LiveOut.result.status default null
@@ -73,6 +75,8 @@ bound Sharing.invites default null
 bound Sharing.invites range u64
 bound Sharing.members range u64
 bound Sharing.reach default false
+bound UploadLimits.filesPerMessage range u32
+bound UploadLimits.uploadMaxBytes range u64
 bound Urls.platform default ""
 bound channels.read.query.after range i64
 bound channels.read.query.before range i64
@@ -109,6 +113,7 @@ field ErrorBody.message required string
 field ErrorBody.reason optional Reason|null
 field ErrorBody.retry_after_ms optional integer|null
 field FragmentList.fragments required array<ListedFragment>
+field FragmentList.limits optional UploadLimits|null
 field FragmentStatus.agentRole optional string|null
 field FragmentStatus.blobMinBytes optional integer|null
 field FragmentStatus.code required CodeStatus
@@ -180,6 +185,7 @@ field LiveOut.draft.type required "draft"
 field LiveOut.error.message required string
 field LiveOut.error.type required "error"
 field LiveOut.hello.id required string
+field LiveOut.hello.limits optional UploadLimits|null
 field LiveOut.hello.platform required string
 field LiveOut.hello.presence required array<Present>
 field LiveOut.hello.principal required string
@@ -281,6 +287,8 @@ field Sharing.invites optional integer|null
 field Sharing.members required integer
 field Sharing.reach optional boolean
 field Sharing.visibility required Visibility
+field UploadLimits.filesPerMessage required integer
+field UploadLimits.uploadMaxBytes required integer
 field Urls.canonical required string
 field Urls.platform required string
 field channels.draft.path.channel required string
@@ -476,6 +484,7 @@ type SetArchived in object
 type SetDock in object
 type SetPinned in object
 type Sharing out object
+type UploadLimits out object
 type Urls out object
 type Visibility out enum
 type channels.draft.path in object
