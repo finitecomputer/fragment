@@ -153,7 +153,7 @@ impl FragmentCell {
         let rows: Vec<KeptRow> = self.typed("SELECT result, settled FROM paid WHERE key = ?", vec![key.into()]).map_err(retry)?;
         let Some(row) = rows.into_iter().next() else { return Ok(None) };
         let corrupt = |e: serde_json::Error| retry(CellError::host(format!("a kept step result: {e}")));
-        let result = serde_json::from_str(&row.result).map_err(corrupt)?;
+        let result = crate::json_text(&row.result).map_err(corrupt)?;
         Ok(Some(Kept { result, settled: row.settled != 0 }))
     }
 

@@ -52,7 +52,7 @@ struct Row {
 
 impl Row {
     fn shown(&self) -> CellResult<Shown> {
-        let fields = serde_json::from_str(&self.fields).map_err(|e| CellError::host(format!("listed {}/{}: its stored fields: {e}", self.channel, self.principal)))?;
+        let fields = crate::json_text(&self.fields).map_err(|e| CellError::host(format!("listed {}/{}: its stored fields: {e}", self.channel, self.principal)))?;
         Ok(Shown { kind: self.kind.clone(), fields })
     }
 }

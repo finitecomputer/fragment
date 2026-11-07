@@ -206,7 +206,7 @@ fn run_row(r: &Value) -> RunRow {
 /// A JSON column the cell wrote from a value.
 fn stored_json(r: &Value, column: &str) -> Value {
     let text = r[column].as_str().unwrap_or_else(|| panic!("runs.{column} is TEXT: {r}"));
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
+    crate::json_text(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
 }
 
 /// A secret's row: its sealed value, and the hosts it may go to (none for
@@ -280,7 +280,7 @@ impl StepRow {
     /// value and error: anything else is corruption.
     fn answer(self) -> StepResult {
         let outcome = match (self.value, self.error) {
-            (Some(v), None) => StepOutcome::Value(serde_json::from_str(&v).unwrap_or_else(|e| panic!("steps.value is the JSON the cell wrote: {e}"))),
+            (Some(v), None) => StepOutcome::Value(crate::json_text(&v).unwrap_or_else(|e| panic!("steps.value is the JSON the cell wrote: {e}"))),
             (None, Some(e)) => StepOutcome::Error(e),
             _ => panic!("a steps row holds a value or an error, not both or neither"),
         };
@@ -918,7 +918,7 @@ impl FragmentCell {
         };
         match self.invoke(inv).await {
             // a step's value is a tree (its answers are stored as JSON with the run's)
-            Ok(r) => serde_json::from_str(r.result.get()).map_err(|e| permanent(format!("{op}: its result does not read as JSON: {e}"))),
+            Ok(r) => crate::json_text(r.result.get()).map_err(|e| permanent(format!("{op}: its result does not read as JSON: {e}"))),
             Err(e) => match e.code {
                 ErrorCode::HostFailed | ErrorCode::UpstreamFailed => Err(StepFail::Retry(e.message)),
                 _ => Err(permanent(format!("{op}: {}", e.message))),
@@ -1268,7 +1268,7 @@ impl FragmentCell {
     /// last triggered run started at.
     fn woke_covered(&self) -> CellResult<BTreeMap<String, Option<String>>> {
         match self.meta(MetaKey::WokeCovered)? {
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored woke commits do not decode: {e}"))),
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored woke commits do not decode: {e}"))),
             None => Ok(Default::default()),
         }
     }

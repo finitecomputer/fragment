@@ -57,7 +57,7 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
         return Ok(serde_json::Value::Null);
     }
     let text = js_sys::JSON::stringify(v).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
-    serde_json::from_str(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
+    crate::json_text(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
 }
 
 /// `obj.method(...args)`, settled (a value, a promise, or an RPC
@@ -459,6 +459,16 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
         await_js(call(&queue, "sendBatch", &[list.into()]), "sendBatch").await?;
     }
     Ok(())
+}
+
+/// A queue message's body, the JSON value a cell sent (`queue_send`), as
+/// its JSON text: for serde_json to read as the routes read theirs, so its
+/// types have that one decoder in the Wasm and not a second,
+/// serde_wasm_bindgen one (`worker::Message::try_from`): the meter queue's
+/// `MeterRow` alone was a 44 KB visitor.
+pub(crate) fn queue_text(raw: &worker::RawMessage) -> Result<String, String> {
+    let text = js_sys::JSON::stringify(&raw.body()).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
+    Ok(String::from(text))
 }
 
 /// A request to the Browser Rendering binding (`BROWSER`, wrangler.jsonc

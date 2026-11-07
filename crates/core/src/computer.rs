@@ -690,7 +690,9 @@ impl Lifecycle {
     /// filled from those fields, so a computer stored before this release
     /// comes up as it was.
     pub fn read(text: &str) -> serde_json::Result<Lifecycle> {
-        let mut life: Lifecycle = serde_json::from_str(text)?;
+        // its bytes, never `from_str`: the cell decodes JSON text through
+        // one decoder per type (`crate::json_text`, cell/clippy.toml)
+        let mut life: Lifecycle = serde_json::from_slice(text.as_bytes())?;
         life.phase = life.legacy().fill(life.phase.clone());
         life.set_legacy();
         Ok(life)

@@ -169,7 +169,7 @@ impl FragmentCell {
             }
             // its face (kind, title, picture), for whatever names it: an
             // agent shows by its fragment's (share.rs, `name_agents`)
-            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
+            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Value>(&f).ok()).unwrap_or(Value::Null)),
             // its reach and whether it is shared beyond its owner and their
             // agents, for an operator's census (reach.rs): no names
             "reach" => Ok(json!({ "kind": self.kind()?, "reach": self.reaches()?, "beyond": self.sharing_counts()?.beyond() })),
