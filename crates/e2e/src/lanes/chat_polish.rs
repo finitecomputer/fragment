@@ -662,7 +662,7 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     // any end takes a helper off: done, lost
     post(&ada, "wk:ada-turn:ce:h0", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h0", "outcome": "completed" }))?;
     post(&ada, "wk:ada-turn:ce:h3", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h3", "outcome": "lost" }))?;
-    s.ok("a helper that ended, or was lost, leaves the bar", super::shows(chrome, &page, &format!("{said} === '3 helpers working'")), chrome.eval(&page, &format!("{said}"))?);
+    s.ok("a helper that ended, or was lost, leaves the bar", super::shows(chrome, &page, &format!("{said} === '3 helpers working'")), chrome.eval(&page, &said)?);
     // a phone: one row, the composer on screen
     super::fit(chrome, &page, 390, 844, true)?;
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
@@ -679,7 +679,7 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     post(&bo, "wk:ada-turn:ce:h1", json!({ "kind": "turn.child", "turn": "ada-turn", "child": "h1", "outcome": "completed" }))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let group = format!("/^.+ and .+: 4 helpers working$/.test({said} ?? '') && {head}.querySelectorAll('.faces > *').length === 2 && !{head}.querySelector('.helpers-icon')");
-    s.ok("in a chat of two agents, the row names whose helpers they are, by face, and one agent's end never ends another's helper", super::shows(chrome, &page, &group), chrome.eval(&page, &format!("{said}"))?);
+    s.ok("in a chat of two agents, the row names whose helpers they are, by face, and one agent's end never ends another's helper", super::shows(chrome, &page, &group), chrome.eval(&page, &said)?);
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
     s.ok("opened, each task starts with its agent's face", super::shows(chrome, &page, &format!("{lines}.length === 4 && {lines}.every((n) => n.firstElementChild.matches('.face, .agent-avatar'))")), chrome.eval(&page, &format!("{lines}.map((n) => n.innerHTML)"))?);
     chrome.screenshot(&page, &shots.join("desktop-group.png"))?;
