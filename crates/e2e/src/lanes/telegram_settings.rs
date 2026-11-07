@@ -18,7 +18,8 @@
 //!   bound as its door, and its setup in the dialog, step by step: the
 //!   token, connected, the pairing link, the account that answered it
 //!   confirmed, done; its row then Open; its owner's message from Telegram
-//!   reaches the agent.
+//!   reaches the agent. The chat lane runs it again for a Claude Code agent
+//!   (`chat::claude_telegram`): a door is any runtime's.
 //!
 //! The setup page's calls are its own but for where Telegram is: the fake's
 //! address in place of api.telegram.org (its secrets' host, `connect`'s
@@ -290,13 +291,13 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
 }
 
 /// The checks of an agent with no Telegram chat, set up from Settings: see
-/// the module's.
-pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>) -> Result<()> {
+/// the module's. Its screenshots go in `dir`, in the run's scratch.
+pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &str) -> Result<()> {
     let Some(mut b) = s.browser()? else {
         s.ok("Chrome is installed for Settings' Telegram (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    let shots = s.scratch.join("telegram-settings");
+    let shots = s.scratch.join(dir);
     std::fs::create_dir_all(&shots)?;
     let session = api.sign_in(&Api::email_of(c.owner))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;

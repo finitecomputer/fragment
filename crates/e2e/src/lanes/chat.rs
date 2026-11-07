@@ -1492,7 +1492,22 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     claude_offers(s, chrome, &shell, &name, shots)?;
     claude_settings(s, api, chrome, owner, &shell, &name, shots)?;
     chrome.close(shell)?;
+    claude_telegram(s, api, owner, &name, &identity)?;
     Ok(())
+}
+
+/// A Claude agent's Telegram, from Settings (FIN-393; Paul, 2026-11-07:
+/// "Telegram row for claude yes"): its row is shown (agent-runtimes.js
+/// `doors`), and set up there through the setup page's own calls against
+/// Telegram's fake, its owner's message from Telegram reaches the signed-in
+/// Claude Code, whose answer goes back to Telegram (telegram_settings.rs
+/// `from_settings`, as the computers lane runs it for the stub agent).
+fn claude_telegram(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity: &str) -> Result<()> {
+    const TOKEN: &str = "7002000:e2e-telegram-claude-token";
+    let tg = fragment_fakes::telegram::Telegram::start(TOKEN)?;
+    let owner_id = api.identity(owner)?;
+    let c = super::telegram_settings::Connector { owner, owner_id: &owner_id, agent, identity, tg: &tg, token: TOKEN, wake: TURN };
+    super::telegram_settings::from_settings(s, api, &c, "telegram-claude")
 }
 
 /// The shell's Settings, a fresh page of it: the page before marked, then

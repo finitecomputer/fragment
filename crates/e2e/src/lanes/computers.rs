@@ -1208,7 +1208,7 @@ export class App extends DurableObject { noop() { return {}; } }
     // Set up makes
     let gone = api.signed(c.owner, "DELETE", &format!("/api/f/{name}"), None)?;
     anyhow::ensure!(matches!(gone.status, 200 | 204), "the forked connector deleted: {gone}");
-    super::telegram_settings::from_settings(s, api, &settings)?;
+    super::telegram_settings::from_settings(s, api, &settings, "telegram-settings")?;
     Ok(pokes)
 }
 

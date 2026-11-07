@@ -5,14 +5,15 @@
 // agent's profile (its own page), its screen (its computer's desktop) and
 // its own skills (its fragment's skills/, which Hermes installs); Claude
 // Code, none of them (Paul, 2026-11-02: "different harness, different
-// capabilities"); and a hosted door (`doors`: Settings' Telegram), Hermes
-// alone for now (FIN-393). An agent's runtime is its agent.json's `runtime` (none:
+// capabilities"). Both take a hosted door (`doors`: Settings' Telegram),
+// whose messages the bridge relays to any runtime (Paul, 2026-11-07:
+// "Telegram row for claude yes"). An agent's runtime is its agent.json's `runtime` (none:
 // Hermes), as Settings reads it (agent-settings.js `agentJson`), chosen at
 // its making and never changed: read once a page. Until it is read, or when
 // its read fails, an agent is offered what it was before; a runtime this
 // shell does not know is offered nothing beyond its chats.
 
-export const RUNTIME_OFFERS = { hermes: ["profile", "screen", "skills", "doors"], claude: [] };
+export const RUNTIME_OFFERS = { hermes: ["profile", "screen", "skills", "doors"], claude: ["doors"] };
 
 export function createRuntimes({ agentJson, agents, own, byName }) {
   const runtimes = new Map();
