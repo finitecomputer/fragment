@@ -20,6 +20,21 @@ unfinished design, not debt.
   (`codestorage::repo_name`, the owner's digest), not only those its
   fragments' lives recorded.
 
+## The bridge copies the platform's file bounds; the app, an older platform's
+
+- **Shortcut:** a file's bounds are proto's `limits`, which the platform
+  serves its clients (`UploadLimits`: `GET /api/fragments`, a page's
+  hello). Two copies remain. The bridge's `ATTACHMENT_MAX_BYTES` and
+  `ATTACHMENTS_MAX` (images/ cannot depend on proto yet) are held to
+  proto by xtask/src/guards.rs. The app's `UploadLimits.olderPlatform`
+  (ios/Sources/ChatMedia.swift) is what a platform that serves no
+  `limits` took, 25 MiB and 8 files, for a build that meets one.
+- **Risk:** none past a red check for the bridge's. The app against an
+  older platform refuses a file past 25 MiB that the platform might take.
+- **Delete when:** the bridge depends on proto (FIN-379, PR 4); and
+  production serves `limits` (the first production deploy after FIN-405's
+  PR 3), when the app reads an absent `limits` as no bound of its own.
+
 ## A computer's disk is 20 GB, priced as 12
 
 - **Shortcut:** every computer starts with Containers' most disk, 20 GB
@@ -726,9 +741,10 @@ unfinished design, not debt.
 
 ## A blob upload is one request, and the CLI holds whole files
 
-- **Shortcut:** a blob is one request of at most 256 MiB
-  (cell/src/blobs.rs), and the CLI reads files whole; Cloudflare refuses
-  bodies over 100 MB on Free and Pro zones.
+- **Shortcut:** a blob is one request of at most 256 MiB from a
+  computer, and of at most the deployment's `upload_max_bytes` (its
+  zone's limit: 100 MB on Free and Pro) from a person (cell/src/lib.rs
+  `blob_length`), and the CLI reads files whole.
 - **Risk:** large files fail whole, or cannot upload at all.
 - **Delete when:** uploads go in resumable parts (R2 multipart under the
   zone's limit, tested with a 150 MB file) or by signed URL, and the CLI
