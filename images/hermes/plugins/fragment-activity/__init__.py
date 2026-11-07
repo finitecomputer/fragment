@@ -22,9 +22,12 @@ _children = {}
 # Each recorded child's end not yet answered by the bridge, by its session
 # id: said again (on the socket opened again) until answered, so a stop
 # said while the bridge was away is never lost. An end said twice is one
-# (the bridge ends a helper once). Bounded: past `_ENDS_MAX`, the oldest go.
+# (the bridge ends a helper once). Never dropped: the bound is on recording
+# (`_RECORDED_MAX`), so an end owed always has room.
 _ends = {}
-_ENDS_MAX = 256
+# Recorded children, running or with their end still to say, at most: a
+# child started past it holds the computer, and is recorded nowhere.
+_RECORDED_MAX = 256
 _socket = None
 _worker = None
 # The person's turns this gateway runs, by Hermes' turn id: each our turn's
@@ -117,6 +120,9 @@ def child_started(*, child_session_id=None, parent_turn_id=None, child_goal=None
         raise ValueError("a delegated child has a session id")
     with _condition:
         mine = _turns.get(parent_turn_id) if parent_turn_id else None
+        if mine is not None and sum(_children.values()) + len(_ends) >= _RECORDED_MAX:
+            _log.warning("A helper went unrecorded: too many ends wait for the bridge")
+            mine = None
         frame = {"working": True}
         if mine is not None:
             frame.update(turn=mine[0], child=child_session_id, goal=" ".join(str(child_goal or "").split())[:_GOAL_MAX])
@@ -135,9 +141,6 @@ def child_stopped(*, child_session_id=None, child_status=None, **kwargs):
     with _condition:
         if _children.pop(child_session_id, False):
             _ends[child_session_id] = _CHILD_STATUS.get(child_status, "failed")
-            while len(_ends) > _ENDS_MAX:
-                _log.warning("A helper's end was never answered; dropped")
-                del _ends[next(iter(_ends))]
         if _ends:
             _say_ends()
         elif _socket is not None:
