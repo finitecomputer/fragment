@@ -1587,9 +1587,9 @@ impl ComputerCell {
     /// whether there was one (`fail-starts`, `fail-takeover-destroys`).
     fn lever_take(&self, key: MetaKey) -> bool {
         let Ok(Some(n)) = self.meta(key) else { return false };
-        let left = n.parse::<u32>().unwrap_or(0).saturating_sub(1);
-        let _ = if left == 0 { self.delete_meta(key) } else { self.set_meta(key, &left.to_string()) };
-        true
+        let n = n.parse::<u32>().unwrap_or(0);
+        let _ = if n <= 1 { self.delete_meta(key) } else { self.set_meta(key, &(n - 1).to_string()) };
+        n > 0
     }
 
     async fn stall_failing_start(&self) {
@@ -2379,31 +2379,24 @@ impl ComputerCell {
                 // the next `times` starts fail with their container up, or
                 // the next takeovers' destroys leave it running (0: none)
                 let key = if b.op == "fail-starts" { MetaKey::FailStarts } else { MetaKey::FailTakeOverDestroys };
-                let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid(format!("{} names its times, 0 to {LEVER_FAILS_MAX}", b.op)))?;
-                match times {
-                    0 => self.delete_meta(key)?,
-                    n => self.set_meta(key, &n.to_string())?,
-                }
-                Ok(json!({ "computer": id, "op": b.op, "times": times }))
+                let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
+                self.set_meta(key, &times.to_string())?;
+                Ok(json!({ "computer": id }))
             }
             "alarm-in" => {
                 // its alarm fires in `ms`, whatever its lifecycle asked for
                 let ms = b.ms.ok_or_else(|| CellError::invalid("alarm-in names its ms"))?;
-                let at = js::now_ms() + i64::from(ms);
-                self.alarm_at(Some(at)).await?;
-                Ok(json!({ "computer": id, "alarmAt": at }))
+                self.alarm_at(Some(js::now_ms() + i64::from(ms))).await?;
+                Ok(json!({ "computer": id }))
             }
             "stall-failing-start" | "stall-takeover" => {
                 // its next start that fails waits `ms` between storing that
                 // it fails and destroying its container, or its next
                 // takeover of a start destroying, before its destroy (0: none)
                 let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
-                let ms = b.ms.map(u64::from).filter(|ms| *ms <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid(format!("{} names its ms, 0 to {STALL_FAILING_START_MAX_MS}", b.op)))?;
-                match ms {
-                    0 => self.delete_meta(key)?,
-                    ms => self.set_meta(key, &ms.to_string())?,
-                }
-                Ok(json!({ "computer": id, "op": b.op, "ms": ms }))
+                let ms = b.ms.filter(|ms| u64::from(*ms) <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid("it names its ms, 0 to 600000"))?;
+                self.set_meta(key, &ms.to_string())?;
+                Ok(json!({ "computer": id }))
             }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
