@@ -90,7 +90,7 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
     api, el: (tag, cls, text) => new Node(tag, cls, text), section, actionLine, named: (node, f) => Object.assign(node, { textContent: f }), seg: (s) => s,
     computer: () => ({ agents: AGENTS }), fragments: () => list, listed: () => at.listed, own: (f) => f.role === "owner",
     connectorLabel: (agent, door) => `${agent.split("--")[0]}-${door}`, markOffer: (node, agent, what) => Object.assign(node, { offer: [agent, what] }),
-    framed: (name, path) => `/auth/frame?name=${name}&return=${path}`, openSetup: (o) => opened.push(o), openChat: () => {},
+    framed: (name, path) => `/auth/frame?name=${name}&return=${path}`, pressSetup: () => 1, openSetup: (o) => opened.push(o), openChat: () => {},
     notice: (...n) => notices.push(n), load: async () => {
       at.loads++;
       if (at.listFails) {
@@ -160,7 +160,7 @@ test("Set up opens a bound chat's setup page, making nothing", async () => {
   w.draw();
   await w.press(0, "Set up");
   assert.equal(w.opened.length, 1);
-  assert.deepEqual({ ...w.opened[0], onClose: undefined }, { src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", onClose: undefined });
+  assert.deepEqual({ ...w.opened[0], onClose: undefined }, { pressed: 1, src: "/auth/frame?name=maple-telegram--e5f6&return=/setup.html", name: "maple-telegram--e5f6", agent: "maple--a1b2", title: "Telegram", onClose: undefined });
   assert.ok(!w.asked.some((a) => a.startsWith("POST")));
 });
 

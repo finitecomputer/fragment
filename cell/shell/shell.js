@@ -1382,14 +1382,14 @@ function nameScreen(frame) {
   } catch {}
 }
 
-const { openSetup } = createConnectorSetup({ el, named, frameOf });
+const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
 const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
   api, el, section, actionLine, named, seg, computer: () => state.computer, getSeat: () => state.seat,
-  titleOf, frameOf, openSetup, simplexChatOf, openChat, notice, setHome,
+  titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome,
 });
 const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
-  connectorLabel, markOffer, framed, openSetup, openChat, notice, load,
+  connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load,
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.

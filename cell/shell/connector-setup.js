@@ -13,9 +13,18 @@
 // frame that can't sign in (Safari's cookie rule) says so in its place,
 // its link opening that same page in a tab (shell.js, BLOCKED). Done or
 // Escape closes it, and `onClose` follows.
+//
+// A Set up's dialog opens once what it waits on answers (a port ticket, a
+// connector made): each press takes its turn first (`pressSetup`), and only
+// the latest press's opens, so an answer that comes late never closes the
+// dialog of a Set up pressed after it.
 export function createConnectorSetup({ el, named, frameOf }) {
   let open = null;
-  function openSetup({ title, agent, src, name, frame = frameOf(src, `${title} setup`, name), tall = false, onClose }) {
+  let presses = 0;
+  const pressSetup = () => ++presses;
+  function openSetup({ pressed, title, agent, src, name, frame, tall = false, onClose }) {
+    if (pressed !== presses) return null;
+    frame ??= frameOf(src, `${title} setup`, name);
     open?.close();
     const dialog = el("dialog", "rename-agent connector-setup");
     dialog.setAttribute("aria-labelledby", "connector-setup-title");
@@ -39,5 +48,5 @@ export function createConnectorSetup({ el, named, frameOf }) {
     dialog.showModal();
     return dialog;
   }
-  return { openSetup };
+  return { pressSetup, openSetup };
 }
