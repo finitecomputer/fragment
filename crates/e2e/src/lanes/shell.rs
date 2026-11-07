@@ -8301,16 +8301,28 @@ fn pinned_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     );
     // on a phone: the list, the pinned agent first
     let wide = b.eval(page, "[innerWidth, innerHeight]")?;
+    // (narrow and settled first: the wide layout's open sidebar closes as it narrows)
+    let settled = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
+    let left_open = "document.getElementById('layout').classList.contains('left-open')";
     b.viewport(page, 390, 844, true)?;
-    if b.eval(page, "document.getElementById('layout').classList.contains('left-open')")? != true {
+    let narrow = b.until(page, &format!("innerWidth === 390 && document.getElementById('layout').classList.contains('narrow') && {settled}"), wait);
+    if b.eval(page, left_open)? != true {
         b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
     }
-    let phone = b.until(page, &format!("document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {}", order(&format!("Reader,{first_title}"))), wait);
+    let phone = narrow && b.until(page, &format!("{left_open} && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {settled} && {}", order(&format!("Reader,{first_title}"))), wait);
     let _ = b.screenshot(page, &shots.join("phone-390-agent-pinned.png"));
+    let phone_heroes = b.eval(page, HEROES)?;
+    b.eval(page, "(document.getElementById('scrim').click(), true)")?;
+    b.until(page, &format!("!{left_open}"), wait);
     let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32);
     b.viewport(page, w, h, false)?;
-    let back = b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)"), wait);
-    s.ok("on a phone the list shows the pinned agent first too", phone && back, json!({ "heroes": b.eval(page, HEROES)? }));
+    // wide again, its sidebar open as it was, before the next press, which goes by where things are
+    b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && {settled}"), wait);
+    if b.eval(page, left_open)? != true {
+        b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
+    }
+    let back = b.until(page, &format!("{left_open} && document.querySelector({})?.getBoundingClientRect().width > 0 && {settled}", js(&hero)), wait);
+    s.ok("on a phone the list shows the pinned agent first too", phone && back, json!({ "heroes": phone_heroes, "back": back }));
     let unpinned = pick(b, "Unpin")?;
     let again = b.until(page, &format!("{} && !document.querySelector({})", order(&format!("{first_title},Reader")), js(&format!("{hero} .pin-mark"))), wait);
     let row = own_row_of(api, session, reader);
