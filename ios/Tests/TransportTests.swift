@@ -140,12 +140,15 @@ struct TransportTests {
         #expect(session.rows.map(\.id) == ["chat:1", "work:2"], "a turn's start is not shown")
         #expect(session.activeTurns == ["t1"])
 
+        // a reply begun takes its place, after its turn's latest record
+        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hal","at":2500}"#)
+        try await waitUntil("a reply begun") { session.drafts.map(\.text) == ["Hal"] }
+        #expect(session.rows.map(\.id) == ["chat:1", "work:2", "d:npub1agent t1"])
         let told = Mutex(false)
         withObservationTracking { _ = session.rows } onChange: { told.withLock { $0 = true } }
-        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hal","at":2500}"#)
         socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hallo","at":2600}"#)
         try await waitUntil("the reply's words") { session.drafts.map(\.text) == ["Hallo"] }
-        #expect(!told.withLock { $0 }, "a draft never redraws the rows")
+        #expect(!told.withLock { $0 }, "a draft's words never redraw the rows")
     }
 
     /// Which turns run is said again by each connection, once its work is
@@ -309,6 +312,106 @@ struct TransportTests {
         await session.stop()
         let stop = try #require(stub.seen.first { $0.route == route })
         #expect(stop.json == .object(["id": .string("stop:t4"), "body": .object(["kind": .string("stop"), "turn": .string("t4")])]))
+    }
+
+    /// Steer, as the web's composer offers it (chat.js `refreshSend`): to
+    /// the owner of an agent whose menu has `steer`, while it works, for
+    /// words alone; it sends `/steer <words>` as a command of that menu,
+    /// and the words stay until it is sent.
+    @Test func steerIsOfferedByTheAgentsMenuAndSendsItsCommand() async throws {
+        let route = posts
+        let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 9, replayed: false) : (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"]), api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(frame("work", 1, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"},{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
+        session.composer = "  use the blue one "
+        #expect(!session.steers(recording: false), "an agent not theirs offers them no menu")
+        session.owned = ["npub1agent"]
+        #expect(session.myTurn == TurnKey(agent: "npub1agent", id: "t2"))
+        #expect(session.steers(recording: false))
+        #expect(!session.steers(recording: true), "a voice memo being recorded goes with a message alone")
+        #expect(session.placeholder(name: { _ in "Juniper" }) == "A message waits its turn")
+        session.attachments = [ChatAttachment(sha256: "x", name: "a.txt", type: "text/plain", size: 1)]
+        #expect(!session.steers(recording: false), "files go with a message alone")
+        session.attachments = []
+        session.composer = "/usage"
+        #expect(!session.steers(recording: false), "a command typed is no steer")
+        session.composer = "  use the blue one "
+        await session.steer()
+        let sent = try #require(stub.seen.first { $0.route == route })
+        #expect(sent.json["body"] == .object(["kind": .string("command"), "command": .string("steer"), "args": .string("use the blue one"), "to": .array([.string("npub1agent")])]))
+        #expect(session.composer.isEmpty && session.error == nil)
+        // shown as typed, a person's command (chat.js `userMessage`)
+        #expect(session.rows.contains { $0.record?.command == "steer" })
+    }
+
+    /// A menu without `steer` (another runtime's) offers none.
+    @Test func noSteerWhereTheRuntimeOffersNone() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"]), api: api)
+        session.owned = ["npub1agent"]
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(frame("work", 1, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"}]}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me"}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
+        session.composer = "use the blue one"
+        #expect(!session.steers(recording: false))
+        #expect(session.placeholder(name: { _ in "Juniper" }) == "A message waits its turn")
+    }
+
+    /// A turn asking its asker something (`turn.asked`): the composer is the
+    /// answer, and what it sends is the web's answer, a message of theirs
+    /// to the chat (docs/chat-records.md: "The asker's next message to that
+    /// agent is then the answer"), no command, no card's answer. Once said,
+    /// it waits on no one.
+    @Test func anAnswerToATurnsQuestionIsTheirNextMessage() async throws {
+        let route = posts
+        let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 3, replayed: false) : (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"]), api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(#"{"type":"record",\#(record("chat", 1, principal: "npub1me", body: #"{"text":"ask-me"}"#).dropFirst())"#)
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
+        socket.push(frame("chat", 2, body: #"{"text":"What should I call it?","turn":"t1"}"#))
+        socket.push(frame("work", 3, body: #"{"kind":"turn.asked","turn":"t1","asks":"npub1me"}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":3,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"chat","next":2,"more":false}"#)
+        try await waitUntil("the question asked") { session.workRead && session.answering() != nil }
+        #expect(session.answering() == TurnKey(agent: "npub1agent", id: "t1"))
+        #expect(session.placeholder(name: { _ in "Juniper" }) == "Your answer for Juniper")
+        // its line says so, after the question
+        let ids = session.rows.map(\.id)
+        #expect(ids.suffix(2) == ["chat:2", "q:npub1agent t1"])
+        session.composer = "Basil"
+        await session.send()
+        let sent = try #require(stub.seen.first { $0.route == route })
+        let body = sent.json["body"]
+        #expect(body["text"] == .string("Basil") && body["kind"] == .null && body["to"] == .null && body["command"] == .null)
+        // the platform's record of it (`posted`: npub1me's, at 3000) ends the wait
+        try await waitUntil("answered") { session.answering() == nil }
+        #expect(!session.rows.contains { $0.id == "q:npub1agent t1" })
     }
 
     /// A turn begun before the backlog (a start, then more steps than one

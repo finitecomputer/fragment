@@ -36,6 +36,127 @@ struct WorkingIndicatorTests {
         #expect(WorkingActivity(timeline).cards[first.id]?.until == 6000)
     }
 
+    /// The web's order (chat.js `timeline()`), whatever order records come
+    /// in: by `at`, then `n`, a record's seq, a `chat` and a `work` one
+    /// compared as numbers; at a tie of both, a message before its turn's
+    /// records. A reply being written and a working line go after their
+    /// turn's latest record (`lastN + 0.5`); a live call after all its turn
+    /// said. So the agent's words never trade places with its work.
+    @Test func orderIsTheWebsAcrossChannelsAndStaysWhileAReplyStreams() throws {
+        let agent = "npub1preview", key = TurnKey(agent: agent, id: "t")
+        func said(_ seq: Int64, at: Int64, _ text: String, by: String = "npub1preview", turn: Bool = true) -> ChannelRecord {
+            var body: [String: JSONValue] = ["text": .string(text)]
+            if turn { body["turn"] = .string("t") }
+            return .init(channel: "chat", seq: seq, at: at, principal: by, kind: "message", body: .object(body))
+        }
+        func did(_ seq: Int64, at: Int64, _ kind: String, _ id: String = "") -> ChannelRecord {
+            var body: [String: JSONValue] = ["kind": .string(kind), "turn": .string("t")]
+            switch kind {
+            case "turn.start": body["asker"] = .string("npub1me"); body["cause"] = .object(["channel": .string("chat"), "seq": .number(1)])
+            case "turn.call", "turn.step":
+                body["tool"] = .string("terminal"); body["category"] = .string("shell"); body["args"] = .string(id)
+                body["tool_call_id"] = .string(id); body["response"] = .string("r-" + id)
+                if kind == "turn.step" { body["step"] = .number(Double(seq)); body["ok"] = .bool(true); body["status"] = .string("completed") }
+            case "turn.end": body["outcome"] = .string("idle")
+            default: break
+            }
+            return .init(channel: "work", seq: seq, at: at, principal: agent, kind: "message", body: .object(body))
+        }
+        /// The same records, inserted in several orders (a replay, a page
+        /// read back), and drawn twice: one answer.
+        func rows(_ records: [ChannelRecord], drafting: Set<TurnKey> = [], ready: Bool = true) throws -> [String] {
+            var generator = SeededGenerator(seed: 7)
+            var drawn: [[String]] = []
+            for pass in 0..<6 {
+                var timeline = Timeline()
+                let order = pass == 0 ? records : pass == 1 ? records.reversed() : records.shuffled(using: &generator)
+                for record in order { timeline.insert(record) }
+                let activity = WorkingActivity(timeline, ready: ready, drafting: drafting, me: "npub1me", agents: [agent])
+                #expect(WorkingActivity(timeline, ready: ready, drafting: drafting, me: "npub1me", agents: [agent]) == activity)
+                drawn.append(activity.rows.map(\.id))
+            }
+            #expect(Set(drawn.map { $0.joined(separator: ",") }).count == 1, "\(drawn)")
+            return drawn[0]
+        }
+
+        // 1. An ended turn, records at equal times on both channels.
+        let ended = [
+            did(1, at: 1000, "turn.start"), said(1, at: 1000, "hi", by: "npub1me", turn: false),
+            // its words before the call, at the call's own time: chat 2 before work 3
+            did(2, at: 2000, "turn.call", "a"), said(2, at: 2000, "Let me look."), did(3, at: 2000, "turn.step", "a"),
+            // a tie of both at and seq: the message first, as the web inserts it
+            said(4, at: 3000, "Then this."), did(4, at: 3000, "turn.step", "b"),
+            // work 5 before chat 6
+            did(5, at: 4000, "turn.step", "c"), said(6, at: 4000, "Done."),
+            did(6, at: 5000, "turn.end")
+        ]
+        #expect(try rows(ended) == ["chat:1", "chat:2", "work:3", "chat:4", "work:4", "chat:6"])
+        var timeline = Timeline()
+        for record in ended { timeline.insert(record) }
+        #expect(WorkingActivity(timeline).cards["work:4"]?.steps.map(\.id) == ["work:4", "work:5"])
+
+        // 2. A turn running: its reply streams while its work comes.
+        var live = [did(1, at: 1000, "turn.start"), said(1, at: 1000, "hi", by: "npub1me", turn: false)]
+        #expect(try rows(live) == ["chat:1", "w:\(agent) t"])
+        #expect(try rows(live, drafting: [key]) == ["chat:1", "d:\(agent) t"], "the draft says it works")
+        // a call while its words are still being written: the words first,
+        // as they will be once they are a reply
+        live.append(did(2, at: 2000, "turn.call", "a"))
+        #expect(try rows(live, drafting: [key]) == ["chat:1", "d:\(agent) t", "work:2"])
+        live.append(said(2, at: 2100, "Let me look."))
+        #expect(try rows(live) == ["chat:1", "chat:2", "work:2"])
+        // its result, the card's in place of its call
+        live.append(did(3, at: 2500, "turn.step", "a"))
+        #expect(try rows(live) == ["chat:1", "chat:2", "work:3"])
+        #expect(try rows(live, drafting: [key]) == ["chat:1", "chat:2", "work:3", "d:\(agent) t"])
+        // the next call, again while its words are written
+        live.append(did(4, at: 2600, "turn.call", "b"))
+        #expect(try rows(live, drafting: [key]) == ["chat:1", "chat:2", "work:3", "d:\(agent) t", "work:4"])
+        live.append(said(3, at: 2700, "Found it."))
+        #expect(try rows(live) == ["chat:1", "chat:2", "work:3", "chat:3", "work:4"])
+        // the person says more meanwhile: after the turn's live line
+        live.append(said(4, at: 2800, "also this", by: "npub1me", turn: false))
+        #expect(try rows(live) == ["chat:1", "chat:2", "work:3", "chat:3", "work:4", "chat:4"])
+        live.append(did(5, at: 2900, "turn.step", "b"))
+        // the working line after the turn's latest record, before nothing later
+        #expect(try rows(live, drafting: [key]) == ["chat:1", "chat:2", "work:3", "chat:3", "chat:4", "work:5", "d:\(agent) t"])
+        // read before its work is (`ready` false): no line, every record where it was
+        #expect(try rows(live, ready: false) == ["chat:1", "chat:2", "work:3", "chat:3", "chat:4", "work:5"])
+    }
+
+    /// A person's message waits its turn while its agent works for someone
+    /// else, or after its turn's work went past its last words (chat.js
+    /// `queued`); its own asker's message after the agent spoke, or one
+    /// its own turn began on, waits for nothing.
+    @Test func aMessageIsQueuedAsTheWebMarksIt() throws {
+        let agent = "npub1preview"
+        func work(_ seq: Int64, _ body: [String: JSONValue]) -> ChannelRecord {
+            .init(channel: "work", seq: seq, at: seq * 1000, principal: agent, kind: "message", body: .object(body.merging(["turn": .string("t")]) { a, _ in a }))
+        }
+        func chat(_ seq: Int64, at: Int64, by: String, turn: Bool = false) -> ChannelRecord {
+            .init(channel: "chat", seq: seq, at: at, principal: by, kind: "message", body: .object(turn ? ["text": .string("x"), "turn": .string("t")] : ["text": .string("x")]))
+        }
+        var timeline = Timeline()
+        timeline.insert(chat(1, at: 500, by: "npub1me"))
+        timeline.insert(work(1, ["kind": .string("turn.start"), "asker": .string("npub1me"), "cause": .object(["channel": .string("chat"), "seq": .number(1)])]))
+        timeline.insert(work(2, ["kind": .string("turn.step"), "step": .number(1), "tool": .string("terminal"), "args": .string("ls")]))
+        // after its work, its asker's next message waits its turn
+        timeline.insert(chat(2, at: 2500, by: "npub1me"))
+        // someone else's waits too
+        timeline.insert(chat(3, at: 2600, by: "npub1other"))
+        var activity = WorkingActivity(timeline, me: "npub1me", agents: [agent])
+        #expect(activity.queued == ["chat:2", "chat:3"], "the message its turn began on waits for nothing")
+        // the agent's words after its work: its asker's next message is likely its answer
+        timeline.insert(chat(4, at: 3000, by: agent, turn: true))
+        timeline.insert(chat(5, at: 3100, by: "npub1me"))
+        activity = WorkingActivity(timeline, me: "npub1me", agents: [agent])
+        #expect(activity.queued == ["chat:2", "chat:3"])
+        #expect(WorkingActivity(timeline, ready: false, me: "npub1me", agents: [agent]).queued.isEmpty, "nothing runs before its work is read")
+        #expect(WorkingActivity.pending(timeline, principal: "npub1me", lead: agent) == nil, "its turn's own line says it works, no waiting line (chat.js `expectTurn`)")
+        timeline.insert(work(9, ["kind": .string("turn.end"), "outcome": .string("idle")]))
+        #expect(WorkingActivity(timeline, me: "npub1me", agents: [agent]).queued.isEmpty)
+    }
+
     @Test func resultsConsumeCallsOnceWithIDsBeforeArguments() throws {
         struct Pairing {
             let calls: [(id: String, args: String, response: String)]
@@ -112,7 +233,8 @@ struct WorkingIndicatorTests {
         let afterReply = WorkingActivity(timeline)
         #expect(afterReply.cards[step.id]?.running == false)
         #expect(afterReply.cards[step.id]?.until == 3000)
-        #expect(afterReply.rows.map(\.id) == [step.id, reply.id])
+        // its working line after its turn's latest record, the reply (chat.js `lastN + 0.5`)
+        #expect(afterReply.rows.map(\.id) == [step.id, reply.id, "w:npub1preview paired"])
         #expect(afterReply.hints.map(\.kind) == [.working(asker: nil)])
         var replay = Timeline()
         for record in [reply, step, reply, start, step] { replay.insert(record) }
@@ -243,5 +365,18 @@ struct WorkingIndicatorTests {
         #expect(rows.map(\.name) == ["The agent", "Moss"])
         #expect(rows.map(\.id.agent) == ["npub1unknown", "npub1moss"])
         #expect(rows.allSatisfy { $0.id.id == "new" })
+    }
+}
+
+/// A deterministic shuffle's source (SplitMix64), so a failure replays.
+struct SeededGenerator: RandomNumberGenerator {
+    var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
     }
 }

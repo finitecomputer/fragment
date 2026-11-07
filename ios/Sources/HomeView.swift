@@ -140,10 +140,14 @@ struct HomeView: View {
 
 struct ComposerView: View {
     @Binding var text: String
+    /// Whether a turn runs that Stop stops: the circle is Stop until
+    /// something is typed, then Send (chat.js `refreshSend`).
     let working: Bool
     let enabled: Bool
     var busy = false
     var recording = false
+    /// What the field says while empty: what sending does now.
+    var placeholder = "Message your agent"
     /// The + menu's two ways to attach: the photo library, or Files.
     let attachPhotos: () -> Void
     let attachFiles: () -> Void
@@ -152,10 +156,15 @@ struct ComposerView: View {
     let record: () -> Void
     let send: () async -> Void
     let stop: () async -> Void
+    /// Tells the running turn what is typed now, when its runtime offers
+    /// it (`ChatSession.steers`); none, no Steer.
+    var steer: (() async -> Void)? = nil
     @State private var submitting = false
     var hasAttachments = false
+    private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
+    private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
-    private var canSend: Bool { !submitting && !busy && !recording && enabled && (working || valid) }
+    private var canSend: Bool { !submitting && !busy && !recording && enabled && (stops || valid) }
     var body: some View {
         // A single glass surface, with equal hit targets and no nested glass
         // button padding, keeps the single-line and growing field aligned.
@@ -176,11 +185,26 @@ struct ComposerView: View {
             }
             .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
             .disabled(busy)
-            ComposerField(text: $text, placeholder: "Message your agent", pasteImages: pasteImages)
+            ComposerField(text: $text, placeholder: placeholder, pasteImages: pasteImages)
                 .frame(minHeight: 44)
+            if let steer, !stops {
+                // Send queues the words for the turn after; Steer tells this one now
+                Button {
+                    submitting = true
+                    Task { await steer(); submitting = false }
+                } label: {
+                    Text("Steer").font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12).frame(height: 34)
+                        .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
+                        .frame(height: 44).contentShape(Capsule())
+                }
+                .disabled(submitting || busy || !enabled)
+                .accessibilityLabel("Steer it now")
+                .accessibilityIdentifier("steer")
+            }
             Button {
                 submitting = true
-                Task { await (working ? stop() : send()); submitting = false }
+                Task { await (stops ? stop() : send()); submitting = false }
             } label: {
                 ZStack {
                     // The adaptive label color keeps the filled control high-contrast;
@@ -189,7 +213,7 @@ struct ComposerView: View {
                     if busy || submitting {
                         ProgressView().tint(.secondary)
                     } else {
-                        Image(systemName: working ? "stop.fill" : "arrow.up")
+                        Image(systemName: stops ? "stop.fill" : "arrow.up")
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(canSend ? Color(uiColor: .systemBackground) : Color.secondary)
                     }
@@ -199,8 +223,8 @@ struct ComposerView: View {
                 .contentShape(Circle())
             }
             .disabled(!canSend)
-            .accessibilityLabel(working ? "Stop response" : "Send message")
-            .accessibilityIdentifier(working ? "stop" : "send")
+            .accessibilityLabel(stops ? "Stop response" : "Send message")
+            .accessibilityIdentifier(stops ? "stop" : "send")
         }
         .buttonStyle(.plain)
         .padding(6)
@@ -234,14 +258,14 @@ struct ComposerField: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: 11, left: 2, bottom: 11, right: 2)
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.accessibilityIdentifier = "composer"
-        view.placeholder.text = placeholder
         view.placeholder.isAccessibilityElement = false
-        view.accessibilityLabel = placeholder
         return view
     }
     func updateUIView(_ view: PastingTextView, context: Context) {
         context.coordinator.text = $text
         view.pasteImages = pasteImages
+        // it says what sending does now (an answer, a message that waits its turn)
+        if view.placeholder.text != placeholder { view.placeholder.text = placeholder; view.accessibilityLabel = placeholder }
         if view.text != text { view.text = text }
         view.placeholder.isHidden = !text.isEmpty
     }

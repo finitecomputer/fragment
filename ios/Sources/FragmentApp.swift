@@ -63,6 +63,9 @@ final class Library {
     func leftChat(_ name: String) {
         if sessions[name]?.closed != nil { sessions.removeValue(forKey: name) }
     }
+    /// The identities of the person's own agents: whose menus they may use
+    /// in a chat (chat.js `menuOf`, an agent's owner by `__members`).
+    var ownedIdentities: Set<String> { Set(agents.filter { $0.role == "owner" }.compactMap { identities[$0.name] }) }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]

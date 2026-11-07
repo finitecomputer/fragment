@@ -82,6 +82,19 @@ struct ChannelRecord: Codable, Identifiable, Equatable, Sendable {
     var isMessage: Bool {
         channel == "chat" && (body["kind"].string == nil || body["kind"].string == "message")
     }
+    /// A person's command for an agent's runtime (`{kind: "command"}`,
+    /// docs/chat-records.md): shown as typed, `/<command> <args>`, as the
+    /// web's chat shows one (chat.js `onChat`).
+    var command: String? {
+        guard channel == "chat", body["kind"].string == "command" else { return nil }
+        return Self.commandName(body["command"].string)
+    }
+    /// A command's name as the wire takes one, `^[a-z0-9_-]{1,32}$` (chat.js `COMMAND`).
+    static func commandName(_ name: String?) -> String? {
+        guard let name, (1...32).contains(name.utf8.count),
+              name.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 95 || $0 == 45 }) else { return nil }
+        return name
+    }
 }
 
 struct LiveFrame: Decodable, Sendable {
@@ -136,6 +149,8 @@ struct TurnState: Equatable, Sendable {
     var startAt: Int64?
     var ended = false
     var cause: JSONValue = .null
+    /// Whom its `turn.start` names as its asker (control.js `controllerOf`).
+    var asker: String?
     var running: Bool { startAt != nil && !ended }
 }
 
@@ -181,11 +196,12 @@ struct Timeline {
         guard record.channel == "work" else { return }
         if oldestWork.map({ record.seq < $0.seq }) ?? true { oldestWork = (record.seq, record.at) }
         indexWork(record)
+        learnMenu(record)
         guard let id = record.turn else { return }
         let key = TurnKey(agent: record.principal, id: id)
         var state = turns[key] ?? TurnState()
         switch record.body["kind"].string {
-        case "turn.start": state.startAt = record.at; state.cause = record.body["cause"]
+        case "turn.start": state.startAt = record.at; state.cause = record.body["cause"]; state.asker = record.body["asker"].string
         case "turn.end": state.ended = true
         default: break
         }
@@ -195,6 +211,19 @@ struct Timeline {
             let done = turns.filter { $0.value.startAt != nil && $0.value.ended && $0.key != key }.sorted { $0.value.startAt! < $1.value.startAt! }
             for (gone, _) in done.prefix(turns.count - Self.maximumTurns) { turns.removeValue(forKey: gone) }
         }
+    }
+
+    /// Each agent's menu, its latest (`{kind: "commands"}` on `work`, posted
+    /// by the agent it names): the names of the commands its runtime takes
+    /// from its owner, as the web's chat reads one (chat.js `onMenu`).
+    private(set) var menus: [String: (seq: Int64, commands: [String])] = [:]
+    static let menuMax = 64
+    private mutating func learnMenu(_ record: ChannelRecord) {
+        guard record.body["kind"].string == "commands", record.body["agent"].string == record.principal,
+              case .array(let listed) = record.body["commands"], (menus[record.principal]?.seq ?? -1) < record.seq else { return }
+        let names = listed.compactMap { ChannelRecord.commandName($0["name"].string) }.prefix(Self.menuMax)
+        menus[record.principal] = (record.seq, Array(names))
+        revision &+= 1
     }
 
     /// Whether a turn read without its start needs it, from earlier work:
