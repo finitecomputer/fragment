@@ -145,9 +145,10 @@ struct ChatView: View {
                 let steers = session.steers(recording: voice.recording)
                 ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
                     // sends go over HTTP: a reconnect never holds the composer
-                    enabled: session.read, busy: session.attaching, recording: voice.recording,
+                    // a memo being recorded holds its place as attaching, and its Finish stays
+                    enabled: session.read, busy: session.attaching && !voice.recording, recording: voice.recording,
                     placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
-                    attachPhotos: { photos = true }, attachFiles: { importer = true },
+                    attachPhotos: { if session.admits(1) { photos = true } }, attachFiles: { if session.admits(1) { importer = true } },
                     pasteImages: { pasteboard in paste(pasteboard) },
                     record: { Task { await recordVoice() } },
                     send: { await session.send() }, stop: { await session.stop() },
@@ -163,7 +164,7 @@ struct ChatView: View {
         }
         // Photos as the system's picker gives them, its most compatible
         // encoding: a picture the web shows goes as it is, any other as JPEG
-        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - session.attachments.count),
+        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, session.fileRoom),
                       matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
@@ -206,11 +207,10 @@ struct ChatView: View {
     }
 
     /// Files picked, read and put as the message's attachments (the
-    /// session's one attaching at a time); its task, to wait on.
-    @discardableResult
-    private func uploadFiles(_ urls: [URL]) -> Task<Void, Never>? {
-        guard session.beginAttaching(urls.count) else { return nil }
-        return Task {
+    /// session's one attaching at a time).
+    private func uploadFiles(_ urls: [URL]) {
+        guard session.beginAttaching(urls.count) else { return }
+        Task {
             await session.attach {
                 try await Task.detached(priority: .userInitiated) {
                     try urls.map { url in
@@ -248,13 +248,12 @@ struct ChatView: View {
         guard session.beginAttaching(pictures.count) else { return }
         Task { await session.attach { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value } }
     }
+    /// A voice memo: its place in the message reserved before it records,
+    /// then attached once finished (by hand, or at its deadline).
     private func recordVoice() async {
-        if voice.recording {
-            if let url = voice.stop() { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) }
-        } else {
-            guard session.attachments.count < ChatAttachment.countMax else { session.error = ChatAttachment.limits.countRefusal; return }
-            await voice.start { url in Task { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) } }
-        }
+        if voice.recording { voice.finish(); return }
+        guard session.beginAttaching(1) else { return }
+        await session.attach { [voice] in try await voice.file() }
     }
 }
 
