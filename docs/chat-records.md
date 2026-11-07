@@ -382,13 +382,19 @@ that the turn started.
 
 `child` is the first 24 hex digits of SHA-256 of the runtime's id for the
 helper (Hermes' child session id). A start has `goal`: its task, one line
-of at most 140 characters. An end has `outcome`: `completed`, `failed`,
+of at most 140 characters. The goal is the chat's content, read by whoever
+reads the turn's steps: its whitespace made single spaces and cut, never
+scrubbed. An end has `outcome`: `completed`, `failed`,
 `interrupted`, `timed_out`, or `lost` (the process running it died first:
 the next start of the computer's bridge ends it so). A reader treats any
 other outcome as ended. A helper outlives its turn: its end is posted
 under the turn that started it, after that turn's `turn.end`, as a late
 notice is. Helpers the agent grouped (Hermes' task `group`) end
-together, when their group reports. A turn records at most 32 helpers. A page shows the helpers
+together, when their group reports. A turn records at most 32 helpers;
+a computer's bridge keeps at most 1,024 open (each until its end is
+posted), and our image's plugin records at most 256 running or waiting
+to say their end. A helper past a bound holds the computer and is
+recorded nowhere. A page shows the helpers
 started and not ended as working (a bar above the composer); a helper's
 result comes back as a reply of the agent's own. Only our Hermes image's
 helpers are recorded; older bridges post none. Known gap: the helpers of
