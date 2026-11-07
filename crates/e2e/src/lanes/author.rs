@@ -1313,7 +1313,55 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      its page made {calls} HTTP calls to the query");
     s.ok("and asked the query over HTTP once, before its socket opened: every re-run went over the socket", calls == 1, format!("{calls} HTTP calls to list"));
     deploying_call(s, api, &mut chrome)?;
+    click_aims(s, &mut chrome, &v)?;
     super::posts::browser(s, api, &mut chrome)
+}
+
+/// The harness's `click` (browser.rs) reaches the element it aims at, or
+/// nothing. Valid: a still button, pressed once. Invalid: one the page
+/// moves under the mouse between the aim and the press (two buttons swap
+/// places as the pointer comes, as a list drawn again moves its rows): the
+/// press on the other is stopped before the page hears it, and the next aim
+/// presses the button where it is now, once; and one covered for good is an
+/// error naming its cover, which hears nothing either.
+fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    chrome.eval(
+        page,
+        "(() => { window.__heard = []; const box = document.createElement('div'); box.id = 'aims'; \
+         Object.assign(box.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: 'white' }); \
+         const put = (tag, id, top) => { const e = document.createElement(tag); e.id = id; e.textContent = id; \
+           Object.assign(e.style, { position: 'absolute', left: '20px', top: `${top}px`, width: '200px', height: '40px', margin: '0' }); \
+           for (const k of ['pointerdown', 'click']) e.addEventListener(k, () => window.__heard.push(`${k} ${id}`)); box.append(e); return e; }; \
+         put('button', 'still', 20); const moving = put('button', 'moving', 100), other = put('button', 'other', 160); \
+         moving.addEventListener('pointermove', () => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; moving.style.top = '160px'; other.style.top = '100px'; }); \
+         put('button', 'covered', 240); put('div', 'cover', 240); \
+         document.body.append(box); return true; })()",
+    )?;
+    let heard = |chrome: &mut crate::browser::Browser| -> Result<Value> { chrome.eval(page, "(() => { const h = window.__heard; window.__heard = []; return h; })()") };
+
+    chrome.click(page, "#still")?;
+    let still = heard(chrome)?;
+    s.ok("a click aimed at a still button presses it, once", still == json!(["pointerdown still", "click still"]), &still);
+
+    chrome.eval(page, "(document.getElementById('aims').dataset.swap = 'armed', true)")?;
+    chrome.click(page, "#moving")?;
+    let moved = heard(chrome)?;
+    let swapped = chrome.eval(page, "document.getElementById('aims').dataset.swap")?;
+    s.ok(
+        "one moved under the mouse between its aim and its press: the other button hears nothing of the press, and the next aim presses it where it is, once",
+        swapped == "done" && moved == json!(["pointerdown moving", "click moving"]),
+        json!({ "swapped": swapped, "heard": moved }),
+    );
+
+    let covered = chrome.click(page, "#covered");
+    let under = heard(chrome)?;
+    s.ok(
+        "one covered for good: the click is an error naming its cover, and the cover heard nothing",
+        covered.as_ref().is_err_and(|e| e.to_string().contains("<div#cover>")) && under == json!([]),
+        json!({ "click": covered.err().map(|e| e.to_string()), "heard": under }),
+    );
+    chrome.eval(page, "(document.getElementById('aims').remove(), true)")?;
+    Ok(())
 }
 
 /// An app's call while a deploy goes out: the fragment's ask for its

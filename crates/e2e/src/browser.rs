@@ -976,32 +976,78 @@ impl Browser {
         Ok(())
     }
 
-    /// `click_at` the middle of the first element `selector` matches.
+    /// `click_at` the middle of the first element `selector` matches, as a
+    /// hand presses what it sees. Its aim and its press are separate calls,
+    /// and a page draws again between them on its own (the shell's list
+    /// reads itself again a moment after any change, and a row comes or
+    /// folds away): a press that starts on another element than the one
+    /// `selector` names then is stopped at the window, every event of it,
+    /// so nothing hears it, and aimed again where the element is now
+    /// (Playwright's hit-target check, its way). A press that starts on it
+    /// goes through whole, as any press does: a pointer the page captures,
+    /// a label's click, a disabled button's none. One that never reaches it
+    /// in CLICK_AIMS (the element covered) is an error naming what it hit.
     pub fn click(&mut self, page: &Page, selector: &str) -> Result<()> {
-        let at = self.middle_of(page, selector)?;
-        self.click_at(page, at)
+        let mut hit = Vec::new();
+        for _ in 0..CLICK_AIMS {
+            let at = self.middle_of(page, selector, true)?;
+            self.click_at(page, at)?;
+            // (a page the press took elsewhere, its document gone, has no
+            // aim to answer: the press started on the element)
+            let missed = self.eval(page, "(() => { const a = window.__aim; window.__aim = null; a?.done(); return a?.missed ?? null; })()").unwrap_or(Value::Null);
+            let Some(missed) = missed.as_str() else { return Ok(()) };
+            println!("      (a click aimed at {selector} pressed {missed} instead: stopped, and aimed again)");
+            hit.push(missed.to_string());
+        }
+        bail!("a click aimed at {selector} never reached it: it pressed {}", hit.join(", then "))
     }
 
     /// The mouse moved to the middle of the first element `selector`
     /// matches, and no click: the page hears `pointermove`, as a hand's.
     pub fn hover(&mut self, page: &Page, selector: &str) -> Result<()> {
-        let (x, y) = self.middle_of(page, selector)?;
+        let (x, y) = self.middle_of(page, selector, false)?;
         let moved = json!({ "type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0 });
         self.send("Input.dispatchMouseEvent", moved, Some(&page.session))?;
         Ok(())
     }
 
     /// The middle of the first element `selector` matches, in the
-    /// viewport's coordinates, scrolled into view first.
-    fn middle_of(&mut self, page: &Page, selector: &str) -> Result<(f64, f64)> {
+    /// viewport's coordinates, scrolled into view first; with `aim`, the
+    /// window's check of the next press (`AIM`, in the same task, so no
+    /// drawing comes between them).
+    fn middle_of(&mut self, page: &Page, selector: &str, aim: bool) -> Result<(f64, f64)> {
+        let sel = serde_json::to_string(selector)?;
         let at = self.eval(
             page,
-            &format!("(() => {{ const e = document.querySelector({selector:?}); if (!e) return null; e.scrollIntoView({{ block: 'nearest' }}); const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"),
+            &format!(
+                "(() => {{ const e = document.querySelector({sel}); if (!e) return null; e.scrollIntoView({{ block: 'nearest' }}); const r = e.getBoundingClientRect(); {} return [r.x + r.width / 2, r.y + r.height / 2]; }})()",
+                if aim { format!("({AIM})({sel});") } else { String::new() }
+            ),
         )?;
         let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { bail!("nothing on the page matches {selector}") };
         Ok((x, y))
     }
 }
+
+/// How many presses `click` makes at its element, each stopped that started
+/// on another: a page drawn again between an aim and its press moves once,
+/// not on every aim; one that never reaches it is covered.
+const CLICK_AIMS: u32 = 3;
+
+/// The window's check of `click`'s next press, given its selector: a
+/// trusted `pointerdown` outside the element the selector names (the same
+/// one, or the one drawn in its place) is `missed`, and it and the rest of
+/// that press (to its `click`) are stopped before any of the page's
+/// listeners; one inside takes the check away, the press the page's.
+/// `done` takes it away, whatever came.
+const AIM: &str = "(sel) => { window.__aim?.done(); const kinds = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']; \
+    const named = (n) => n?.nodeType === 1 ? `<${n.localName}${n.id ? '#' + n.id : ''}${n.dataset?.key ? ` data-key=\"${n.dataset.key}\"` : ''}>` : String(n); \
+    const aim = window.__aim = { missed: null, done: () => { for (const k of kinds) removeEventListener(k, check, true); } }; \
+    function check(ev) { if (!ev.isTrusted) return; \
+      if (ev.type === 'pointerdown' && !document.querySelector(sel)?.contains(ev.target)) aim.missed = named(ev.target); \
+      if (aim.missed === null) return aim.done(); \
+      ev.preventDefault(); ev.stopImmediatePropagation(); if (ev.type === 'click') aim.done(); } \
+    for (const k of kinds) addEventListener(k, check, true); }";
 
 impl Drop for Browser {
     fn drop(&mut self) {
