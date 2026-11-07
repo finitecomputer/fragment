@@ -396,7 +396,8 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
   // The roster changed (shell.js `load`): settings shown draw their Agents
   // again, in place under its heading, nothing else read again. An agent
   // still there keeps its card, as it is (its reads, its Edit open, a save
-  // on its way); one come has a card of its own, one gone loses its: what
+  // on its way); one come has a card of its own, one gone loses its (its
+  // Edit closed, its late answers dropped: agent-settings.js `editTenancy`): what
   // is under them moves, as that is a change, while a card's own reads
   // never move anything.
   function agentsChanged() {
@@ -405,6 +406,8 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     const roster = rosterOf();
     if (roster === d.roster) return;
     const drawn = agentsDrawn(d.linked, d.cards);
+    // an agent gone: its card retired, its Edit closed if open
+    for (const [agent, [card]] of d.cards) if (!drawn.cards.has(agent)) card.retire();
     Object.assign(d, { roster, cards: drawn.cards });
     d.section.replaceChildren(d.section.querySelector(":scope > h2"), ...drawn.out);
     renderAgentFaces();

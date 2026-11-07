@@ -62,6 +62,37 @@ export function cardsFor(roster, kept, make) {
   return new Map(roster.map((a) => [a.fragment, kept.get(a.fragment) ?? make(a)]));
 }
 
+// Who the one Edit dialog is lent to (FIN-424, #1090): `current()` is the
+// dialog and its slot, once made. A card lends it its fields (`lend`), given
+// back as it closes; a card whose agent is gone (`retire`) closes it and
+// empties it if it holds that card's, and gets none of its fields back; and
+// a read or a save of a retired card that answers after (`whileLive`) never
+// does: nothing of an agent removed, in another tab, says it was saved or
+// can be edited again.
+export function editTenancy(current) {
+  let tenant = null;
+  const gone = new WeakSet();
+  const never = new Promise(() => {});
+  return {
+    lend(card, giveBack) {
+      tenant = card;
+      current().dialog.onclose = () => {
+        if (tenant === card) tenant = null;
+        if (!gone.has(card)) giveBack();
+      };
+    },
+    retire(card) {
+      gone.add(card);
+      if (tenant !== card) return;
+      tenant = null;
+      const d = current();
+      d.slot.replaceChildren();
+      if (d.dialog.open) d.dialog.close();
+    },
+    whileLive: (card, p) => p.then((v) => (gone.has(card) ? never : v), (e) => (gone.has(card) ? never : Promise.reject(e))),
+  };
+}
+
 export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
@@ -514,6 +545,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   // written as it changes, said under them) are kept in its card, unseen,
   // and lent to the dialog while it is open ----
   let editing = null;
+  const tenancy = editTenancy(() => editing);
   function editDialog() {
     if (editing?.dialog.isConnected) return editing;
     const dialog = el("dialog", "rename-agent agent-dialog");
@@ -557,13 +589,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     const said = el("span", "muted agent-model-said");
     // what the picks show: agent.json, none (404: the defaults), or unread
     // (null: its read failed, or did not answer within SETTINGS_READ_MS)
-    const read = readWithin((signal) => agentJson(a.fragment, signal).catch((e) => (e.status === 404 ? {} : Promise.reject(e))), SETTINGS_READ_MS);
+    // (as one of its writes: dropped once its agent is gone, `retire`)
+    const read = tenancy.whileLive(box, readWithin((signal) => agentJson(a.fragment, signal).catch((e) => (e.status === 404 ? {} : Promise.reject(e))), SETTINGS_READ_MS));
     let unread = "Reading…";
     read.then((j) => {
       unread = j === null ? "Couldn't read" : null;
       if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them.";
     });
-    const write = (change) => writeAgentJson(a.fragment, change);
+    const write = (change) => tenancy.whileLive(box, writeAgentJson(a.fragment, change));
     // the model pick: when there may be a choice, a route the deployment
     // names (Private, Standard) or a model of a provider the person
     // connected; whether there is one, with a single route, is the agent's
@@ -597,15 +630,18 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       name.querySelector("input").value = titleOf(a.fragment);
       picture.redraw();
       d.slot.replaceChildren(fields, said);
-      d.dialog.onclose = () => {
+      tenancy.lend(box, () => {
         if (home.isConnected) home.append(fields, said);
         summarize();
-      };
+      });
       d.dialog.showModal();
     };
     const details = el("div", "agent-details");
     details.append(summary, edit);
     box.append(row, details, home);
+    // its agent gone (settings.js `agentsChanged`): its Edit closed if open,
+    // and what it was waiting on dropped
+    box.retire = () => tenancy.retire(box);
     return box;
   }
   // a pick (`value`) being written (`written`), said under its agent's
