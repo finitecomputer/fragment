@@ -38,7 +38,8 @@ import reads are cli/src/session/.
   wrote when it compressed. A file a message held whose bytes came with it
   is one of its `attachments`, `{name, media_type, size, sha256, path}`,
   its bytes the archive's `path`, `media/<sha256>.<ext>` (each file once,
-  however many messages hold it; at most 25 MiB, and counted toward the
+  however many messages hold it; at most what the platform takes from a
+  person (its `limits`), and counted toward the
   archive's bytes); one whose bytes did not is a mark in its text
   (`[image]`, `[audio]`, `[video]`, `[file]`), as its origin left it.
   A tool's output and an assistant's reasoning are cut to 2,000
@@ -191,7 +192,7 @@ archive's index, the markers dropped).
   checked against its `sha256` and `size`; one that is not what it names,
   missing, or outside `chats/` is left out of its message, said. It reads
   only regular files inside `chats/`, no link out of it and no device,
-  each at most 512 MiB (a file a message held, 25 MiB), read through a
+  each at most 512 MiB (a file a message held, the platform's `limits`), read through a
   message at a time (a picture's base64, which `export.py` copied, is not
   held).
 - **Hermes' `state.db`** (or a Hermes home holding it), read-only, in one

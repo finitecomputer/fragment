@@ -140,12 +140,15 @@ struct TransportTests {
         #expect(session.rows.map(\.id) == ["chat:1", "work:2"], "a turn's start is not shown")
         #expect(session.activeTurns == ["t1"])
 
+        // a reply begun takes its place, after its turn's latest record
+        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hal","at":2500}"#)
+        try await waitUntil("a reply begun") { session.drafts.map(\.text) == ["Hal"] }
+        #expect(session.rows.map(\.id) == ["chat:1", "work:2", "d:npub1agent t1"])
         let told = Mutex(false)
         withObservationTracking { _ = session.rows } onChange: { told.withLock { $0 = true } }
-        socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hal","at":2500}"#)
         socket.push(#"{"type":"draft","channel":"chat","principal":"npub1agent","turn":"t1","text":"Hallo","at":2600}"#)
         try await waitUntil("the reply's words") { session.drafts.map(\.text) == ["Hallo"] }
-        #expect(!told.withLock { $0 }, "a draft never redraws the rows")
+        #expect(!told.withLock { $0 }, "a draft's words never redraw the rows")
     }
 
     /// Which turns run is said again by each connection, once its work is
@@ -309,6 +312,533 @@ struct TransportTests {
         await session.stop()
         let stop = try #require(stub.seen.first { $0.route == route })
         #expect(stop.json == .object(["id": .string("stop:t4"), "body": .object(["kind": .string("stop"), "turn": .string("t4")])]))
+    }
+
+    /// Steer, as the web's composer offers it (chat.js `refreshSend`): to
+    /// the owner of an agent whose menu has `steer`, while it works, for
+    /// words alone; it sends `/steer <words>` as a command of that menu.
+    /// The bridge posts a turn's start before its first menu: a menu that
+    /// comes (or goes) alone redraws the composer.
+    @Test func steerIsOfferedByTheAgentsMenuAndSendsItsCommand() async throws {
+        let route = posts
+        let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 9, replayed: false) : (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"]), api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
+        session.composer = "  use the blue one "
+        session.owned = ["npub1agent"]
+        #expect(!session.steers(recording: false), "no menu yet")
+        // the menu comes alone, words already typed: Steer shows
+        let told = Mutex(false)
+        withObservationTracking { _ = session.steers(recording: false) } onChange: { told.withLock { $0 = true } }
+        socket.push(frame("work", 2, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"},{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        try await waitUntil("the composer told of the menu") { told.withLock { $0 } }
+        #expect(session.steers(recording: false))
+        #expect(session.myTurn == TurnKey(agent: "npub1agent", id: "t2"))
+        #expect(!session.steers(recording: true), "a voice memo being recorded goes with a message alone")
+        session.attachments = [ChatAttachment(sha256: "x", name: "a.txt", type: "text/plain", size: 1)]
+        #expect(!session.steers(recording: false), "files go with a message alone")
+        session.attachments = []
+        session.composer = "/usage"
+        #expect(!session.steers(recording: false), "a command typed is no steer")
+        session.composer = "  use the blue one "
+        // withdrawn alone: Steer goes
+        let withdrawn = Mutex(false)
+        withObservationTracking { _ = session.steers(recording: false) } onChange: { withdrawn.withLock { $0 = true } }
+        socket.push(frame("work", 3, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"}]}"#))
+        try await waitUntil("the composer told the menu changed") { withdrawn.withLock { $0 } }
+        #expect(!session.steers(recording: false))
+        socket.push(frame("work", 4, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        try await waitUntil("offered again") { session.steers(recording: false) }
+        await session.steer()
+        let sent = try #require(stub.seen.first { $0.route == route })
+        #expect(sent.json["body"] == .object(["kind": .string("command"), "command": .string("steer"), "args": .string("use the blue one"), "to": .array([.string("npub1agent")])]))
+        #expect(session.composer.isEmpty && session.pending.isEmpty && session.error == nil)
+        // shown as typed, a person's command (chat.js `userMessage`)
+        #expect(session.rows.contains { $0.record?.command == "steer" })
+    }
+
+    /// A Steer whose answer was lost after its append committed: saved
+    /// before it was posted, it is there after a relaunch, and sent again
+    /// only by hand, with the same id and body, so it runs once (docs/ios.md).
+    @Test func aSteerWhoseAnswerWasLostIsRetriedWithTheSameIDAfterARelaunch() async throws {
+        let route = posts
+        let stub = Stub { seen, before in
+            guard seen.route == route else { return (404, "{}") }
+            if !before.contains(where: { $0.route == route }) { return (503, #"{"error":"unavailable","message":"Try again shortly."}"#) }
+            return posted(seen, seq: 9, replayed: true)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let fragment = FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"])
+        let session = ChatSession(fragment: fragment, api: api)
+        let run = Task { await session.run() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me"}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
+        session.owned = ["npub1agent"]
+        session.composer = "use the blue one"
+        await session.steer()
+        run.cancel()
+        let lost = try #require(session.pending.first)
+        #expect(lost.failed && lost.command == "steer" && session.composer.isEmpty)
+        // relaunched: the same command waits, to be sent again by hand
+        let again = ChatSession(fragment: fragment, api: api)
+        let restored = try #require(again.pending.first)
+        #expect(restored.id == lost.id && restored.command == "steer" && restored.text == "use the blue one" && restored.failed)
+        await again.retry(restored)
+        #expect(again.pending.isEmpty)
+        let sent = stub.seen.filter { $0.route == route }
+        #expect(sent.count == 2 && sent[0].json == sent[1].json && sent[0].json["id"].string == lost.id)
+        #expect(sent[1].json["body"]["kind"] == .string("command") && sent[1].json["body"]["client_id"] == .null)
+    }
+
+    /// A menu without `steer` (another runtime's) offers none.
+    @Test func noSteerWhereTheRuntimeOffersNone() async throws {
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"]), api: api)
+        session.owned = ["npub1agent"]
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(frame("work", 1, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"}]}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me"}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
+        session.composer = "use the blue one"
+        #expect(!session.steers(recording: false))
+        #expect(session.placeholder(name: { _ in "Juniper" }) == "A message waits its turn")
+    }
+
+    /// An agent added after the chat opened (Agents in this chat): the list
+    /// read again names it, and the same cached session, its draft kept,
+    /// counts it at once. Rowan was known already, so no handle changed:
+    /// a message that @mentions Rowan while Rowan works waits its turn.
+    @Test func anAgentAddedAfterTheChatOpenedIsWhomItsMentionWaitsFor() async throws {
+        let juniper = "npub1juniper", rowan = "npub1rowan"
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        let opened = FragmentSummary(name: chat.name, kind: "chat", agents: [juniper])
+        library.fragments = [opened]
+        let session = try library.session(for: opened, api: api)
+        session.handles = [juniper: "juniper", rowan: "rowan"]
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        // Rowan works on another's turn; Juniper, the lead, is idle
+        socket.push(#"{"type":"record",\#(record("work", 1, principal: rowan, body: #"{"kind":"turn.start","turn":"t1","asker":"npub1other"}"#).dropFirst())"#)
+        socket.push(#"{"type":"record",\#(record("chat", 1, principal: "npub1me", body: #"{"text":"@Rowan do this next"}"#).dropFirst())"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        try await waitUntil("the message read") { session.workRead && session.rows.contains { $0.id == "chat:1" } }
+        #expect(!session.activity.queued.contains("chat:1"), "Rowan is not of this chat yet: it is the idle lead's")
+        session.edit("A draft to keep")
+
+        // as Agents in this chat's Add reads the list again (`AgentMembershipView.add`)
+        library.fragments = [FragmentSummary(name: chat.name, kind: "chat", agents: [juniper, rowan])]
+        #expect(try library.session(for: opened, api: api) === session)
+        #expect(session.agents == [juniper, rowan] && session.handles == [juniper: "juniper", rowan: "rowan"])
+        #expect(session.activity.queued.contains("chat:1"))
+        #expect(session.composer == "A draft to keep")
+        // a chat opened after its list was read takes the list's agents, not the ones it was opened with
+        let other = FragmentSummary(name: "chat--other", kind: "chat")
+        library.fragments.append(FragmentSummary(name: other.name, kind: "chat", agents: [rowan]))
+        #expect(try library.session(for: other, api: api).agents == [rowan])
+    }
+
+    /// A turn asking its asker something (`turn.asked`): the composer is the
+    /// answer, and what it sends is the web's answer, a message of theirs
+    /// to the chat (docs/chat-records.md: "The asker's next message to that
+    /// agent is then the answer"), no command, no card's answer. Once said,
+    /// it waits on no one.
+    @Test func anAnswerToATurnsQuestionIsTheirNextMessage() async throws {
+        let route = posts
+        let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 3, replayed: false) : (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"]), api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(#"{"type":"record",\#(record("chat", 1, principal: "npub1me", body: #"{"text":"ask-me"}"#).dropFirst())"#)
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
+        socket.push(frame("chat", 2, body: #"{"text":"What should I call it?","turn":"t1"}"#))
+        socket.push(frame("work", 3, body: #"{"kind":"turn.asked","turn":"t1","asks":"npub1me"}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":3,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"chat","next":2,"more":false}"#)
+        try await waitUntil("the question asked") { session.workRead && session.answering() != nil }
+        #expect(session.answering() == TurnKey(agent: "npub1agent", id: "t1"))
+        #expect(session.placeholder(name: { _ in "Juniper" }) == "Your answer for Juniper")
+        // its line says so, after the question
+        let ids = session.rows.map(\.id)
+        #expect(ids.suffix(2) == ["chat:2", "q:npub1agent t1"])
+        session.composer = "Basil"
+        await session.send()
+        let sent = try #require(stub.seen.first { $0.route == route })
+        let body = sent.json["body"]
+        #expect(body["text"] == .string("Basil") && body["kind"] == .null && body["to"] == .null && body["command"] == .null)
+        // the platform's record of it (`posted`: npub1me's, at 3000) ends the wait
+        try await waitUntil("answered") { session.answering() == nil }
+        #expect(!session.rows.contains { $0.id == "q:npub1agent t1" })
+    }
+
+    // ---- Home's first message (`Library.launch`, launcher.js `startFromSearch`) ----
+
+    /// The platform a launch meets: the person's agent, a chat it makes,
+    /// its blobs and its channel. `blob` answers each blob put.
+    final class Count: Sendable {
+        private let value = Mutex(0)
+        func add() { value.withLock { $0 += 1 } }
+        var now: Int { value.withLock { $0 } }
+    }
+    /// `lost`: a post whose acknowledgement is lost, after it committed.
+    private func launchStub(created: Count, gate: Gate? = nil, holdAt: String? = nil,
+                            blob: @escaping @Sendable (Seen, [Seen]) -> (Int, String) = { _, _ in (200, #"{"ok":true,"stored":true}"#) },
+                            lost: @escaping @Sendable (Seen, [Seen]) -> Bool = { _, _ in false }) -> Stub {
+        let chatRoute = "POST /api/f/mobile-chat--c1/channels/chat"
+        return Stub { seen, before in
+            if let holdAt, seen.route.hasPrefix(holdAt) { gate?.pass() }
+            switch seen.route {
+            case "GET /api/fragments": return (200, #"{"fragments":[{"name":"juniper--a2","kind":"agent","role":"owner","title":"Juniper"}]}"#)
+            case "GET /api/f/juniper--a2/status": return (200, #"{"npub":"npub1juniper","urls":{"canonical":"https://juniper--a2.finite.test/"}}"#)
+            case "POST /api/fragments": created.add(); return (200, #"{"name":"mobile-chat--c1"}"#)
+            case "PUT /api/f/mobile-chat--c1/members/npub1juniper": return (200, "{}")
+            case chatRoute: return lost(seen, before) ? (503, #"{"error":"unavailable","message":"Try again shortly."}"#) : posted(seen, seq: 1, replayed: false)
+            default:
+                if seen.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") { return blob(seen, before) }
+                return (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+    }
+    private func hold(_ library: Library, _ files: [OutgoingFile]) async throws {
+        let had = library.home.files.count
+        #expect(library.home.hold(files.count) { files })
+        try await waitUntil("held") { library.home.files.count == had + files.count && !library.home.reading }
+    }
+    private let first3 = [OutgoingFile(data: Data("one".utf8), name: "one.txt", type: "text/plain"),
+                          OutgoingFile(data: Data("two".utf8), name: "two.txt", type: "text/plain"),
+                          OutgoingFile(data: Data("memo".utf8), name: "voice-1CC2B6D3-CAD8-4497-8692-C753A0C7C3B1.m4a", type: "audio/mp4")]
+
+    /// An upload that fails, the first or the second of three: nothing is
+    /// posted, all the words and files stay on Home with why, and sent again
+    /// they go to the same chat, all of them, as one message.
+    @Test func aFirstMessageNotUploadedStaysWholeAndGoesToTheSameChat() async throws {
+        for failing in ["one", "two"] {
+            let created = Count()
+            let stub = launchStub(created: created) { seen, before in
+                // the failing file's first put: a dropped connection
+                if seen.body == Data(failing.utf8) && !before.contains(where: { $0.body == seen.body }) { return (503, #"{"error":"unavailable","message":"Try again shortly."}"#) }
+                return (200, #"{"ok":true,"stored":true}"#)
+            }
+            let api = try stub.api()
+            defer { try? ChatDraftStore.removeAccount(api: api) }
+            let library = Library()
+            await library.load(api)
+            library.home.text = "Three files\nand a memo"
+            try await hold(library, first3)
+            var opened: [String] = []
+            await #expect(throws: (any Error).self) { try await library.launch(api) { opened.append($0.name) } }
+            #expect(stub.seen.filter { $0.route.hasSuffix("/channels/chat") }.isEmpty, "\(failing): nothing posted")
+            #expect(library.home.text == "Three files\nand a memo" && library.home.files.map(\.file) == first3, "\(failing): all of it stays")
+            #expect(library.home.error == "Your message wasn't sent. Try again shortly." && !library.home.launching)
+            let session = try #require(library.sessions["mobile-chat--c1"])
+            #expect(session.pending.isEmpty && session.composer.isEmpty && session.attachments.isEmpty, "\(failing): no words alone in the chat")
+            // sent again: the same chat, every file, one message
+            try await library.launch(api) { opened.append($0.name) }
+            #expect(created.now == 1 && opened == ["mobile-chat--c1", "mobile-chat--c1"])
+            let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }
+            #expect(posts.count == 1)
+            let body = posts[0].json["body"]
+            #expect(body["text"] == .string("Three files\nand a memo"))
+            #expect(body["attachments"].array.map { $0["name"] } == first3.map { .string($0.name) })
+            #expect(library.home.text.isEmpty && library.home.files.isEmpty && library.home.error == nil && session.pending.isEmpty)
+        }
+    }
+
+    /// Files of the same bytes go once, as the chat's composer attaches
+    /// them, and the message is posted.
+    @Test func aFirstMessageWithTheSameBytesTwiceIsPosted() async throws {
+        let created = Count()
+        let stub = launchStub(created: created)
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "Twice"
+        let same = OutgoingFile(data: Data("same".utf8), name: "a.txt", type: "text/plain")
+        try await hold(library, [same, same])
+        try await library.launch(api) { _ in }
+        let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }
+        #expect(posts.count == 1 && posts[0].json["body"]["attachments"].array.count == 1)
+        #expect(library.home.files.isEmpty && library.home.text.isEmpty)
+    }
+
+    /// While its chat is made, Home takes no edits and no files: what goes
+    /// is what was submitted, and nothing added meanwhile is lost unseen.
+    @Test func aLaunchSendsWhatWasSubmittedWhileItsChatIsMade() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "POST /api/fragments")
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "As submitted"
+        try await hold(library, [first3[0]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("the chat being made") { stub.seen.contains { $0.route == "POST /api/fragments" } }
+        #expect(!library.canLaunch && library.home.launching)
+        library.home.text = "Changed meanwhile"
+        #expect(!library.home.hold(1) { [OutgoingFile(data: Data("late".utf8), name: "photo-1.jpg", type: "image/jpeg")] }, "a late paste is refused, said")
+        #expect(library.home.error == "Wait for the message being sent.")
+        library.home.remove(library.home.files[0].id)
+        #expect(library.home.text == "As submitted" && library.home.files.count == 1)
+        gate.open()
+        try await launch.value
+        let body = try #require(stub.seen.first { $0.route.hasSuffix("/channels/chat") }).json["body"]
+        #expect(body["text"] == .string("As submitted") && body["attachments"].array.map { $0["name"] } == [.string("one.txt")])
+        #expect(library.home.text.isEmpty && library.home.files.isEmpty)
+    }
+
+    /// While its files upload, the new chat's composer is its person's: what
+    /// they type there stays, and the first message is what was submitted.
+    @Test func aLaunchLeavesWhatIsTypedInItsChatMeanwhile() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/")
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "As submitted"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        let session = try #require(library.sessions["mobile-chat--c1"])
+        session.edit("Typed in the chat meanwhile")
+        gate.open()
+        try await launch.value
+        let body = try #require(stub.seen.first { $0.route.hasSuffix("/channels/chat") }).json["body"]
+        #expect(body["text"] == .string("As submitted") && body["attachments"].array.count == 1)
+        #expect(session.composer == "Typed in the chat meanwhile" && session.pending.isEmpty)
+    }
+
+    /// While the first message's file uploads (held open here), the chat
+    /// sends nothing else: a follow-up waits, said so, its words kept, and
+    /// goes once the first is posted, after it.
+    @Test func aFollowUpWaitsForTheFirstMessageBeingUploaded() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/")
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        let session = try #require(library.sessions["mobile-chat--c1"])
+        #expect(session.sendingFirst)
+        session.edit("A follow-up")
+        await session.send()
+        #expect(session.error == "Wait for the message being sent." && session.composer == "A follow-up" && session.pending.isEmpty)
+        #expect(!stub.seen.contains { $0.route.hasSuffix("/channels/chat") })
+        gate.open()
+        try await launch.value
+        #expect(!session.sendingFirst)
+        await session.send()
+        let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }.map { $0.json["body"]["text"] }
+        #expect(posts == [.string("The original task"), .string("A follow-up")])
+        #expect(session.pending.isEmpty && session.composer.isEmpty && session.error == nil)
+    }
+
+    /// A full cache, and the person away and back while the first message's
+    /// upload is held open: the chat they come back to is the one sending
+    /// it, so a follow-up there still waits for it, and a draft typed there
+    /// is kept when the first message is saved.
+    @Test func aFirstMessageKeepsItsSessionInAFullCache() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/")
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        for index in 0..<31 {
+            try library.session(for: FragmentSummary(name: "draft-\(index)", kind: "chat"), api: api).composer = "A draft to preserve"
+        }
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
+        let session = try #require(library.sessions[chat.name])
+        #expect(library.sessions.count == 32 && session.sendingFirst)
+        // away: to a chat not cached (refused, nothing to make room) and to one that is
+        #expect(throws: APIError.self) { try library.session(for: FragmentSummary(name: "one-more", kind: "chat"), api: api) }
+        _ = try library.session(for: FragmentSummary(name: "draft-3", kind: "chat"), api: api)
+        // and back
+        let again = try library.session(for: chat, api: api)
+        #expect(again === session && again.sendingFirst)
+        again.edit("A follow-up")
+        await again.send()
+        #expect(again.error == "Wait for the message being sent." && again.composer == "A follow-up" && again.pending.isEmpty)
+        again.edit("A draft typed meanwhile")
+        again.flushDraft()
+        gate.open()
+        try await launch.value
+        #expect(library.sessions[chat.name] === session && !session.sendingFirst)
+        #expect(session.composer == "A draft typed meanwhile" && session.pending.isEmpty)
+        #expect(ChatSession(fragment: chat, api: api).composer == "A draft typed meanwhile")
+        await session.send()
+        let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }.map { $0.json["body"]["text"] }
+        #expect(posts == [.string("The original task"), .string("A draft typed meanwhile")])
+        #expect(library.sessions.values.filter { $0 !== session }.allSatisfy { $0.composer == "A draft to preserve" })
+    }
+
+    /// The outbox's last place is the first message's: nothing sent while
+    /// its upload is held open takes it, and saved there, its post whose
+    /// answer was lost is retried after a relaunch with the same id and body.
+    @Test func aFirstMessageKeepsItsPlaceInTheOutbox() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/", lost: { seen, before in
+            let text = seen.json["body"]["text"].string ?? ""
+            return text.hasPrefix("Lost") || (text == "The original task" && !before.contains { $0.json["id"] == seen.json["id"] })
+        })
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
+        let session = try library.session(for: chat, api: api)
+        for index in 1..<SavedChat.pendingMax { session.edit("Lost \(index)"); await session.send() }
+        #expect(session.pending.count == SavedChat.pendingMax - 1 && session.pending.allSatisfy(\.failed))
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        #expect(try library.session(for: chat, api: api) === session && session.sendingFirst)
+        session.edit("Lost meanwhile")
+        await session.send()
+        #expect(session.pending.count == SavedChat.pendingMax - 1 && session.composer == "Lost meanwhile")
+        gate.open()
+        try await launch.value
+        let first = try #require(session.pending.last)
+        #expect(session.pending.count == SavedChat.pendingMax && first.text == "The original task" && first.failed)
+        // relaunched: the first message is in the saved outbox, retried as it was
+        let again = ChatSession(fragment: chat, api: api)
+        let restored = try #require(again.pending.first { $0.id == first.id })
+        #expect(again.pending.count == SavedChat.pendingMax && restored.attachments == first.attachments)
+        await again.retry(restored)
+        let sent = stub.seen.filter { $0.route.hasSuffix("/channels/chat") && $0.json["body"]["text"] == .string("The original task") }
+        #expect(sent.count == 2 && sent[0].json == sent[1].json && sent[0].json["id"].string == first.id)
+        #expect(!again.pending.contains { $0.id == first.id })
+    }
+
+    /// An outbox full where the first message would be saved, its upload
+    /// held open until then: it is refused there, never posted unsaved, and
+    /// all of it stays on Home with why.
+    @Test func aFullOutboxRefusesTheFirstMessageWhereItIsSaved() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/", lost: { seen, _ in
+            seen.json["body"]["text"].string?.hasPrefix("Lost") == true
+        })
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
+        let session = try library.session(for: chat, api: api)
+        for index in 0..<SavedChat.pendingMax { session.edit("Lost \(index)"); await session.send() }
+        #expect(session.pending.count == SavedChat.pendingMax)
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        #expect(session.sendingFirst)
+        gate.open()
+        await #expect(throws: (any Error).self) { try await launch.value }
+        #expect(!stub.seen.contains { $0.route.hasSuffix("/channels/chat") && $0.json["body"]["text"] == .string("The original task") })
+        #expect(library.home.text == "The original task" && library.home.files.count == 1)
+        #expect(library.home.error == "Your message wasn't sent. Wait for the messages still sending, or edit the ones not sent.")
+        #expect(session.pending.count == SavedChat.pendingMax && !session.sendingFirst)
+        #expect(ChatSession(fragment: chat, api: api).pending.map(\.text) == session.pending.map(\.text))
+    }
+
+    /// Every way to start a chat from Home waits for a voice memo being
+    /// recorded (Send, the Start a new chat row: one rule).
+    @Test func noLaunchWhileAMemoIsRecorded() async throws {
+        let created = Count()
+        let stub = launchStub(created: created)
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "With a memo"
+        #expect(library.canLaunch)
+        library.home.recording = true
+        #expect(!library.canLaunch)
+        try await library.launch(api) { _ in Issue.record("launched while recording") }
+        #expect(created.now == 0 && library.home.text == "With a memo")
+    }
+
+    /// Home's voice memo holds its place too: with the first message full,
+    /// it is refused before it records; with a place left, a paste meanwhile
+    /// is refused, and the memo, finished, is held in that place.
+    @Test func aHomeVoiceMemoHoldsItsPlaceFromBeforeItRecords() async throws {
+        let library = Library()
+        let home = library.home
+        try await hold(library, (0..<ChatAttachment.countMax).map { OutgoingFile(data: Data("file \($0)".utf8), name: "file-\($0).txt", type: "text/plain") })
+        let microphone = TestMicrophone()
+        let voice = VoiceMemo(microphone: microphone)
+        #expect(home.room == 0)
+        let full = home.hold(1) { [voice] in try await voice.file() }
+        #expect(!full && home.error == ChatAttachment.limits.countRefusal && microphone.started == 0 && !home.reading)
+        home.remove(home.files[0].id)
+        #expect(home.room == 1)
+        let taken = home.hold(1) { [voice] in try await voice.file() }
+        #expect(taken)
+        try await waitUntil("the memo recording") { voice.recording }
+        let pasted = home.hold(1) { [OutgoingFile(data: Data("pasted".utf8), name: "pasted-image-1.png", type: "image/png")] }
+        #expect(!pasted && home.error == "Wait for the files being attached, then add more." && !home.ready)
+        voice.finish()
+        try await waitUntil("the memo held") { !home.reading }
+        let recorded = try #require(microphone.url)
+        #expect(home.files.count == ChatAttachment.countMax && home.files.last?.file.name == recorded.lastPathComponent)
+        #expect(home.files.last?.file.data == microphone.bytes && home.error == nil && !FileManager.default.fileExists(atPath: recorded.path))
+    }
+
+    /// A voice memo's chip in the composer says what it is and how long,
+    /// never the name it is sent with; any other file keeps its name.
+    @Test func aVoiceMemoChipSaysItsLengthNotItsFileName() {
+        let memo = "voice-1CC2B6D3-CAD8-4497-8692-C753A0C7C3B1.m4a"
+        #expect(ComposerMemos.label(memo) == "Voice memo", "its length unknown (a draft from before a relaunch)")
+        ComposerMemos.remember(memo, seconds: 7)
+        #expect(ComposerMemos.label(memo) == "Voice memo · 0:07")
+        ComposerMemos.remember("voice-0A0A0A0A-0A0A-0A0A-0A0A-0A0A0A0A0A0A.m4a", seconds: 65)
+        #expect(ComposerMemos.label("voice-0A0A0A0A-0A0A-0A0A-0A0A-0A0A0A0A0A0A.m4a") == "Voice memo · 1:05")
+        #expect(ComposerMemos.label("photo-1.jpg") == "photo-1.jpg")
+        #expect(ComposerMemos.label("voice-notes.m4a") == "voice-notes.m4a", "a file of theirs so named is theirs")
     }
 
     /// A turn begun before the backlog (a start, then more steps than one

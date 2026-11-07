@@ -33,20 +33,27 @@ final class ImageCache {
     func cached(_ url: URL) -> UIImage? { images.object(forKey: url as NSURL) }
 
     func image(_ url: URL, api: FragmentAPI?) async -> UIImage? {
-        if let image = cached(url) { return image }
-        if let task = loading[url] { return await task.value }
-        reads += 1
-        let task = Task<UIImage?, Never> {
+        let bytesMax = Self.bytesMax
+        return await image(url) {
             do {
                 let request = URLRequest(url: url)
                 let data: Data
                 let response: URLResponse
                 if let api, PlatformOrigin.same(api.baseURL, url) { (data, response) = try await api.data(for: request) }
                 else { (data, response) = try await URLSession.shared.data(for: request) }
-                guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= Self.bytesMax else { return nil }
+                guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= bytesMax else { return nil }
                 return UIImage(data: data)
             } catch { return nil }
         }
+    }
+
+    /// A picture `make` makes (a chat file's, from its file on this
+    /// iPhone: `BlobKey.imageKey`), kept as one read is, under `url`.
+    func image(_ url: URL, make: @escaping @Sendable () async -> UIImage?) async -> UIImage? {
+        if let image = cached(url) { return image }
+        if let task = loading[url] { return await task.value }
+        reads += 1
+        let task = Task<UIImage?, Never> { await make() }
         loading[url] = task
         let image = await task.value
         // emptied meanwhile (another account): what it read is not kept

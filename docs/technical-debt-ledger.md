@@ -5,6 +5,29 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A computer's lifecycle writes its old flags too
+
+- **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
+  phase into the phases that own it (`fragment_core::computer::Phase`:
+  `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
+  `owes_start`, `Failed`'s `since_ms`). The previous release reads only
+  the old fields (`wake_after_sleep`, `retry_at_ms`, `failed_ms`,
+  `owner_sleep`, `restarting`), so every stored lifecycle still carries
+  them too, written from the phase (`Legacy`), and `Lifecycle::read` fills
+  a phase stored by that release from them. Each step asserts the two
+  agree.
+- **Risk:** none while they agree. A rollback reads the same computer;
+  only `Starting`'s `destroying` is new to it, so a rolled-back release
+  counts a failing start's own destroy as a crash again (one more strike,
+  as before #1004's note in memory, which it still has).
+- **Delete when:** writing them, once no deployment can roll back to a
+  release before this one (production runs a release after it): step two
+  stops writing them (`Legacy::of`, the per-step assertion). Reading them
+  (`Legacy::fill`) goes too once every stored lifecycle has been written
+  by this release or a later one: a computer that has not woken since
+  keeps the old fields until its next event, so that last cut waits for
+  a sweep that touches every computer, or for no computer being older.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made
@@ -19,6 +42,21 @@ unfinished design, not debt.
 - **Delete when:** a wipe deletes its person's repos by their name
   (`codestorage::repo_name`, the owner's digest), not only those its
   fragments' lives recorded.
+
+## The bridge copies the platform's file bounds; the app, an older platform's
+
+- **Shortcut:** a file's bounds are proto's `limits`, which the platform
+  serves its clients (`UploadLimits`: `GET /api/fragments`, a page's
+  hello). Two copies remain. The bridge's `ATTACHMENT_MAX_BYTES` and
+  `ATTACHMENTS_MAX` (images/ cannot depend on proto yet) are held to
+  proto by xtask/src/guards.rs. The app's `UploadLimits.olderPlatform`
+  (ios/Sources/ChatMedia.swift) is what a platform that serves no
+  `limits` took, 25 MiB and 8 files, for a build that meets one.
+- **Risk:** none past a red check for the bridge's. The app against an
+  older platform refuses a file past 25 MiB that the platform might take.
+- **Delete when:** the bridge depends on proto (FIN-379, PR 4); and
+  production serves `limits` (the first production deploy after FIN-405's
+  PR 3), when the app reads an absent `limits` as no bound of its own.
 
 ## A computer's disk is 20 GB, priced as 12
 
@@ -726,9 +764,10 @@ unfinished design, not debt.
 
 ## A blob upload is one request, and the CLI holds whole files
 
-- **Shortcut:** a blob is one request of at most 256 MiB
-  (cell/src/blobs.rs), and the CLI reads files whole; Cloudflare refuses
-  bodies over 100 MB on Free and Pro zones.
+- **Shortcut:** a blob is one request of at most 256 MiB from a
+  computer, and of at most the deployment's `upload_max_bytes` (its
+  zone's limit: 100 MB on Free and Pro) from a person (cell/src/lib.rs
+  `blob_length`), and the CLI reads files whole.
 - **Risk:** large files fail whole, or cannot upload at all.
 - **Delete when:** uploads go in resumable parts (R2 multipart under the
   zone's limit, tested with a 150 MB file) or by signed URL, and the CLI

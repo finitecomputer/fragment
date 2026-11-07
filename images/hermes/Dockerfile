@@ -86,6 +86,7 @@ COPY crates/nip98 crates/nip98
 COPY crates/proto crates/proto
 COPY crates/templates crates/templates
 COPY templates/blank templates/blank
+COPY templates/board templates/board
 COPY templates/calories templates/calories
 COPY templates/doc templates/doc
 COPY templates/inbox templates/inbox

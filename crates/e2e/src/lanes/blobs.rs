@@ -116,6 +116,23 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("one whose payload tag names any other hash is 401", r.status == 401, &r);
     let r = put(None, &sha256_hex(&wrong), wrong.clone())?;
     s.ok("an unsigned upload is 401", r.status == 401, &r);
+
+    // a person's upload is at most what the platform tells its clients
+    // (`limits` on the list: this fleet's own `UPLOAD_MAX_BYTES`); an
+    // agent's, through its computer, at most a blob's
+    let most = api.signed(&keys, "GET", "/api/fragments", None)?.body["limits"]["uploadMaxBytes"].as_u64().unwrap_or(0) as usize;
+    let (at, past) = (bytes_of(most, 8), bytes_of(most + 1, 9));
+    let taken = put(Some(&keys), &sha256_hex(&at), at.clone())?;
+    let refused = put(Some(&keys), &sha256_hex(&past), past.clone())?;
+    s.ok(
+        "a person's upload is taken at the platform's bound, as its clients are told it, and refused one byte past it (413)",
+        (s.hosted() || most as u64 == crate::UPLOAD_MAX_BYTES) && taken.status == 200 && refused.status == 413,
+        json!({ "most": most, "at": taken.status, "past": refused.status, "said": refused.message() }),
+    );
+    let (agent, agent_id) = api.own_agent(&keys)?;
+    let joined = api.signed(&keys, "PUT", &format!("/api/f/{name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    let r = put(Some(&agent), &sha256_hex(&past), past.clone())?;
+    s.ok("an agent's upload (its computer's, which no zone meets) is bounded by a blob's: past a person's, taken", joined.status == 200 && r.status == 200, json!({ "joined": joined.status, "put": r.status }));
     let viewer = api.person()?;
     api.share(&name, viewer.pubkey_hex(), "viewer")?;
     let r = put(Some(&viewer), &sha256_hex(&wrong), wrong.clone())?;

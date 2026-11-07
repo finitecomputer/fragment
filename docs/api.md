@@ -38,8 +38,10 @@ Every answer of the platform's host names its release in
 verified a CLI for the release's inputs, that version in `x-fragment-cli`.
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
-on Free and Pro), below the `BLOB_MAX_BYTES` a blob route allows (debt
-ledger).
+on Free and Pro). A person's blob upload is refused past the deployment's
+`upload_max_bytes` (default that zone limit), which `GET /api/fragments`
+tells clients (`limits`); an agent's, from its computer, which never meets
+the zone, past `BLOB_MAX_BYTES` (debt ledger).
 
 ## Test levers
 
@@ -63,7 +65,7 @@ otherwise); the registry's and the mail lever are no route.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?}` |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -670,7 +672,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person who is not a guest; an agent for its owner (the owner's, billed to them, its maker an editor) | `{label \| name, visibility?, template?, title?, agent?}` (Names) → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}`. `agent`, one of the maker's own agents (its identity), is an editor from the first moment, in every list row of it, its computer told it joined, as `PUT members/{agent}` adds one after, once its template is installed (a template that fails to land tells it when a retry lands it); anyone else's is 403, and nothing is made; with a connector's template (`telegram`, whose only editor is its owner) it is 400, and nothing is made. A guest is 403 `forbidden` (`Spend::Create`), however asked, and past the overdraft 402 `budget_used_up`; a ledger that does not answer refuses none. `visibility` defaults to `link`, but `members` for a chat, an agent or a session archive (`Visibility::made_from`). The fragment's own key is made in its cell, sealed. With `template` (`blank`, `todo`, `inbox`, `calories`, `doc`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the name, and `title`) and live once the create answers; one that fails to land is retried by the alarm (`template.failed`). `agent`, `chat`, `brain`, `skills`, `sessions`, `telegram` are blessed (decision 40): main's first commit is `{"template", "meta": {title}}`, and the release serves the rest (Apps; a session archive, which `fragment session import` makes: templates/sessions/README.md). `notes` is the CLI's only. A `title` (1 to `TITLE_MAX_CHARS`) needs a `template` (400). A chat's `repo` is `""`: made after the answer (Names), when its agent's computer is told it joined. Its waits, in `Server-Timing` (`<part>;dur=<ms>`): `ledger`, `object` and, an agent's, `agent`; then its object's `identity` (with `agent`), `repo`, `key`, `manifest`, `list`, `seed` (with `template`), `joined` (with `agent` and no `template`: its computer told; a template's seed tells it once it lands) and `alarm` (a chat's: `identity` with `agent`, `key`, `manifest`, `install`, `list` and `alarm`) |
-| `GET /api/fragments` | any signer | → `{fragments: [ListedFragment {name, role, kind, title?, picture?, agentRole?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, pinned?, listed?}]}`. `kind` is `app`, `chat`, `agent`, `brain`, `skills` or `sessions` (a client reads an unknown one as `other`: `FragmentKind::Other`); `picture` an agent's face or an app's icon; `agentRole` an agent's role (An agent's name and picture); `agents` its agent members, the first added first, at most `LISTED_AGENTS_MAX`; `preview` (at most `LISTED_PREVIEW_MAX_BYTES`) and `previewAt`, a chat's newest message their search holds (Search); `unread`, a chat's messages after their last `seen`, at most `LISTED_UNREAD_MAX`, absent at 0; `sharing`, their own fragments' `{visibility, members, guests, invites}`; `archived: true`, `dock: false` and `pinned: true` their own choices; `listed`, what its members are doing (Listed records). An agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there for it and `owned: true` on that identity's own, without `listed` |
+| `GET /api/fragments` | any signer | → `{fragments: [ListedFragment {name, role, kind, title?, picture?, agentRole?, agents?, preview?, previewAt?, unread?, sharing?, archived?, dock?, pinned?, listed?}], limits?}`. `kind` is `app`, `chat`, `agent`, `brain`, `skills` or `sessions` (a client reads an unknown one as `other`: `FragmentKind::Other`); `picture` an agent's face or an app's icon; `agentRole` an agent's role (An agent's name and picture); `agents` its agent members, the first added first, at most `LISTED_AGENTS_MAX`; `preview` (at most `LISTED_PREVIEW_MAX_BYTES`) and `previewAt`, a chat's newest message their search holds (Search); `unread`, a chat's messages after their last `seen`, at most `LISTED_UNREAD_MAX`, absent at 0; `sharing`, their own fragments' `{visibility, members, guests, invites}`; `archived: true`, `dock: false` and `pinned: true` their own choices; `listed`, what its members are doing (Listed records). `limits: UploadLimits {uploadMaxBytes, filesPerMessage}`, the one statement of what a message of the signer's may carry, which every client checks its files against before it sends them and the blob upload holds: `uploadMaxBytes` a person's, the deployment's `upload_max_bytes` (default `UPLOAD_MAX_BYTES_DEFAULT`, the request body a Free or Pro zone takes, which each of a person's uploads passes), an agent's `BLOB_MAX_BYTES` (its computer's uploads never meet the zone); `filesPerMessage` `FILES_PER_MESSAGE`; absent from an older platform. An agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there for it and `owned: true` on that identity's own, without `listed`, and `limits` the agent's own |
 | `GET /api/fragments/watch` | any signer; the shell's session with the platform's exact `Origin` | a WebSocket: `{type: "hello"}`, then `{type: "changed"}` whenever their list changes, and `{type: "invited"}` whenever the invites waiting on them change. Frames name nothing: the page reads again with its own credential. A fragment's page is refused like no one (401). At most `LIST_WATCHERS_MAX` a list (429). Not for `for` |
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `{archived: bool}` → `{name, archived}`: their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
 | `PUT /api/fragments/{name}/dock` | the same | `{dock: bool}` → `Docked {name, dock}`: whether their dock shows it, as archiving is (every fragment is on it until taken off); their list's sockets are told. Not for `for` |
@@ -703,7 +705,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `sha256` is its blob. A blessed template's data from the release is listed beneath (`release: true`) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); with none of its own there, a blessed template's data file |
-| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes (`content-length` required, at most `BLOB_MAX_BYTES`), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
+| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges 206) |
 | `GET /api/f/{name}/card` | viewer | → the preview card: a 1280×800 JPEG, `ETag` its SHA-256, `private, no-cache`, `X-Fragment-Ref` the live it shows (an upload has none); `If-None-Match` 304; none yet 404 (Cards) |
 | `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again (Cards). A chat, agent or members-only fragment, or nothing deployed, 400; an owner who pays for nothing 402; within `card::AGAIN_EVERY_MS` of the last ask, 429 |
@@ -1659,7 +1661,7 @@ fragment's, `/api/…` included.
 | `__file?path=` | a content file from live, else main; an agent fragment's or a session archive's from main, else live (its computer, or its imports, write main and never deploy); `no-store`, the file as it is now |
 | `__file?path=&v=<commit>` | that file at the version `v` names: the commit that last changed it (`files.stat`'s and `__files`' `commit`, a generated file's `commit`), 40 or 64 lowercase hex (else 400). At main or live, `immutable` (`private` unless the fragment is public; a blob's, or a file the size of a pointer, `no-cache`), `ETag` the commit; another version, a 302 to the current one's URL (`no-store`): a URL never answers other bytes. Neither pin has the file: as without `v` |
 | `__preview.svg` | the placeholder preview image |
-| `__blob/{sha256}` | `GET`, `HEAD`: one of this fragment's blobs, to viewers and up (not `public` alone), as its declared type (Blobs; ranges 206), `private, max-age=31536000, immutable`, `nosniff`, `ETag` the hash; another fragment's hash 404. `PUT` (editors, from the fragment's own page) uploads as `PUT /api/f/{name}/blobs/{sha256}` → `{ok, sha, size, stored}`; another fragment's page uploads as no one (401) |
+| `__blob/{sha256}` | `GET`, `HEAD`: one of this fragment's blobs, to viewers and up (not `public` alone), as its declared type (Blobs; ranges 206), `private, max-age=31536000, immutable`, `nosniff`, `ETag` the hash; another fragment's hash 404. `PUT` (editors, from the fragment's own page) uploads as a person's `PUT /api/f/{name}/blobs/{sha256}` → `{ok, sha, size, stored}`; another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): as `GET /api/f/{name}/members` |
 | `__schedules` | viewers and up (the share link too): as `GET /api/f/{name}/schedules` |
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: as `GET /api/f/{name}/channels/{channel}`, with this origin's session or share link |
@@ -1708,8 +1710,9 @@ server) and `LiveOut` (server → client) in `crates/proto/src/live.rs`:
   dropped with an error), `{type: "query", id, op, input}` (`id`
   `^[A-Za-z0-9._:-]{1,128}$`), `{type: "ping"}`.
 - server → client: `{type: "hello", id, principal, role, platform,
-  presence: [{id, principal, data}]}` (`platform` the platform's origin:
-  the one page whose messages a framed page may take), `{type: "record",
+  presence: [{id, principal, data}], limits?: UploadLimits}` (`platform` the
+  platform's origin: the one page whose messages a framed page may take;
+  `limits` as `GET /api/fragments` names them), `{type: "record",
   channel, seq, at, principal, kind, body}`, `{type: "subscribed", channel,
   next, more}`, `{type: "draft", channel, principal, turn, text, at,
   thinking?}` (never stored; `text: null` once stopped), `{type:
@@ -1759,7 +1762,7 @@ between two changes to the fragment, one at a time per id (429
 - `presence.set(data)` (changes within 150 ms sent as one), `presence.on(fn)`.
 - `blob(file, {name?, type?})` → `{sha256, size, type, name}`, uploaded as
   an editor.
-- `me()` → the hello's `{id, principal, role, platform}`; `closed(fn)`,
+- `me()` → the hello's `{id, principal, role, platform, limits}`; `closed(fn)`,
   called with `{code, reason}` after 4003 or 4004, which end the socket.
   Otherwise it reconnects by itself with jittered backoff.
 - A page may dial its socket before the library comes, from an inline

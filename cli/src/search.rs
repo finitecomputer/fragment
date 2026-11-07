@@ -171,9 +171,10 @@ mod tests {
                 row("old--k3x9", FragmentKind::Brain, true),
                 row("todo--k3x9", FragmentKind::App, false),
             ],
+            limits: None,
         };
         assert_eq!(all(&list), (vec!["archive--k3x9".to_string(), "zeta--k3x9".to_string()], 0));
-        let many = FragmentList { fragments: (0..IN_MAX + 3).map(|i| row(&format!("b{i:02}--k3x9"), FragmentKind::Brain, false)).collect() };
+        let many = FragmentList { fragments: (0..IN_MAX + 3).map(|i| row(&format!("b{i:02}--k3x9"), FragmentKind::Brain, false)).collect(), limits: None };
         let (names, left) = all(&many);
         assert_eq!((names.len(), left, names[0].as_str()), (IN_MAX, 3, "b00--k3x9"));
     }
