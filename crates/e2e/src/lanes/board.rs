@@ -368,6 +368,7 @@ pub fn board(s: &mut Suite, api: &Api) -> Result<()> {
     let mark = "document.querySelectorAll('.bd-frame iframe').forEach((i) => { i.dataset.e2e = 'kept'; })";
     chrome.eval(&a, mark)?;
     chrome.eval(&b, mark)?;
+    shot(&mut chrome, &b, &media, "2a-viewer-before.png");
     let changed = s.dir("board-edits").join("home.html");
     std::fs::write(&changed, frame_page("Home, second draft", ""))?;
     let changed_s = changed.to_str().expect("utf-8 path").to_string();
@@ -392,6 +393,7 @@ pub fn board(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "a": [a_camera, camera(&mut chrome, &a)], "b": [b_camera, camera(&mut chrome, &b)] }),
     );
     shot(&mut chrome, &a, &media, "2-home-updated.png");
+    shot(&mut chrome, &b, &media, "2b-viewer-after.png");
 
     // replay: the same call id answers its first result and redraws nothing
     let id = "replay-home";
@@ -444,10 +446,10 @@ pub fn board(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.eval(&c, "document.getElementById('fit').click()")?;
     let fits = chrome.eval(
         &c,
-        "(() => { const r = [...document.querySelectorAll('.bd-body')].map((b) => b.getBoundingClientRect()); const z = document.querySelector('.bd-zoom').getBoundingClientRect(); return { inside: r.every((b) => b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight), overflow: document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight, controls: z.left >= 0 && z.right <= innerWidth && z.bottom <= innerHeight }; })()",
+        "(() => { const r = [...document.querySelectorAll('.bd-body')].map((b) => b.getBoundingClientRect()); const z = document.querySelector('.bd-zoom').getBoundingClientRect(); const labels = [...document.querySelectorAll('.bd-label')].every((l) => l.getBoundingClientRect().right <= l.parentElement.getBoundingClientRect().right + 0.5); return { labels, inside: r.every((b) => b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight), overflow: document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight, controls: z.left >= 0 && z.right <= innerWidth && z.bottom <= innerHeight }; })()",
     )?;
     shot(&mut chrome, &c, &media, "3-phone.png");
-    s.ok("at a phone's width the board fits every frame on screen, with nothing overflowing", fitted && fits["inside"] == true && fits["overflow"] == false && fits["controls"] == true, &fits);
+    s.ok("at a phone's width the board fits every frame on screen, each label within its frame, with nothing overflowing", fitted && fits["labels"] == true && fits["inside"] == true && fits["overflow"] == false && fits["controls"] == true, &fits);
     let before = camera(&mut chrome, &c);
     chrome.touches(&c, "touchStart", &[(150.0, 400.0), (240.0, 400.0)])?;
     for step in 1..=6 {

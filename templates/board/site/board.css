@@ -17,9 +17,11 @@ body { background: var(--soft); }
 .bd-frame.on .bd-shield { display: none; }
 .bd-frame.on .bd-body { box-shadow: 0 0 0 calc(2px / var(--z)) var(--accent); }
 /* labels stay one size on screen as the board zooms, down to a tenth */
-.bd-label { position: absolute; left: 0; bottom: 100%; max-width: 100%; display: flex; gap: .5em; align-items: baseline; padding-bottom: .45em; font-size: calc(12px / max(var(--z), .1)); line-height: 1.2; white-space: nowrap; pointer-events: none; }
-.bd-label b { overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--fg); }
-.bd-label span { flex: none; color: var(--muted); }
+.bd-label { position: absolute; left: 0; bottom: 100%; max-width: 100%; overflow: hidden; display: flex; gap: .5em; align-items: baseline; padding-bottom: .45em; font-size: calc(12px / max(var(--z), .1)); line-height: 1.2; white-space: nowrap; pointer-events: none; }
+/* never wider than its frame: the size gives way first, then the name */
+.bd-label b, .bd-label span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bd-label b { flex: 0 1 auto; font-weight: 600; color: var(--fg); }
+.bd-label span { flex: 0 100 auto; color: var(--muted); }
 
 /* the controls, over the board */
 .bd-head { position: fixed; top: max(.75rem, env(safe-area-inset-top)); left: max(.875rem, env(safe-area-inset-left)); right: 6rem; pointer-events: none; }
