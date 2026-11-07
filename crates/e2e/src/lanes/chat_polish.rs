@@ -1027,8 +1027,12 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     anyhow::ensure!(r.status == 200, "starting a turn: {r}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     // (`__failLatest`: the next read of the newest page fails, as a blip)
-    let hook = "if (window === window.top) { window.__failLatest = false; const real = window.fetch.bind(window); \
-        window.fetch = (url, o) => { const u = String(url); if (window.__failLatest && u.includes('__channel/chat') && u.includes('before=9007199254740991')) { window.__failLatest = false; return Promise.reject(new TypeError('Failed to fetch')); } return real(url, o); }; }";
+    // (`__failLatest`: the next read of the newest page fails, as a blip;
+    // `__holdLatest`: the next one is held until `__letLatest()`, then fails)
+    let hook = "if (window === window.top) { window.__failLatest = false; window.__holdLatest = false; window.__heldLatest = false; let go; window.__latestGate = new Promise((r) => { go = r; }); window.__letLatest = () => go(); \
+        const real = window.fetch.bind(window); window.fetch = async (url, o) => { const u = String(url); const latest = u.includes('__channel/chat') && u.includes('before=9007199254740991'); \
+        if (latest && window.__holdLatest) { window.__holdLatest = false; window.__heldLatest = true; await window.__latestGate; window.__heldLatest = false; throw new TypeError('Failed to fetch'); } \
+        if (latest && window.__failLatest) { window.__failLatest = false; throw new TypeError('Failed to fetch'); } return real(url, o); }; }";
     let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), hook)?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let count = "document.querySelectorAll('.msg.user').length";
@@ -1054,7 +1058,7 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     let up = seen(chrome)?;
     s.ok(
         "up the chat, the window holds 600 messages at most: past them its newest go",
-        up["window"] == "up" && up["count"] == 600 && up["first"] == "101" && up["last"] == "700" && up["most"].as_u64().is_some_and(|n| n <= 700),
+        up["window"] == "up" && up["count"] == 600 && up["first"] == "101" && up["last"] == "700" && up["most"].as_u64().is_some_and(|n| n <= 600),
         &up,
     );
     s.ok("and the turn running keeps its working line and Stop", super::shows(chrome, &page, running), &up);
@@ -1083,7 +1087,7 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     let shown = chrome.eval(&page, "[...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'Said while away')")?;
     s.ok(
         "back down, pages come in below as the oldest go, to the end, where the message said meanwhile shows",
-        down["window"] == "live" && down["count"] == 600 && down["last"] == "801" && shown == true && down["most"].as_u64().is_some_and(|n| n <= 700),
+        down["window"] == "live" && down["count"] == 600 && down["last"] == "801" && shown == true && down["most"].as_u64().is_some_and(|n| n <= 600),
         &down,
     );
     // up past the window again, then Jump to latest
@@ -1147,6 +1151,13 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
         reset && after["count"].as_u64().is_some_and(|n| n <= 600),
         &after,
     );
+    // the reader up within that window (at the end, live): a message sent
+    // goes to the end with it, and shows (Codex's review of #1078)
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight - s.clientHeight - 2000; return true; })()")?;
+    anyhow::ensure!(super::shows(chrome, &page, &format!("{window} === 'live' && !document.getElementById('latest').hidden")), "the reader is up within the window");
+    chrome.eval(&page, "(() => { document.getElementById('text').value = 'Said from within the window'; document.getElementById('say').requestSubmit(); return true; })()")?;
+    let within = super::shows(chrome, &page, &format!("{window} === 'live' && document.getElementById('latest').hidden && {count} <= 600 && [...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === 'Said from within the window') && (() => {{ const s = document.getElementById('scroll'); return s.scrollHeight - s.scrollTop - s.clientHeight < 2; }})()"));
+    s.ok("a message sent with the reader up within a full window at the end goes to the end with it, and shows", within, seen(chrome)?);
     // up the chat again, a message sent while the newest page's read fails
     for _ in 0..3 {
         chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
@@ -1166,6 +1177,29 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     chrome.eval(&page, "(() => { document.getElementById('say').requestSubmit(); return true; })()")?;
     let sent = super::shows(chrome, &page, &format!("{window} === 'live' && [...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === 'Said from up the chat') && document.getElementById('latest').hidden"));
     s.ok("sent again: the window at the end, the message there", sent, seen(chrome)?);
+    // and a send whose read of the newest page is held while more is typed,
+    // then fails: the words, and what was typed meanwhile, stay; sent
+    // again, they go as one message (Codex's review of #1078)
+    for _ in 0..3 {
+        chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
+        if super::shows(chrome, &page, &format!("{window} === 'up'")) {
+            break;
+        }
+    }
+    anyhow::ensure!(chrome.eval(&page, window)? == "up", "the window is up the chat once more");
+    chrome.eval(&page, "(window.__holdLatest = true, (() => { document.getElementById('text').value = 'Original words'; document.getElementById('say').requestSubmit(); return true; })())")?;
+    anyhow::ensure!(super::shows(chrome, &page, "window.__heldLatest === true"), "the newest page's read is held");
+    chrome.eval(&page, "(() => { const t = document.getElementById('text'); t.value += ' and more'; t.dispatchEvent(new Event('input')); window.__letLatest(); return true; })()")?;
+    let kept = super::shows(chrome, &page, &format!("window.__heldLatest === false && document.getElementById('banner-text').textContent.startsWith('Your message was not sent') && document.getElementById('text').value === 'Original words and more' && {window} === 'up'"));
+    let posted = super::super::jobs::records(api, owner, &name, "chat").iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("Original words"))).count();
+    s.ok(
+        "a send whose read of the newest page fails after more was typed keeps every word in the composer, nothing posted",
+        kept && posted == 0,
+        json!({ "composer": chrome.eval(&page, "document.getElementById('text').value")?, "posted": posted }),
+    );
+    chrome.eval(&page, "(() => { document.getElementById('say').requestSubmit(); return true; })()")?;
+    let both = super::shows(chrome, &page, &format!("{window} === 'live' && [...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === 'Original words and more')"));
+    s.ok("sent again, they go as one message, at the end", both, seen(chrome)?);
     chrome.close(page)?;
     Ok(())
 }
@@ -1308,6 +1342,109 @@ pub(super) fn history_overlaps(s: &mut Suite, api: &Api, owner: &Keys, session: 
         "a read of work that failed and was said before the chat was ready: ready, the page reads it again by itself (no Try again pressed), and the work comes in",
         ready_after && came,
         json!({ "readyAfterSaid": ready_after, "seen": chrome.eval(&page, &format!("({{ near: {near}, history: {history}, said: document.getElementById('history-status').textContent }})"))? }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// A chat of messages and card answers (`prompt_response`, records a page
+/// reads and never shows) in blocks, posted in order: `("m", n)` n messages,
+/// `("r", n)` n answers.
+fn blocks_fixture(s: &mut Suite, api: &Api, owner: &Keys, label: &str, plan: &[(&str, usize)]) -> Result<String> {
+    let name = s.named(api, owner, label)?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making {label}: {made}");
+    s.owned(&made.body, owner);
+    let mut at = 0;
+    for (kind, n) in plan {
+        let posted: Vec<Result<()>> = std::thread::scope(|scope| {
+            let posters: Vec<_> = (0..8)
+                .map(|t| {
+                    let (name, kind) = (&name, *kind);
+                    scope.spawn(move || -> Result<()> {
+                        for i in (at + t..at + n).step_by(8) {
+                            let body = if kind == "m" { json!({ "text": format!("Line {i}") }) } else { json!({ "kind": "prompt_response", "prompt": format!("p{i}"), "option": "c0" }) };
+                            let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("b{i}"), "body": body })))?;
+                            anyhow::ensure!(r.status == 200, "posting b{i}: {r}");
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            posters.into_iter().map(|p| p.join().expect("a poster's thread")).collect()
+        });
+        posted.into_iter().collect::<Result<Vec<()>>>()?;
+        at += n;
+    }
+    Ok(name)
+}
+
+/// The backward cursor goes by each page read, not by what of it is shown
+/// (Alex's review of #1078): records a page reads and never shows (card
+/// answers), seen already, never hold it. Valid:
+/// - Jump to latest onto a page of seen answers and one message, then up:
+///   the chat's start is reached;
+/// - then down to the end (the window letting its oldest go, seen answers
+///   just before what it keeps), then up again: the start again;
+/// - Jump to latest onto a page of seen answers alone: older messages are
+///   read, not the history said done.
+pub(super) fn history_cursor(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let count = "document.querySelectorAll('.msg.user').length";
+    let window = "document.getElementById('scroll').dataset.window";
+    let history = "document.getElementById('scroll').dataset.history";
+    let has = |seq: u32| format!("!!document.querySelector('.msg[data-seq=\"{seq}\"]')");
+    // the top (or the bottom) reached again and again until `until`, a page each time
+    let walk = |chrome: &mut Browser, page: &crate::browser::Page, top: bool, until: &str| -> Result<bool> {
+        for _ in 0..20 {
+            if chrome.eval(page, until)? == true {
+                return Ok(true);
+            }
+            let before = chrome.eval(page, "[...document.querySelectorAll('.msg[data-seq]')].map((m) => m.dataset.seq).join()")?;
+            chrome.eval(page, if top { "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()" } else { "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()" })?;
+            let moved = format!("[...document.querySelectorAll('.msg[data-seq]')].map((m) => m.dataset.seq).join() !== {before} || ({until})");
+            if !super::shows(chrome, page, &moved) {
+                return Ok(false);
+            }
+        }
+        Ok(chrome.eval(page, until)? == true)
+    };
+
+    // messages 1–600, answers 601–700, messages 701–1300, answers 1301–1400, message 1401
+    let name = blocks_fixture(s, api, owner, "chat-cursor", &[("m", 600), ("r", 100), ("m", 600), ("r", 100), ("m", 1)])?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 1 && document.getElementById('scroll').dataset.watching === '1'")), "the cursor chat opens on its newest page");
+    let up = walk(chrome, &page, true, &format!("{window} === 'up'"))?;
+    chrome.click(&page, "#latest")?;
+    let reset = super::shows(chrome, &page, &format!("{window} === 'live' && {count} === 1"));
+    let start = walk(chrome, &page, true, &format!("{} && {history} === 'done'", has(1)))?;
+    s.ok(
+        "Jump to latest onto a page of seen answers and one message, then up: the chat's start is reached",
+        up && reset && start,
+        json!({ "up": up, "reset": reset, "start": start, "history": chrome.eval(&page, history)?, "first": chrome.eval(&page, "document.querySelector('.msg[data-seq]')?.dataset.seq")? }),
+    );
+    let end = walk(chrome, &page, false, &format!("{window} === 'live' && {}", has(1401)))?;
+    let evicted = chrome.eval(&page, &format!("!{}", has(600)))?;
+    let again = walk(chrome, &page, true, &format!("{} && {history} === 'done'", has(1)))?;
+    s.ok(
+        "then down to the end (its oldest let go, seen answers just before what it keeps), then up again: the start again",
+        end && evicted == true && again,
+        json!({ "end": end, "evicted": evicted, "again": again, "first": chrome.eval(&page, "document.querySelector('.msg[data-seq]')?.dataset.seq")? }),
+    );
+    chrome.close(page)?;
+
+    // messages 1–650, answers 651–750: the newest page holds answers alone
+    let name = blocks_fixture(s, api, owner, "chat-cursor-answers", &[("m", 650), ("r", 100)])?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let up = walk(chrome, &page, true, &format!("{window} === 'up'"))?;
+    chrome.click(&page, "#latest")?;
+    let read = super::shows(chrome, &page, &format!("{window} === 'live' && {count} > 0 && {history} !== 'done'")) || super::shows(chrome, &page, &format!("{count} > 0"));
+    s.ok(
+        "Jump to latest onto a page of seen answers alone: older messages are read, the history not said done",
+        up && read,
+        json!({ "up": up, "count": chrome.eval(&page, count)?, "history": chrome.eval(&page, history)? }),
     );
     chrome.close(page)?;
     Ok(())
