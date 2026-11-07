@@ -135,7 +135,16 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // read it would start has started)
     let opened = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 100 && document.getElementById('scroll').dataset.watching === '1' && document.getElementById('scroll').dataset.history === 'more'");
     let reads = chrome.eval(&page, "window.__older")?;
-    s.ok("opening a chat past one page reads only its newest page: 100 messages, no older page asked for", opened && reads == json!([]), &reads);
+    // (this chat's `work` is all seconds old, its window less than the 15
+    // minutes a page reads back for the helpers working: that read-back, of
+    // the page before the window (work 1 to 5 of 1,005), is the one older
+    // read, once its `work` is ready, apart from the history's)
+    let helpers_read = json!([format!("work?before={}&limit=1000", 1005 - 1000 + 1)]);
+    s.ok(
+        "opening a chat past one page reads only its newest page: 100 messages, no older page asked for (of `work`, the helpers' 15 minutes alone)",
+        opened && (reads == json!([]) || reads == helpers_read),
+        &reads,
+    );
     s.ok("a quote outside the first page has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
     // The reader's place is the anchor's offset from the top of the scroll
     // box, so the header above it settling (the chat's agent, its name and
@@ -783,10 +792,11 @@ pub(super) fn helpers_outlast_the_window(s: &mut Suite, api: &Api, owner: &Keys,
         chrome.eval(&page, &format!("{bar}.outerHTML"))?,
     );
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
-    let one = json!([[goal, "40 min"]]).to_string();
+    // (40 minutes before the records were posted, which takes a minute or two)
+    let since_shown = "/^4\\d min$/.test(l[0][1])";
     s.ok(
         "opened, its task, and how long it has run since its start (the note's `since`)",
-        super::shows(chrome, &page, &format!("JSON.stringify({listed}) === {}", super::js(&one))),
+        super::shows(chrome, &page, &format!("(() => {{ const l = {listed}; return l.length === 1 && l[0][0] === {} && {since_shown}; }})()", super::js(goal))),
         chrome.eval(&page, &listed)?,
     );
     // replay: a note said again (the platform's same record), a later one,
@@ -797,10 +807,13 @@ pub(super) fn helpers_outlast_the_window(s: &mut Suite, api: &Api, owner: &Keys,
     post("wk:long:ce:h2", json!({ "kind": "turn.child", "parent": "long", "child": "h2", "outcome": "completed" }))?;
     post("wk:long:cw:h2:1", note("h2", "Draft the poll", now))?;
     post("wk:long:c:h3", json!({ "kind": "turn.child", "parent": "long", "child": "h3", "goal": "Book the train" }))?;
-    let two = format!("(() => {{ const l = {listed}; return {said} === '2 helpers working' && l.length === 2 && l[0][0] === {} && l[0][1] === '40 min' && l[1][0] === 'Book the train'; }})()", super::js(goal));
+    let two = format!("(() => {{ const l = {listed}; return {said} === '2 helpers working' && l.length === 2 && l[0][0] === {} && {since_shown} && l[1][0] === 'Book the train'; }})()", super::js(goal));
     s.ok("its notes again count once, and a note after a helper's end starts nothing", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
     chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
-    chrome.eval(&page, "new Promise((resolve) => { const t = setInterval(() => { const h = document.querySelector('#helpers .helpers-head'); if (h) { clearInterval(t); h.click(); resolve(true); } }, 50); })")?;
+    // (the page before the reload had it open: a closed bar is the new page's)
+    let reloaded = format!("{said} === '2 helpers working' && {head}.getAttribute('aria-expanded') === 'false'");
+    anyhow::ensure!(super::shows(chrome, &page, &reloaded), "the reloaded page's bar: {}", chrome.eval(&page, &format!("{bar}.outerHTML"))?);
+    chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
     s.ok("a reload finds the same: the long helper from its notes, the ended one ended", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
     // its computer crashed: no note comes, and 15 minutes on, the bar clears
     chrome.eval(&page, "(() => { const now = Date.now; Date.now = () => now() + 16 * 60_000; return true; })()")?;
