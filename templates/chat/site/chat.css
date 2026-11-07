@@ -134,7 +134,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
 .history, .latest-wrap { overflow-anchor: none; }
 /* older messages load as the reader nears #earlier (chat.js `earlier`) */
 .history { text-align: center; }
-#earlier { height: 1px; }
+#earlier, #later { height: 1px; }
 /* the same, for a keyboard or a screen reader: seen once focused */
 .history { position: relative; }
 .history button[aria-disabled="true"] { cursor: wait; }
