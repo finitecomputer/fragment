@@ -179,39 +179,104 @@ final class UploadProgress: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
-@MainActor @Observable
-final class VoiceMemo {
+/// What a voice memo records with: this iPhone's microphone, or a test's.
+@MainActor protocol Microphone: AnyObject {
+    /// Whether the person lets it record (iOS asks them the first time).
+    func allowed() async -> Bool
+    /// Records into the file at `url`, until `stop`.
+    func start(into url: URL) throws
+    func stop() throws
+}
+
+/// This iPhone's microphone, AAC into its file. The audio session is the
+/// recording's from start to stop: what plays stops, and nothing plays
+/// until it ends (`AudioPlayback`).
+@MainActor final class DeviceMicrophone: Microphone {
     private var recorder: AVAudioRecorder?
-    private var deadline: Task<Void, Never>?
-    private var url: URL?
-    var recording = false
-    var error: String?
-    func start(finished: @escaping @MainActor (URL) -> Void) async {
-        guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iOS Settings to record a voice memo."; return }
-        // the session is the recording's from here: what plays stops, and nothing plays until it ends
+    func allowed() async -> Bool { await AVAudioApplication.requestRecordPermission() }
+    func start(into url: URL) throws {
         AudioPlayback.shared.recordingBegan()
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
             try session.setActive(true)
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
             let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 96_000])
             guard recorder.record() else { throw APIError.server("The microphone could not start recording.") }
-            self.recorder = recorder; self.url = url; recording = true
-            // Voice memos share the web's five-minute bound, including an unattended recording.
-            deadline = Task { do { try await Task.sleep(for: .seconds(300)); if let url = stop() { finished(url) } } catch {} }
-        } catch { AudioPlayback.shared.recordingEnded(); self.error = error.localizedDescription }
+            self.recorder = recorder
+        } catch { AudioPlayback.shared.recordingEnded(); throw error }
     }
-    func stop() -> URL? {
-        deadline?.cancel(); deadline = nil
-        recorder?.stop(); recorder = nil; recording = false
+    func stop() throws {
+        recorder?.stop(); recorder = nil
         AudioPlayback.shared.recordingEnded()
-        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
-        catch { self.error = error.localizedDescription }
-        defer { url = nil }
-        return url
+        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
-    func cancel() {
-        if let url = stop() { do { try FileManager.default.removeItem(at: url) } catch { self.error = error.localizedDescription } }
+}
+
+/// A voice memo: recorded from `record` until `finish` or its deadline,
+/// then its file is the caller's. `cancel` stops and removes it.
+@MainActor @Observable
+final class VoiceMemo {
+    /// The web's five-minute bound, an unattended recording's too.
+    static let longest: Duration = .seconds(300)
+    @ObservationIgnored private let microphone: any Microphone
+    @ObservationIgnored private let longest: Duration
+    @ObservationIgnored private var deadline: Task<Void, Never>?
+    @ObservationIgnored private var url: URL?
+    @ObservationIgnored private var ended: CheckedContinuation<URL?, Never>?
+    /// Asked to record, not yet recording (iOS may be asking the person):
+    /// a cancel meanwhile keeps it from starting.
+    @ObservationIgnored private var starting = false
+    private(set) var recording = false
+    var error: String?
+
+    init(microphone: any Microphone = DeviceMicrophone(), longest: Duration = VoiceMemo.longest) {
+        self.microphone = microphone
+        self.longest = longest
+    }
+
+    /// Records until `finish` or the deadline, and returns its file; nil if
+    /// it never records (saying why in `error`) or is cancelled.
+    func record() async -> URL? {
+        guard !starting, !recording else { return nil }
+        starting = true
+        error = nil
+        guard await microphone.allowed() else { starting = false; error = "Allow microphone access in iOS Settings to record a voice memo."; return nil }
+        guard starting else { return nil }
+        starting = false
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
+        do { try microphone.start(into: url) } catch { self.error = error.localizedDescription; return nil }
+        self.url = url; recording = true
+        let longest = longest
+        deadline = Task { [weak self] in
+            do { try await Task.sleep(for: longest) } catch { return }
+            self?.finish()
+        }
+        return await withCheckedContinuation { ended = $0 }
+    }
+    /// Finished, by hand or at its deadline: `record` returns its file.
+    func finish() { end(keeping: true) }
+    /// Stopped and removed: `record` returns none.
+    func cancel() { starting = false; end(keeping: false) }
+
+    private func end(keeping: Bool) {
+        guard recording, let url else { return }
+        deadline?.cancel(); deadline = nil
+        recording = false; self.url = nil
+        do { try microphone.stop() } catch { self.error = error.localizedDescription }
+        if !keeping { do { try FileManager.default.removeItem(at: url) } catch { self.error = error.localizedDescription } }
+        ended?.resume(returning: keeping ? url : nil); ended = nil
+    }
+
+    /// The memo, as the file a message attaches, once recorded: its place
+    /// reserved first (`ChatSession.beginAttaching(1)`), so a message with
+    /// no room refuses it before it records, never after. Its recording
+    /// goes once read. Cancelled or never begun, it is no file
+    /// (`CancellationError`, which `attach` leaves unsaid).
+    func file() async throws -> [OutgoingFile] {
+        guard let url = await record() else { throw CancellationError() }
+        defer { try? FileManager.default.removeItem(at: url) }
+        // its length, read before its file goes (its chip's "Voice memo · 0:07")
+        ComposerMemos.remember(url)
+        return try await ComposerFiles.read([url])
     }
 }
