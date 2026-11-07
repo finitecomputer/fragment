@@ -471,7 +471,8 @@ struct TransportTests {
     /// answer, and what it sends is the web's answer, a message of theirs
     /// to the chat (docs/chat-records.md: "The asker's next message to that
     /// agent is then the answer"), no command, no card's answer. Once said,
-    /// it waits on no one.
+    /// it waits on no one. While it waits, Steer is not offered (chat.js
+    /// `refreshSend`): what they type is the answer.
     @Test func anAnswerToATurnsQuestionIsTheirNextMessage() async throws {
         let route = posts
         let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 3, replayed: false) : (404, "{}") }
@@ -487,15 +488,19 @@ struct TransportTests {
         socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t1","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
         socket.push(frame("chat", 2, body: #"{"text":"What should I call it?","turn":"t1"}"#))
         socket.push(frame("work", 3, body: #"{"kind":"turn.asked","turn":"t1","asks":"npub1me"}"#))
-        socket.push(#"{"type":"subscribed","channel":"work","next":3,"more":false}"#)
+        // its owner's, its menu offering `steer`
+        session.owned = ["npub1agent"]
+        socket.push(frame("work", 4, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":4,"more":false}"#)
         socket.push(#"{"type":"subscribed","channel":"chat","next":2,"more":false}"#)
-        try await waitUntil("the question asked") { session.workRead && session.answering() != nil }
+        try await waitUntil("the question asked") { session.workRead && session.answering() != nil && session.offers("steer", "npub1agent") }
         #expect(session.answering() == TurnKey(agent: "npub1agent", id: "t1"))
         #expect(session.placeholder(name: { _ in "Juniper" }) == "Your answer for Juniper")
         // its line says so, after the question
         let ids = session.rows.map(\.id)
         #expect(ids.suffix(2) == ["chat:2", "q:npub1agent t1"])
         session.composer = "Basil"
+        #expect(!session.steers(recording: false), "what is typed is the answer: no Steer")
         await session.send()
         let sent = try #require(stub.seen.first { $0.route == route })
         let body = sent.json["body"]
@@ -503,6 +508,9 @@ struct TransportTests {
         // the platform's record of it (`posted`: npub1me's, at 3000) ends the wait
         try await waitUntil("answered") { session.answering() == nil }
         #expect(!session.rows.contains { $0.id == "q:npub1agent t1" })
+        // answered, the turn still running: words typed may Steer it again
+        session.composer = "and make it green"
+        #expect(session.steers(recording: false))
     }
 
     // ---- Home's first message (`Library.launch`, launcher.js `startFromSearch`) ----
