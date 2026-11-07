@@ -431,6 +431,9 @@ async fn the_hermes_image() {
     // the activity plugin holds for its children however its socket is opened again
     let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_reconnect.py")]);
     assert_eq!(code, 0, "a reopened activity socket holds while children run: {said}");
+    // and says each child of a person's turn as it starts and ends
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_children.py")]);
+    assert_eq!(code, 0, "each child's start and end are said beside its work: {said}");
     fake.until(30_000, "the local skill fork and its helper committed to the agent fragment", |w| {
         let files = &w.fragments["juniper--k3x9"].files;
         files.get("skills/research/model-council-finite/SKILL.md").is_some_and(|b| String::from_utf8_lossy(b).contains("# My Revised Council"))
@@ -1137,6 +1140,18 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert!(fake.with(|w| !w.bodies(&chat, "work", "turn.step").iter().any(|s| s["args"].as_str().is_some_and(|a| a.contains("delegate-started")))), "no child's call is a step");
     assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
     assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
+    // the helper as the chat's bar reads it (FIN-432): started under the
+    // parent's turn with its task in one line, ended under it once it
+    // finished, after the parent's own end
+    within(&fake, &chat, &c, 10_000, "the helper's start and end", |w| w.bodies(&chat, "work", "turn.child").len() >= 2).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let helpers: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).filter(|b| b["kind"] == "turn.child").collect();
+    assert_eq!(helpers.len(), 2, "one start, one end: {helpers:?}");
+    let goal = helpers[0]["goal"].as_str().unwrap_or_default();
+    assert!(helpers[0]["turn"] == parent && goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{helpers:?}");
+    assert_eq!(*helpers[1], json!({ "kind": "turn.child", "turn": parent, "child": helpers[0]["child"], "outcome": "completed" }));
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| work.iter().position(|r| pred(&r["body"])).expect("recorded");
+    assert!(at(&|b| b["kind"] == "turn.end" && b["turn"] == parent) < at(&|b| b["kind"] == "turn.child" && b.get("outcome").is_some()), "its end comes after its parent's");
     assert!(held, "the computer stays awake throughout the background delegate");
     if let Some(tier) = tier {
         let deep = if tier == "cheap" { ROUTE_FALLBACK_ID } else { "deepseek/deepseek-v4.1-flash" };

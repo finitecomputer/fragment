@@ -514,6 +514,73 @@ fn notices_belong_to_the_chats_turn() {
     assert!(posts(&e2.step(heard(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
 }
 
+/// Goal (FIN-432): a helper a running turn starts is recorded under that
+/// turn on `work` (its task, one line), and its end, however long after the
+/// turn's own end, under the same turn. Replay: a start said again posts
+/// nothing more. Invalid: a start naming no running turn, an end of a
+/// helper never started, records nothing. Restart: a helper still running
+/// ends as lost in the next life, an end not yet posted is posted again as
+/// it was, and a 409 (another life's end) ends it all the same. Bound:
+/// `CHILDREN_PER_TURN_MAX` a turn.
+#[test]
+fn helpers_are_recorded_under_their_turn() {
+    use crate::records::ChildOutcome;
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let start = |turn: &str, child: &str| Event::Child { child: child.into(), change: ChildChange::Started { turn: turn.into(), goal: "Find three venues\nnear Lisbon".into() } };
+    let end = |child: &str, outcome| Event::Child { child: child.into(), change: ChildChange::Ended(outcome) };
+    assert!(posts(&ev(&mut e, start("nosuchturn", "s-0"), T0)).is_empty(), "no running turn");
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "plan the trip" }), T0)).expect("started").turn;
+    let (h1, h2, h3) = (records::child_id("s-1"), records::child_id("s-2"), records::child_id("s-3"));
+    let s = ev(&mut e, start(&turn, "s-1"), T0 + 1);
+    assert_eq!(posts(&s), vec![(records::child_start_id(&turn, &h1), json!({ "kind": "turn.child", "turn": turn, "child": h1, "goal": "Find three venues near Lisbon" }))]);
+    assert!(s.dirty, "kept open in the state before its start is posted");
+    assert!(posts(&ev(&mut e, start(&turn, "s-1"), T0 + 1)).is_empty(), "said again");
+    ev(&mut e, start(&turn, "s-2"), T0 + 1);
+    ev(&mut e, start(&turn, "s-3"), T0 + 1);
+    assert!(posts(&ev(&mut e, end("s-9", ChildOutcome::Completed), T0 + 1)).is_empty(), "never started");
+    // the turn ends; its helpers go on, and end after it, under it
+    ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 2);
+    assert_eq!(e.state().children.len(), 3);
+    let s = ev(&mut e, end("s-1", ChildOutcome::Completed), T0 + 3);
+    assert_eq!(posts(&s), vec![(records::child_end_id(&turn, &h1), json!({ "kind": "turn.child", "turn": turn, "child": h1, "outcome": "completed" }))]);
+    assert!(posts(&ev(&mut e, end("s-1", ChildOutcome::Failed), T0 + 3)).is_empty(), "ended once");
+    // s-2's end is said but not yet posted when the life ends; s-3 still runs
+    let s = e.step(heard(end("s-2", ChildOutcome::TimedOut)), T0 + 4);
+    assert!(matches!(&s.effects[..], [Effect::Owed { .. }]) && s.dirty, "{:?}", s.effects);
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(saved.children.iter().map(|c| (c.child.clone(), c.outcome)).collect::<Vec<_>>(), vec![(h2.clone(), Some(ChildOutcome::TimedOut)), (h3.clone(), None)]);
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    e2.step(Input::Agents(vec![a.clone()]), T0 + 5);
+    let r = e2.recover(T0 + 5);
+    let want = vec![
+        (records::child_end_id(&turn, &h2), json!({ "kind": "turn.child", "turn": turn, "child": h2, "outcome": "timed_out" })),
+        (records::child_end_id(&turn, &h3), json!({ "kind": "turn.child", "turn": turn, "child": h3, "outcome": "lost" })),
+    ];
+    assert_eq!(posts(&r), want, "its own end again, and the running one lost");
+    assert!(r.dirty);
+    e2.step(Input::Posted { turn: turn.clone(), id: want[0].0.clone(), kept: true }, T0 + 6);
+    e2.step(Input::Posted { turn: turn.clone(), id: want[1].0.clone(), kept: false }, T0 + 6);
+    assert!(e2.state().children.is_empty(), "a 409 is an end all the same");
+    assert!(posts(&e2.step(heard(end("s-3", ChildOutcome::Completed)), T0 + 7)).is_empty(), "an earlier life's helper ends nothing here");
+    // the bound, a turn's
+    e2.step(heard(Event::Connected(true)), T0 + 8);
+    let t2 = started(&said(&mut e2, &a, &v, 2, "npub1paul", json!({ "text": "many" }), T0 + 8)).expect("started").turn;
+    for n in 0..limits::CHILDREN_PER_TURN_MAX {
+        assert_eq!(posts(&ev(&mut e2, start(&t2, &format!("m-{n}")), T0 + 9)).len(), 1);
+    }
+    assert!(posts(&ev(&mut e2, start(&t2, "one-too-many"), T0 + 9)).is_empty(), "at most {} a turn", limits::CHILDREN_PER_TURN_MAX);
+    assert!(posts(&ev(&mut e2, end("one-too-many", ChildOutcome::Completed), T0 + 9)).is_empty(), "unrecorded, so nothing to end");
+    // a state holding one helper twice contradicts itself
+    let mut twice = e2.state().clone();
+    twice.children.push(twice.children[0].clone());
+    assert!(Engine::new(twice, Settings::default(), LIFE).is_err());
+    let mut bad = e2.state().clone();
+    bad.children[0].child = "not-hex".into();
+    assert!(Engine::new(bad, Settings::default(), LIFE).is_err());
+}
+
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
 /// chat): text, then a tool call, then text: the first reply posts before
 /// the step, whole (a mid-turn answer past a step's old 300 characters is

@@ -1,5 +1,5 @@
-"""Hermes owns the children; one socket carries their work, and each tool
-call's intent and end.
+"""Hermes owns the children; one socket carries their work, each one's
+start and end, and each tool call's intent and end.
 
 The supported lifecycle hooks identify each child by its session id. Nothing
 is saved: a gateway exit closes the socket, and a new process has no children.
@@ -15,8 +15,10 @@ from websockets.sync.client import connect
 
 _log = logging.getLogger(__name__)
 _condition = threading.Condition()
-# Bounded by Hermes' configured delegation concurrency, across its profiles.
-_children = set()
+# Bounded by Hermes' configured delegation concurrency, across its profiles:
+# each running child's session id, and whether the bridge records it (its
+# start named a person's turn of ours).
+_children = {}
 _socket = None
 _worker = None
 # The person's turns this gateway runs, by Hermes' turn id: each our turn's
@@ -34,6 +36,11 @@ _LIFE = os.urandom(6).hex()
 _responses = 0
 # Hermes' tool outcomes, as a step's (docs/chat-records.md).
 _STATUS = {"ok": "completed", "error": "failed", "timeout": "timed_out", "cancelled": "cancelled", "blocked": "blocked"}
+# Hermes' child outcomes (`child_status`), as a helper's end
+# (docs/chat-records.md, `turn.child`); any other is a failure.
+_CHILD_STATUS = {"completed": "completed", "failed": "failed", "interrupted": "interrupted", "timeout": "timed_out", "error": "failed"}
+# A child's task as said, at most (the bridge keeps one line of 140).
+_GOAL_MAX = 200
 
 
 def register(ctx):
@@ -94,25 +101,38 @@ def _send(frame):
     return None
 
 
-def child_started(*, child_session_id=None, **kwargs):
+def child_started(*, child_session_id=None, parent_turn_id=None, child_goal=None, **kwargs):
+    # Fired in the parent's thread during its delegate_task call, so its
+    # turn still runs: `parent_turn_id` is its Hermes turn, ours by
+    # `_turns`. A child of no turn of ours (a nested one's) holds the
+    # computer all the same, and is recorded nowhere.
     global _worker
     if not isinstance(child_session_id, str) or not child_session_id:
         raise ValueError("a delegated child has a session id")
     with _condition:
-        _children.add(child_session_id)
+        mine = _turns.get(parent_turn_id) if parent_turn_id else None
+        frame = {"working": True}
+        if mine is not None:
+            frame.update(turn=mine[0], child=child_session_id, goal=" ".join(str(child_goal or "").split())[:_GOAL_MAX])
+        _children[child_session_id] = mine is not None
         # Acknowledged before the parent can finish.
-        _send({"working": True})
+        _send(frame)
         if _worker is None:
             _worker = threading.Thread(target=_hold, name="fragment-activity", daemon=True)
             _worker.start()
         _condition.notify_all()
 
 
-def child_stopped(*, child_session_id=None, **kwargs):
+def child_stopped(*, child_session_id=None, child_status=None, **kwargs):
+    # Its `parent_turn_id` is the parent's turn now, never the one that
+    # started it: its end names only the child, which the bridge keeps.
     with _condition:
-        _children.discard(child_session_id)
-        if _socket is not None:
-            _send({"working": bool(_children)})
+        recorded = _children.pop(child_session_id, False)
+        frame = {"working": bool(_children)}
+        if recorded:
+            frame.update(child=child_session_id, status=_CHILD_STATUS.get(child_status, "failed"))
+        if recorded or _socket is not None:
+            _send(frame)
         _condition.notify_all()
 
 

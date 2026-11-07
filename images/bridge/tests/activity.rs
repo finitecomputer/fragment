@@ -203,3 +203,55 @@ async fn a_reused_call_id_is_another_call_across_a_crash() {
     });
     bridge.stop().await;
 }
+
+/// Goal (FIN-432): a helper said beside `working` is recorded under the
+/// turn that started it (`turn.child`), its end when it ends; a crash ends
+/// one still running as lost in the next life, whose late stop then ends
+/// nothing. Invalid: a helper said wrongly records nothing, and its work
+/// holds all the same. An older plugin's bare `working` records none.
+#[tokio::test]
+async fn a_helper_is_recorded_and_a_crash_ends_it_lost() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("helpers");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), relay(&port, &dir));
+    let hermes = Hermes::spawn(listen, "activity-test", SECRET);
+    fake.until(10_000, "chat followed", |w| w.live_sockets() >= 2).await;
+    let mut plugin = dial(listen, SECRET).await;
+    plugin.next().await.unwrap().unwrap();
+    // a turn that runs until its card is answered, so a crash cuts it
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "ship it, something risky" }));
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    support::until(10_000, "the turn under way in Hermes", || hermes.with(|s| !s.begun.is_empty())).await;
+    let start = |child: &str, goal: &str| json!({ "working": true, "turn": turn, "child": child, "goal": goal }).to_string();
+    assert_eq!(said(&mut plugin, r#"{"working":true}"#).await, "working", "an older plugin's");
+    assert_eq!(said(&mut plugin, &start("session-1", "Find three venues near Lisbon")).await, "working");
+    assert_eq!(said(&mut plugin, &start("session-2", "Compare the two quotes")).await, "working");
+    assert_eq!(said(&mut plugin, &json!({ "working": true, "turn": "has space", "child": "session-3" }).to_string()).await, "working", "said wrongly, it still holds");
+    assert_eq!(said(&mut plugin, &json!({ "working": true, "child": "session-1", "status": "completed" }).to_string()).await, "working");
+    let (h1, h2) = (fragment_bridge::records::child_id("session-1"), fragment_bridge::records::child_id("session-2"));
+    fake.until(10_000, "two starts and an end", |w| w.bodies(&chat, "work", "turn.child").len() >= 3).await;
+    assert_eq!(fake.with(|w| w.bodies(&chat, "work", "turn.child")), vec![
+        json!({ "kind": "turn.child", "turn": turn, "child": h1, "goal": "Find three venues near Lisbon" }),
+        json!({ "kind": "turn.child", "turn": turn, "child": h2, "goal": "Compare the two quotes" }),
+        json!({ "kind": "turn.child", "turn": turn, "child": h1, "outcome": "completed" }),
+    ]);
+    assert!(fake.with(|w| w.keepalive_open == 1), "its work holds the computer");
+    fake.until(10_000, "its card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+    bridge.kill().await;
+    drop(plugin);
+    fake.until(10_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let bridge = support::start_killable(cfg, relay(&port, &dir));
+    let _woken = hermes.after_boot(listen, "activity-test", SECRET);
+    let lost = json!({ "kind": "turn.child", "turn": turn, "child": h2, "outcome": "lost" });
+    fake.until(10_000, "the running helper ended as lost", |w| w.bodies(&chat, "work", "turn.child").contains(&lost)).await;
+    let mut plugin = dial(listen, SECRET).await;
+    plugin.next().await.unwrap().unwrap();
+    assert_eq!(said(&mut plugin, &json!({ "working": false, "child": "session-2", "status": "completed" }).to_string()).await, "working");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(fake.with(|w| w.bodies(&chat, "work", "turn.child").len()), 4, "an earlier life's helper ends once");
+    bridge.stop().await;
+}
