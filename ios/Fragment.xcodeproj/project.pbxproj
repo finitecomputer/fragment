@@ -13,6 +13,7 @@
 		0B5597754A0B7033A7BD7FB2 /* WorkingIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98C64B1BD04CDB37166AD010 /* WorkingIndicatorTests.swift */; };
 		1FA3D11FABC00DC40F41A041 /* FragmentWebSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */; };
 		2245C93502274850A29D08C3 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD99E857900FD0F65CD6B108 /* ChatView.swift */; };
+		29EB0FCB1BCE63B32216F7B8 /* HelpersBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88790B802C8289FD61C8F5B6 /* HelpersBar.swift */; };
 		2A5C821580EECE3D7D8C7F3D /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */; };
 		2D65CF61D8311C8A8A6B3271 /* AccountConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AFC16F9330AE76994AAFAFC /* AccountConnection.swift */; };
 		4024A3397E46CADB1EC9D344 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = D48A78B0A3D4F8A90EEBD8DB /* Models.swift */; };
@@ -45,6 +46,7 @@
 		E4358E209B49F024F52BDCAE /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 811C73B367475E8B5D4DB77F /* AppIcon.icon */; };
 		EBB66B878C4362F14779FB52 /* LaunchScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = A95702BF0C241F4A98C5F812 /* LaunchScope.swift */; };
 		ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */; };
+		F50275E61121F933C6EE3FED /* HelpersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5234B182B29B77257B19CF70 /* HelpersTests.swift */; };
 		F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8B11860501F69BE73ECB3D0 /* DraftTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -80,12 +82,14 @@
 		4AE675325F3A8ED7EAE13267 /* FragmentTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FragmentTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4FB5B600A80E7BE0157A6E77 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
 		5054A0D255D0C92348C16E30 /* WorkingIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingIndicator.swift; sourceTree = "<group>"; };
+		5234B182B29B77257B19CF70 /* HelpersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpersTests.swift; sourceTree = "<group>"; };
 		58A68F1B6233D7E206EC07A8 /* FragmentUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FragmentUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6126FEDF8DC438F0E3C2A5EC /* ThirdPartyNotices.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = ThirdPartyNotices.txt; sourceTree = "<group>"; };
 		63AC3B6E5464205E0D215570 /* AuthenticatedImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticatedImage.swift; sourceTree = "<group>"; };
 		74E480260C706AE0F972CA37 /* FragmentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentUITests.swift; sourceTree = "<group>"; };
 		7C7F962BA11EC3D0BD85DB75 /* WorkingActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingActivity.swift; sourceTree = "<group>"; };
 		811C73B367475E8B5D4DB77F /* AppIcon.icon */ = {isa = PBXFileReference; path = AppIcon.icon; sourceTree = "<group>"; };
+		88790B802C8289FD61C8F5B6 /* HelpersBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpersBar.swift; sourceTree = "<group>"; };
 		8C581195A0FDAC2EA88D081F /* ShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellTests.swift; sourceTree = "<group>"; };
 		92F50038387E161FFC74D67A /* DeviceIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentityTests.swift; sourceTree = "<group>"; };
 		934BF3B3E3B9A45CF6843505 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -169,6 +173,7 @@
 				2F7C65701872682E560E008F /* FragmentAPI.swift */,
 				EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */,
 				014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */,
+				88790B802C8289FD61C8F5B6 /* HelpersBar.swift */,
 				D261EC9048255D1B31FED623 /* HomeView.swift */,
 				A95702BF0C241F4A98C5F812 /* LaunchScope.swift */,
 				214C3D2F32BD4FA5AB5CDF41 /* MarkdownText.swift */,
@@ -188,6 +193,7 @@
 				0A44398C694D0FA2138E5A64 /* AppSettingsTests.swift */,
 				92F50038387E161FFC74D67A /* DeviceIdentityTests.swift */,
 				D8B11860501F69BE73ECB3D0 /* DraftTests.swift */,
+				5234B182B29B77257B19CF70 /* HelpersTests.swift */,
 				01EF9BE87256547DD6FFAAE4 /* LaunchScopeTests.swift */,
 				AB0814CDF8824F8A8657129D /* MarkdownTests.swift */,
 				3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */,
@@ -319,6 +325,7 @@
 				5938CA76ED5569461BA445AB /* AppSettingsTests.swift in Sources */,
 				A8A038F320ECBCC025021D8B /* DeviceIdentityTests.swift in Sources */,
 				F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */,
+				F50275E61121F933C6EE3FED /* HelpersTests.swift in Sources */,
 				C26F2704F9C3B89DD4186C3B /* LaunchScopeTests.swift in Sources */,
 				A0F935E5B3AB7E00AF2297A0 /* MarkdownTests.swift in Sources */,
 				7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */,
@@ -357,6 +364,7 @@
 				B00F01210DFD198F6F1180C9 /* FragmentAPI.swift in Sources */,
 				9B04659A7CA2A9C6E5F0276A /* FragmentApp.swift in Sources */,
 				1FA3D11FABC00DC40F41A041 /* FragmentWebSheet.swift in Sources */,
+				29EB0FCB1BCE63B32216F7B8 /* HelpersBar.swift in Sources */,
 				73EE483533F3A6306B65148C /* HomeView.swift in Sources */,
 				EBB66B878C4362F14779FB52 /* LaunchScope.swift in Sources */,
 				2A5C821580EECE3D7D8C7F3D /* MarkdownText.swift in Sources */,

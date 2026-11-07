@@ -81,13 +81,19 @@ struct WorkingActivity: Equatable {
     var rows: [ChannelRecord] = []
     var cards: [String: ToolCard] = [:]
     var hints: [WorkingHint] = []
+    /// The `work` kinds of a turn this reads (docs/chat-records.md); any
+    /// other (a helper's `turn.child`, a later bridge's) changes nothing.
+    static let turnKinds: Set<String> = ["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]
+    /// Those that say a turn went on past its question in words
+    /// (`turn.asked`); its asker's answer is read from the chat.
+    static let wentOn: Set<String> = ["turn.step", "turn.call", "turn.end"]
 
     init(_ timeline: Timeline, ready: Bool = true) {
         let records = timeline.records
         let messages = records.filter { $0.isMessage }
         let replies = Dictionary(grouping: messages.filter { $0.turn != nil }) { TurnKey(agent: $0.principal, id: $0.turn!) }
         let lastSaid = Dictionary(grouping: messages, by: \.principal).mapValues { $0.last!.at }
-        let work = Dictionary(grouping: records.filter { $0.channel == "work" && $0.turn != nil }) {
+        let work = Dictionary(grouping: records.filter { $0.channel == "work" && $0.turn != nil && Self.turnKinds.contains($0.body["kind"].string ?? "") }) {
             TurnKey(agent: $0.principal, id: $0.turn!)
         }
         struct Item {
@@ -107,7 +113,8 @@ struct WorkingActivity: Equatable {
             let steps = own.filter { $0.body["kind"].string == "turn.step" }
             let calls = own.filter { $0.body["kind"].string == "turn.call" }
             let latestResponse = calls.last?.body["response"].string
-            let lastWork = own.last
+            // the question, or what says the turn went on past it, whichever came last
+            let lastWork = own.last { $0.body["kind"].string == "turn.asked" || Self.wentOn.contains($0.body["kind"].string ?? "") }
             let closed = Set(own.filter { $0.body["kind"].string == "turn.prompt.closed" }.compactMap { $0.body["prompt"].string })
             if own.contains(where: { $0.body["kind"].string == "turn.prompt" && !closed.contains($0.body["prompt"].string ?? "") }) { waiting.insert(key) }
             if lastWork?.body["kind"].string == "turn.asked", let asks = lastWork?.body["asks"].string,

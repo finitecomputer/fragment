@@ -24,6 +24,8 @@ final class ChatSession {
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
+    /// The helpers working now (`turn.child`), once this connection read its `work`.
+    private(set) var helpers: [Helpers.Helper] = []
     private(set) var chatCursor: Int64 = 0
     /// Whether the chat was ever read to its end here, both its channels
     /// (`chat` and the `work` it shows): before, it is loading, never shown
@@ -104,6 +106,8 @@ final class ChatSession {
         if writing != drafts { drafts = writing }
         let running = workRead ? timeline.activeTurns : []
         if running != activeTurns { activeTurns = running }
+        let working = workRead ? timeline.helpers.running : []
+        if working != helpers { helpers = working }
         let cursor = timeline.cursors["chat"] ?? 0
         if cursor != chatCursor { chatCursor = cursor }
         if timeline.detached != detached { detached = timeline.detached }
