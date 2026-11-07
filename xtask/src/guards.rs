@@ -208,26 +208,36 @@ mod tests {
     /// copied by hand into every client until 2026-11), 100 MB (a zone's)
     /// and 256 MiB (a blob's), as integer expressions with their spaces,
     /// parentheses and digit separators taken out. `100000000` is a common
-    /// number besides (a hundred megapixels, a hundred million neurons), so
-    /// it counts only on a line that speaks of what a file bound bounds.
+    /// number besides (a hundred megapixels, a ledger's neurons), so it
+    /// counts only where its own clause speaks of what a file bound bounds.
     const FILE_BOUNDS: [&str; 12] = ["25*1024*1024", "25<<20", "26214400", "100*1024*1024", "100<<20", "104857600", "100*1000*1000", "100e6", "1e8", "256*1024*1024", "256<<20", "268435456"];
     const ZONE_BOUND: &str = "100000000";
     const ZONE_WORDS: [&str; 6] = ["byte", "size", "upload", "file", "attach", "blob"];
+    /// What ends a clause: an item of a list, an object or a statement.
+    const CLAUSE_ENDS: [u8; 6] = [b',', b';', b'{', b'}', b'[', b']'];
 
     /// How many times `line` writes a file bound (`FILE_BOUNDS`): each
     /// whole, no digit, letter or point before it, and no digit after it
-    /// (nor a letter, after an exponent's: `1e8` in a hash is none).
+    /// (nor a letter, after an exponent's: `1e8` in a hash is none). A bare
+    /// `100000000` counts when the clause that holds it (`const UPLOAD_MOST
+    /// = …`, `"uploadMaxBytes": …`, `let size = …`) names a file's bound;
+    /// not for another clause of the line (a ledger row's neurons beside a
+    /// storage row's byte-hours, 2026-11-07).
     fn file_bounds(line: &str) -> usize {
         let squeezed: String = line.chars().filter(|c| !c.is_whitespace() && !['_', '(', ')'].contains(c)).collect();
         let bytes = squeezed.as_bytes();
         let at = |i: Option<usize>| i.and_then(|i| bytes.get(i)).copied();
-        let count = |needle: &str| {
+        let found = |needle: &str| -> Vec<usize> {
             let after_ok = |c: Option<u8>| !c.is_some_and(|c| c.is_ascii_digit() || (needle.contains('e') && c.is_ascii_alphanumeric()));
-            squeezed.match_indices(needle).filter(|(i, n)| !at(i.checked_sub(1)).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'.') && after_ok(at(Some(i + n.len())))).count()
+            squeezed.match_indices(needle).filter(|(i, n)| !at(i.checked_sub(1)).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'.') && after_ok(at(Some(i + n.len())))).map(|(i, _)| i).collect()
         };
-        let lower = squeezed.to_ascii_lowercase();
-        let zone = if ZONE_WORDS.iter().any(|w| lower.contains(w)) { count(ZONE_BOUND) } else { 0 };
-        FILE_BOUNDS.iter().map(|b| count(b)).sum::<usize>() + zone
+        let clause = |i: usize| {
+            let start = bytes[..i].iter().rposition(|b| CLAUSE_ENDS.contains(b)).map_or(0, |p| p + 1);
+            let end = bytes[i..].iter().position(|b| CLAUSE_ENDS.contains(b)).map_or(bytes.len(), |p| i + p);
+            squeezed[start..end].to_ascii_lowercase()
+        };
+        let zone = found(ZONE_BOUND).into_iter().filter(|&i| ZONE_WORDS.iter().any(|w| clause(i).contains(w))).count();
+        FILE_BOUNDS.iter().map(|b| found(b).len()).sum::<usize>() + zone
     }
 
     /// Goal: a file bound is stated once (Paul, 2026-11-06: the chat's
@@ -281,6 +291,9 @@ mod tests {
         assert_eq!(file_bounds("let most = 25 * (1024 * 1024);"), 1);
         assert_eq!(file_bounds("const UPLOAD_MOST = 100000000;"), 1, "a bare count, named for what it bounds");
         assert_eq!(file_bounds("Usage::Neurons { milli: 100_000_000 }"), 0, "not a file's");
+        assert_eq!(file_bounds(r#"{"rows":[{"usage":{"kind":"neurons","milli":100000000}},{"usage":{"byte_hours":9,"kind":"storage"}}]}"#), 0, "a ledger's neurons beside another row's bytes");
+        assert_eq!(file_bounds(r#"{"limits":{"uploadMaxBytes":100000000,"filesPerMessage":8}}"#), 1, "a key that names it");
+        assert_eq!(file_bounds("let size = 100_000_000; // bytes"), 1);
         assert_eq!(file_bounds("let sha = \"9f1e8a\"; let x = \"1e8ab\";"), 0, "an exponent's spelling inside a hash");
     }
 }
