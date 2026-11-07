@@ -8,7 +8,15 @@ struct FragmentApp: App {
 
 @MainActor @Observable
 final class Library {
-    var fragments: [FragmentSummary] = []
+    /// The person's list. Each chat's session follows its agents in it
+    /// (`ChatSession.agents`): one added after the chat opened counts in
+    /// its cached session at once, its draft and outbox kept.
+    var fragments: [FragmentSummary] = [] {
+        didSet {
+            guard fragments != oldValue else { return }
+            for chat in fragments { if let agents = chat.agents, let session = sessions[chat.name] { session.agents = agents } }
+        }
+    }
     var error: String?
     var loading = false
     var creating = false
@@ -63,6 +71,16 @@ final class Library {
     func leftChat(_ name: String) {
         if sessions[name]?.closed != nil { sessions.removeValue(forKey: name) }
     }
+    /// The identities of the person's own agents: whose menus they may use
+    /// in a chat (chat.js `menuOf`, an agent's owner by `__members`).
+    var ownedIdentities: Set<String> { Set(agents.filter { $0.role == "owner" }.compactMap { identities[$0.name] }) }
+    /// The word that @mentions each agent listed, by its identity: its
+    /// fragment's label (chat.js `handleOf`), lowercased.
+    var handles: [String: String] {
+        var words: [String: String] = [:]
+        for agent in agents { if let id = identities[agent.name], let label = agent.name.components(separatedBy: "--").first, !label.isEmpty { words[id] = words[id] ?? label.lowercased() } }
+        return words
+    }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]
@@ -78,6 +96,8 @@ final class Library {
         }
         guard sessions.count < 32 else { throw APIError.server("Finish or discard a draft in another chat before opening more conversations.") }
         let session = ChatSession(fragment: chat, api: api)
+        // its agents as the list names them, which may be newer than `chat` (a chat just made)
+        if let agents = fragments.first(where: { $0.name == chat.name })?.agents { session.agents = agents }
         sessions[chat.name] = session
         return session
     }

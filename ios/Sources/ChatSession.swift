@@ -9,21 +9,43 @@ final class ChatSession {
     /// (`rows`, `drafts`, `activeTurns`), each set only when it changes: a
     /// draft's next words redraw its draft alone, never the chat's rows.
     @ObservationIgnored private(set) var timeline = Timeline() { didSet { timelineChanged() } }
-    /// The records a chat shows (WorkingActivity), in order.
-    private(set) var rows: [ChannelRecord] = []
+    /// What a chat shows (WorkingActivity), in the web's order: its
+    /// records, and the replies being written and working lines in their places.
+    private(set) var rows: [ChatItem] = []
     private(set) var activity = WorkingActivity(Timeline())
     private(set) var presence: [String: String] = [:]
     private(set) var awaitingReply: WorkingHint?
     @ObservationIgnored private var activityReady = false
+    /// The replies being written, by turn, as the activity was last made
+    /// with them: their words change nothing of it, their coming and going does.
+    @ObservationIgnored private var activityDrafting: Set<TurnKey> = []
+    @ObservationIgnored private var activityPrincipal = ""
+    /// The identities of the person's own agents (`Library`): whose menus
+    /// they may use (chat.js `menuOf`, by `__members`' owner) and whose
+    /// routines' turns are theirs (control.js `controllerOf`).
+    var owned: Set<String> = [] { didSet { if owned != oldValue { activityOwned = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityOwned: Set<String>?
+    /// The word that @mentions each agent the person's list names, by its
+    /// identity: its fragment's label (chat.js `handleOf`, bridge `answers_to`).
+    var handles: [String: String] = [:] { didSet { if handles != oldValue { activityHandles = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityHandles: [String: String]?
+    /// The chat's agents, its lead first, as the person's list names them
+    /// now (`Library.fragments`), not as when it opened: whom a message is
+    /// for, so one added through Agents in this chat counts at once.
+    var agents: [String] = [] { didSet { if agents != oldValue { activityAgents = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityAgents: [String]?
+    /// A post awaiting its agent's claim, at the chat's end (the web's
+    /// pending line): each running turn's line is in the rows.
     var workingHints: [WorkingHint] {
-        guard workRead else { return [] }
-        var hints = activity.hints.filter { hint in !drafts.contains { $0.turn == hint.id.id && $0.principal == hint.id.agent } }
-        if let pending = awaitingReply, !hints.contains(where: { $0.id.agent == pending.id.agent }) { hints.append(pending) }
-        return hints
+        guard workRead, let pending = awaitingReply, !activity.hints.contains(where: { $0.id.agent == pending.id.agent }) else { return [] }
+        return [pending]
     }
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
+    /// Each agent's menu, its commands' names (`Timeline.menus`), as the
+    /// composer observes it: a menu that comes or changes alone redraws Steer.
+    private(set) var menus: [String: [String]] = [:]
     private(set) var chatCursor: Int64 = 0
     /// Whether the chat was ever read to its end here, both its channels
     /// (`chat` and the `work` it shows): before, it is loading, never shown
@@ -79,6 +101,7 @@ final class ChatSession {
     init(fragment: FragmentSummary, api: FragmentAPI) {
         self.fragment = fragment
         self.api = api
+        agents = fragment.agents ?? []
         do { persistence = try ChatDraftStore(api: api, fragment: fragment.name) }
         catch { self.error = "The local draft could not be opened: " + error.localizedDescription; return }
         // What was saved, within its bounds; a file that is none is cleared.
@@ -94,13 +117,21 @@ final class ChatSession {
         } catch { self.error = error.localizedDescription }
     }
     private func timelineChanged() {
-        if rowsRevision != timeline.revision || activityReady != workRead {
+        // a reply being written is at the chat's end, which a window paged back does not show
+        let drafting = timeline.detached ? [] : Set(timeline.drafts.values.map { TurnKey(agent: $0.principal, id: $0.turn) })
+        if rowsRevision != timeline.revision || activityReady != workRead || activityDrafting != drafting
+            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles || activityAgents != agents {
             rowsRevision = timeline.revision
             activityReady = workRead
-            let next = WorkingActivity(timeline, ready: workRead)
+            activityDrafting = drafting
+            activityPrincipal = principal
+            activityOwned = owned
+            activityHandles = handles
+            activityAgents = agents
+            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: agents, handles: handles)
             if next != activity { activity = next }
-            if !next.rows.elementsEqual(rows, by: { $0.id == $1.id }) { rows = next.rows }
-            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: fragment.agents?.first)
+            if next.rows != rows { rows = next.rows }
+            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: agents.first)
             if let candidate, case .pending(let since) = candidate.kind,
                candidate.id == awaitingReply?.id || Int64(Date().timeIntervalSince1970 * 1000) - since < 90_000 { awaitingReply = candidate }
             else { awaitingReply = nil }
@@ -109,6 +140,8 @@ final class ChatSession {
         if writing != drafts { drafts = writing }
         let running = workRead ? timeline.activeTurns : []
         if running != activeTurns { activeTurns = running }
+        let offered = timeline.menus.mapValues(\.commands)
+        if offered != menus { menus = offered }
         let cursor = timeline.cursors["chat"] ?? 0
         if cursor != chatCursor { chatCursor = cursor }
         if timeline.detached != detached { detached = timeline.detached }
@@ -150,8 +183,10 @@ final class ChatSession {
         // nor while files are being attached: their places are held (`beginAttaching`)
         guard composer.isEmpty && attachments.isEmpty && uploads.isEmpty && !attaching else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
-        // its own words, files and addressees: the draft's were kept until now
-        composer = refused.text; attachments = refused.attachments; recipients = refused.recipients
+        // its own words, files and addressees: the draft's were kept until
+        // now (a command's words alone: its agent is no addressee of theirs)
+        composer = refused.text; attachments = refused.attachments
+        if refused.command == nil { recipients = refused.recipients }
         replyTo = timeline.records.first { $0.channel == "chat" && $0.seq == refused.replyTo }
         error = nil
     }
@@ -485,11 +520,7 @@ final class ChatSession {
 
     private func deliver(_ post: PendingPost) async {
         do {
-            var body: [String: JSONValue] = ["text": .string(post.text), "client_id": .string(post.id)]
-            if !post.attachments.isEmpty { body["attachments"] = .array(post.attachments.map(\.json)) }
-            if let replyTo = post.replyTo { body["reply_to"] = .number(Double(replyTo)) }
-            if !post.recipients.isEmpty { body["to"] = .array(post.recipients.map { .string($0) }) }
-            let record = try await api.post(fragment.name, id: post.id, body: .object(body))
+            let record = try await api.post(fragment.name, id: post.id, body: Self.body(of: post))
             timeline.insert(record, advancingCursor: false)
             pending.removeAll { $0.id == post.id }
             error = nil
@@ -510,6 +541,95 @@ final class ChatSession {
             pending[index].failed = true
             self.error = error.localizedDescription
         }
+    }
+
+    // ---- the composer while turns run (chat.js `refreshSend`, `render`) ----
+
+    /// Who controls a turn (control.js `controllerOf`): its asker, but the
+    /// agent's owner for a turn caused on its own `tasks` (a routine's).
+    private func controller(of key: TurnKey, _ state: TurnState) -> String? {
+        state.cause["channel"].string == "tasks" ? (owned.contains(key.agent) ? principal : nil) : state.asker
+    }
+    /// The newest running turn this person controls (control.js `controlledBy`).
+    var myTurn: TurnKey? {
+        guard workRead, !principal.isEmpty else { return nil }
+        return timeline.turns.filter { $0.value.running && controller(of: $0.key, $0.value) == principal }
+            .max { ($0.value.startAt!, $0.key.id) < ($1.value.startAt!, $1.key.id) }?.key
+    }
+    /// Whom a command goes to: the agent working for this person, else the lead.
+    var commandTarget: String? { myTurn?.agent ?? agents.first }
+    /// Whether `agent`'s runtime takes `command` from this person: its
+    /// menu's, offered to its owner alone (chat.js `menuOf`).
+    func offers(_ command: String, _ agent: String?) -> Bool {
+        guard let agent, owned.contains(agent) else { return false }
+        return menus[agent]?.contains(command) == true
+    }
+    /// Whether what is typed may Steer the running turn instead of waiting
+    /// its turn (chat.js `refreshSend`): words, no command, no files, its
+    /// target working, and its runtime offering `steer`. A file still
+    /// uploading, or failed, is one of the composer's files too (#1088).
+    func steers(recording: Bool) -> Bool {
+        let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty, !words.hasPrefix("/"), attachments.isEmpty, uploads.isEmpty, !recording, workRead, let target = commandTarget,
+              timeline.turns.contains(where: { $0.key.agent == target && $0.value.running }) else { return false }
+        return offers("steer", target)
+    }
+    /// A running turn waiting on this person's words: its question
+    /// (`turn.asked`), or its card that takes words (chat.js `askedMe`).
+    func answering(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> TurnKey? {
+        guard workRead, !principal.isEmpty else { return nil }
+        if let asked = activity.asking.filter({ $0.value == principal }).keys.min(by: { ($0.agent, $0.id) < ($1.agent, $1.id) }) { return asked }
+        return activity.openCards.first { card in
+            card.takesWords && card.asks == principal && (card.expiresAt.map { now <= $0 } ?? true) && timeline.turns[card.turn]?.running == true
+        }?.turn
+    }
+    /// The composer's words, as the web's say what it does now (chat.js
+    /// `render`). While their turn runs, the web's whole sentence ("<name>
+    /// is working: a message waits its turn, or Steer it now") is cut on a
+    /// phone: the chat already says who works, and Steer shows beside Send
+    /// once words are typed, so it says what sending does alone.
+    func placeholder(name: (String) -> String, now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        if let asked = answering(now: now) { return "Your answer for \(name(asked.agent))" }
+        if workRead, let card = activity.openCards.first(where: { $0.asks == principal && !$0.stopped && ($0.expiresAt.map { now <= $0 } ?? true) }) {
+            return "\(name(card.turn.agent)) is waiting for you"
+        }
+        if myTurn != nil { return "A message waits its turn" }
+        return agents.first.map { "Message \(name($0))" } ?? "Message your agent"
+    }
+
+    /// The running turn told what is typed, at once (`/steer <words>`, a
+    /// command of its runtime's menu, as the web's Steer sends it). It goes
+    /// as a message goes: saved with its id before any request, shown
+    /// sending, and, its answer lost, retried only by hand with that same
+    /// id and body (docs/ios.md), so it never runs twice.
+    func steer(recording: Bool = false) async {
+        guard steers(recording: recording), let target = commandTarget else { return }
+        guard persistence != nil else { error = "The local draft could not be opened. Reopen this chat before sending."; return }
+        guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
+        let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let post = PendingPost(id: UUID().uuidString, text: words, recipients: [target], command: "steer")
+        do {
+            try persistence?.save(SavedChat(composer: "", attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
+        } catch { self.error = "The command could not be saved on this iPhone: " + error.localizedDescription; return }
+        pending.append(post)
+        composer = ""
+        await deliver(post)
+    }
+    /// What a post sends: a command (docs/chat-records.md, "A command"),
+    /// or a message.
+    static func body(of post: PendingPost) -> JSONValue {
+        if let command = post.command, let target = post.recipients.first { return Self.command(command, args: post.text, to: target) }
+        var body: [String: JSONValue] = ["text": .string(post.text), "client_id": .string(post.id)]
+        if !post.attachments.isEmpty { body["attachments"] = .array(post.attachments.map(\.json)) }
+        if let replyTo = post.replyTo { body["reply_to"] = .number(Double(replyTo)) }
+        if !post.recipients.isEmpty { body["to"] = .array(post.recipients.map { .string($0) }) }
+        return .object(body)
+    }
+    /// A command's body (docs/chat-records.md, "A command"): its words only if any.
+    static func command(_ name: String, args: String, to target: String) -> JSONValue {
+        var body: [String: JSONValue] = ["kind": .string("command"), "command": .string(name), "to": .array([.string(target)])]
+        if !args.isEmpty { body["args"] = .string(args) }
+        return .object(body)
     }
 
     func stop() async {
