@@ -42,6 +42,8 @@ private struct ComposerTile: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 14).fill(FragmentStyle.surface)
                 if let image { Image(uiImage: image).resizable().scaledToFill().frame(width: Self.side, height: Self.side).clipped() }
+                // under an upload's state, a file's icon would only crowd it
+                else if upload != nil {}
                 else if kind == .voice || kind == .audio { ComposerSound(attachment: attachment, key: key) }
                 else { Image(systemName: kind == .pdf ? "doc.richtext" : attachment.symbol).font(.title2).foregroundStyle(.secondary) }
                 if let upload {
@@ -53,7 +55,9 @@ private struct ComposerTile: View {
                         }
                         .accessibilityLabel("Retry upload").accessibilityHint(upload.failed ?? "").accessibilityIdentifier("retryUpload")
                     } else {
-                        ProgressRing(fraction: upload.progress, label: "Uploading").foregroundStyle(.white)
+                        // all of it sent, the server still taking it: no share left to show
+                        if upload.progress < 0.99 { ProgressRing(fraction: upload.progress, label: "Uploading").foregroundStyle(.white) }
+                        else { ProgressView().tint(.white).accessibilityLabel("Uploading") }
                     }
                 }
             }
