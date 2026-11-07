@@ -81,6 +81,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/frame-standin.test.mjs",
     "cell/shell-tests/history-page.test.mjs",
     "cell/shell-tests/launcher-knowledge.test.mjs",
+    "cell/shell-tests/limits.test.mjs",
     "cell/shell-tests/making.test.mjs",
     "cell/shell-tests/onboarding.test.mjs",
     "cell/shell-tests/restart-follow.test.mjs",
@@ -309,9 +310,9 @@ mod tests {
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         // the Worker's restore reads (beside the module it tests), the shell's
-        // tests, and the brain app's and the slides' build's and presenter's (beside the
-        // templates crate: a file under templates/ would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs"]].concat());
+        // tests, and the board's and brain's apps' and the slides' build's and presenter's
+        // (beside the templates crate: a file under templates/ would ship with its template)
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");

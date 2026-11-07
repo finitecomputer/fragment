@@ -34,10 +34,8 @@
 import { icon } from "./icons.js";
 import { KIND } from "./frame-messages.js";
 import { speakers } from "./session-text.js";
+import { refusal } from "./limits.js";
 
-// At most 8 files, 25 MiB each, as the chat's page takes them.
-const FILES_MAX = 8;
-const FILE_MAX_BYTES = 25 * 1024 * 1024;
 // A connection dropped on a file's upload is tried again, as `fragment.blob` does.
 const UPLOAD_TRIES = 3;
 // The input grows with a long prompt to this, then scrolls; one line at rest.
@@ -330,15 +328,17 @@ export function createLauncher(shell) {
   const canSend = () => canLaunch() || !!firstChat();
   const sendable = () => canSend() && (!!input.value.trim() || (launchFiles.length > 0 && canLaunch()));
 
+  // What a message carries, at most, as the chat's page takes it: the
+  // platform's own word as its list last said it (`state.limits`;
+  // limits.js), checked again as the files are sent.
   function addFiles(files) {
     launchError = "";
+    const limits = state.limits;
     for (const file of files) {
-      if (launchFiles.length >= FILES_MAX) {
-        launchError = `A message carries at most ${FILES_MAX} files.`;
-        break;
-      }
-      if (file.size > FILE_MAX_BYTES) {
-        launchError = `${file.name || "A file"} is over 25 MB.`;
+      const why = refusal(limits, [file], launchFiles.length);
+      if (why) {
+        launchError = why;
+        if (launchFiles.length >= limits.filesPerMessage) break;
         continue;
       }
       launchFiles.push({ file, url: file.type.startsWith("image/") ? URL.createObjectURL(file) : null });
@@ -509,6 +509,15 @@ export function createLauncher(shell) {
       leaveSidebar();
       return;
     }
+    // its files against the platform's word now (its list, read again since
+    // they were taken: a deploy may have changed it): refused, they and the
+    // words stay, saying why
+    const why = refusal(state.limits, files);
+    if (why) {
+      launchError = why;
+      $("search-status").textContent = launchError;
+      return;
+    }
     launching = true;
     ++asked;
     clearTimeout(typing);
@@ -547,7 +556,7 @@ export function createLauncher(shell) {
         leaveSidebar();
         view = shell.views();
       }
-      // bounded: at most FILES_MAX, uploaded together
+      // bounded: at most the platform's filesPerMessage (checked above), uploaded together
       const attachments = await Promise.all(files.map((f) => upload(name, f)));
       await api("POST", `/api/f/${seg(name)}/channels/chat`, { id: pendingLaunch.id, body: { text, ...(attachments.length ? { attachments } : {}) } });
       pendingLaunch = null;

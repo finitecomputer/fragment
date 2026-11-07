@@ -957,6 +957,26 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("their record names the files as docs/chat-records.md does", carried == Value::Array(expected), &carried);
     s.ok("the agent read them", shows(&mut chrome, &page, &replied("[got 3: picture.png, tall.png, square.png]")), "");
 
+    // a file past what the platform names (the page's hello's `limits`, the
+    // fleet's own bound): refused before any upload, in its number
+    let limits = chrome.eval(&page, "import('./__fragment.js').then((f) => f.me()).then((hello) => hello.limits)")?;
+    let most = limits["uploadMaxBytes"].as_u64().unwrap_or(0);
+    let big = shots.join("atlas.tiff");
+    std::fs::File::create(&big)?.set_len(most + 1)?;
+    chrome.choose_files(&page, "#attachment-picker", &[big.as_path()])?;
+    let said = format!("atlas.tiff is over {} MB, the most a chat takes.", (most as f64 / 1e6).round());
+    let refused = shows(&mut chrome, &page, &format!("!document.getElementById('banner').hidden && document.getElementById('banner-text').textContent === {} && !document.querySelector('#attachments .attachment-chip')", json!(said)));
+    s.ok(
+        "a file past the platform's bound (its hello's `limits`) is refused in its number, no chip made",
+        // a hosted run's bound is its deployment's (a zone's), not this fleet's
+        (s.hosted() || limits["uploadMaxBytes"] == crate::UPLOAD_MAX_BYTES) && limits["filesPerMessage"] == fragment_proto::limits::FILES_PER_MESSAGE && refused,
+        json!({ "limits": limits, "banner": chrome.eval(&page, "document.getElementById('banner-text').textContent")? }),
+    );
+    chrome.click(&page, "#banner-dismiss")?;
+    // and the page's own upload route refuses one past it, unread (413)
+    let page_put = chrome.eval(&page, &format!("fetch('./__blob/' + '0'.repeat(64), {{ method: 'PUT', body: new Uint8Array({most} + 1), credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    s.ok("the page's upload route (`__blob`) refuses a file past the platform's bound (413)", page_put == 413, &page_put);
+
     // Large pictures keep their aspect ratio, capped at 240px and at the
     // message's available width; each wrapper's content box hugs its image.
     for (width, height, mobile) in [(1280, 860, false), (375, 812, true), (280, 812, true)] {

@@ -9,6 +9,7 @@ mod ai_tools;
 mod app;
 mod appfiles;
 mod blobs;
+mod board;
 mod bot_mode;
 mod brain;
 mod chat;
@@ -131,6 +132,7 @@ const LANES: &[Lane] = &[
     brain::brain_release,
     doc::doc,
     slides::slides,
+    board::board,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
@@ -191,7 +193,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
-        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "slides", "export", "search", "search-across",
+        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost",
     ],
     &[
