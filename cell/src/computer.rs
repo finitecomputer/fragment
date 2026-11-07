@@ -1081,7 +1081,8 @@ impl ComputerCell {
             // whatever runs (`0`, as a new start's is): the lifecycle names
             // no start after this one, so only its container can run. One
             // still running after its destroy is no failure told yet: the
-            // next event (its deadline's alarm at the latest) tries again.
+            // next event tries again, the alarm `take_over` keeps at the
+            // latest.
             // (the lever's `fail-takeover-destroys`: one that leaves it running)
             if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
                 return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
