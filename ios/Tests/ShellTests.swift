@@ -18,20 +18,19 @@ struct ShellTests {
         #expect(GlassTilt.lean(gravityX: 0.3, gravityY: 0) == SIMD2(0.3, 0))
     }
 
-    /// A finished memo sends itself with the composer's words; one that can't
-    /// be put sends nothing, leaving the words and its Retry.
+    /// A finished memo sends itself with the composer's words, its place held
+    /// from before it records (`ChatView`'s `memo`); one that can't be put
+    /// sends nothing, leaving the words and its Retry.
     @Test func aFinishedMemoSendsItselfOrNothing() async throws {
-        func memo() throws -> URL {
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
-            try Data(UUID().uuidString.utf8).write(to: url)
-            return url
-        }
         let refused = Stub { _, _ in (500, #"{"error":"unavailable","message":"not now"}"#) }
         let failing = try refused.api()
         defer { try? ChatDraftStore.removeAccount(api: failing) }
         let kept = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: failing)
         kept.edit("Listen to this")
-        await kept.sendMemo(try memo())
+        // left recording: its deadline finishes it, and it sends itself all the same
+        let unattended = VoiceMemo(microphone: TestMicrophone(), longest: .milliseconds(50))
+        #expect(kept.beginAttaching(1))
+        await kept.sendMemo { [unattended] in try await unattended.file() }
         #expect(kept.composer == "Listen to this" && kept.pending.isEmpty && kept.attachments.isEmpty && !kept.uploads.isEmpty)
         #expect(!refused.seen.contains { $0.method == "POST" })
 
@@ -42,10 +41,18 @@ struct ShellTests {
         defer { try? ChatDraftStore.removeAccount(api: api) }
         let session = ChatSession(fragment: FragmentSummary(name: "talk--c2", kind: "chat"), api: api)
         session.edit("Listen to this")
-        await session.sendMemo(try memo())
+        let microphone = TestMicrophone()
+        let voice = VoiceMemo(microphone: microphone)
+        #expect(session.beginAttaching(1))
+        let memo = Task { await session.sendMemo { [voice] in try await voice.file() } }
+        try await waitUntil("the memo recording") { voice.recording }
+        #expect(!stub.seen.contains { $0.method == "POST" }, "nothing goes while it records")
+        voice.finish()
+        await memo.value
         #expect(stub.seen.filter { $0.method == "POST" }.count >= 1)
         #expect(session.composer.isEmpty && session.attachments.isEmpty)
         #expect(session.pending.first?.attachments.count == 1 && session.pending.first?.text == "Listen to this")
+        #expect(session.pending.first?.attachments.first?.name == microphone.url?.lastPathComponent)
         // a chat just made shows at once, before any connection has read it
         #expect(!session.read)
         session.beginEmpty()
@@ -458,6 +465,139 @@ struct ShellTests {
         #expect(!session.beginAttaching(ChatAttachment.countMax) && !session.attaching)
     }
 
+    /// Blobs put, but for one refused (as a file past its bound is); a
+    /// message posted only past `posting`, then refused.
+    nonisolated private static func blobs(posting: Gate? = nil) -> Stub {
+        Stub { seen, _ in
+            if seen.route == "POST /api/f/talk--c1/channels/chat" { posting?.pass(); return (400, #"{"error":"refused","message":"Not this one."}"#) }
+            guard seen.method == "PUT" else { return (404, #"{"error":"not_found","message":"no route"}"#) }
+            return seen.body == Data("refused".utf8) ? (413, #"{"error":"too_large","message":"This file is too large."}"#) : (200, #"{"ok":true,"stored":true}"#)
+        }
+    }
+    /// A message's files: `finished` put, then `failed` whose uploads failed.
+    private static func fill(_ session: ChatSession, finished: Int, failed: Int) async {
+        if finished > 0, session.beginAttaching(finished) {
+            await session.attach { (0..<finished).map { OutgoingFile(data: Data("file \($0)".utf8), name: "file-\($0).txt", type: "text/plain") } }
+        }
+        if failed > 0, session.beginAttaching(failed) {
+            await session.attach { [OutgoingFile(data: Data("refused".utf8), name: "refused.txt", type: "text/plain")] }
+        }
+        #expect(session.attachments.count == finished && session.uploads.filter { $0.failed != nil }.count == failed)
+    }
+
+    /// A message's files are counted one way, failed uploads with them: at
+    /// its limit, a voice memo is refused before its microphone starts, as
+    /// Photos and Files are; a failed one removed, there is room again.
+    @Test func aFullMessageRefusesAVoiceMemoBeforeItRecords() async throws {
+        let stub = Self.blobs()
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        await Self.fill(session, finished: ChatAttachment.countMax - 1, failed: 1)
+        #expect(session.fileCount == ChatAttachment.countMax && session.fileRoom == 0)
+        let microphone = TestMicrophone()
+        let voice = VoiceMemo(microphone: microphone)
+        // the mic's own check (`ChatView.recordVoice`), before anything records
+        #expect(!session.beginAttaching(1) && !session.attaching && session.error == ChatAttachment.limits.countRefusal)
+        #expect(!session.admits(1) && microphone.started == 0 && !voice.recording)
+        session.removeUpload(try #require(session.uploads.first).id)
+        session.error = nil
+        #expect(session.fileRoom == 1 && session.admits(1) && session.error == nil)
+    }
+
+    /// Below the limit, a memo's place is held from before it records, so
+    /// nothing takes it meanwhile (a paste, a send); finished by hand, it is
+    /// attached beside the failed upload, and its recording goes.
+    @Test func aVoiceMemoFinishedByHandIsAttachedInThePlaceItHeld() async throws {
+        let stub = Self.blobs()
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        await Self.fill(session, finished: ChatAttachment.countMax - 2, failed: 1)
+        #expect(session.fileRoom == 1)
+
+        let microphone = TestMicrophone()
+        let voice = VoiceMemo(microphone: microphone)
+        #expect(session.beginAttaching(1))
+        let memo = Task { await session.attach { [voice] in try await voice.file() } }
+        try await waitUntil("the memo recording") { voice.recording }
+        #expect(!session.beginAttaching(1) && session.error == "Wait for the files being attached, then add more.")
+        await session.send()
+        #expect(session.error == "Wait for the files being attached." && voice.recording)
+
+        voice.finish()
+        await memo.value
+        let recorded = try #require(microphone.url)
+        #expect(!session.attaching && !voice.recording && microphone.stopped == 1)
+        #expect(session.attachments.count == ChatAttachment.countMax - 1 && session.uploads.count == 1 && session.fileRoom == 0)
+        #expect(session.attachments.last?.name == recorded.lastPathComponent && session.attachments.last?.size == microphone.bytes.count)
+        #expect(stub.seen.contains { $0.method == "PUT" && $0.body == microphone.bytes })
+        #expect(!FileManager.default.fileExists(atPath: recorded.path), "its recording goes once read")
+    }
+
+    /// One left recording ends at its deadline, and is attached all the same.
+    @Test func aVoiceMemoAtItsDeadlineIsAttached() async throws {
+        let stub = Self.blobs()
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        await Self.fill(session, finished: ChatAttachment.countMax - 2, failed: 1)
+        let microphone = TestMicrophone()
+        let voice = VoiceMemo(microphone: microphone, longest: .milliseconds(50))
+        #expect(session.beginAttaching(1))
+        await session.attach { [voice] in try await voice.file() }
+        let recorded = try #require(microphone.url)
+        #expect(!session.attaching && !voice.recording && microphone.started == 1 && microphone.stopped == 1)
+        #expect(session.attachments.count == ChatAttachment.countMax - 1 && session.attachments.last?.name == recorded.lastPathComponent)
+        #expect(session.fileRoom == 0 && !FileManager.default.fileExists(atPath: recorded.path))
+    }
+
+    /// A memo the microphone may not record, or one cancelled (its chat
+    /// left), frees the place it held, and says nothing it need not. While
+    /// it records, a refused message is not reopened into its message.
+    @Test func aVoiceMemoNotRecordedFreesItsPlace() async throws {
+        let posting = Gate()
+        let stub = Self.blobs(posting: posting)
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: api)
+        // a refused message waiting to be edited, as one refused beside a draft does
+        session.edit("Words refused")
+        let sending = Task { await session.send() }
+        try await waitUntil("the message pending") { session.pending.count == 1 }
+        session.edit("A draft meanwhile")
+        posting.open()
+        await sending.value
+        let refused = try #require(session.pending.first)
+        #expect(refused.refused == "Not this one.")
+        session.edit("")
+        session.error = nil
+
+        let microphone = TestMicrophone()
+        microphone.allows = false
+        let voice = VoiceMemo(microphone: microphone)
+        #expect(session.beginAttaching(1))
+        await session.attach { [voice] in try await voice.file() }
+        #expect(!session.attaching && session.error == nil && microphone.started == 0)
+        #expect(voice.error == "Allow microphone access in iOS Settings to record a voice memo.")
+
+        microphone.allows = true
+        #expect(session.beginAttaching(1))
+        let memo = Task { await session.attach { [voice] in try await voice.file() } }
+        try await waitUntil("the memo recording") { voice.recording }
+        #expect(voice.error == nil)
+        session.reopen(refused)
+        #expect(session.pending.count == 1 && session.composer.isEmpty && session.error == "Send or clear your draft first, then edit this message.")
+        session.error = nil
+        voice.cancel()
+        await memo.value
+        let recorded = try #require(microphone.url)
+        #expect(!session.attaching && session.error == nil && session.fileCount == 0 && session.admits(1))
+        #expect(microphone.stopped == 1 && !FileManager.default.fileExists(atPath: recorded.path))
+        session.reopen(refused)
+        #expect(session.pending.isEmpty && session.composer == "Words refused")
+    }
+
     @Test func anAgentJoinsAChatAsAnEditorByItsNpub() async throws {
         let stub = Stub { seen, before in
             seen.route == "PUT /api/f/talk--c9/members/npub1moss" ? (200, #"{"principal":"npub1moss","role":"editor"}"#) : Self.platform(seen, before)
@@ -687,3 +827,15 @@ struct ShellTests {
 }
 
 private final class Heard: Sendable { let keys = Mutex<[String]>([]) }
+
+/// A microphone that records known bytes, for a voice memo's tests.
+@MainActor final class TestMicrophone: Microphone {
+    var allows = true
+    let bytes = Data("a voice memo \(UUID().uuidString)".utf8)
+    private(set) var started = 0
+    private(set) var stopped = 0
+    private(set) var url: URL?
+    func allowed() async -> Bool { allows }
+    func start(into url: URL) throws { started += 1; self.url = url; try bytes.write(to: url) }
+    func stop() throws { stopped += 1 }
+}

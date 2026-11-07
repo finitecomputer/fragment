@@ -11,10 +11,14 @@ struct HelpersTests {
         .init(channel: "work", seq: seq, at: seq * 1000, principal: agent, kind: "message", body: try JSONDecoder().decode(JSONValue.self, from: Data(body.utf8)))
     }
     private func start(_ seq: Int64, _ child: String, _ goal: String, turn: String = "t1", agent: String = "npub1ada") throws -> ChannelRecord {
-        try work(seq, #"{"kind":"turn.child","turn":"\#(turn)","child":"\#(child)","goal":"\#(goal)"}"#, agent: agent)
+        try work(seq, #"{"kind":"turn.child","parent":"\#(turn)","child":"\#(child)","goal":"\#(goal)"}"#, agent: agent)
     }
     private func end(_ seq: Int64, _ child: String, _ outcome: String, turn: String = "t1", agent: String = "npub1ada") throws -> ChannelRecord {
-        try work(seq, #"{"kind":"turn.child","turn":"\#(turn)","child":"\#(child)","outcome":"\#(outcome)"}"#, agent: agent)
+        try work(seq, #"{"kind":"turn.child","parent":"\#(turn)","child":"\#(child)","outcome":"\#(outcome)"}"#, agent: agent)
+    }
+    /// A note that a helper still works: its start again, with `since`.
+    private func note(_ seq: Int64, _ child: String, _ goal: String, since: Int64, turn: String = "t1", agent: String = "npub1ada") throws -> ChannelRecord {
+        try work(seq, #"{"kind":"turn.child","parent":"\#(turn)","child":"\#(child)","goal":"\#(goal)","since":\#(since)}"#, agent: agent)
     }
 
     @Test func aHelperWorksFromItsStartUntilAnyEnd() throws {
@@ -76,17 +80,18 @@ struct HelpersTests {
         timeline.insert(try end(2, "h1", "completed", agent: "npub1bo"))
         timeline.insert(try start(3, "h1", "Same child, another agent", agent: "npub1bo"))
         #expect(timeline.helpers.running.map(\.agent) == ["npub1ada"], "bo's end came first, so its own start is ended")
-        for (seq, bad) in [(4, #"{"kind":"turn.child","turn":"t1","child":"","goal":"x"}"#), (5, #"{"kind":"turn.child","turn":"t1","child":7,"goal":"x"}"#), (6, #"{"kind":"turn.child","child":"h9","goal":"x"}"#), (7, #"{"kind":"turn.child","turn":"t1","child":"h9"}"#)] {
+        for (seq, bad) in [(4, #"{"kind":"turn.child","parent":"t1","child":"","goal":"x"}"#), (5, #"{"kind":"turn.child","parent":"t1","child":7,"goal":"x"}"#), (6, #"{"kind":"turn.child","child":"h9","goal":"x"}"#), (7, #"{"kind":"turn.child","parent":"t1","child":"h9"}"#), (8, #"{"kind":"turn.child","turn":"t1","child":"h9","goal":"a reader before helpers' name for its turn"}"#)] {
             timeline.insert(try work(Int64(seq), bad))
         }
-        let chat = ChannelRecord(channel: "chat", seq: 8, at: 8, principal: "npub1ada", kind: "message", body: .object(["kind": .string("turn.child"), "turn": .string("t1"), "child": .string("h8"), "goal": .string("not work")]))
+        let chat = ChannelRecord(channel: "chat", seq: 9, at: 9, principal: "npub1ada", kind: "message", body: .object(["kind": .string("turn.child"), "parent": .string("t1"), "child": .string("h8"), "goal": .string("not work")]))
         timeline.insert(chat)
         #expect(timeline.helpers.running.map(\.child) == ["h1"] && timeline.helpers.known.count == 2)
     }
 
     /// What an older app reads too: the records start no turn, end none,
     /// draw nothing in the chat, and a helper's end after its turn's end
-    /// keeps that turn ended.
+    /// keeps that turn ended. They name their turn `parent`, never `turn`,
+    /// so no app before them makes a turn of them at all.
     @Test func theRecordsChangeNothingElseAChatDraws() throws {
         var timeline = Timeline()
         timeline.insert(try work(1, #"{"kind":"turn.start","turn":"t1","agent":"npub1ada"}"#))
@@ -101,6 +106,68 @@ struct HelpersTests {
         #expect(!activity.rows.contains { $0.record?.body["kind"].string == "turn.child" })
         #expect(activity.cards.values.allSatisfy { !$0.running })
         #expect(timeline.helpers.running.map(\.child) == ["h9"])
+        #expect(timeline.turns[TurnKey(agent: "npub1ada", id: "t9")] == nil, "a helper's records make no turn")
+    }
+
+    /// FIN-432, Paul's (b) of 11-07. Valid: a helper whose start is long
+    /// out of what was read works from its note alone, from its `since`;
+    /// its start read later times it from the start's record. Replay: a
+    /// note read again, or a later one, is the same helper, and a note
+    /// after its end, in any order, starts nothing.
+    @Test func aLongHelperWorksFromItsNote() throws {
+        var timeline = Timeline()
+        let read = 2_000_000_000
+        let since: Int64 = 2_000_000_000 - 40 * 60_000
+        timeline.insert(try note(Int64(read / 1000), "h1", "Read every review", since: since))
+        let h = timeline.helpers.running
+        #expect(h.map(\.goal) == ["Read every review"] && h.first?.at == since && h.first?.seen == Int64(read))
+        #expect(Helpers.working(h, at: Int64(read) + 60_000).count == 1)
+        #expect(HelpersBar.minutes(Int64(read) + 60_000 - h[0].at) == "41 min", "how long since its start")
+        // replay: the same note, and a later one: one helper, its start kept
+        timeline.learn(try note(Int64(read / 1000), "h1", "Read every review", since: since))
+        timeline.insert(try note(Int64(read / 1000) + 600, "h1", "Read every review", since: since))
+        #expect(timeline.helpers.running.count == 1 && timeline.helpers.running[0].seen == Int64(read) + 600_000 && timeline.helpers.known.count == 1)
+        // its start read later (an earlier page): timed from it
+        timeline.insert(try start(1_997_599, "h1", "Read every review"), advancingCursor: false)
+        #expect(timeline.helpers.running.first?.at == 1_997_599_000 && timeline.helpers.running.first?.seen == Int64(read) + 600_000)
+        // a note after its end, either order: ended
+        timeline.insert(try end(Int64(read / 1000) + 700, "h1", "completed"))
+        timeline.learn(try note(Int64(read / 1000) + 600, "h1", "Read every review", since: since))
+        var earlier = Timeline()
+        earlier.insert(try end(9, "h2", "completed"))
+        earlier.insert(try note(8, "h2", "Draft", since: 1), advancingCursor: false)
+        #expect(timeline.helpers.running.isEmpty && earlier.helpers.running.isEmpty)
+    }
+
+    /// Invalid: a note with no task, or a `since` that is no whole number
+    /// of ms above 0 at or before its record's `at`, is none.
+    @Test func aMalformedNoteIsNone() throws {
+        var timeline = Timeline()
+        let bad = [#""soon""#, "-5", "0", "1.5", "null", "9000", "[1]"]
+        for (n, since) in bad.enumerated() {
+            timeline.insert(try work(Int64(n + 1), #"{"kind":"turn.child","parent":"t1","child":"b\#(n)","goal":"x","since":\#(since)}"#))
+        }
+        timeline.insert(try work(20, #"{"kind":"turn.child","parent":"t1","child":"b9","since":5}"#))
+        #expect(timeline.helpers.known.isEmpty, "\(timeline.helpers.known)")
+        // at its record's `at` exactly is a note
+        timeline.insert(try work(21, #"{"kind":"turn.child","parent":"t1","child":"ok","goal":"x","since":21000}"#))
+        #expect(timeline.helpers.running.map(\.child) == ["ok"])
+    }
+
+    /// Restart: a helper no note has come for in `Helpers.readBack` (its
+    /// computer crashed, its notes stopped) works no more; a new life's
+    /// `lost` end ends it.
+    @Test func aHelperNoNoteCameForWorksNoMore() throws {
+        var timeline = Timeline()
+        timeline.insert(try start(1_000_000, "h1", "Find venues"))
+        timeline.insert(try note(1_000_600, "h2", "Compare quotes", since: 1_000_000_000))
+        let running = timeline.helpers.running
+        let noted = Int64(1_000_600_000)
+        #expect(Helpers.working(running, at: noted + Helpers.readBack).map(\.child) == ["h2"], "h1's start is older than that")
+        #expect(Helpers.working(running, at: noted + Helpers.readBack + 1).isEmpty)
+        #expect(Helpers.working(running, at: 1_000_000_000 + Helpers.readBack).map(\.child) == ["h1", "h2"])
+        timeline.insert(try end(1_000_700, "h2", "lost"))
+        #expect(timeline.helpers.running.map(\.child) == ["h1"])
     }
 
     /// Codex on #1086: a turn asking its owner in words keeps asking while

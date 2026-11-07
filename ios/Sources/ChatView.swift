@@ -137,11 +137,12 @@ struct ChatView: View {
                 if let error = session.error {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
-                HelpersBar(helpers: session.helpers, library: library, several: (session.fragment.agents?.count ?? 0) > 1)
+                HelpersBar(helpers: session.helpers, library: library, several: session.agents.count > 1)
                     .padding(.horizontal, 20)
                 ComposerBar(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
-                    // sends go over HTTP: a reconnect never holds the composer
-                    enabled: session.read, busy: session.attaching,
+                    // sends go over HTTP: a reconnect never holds the composer;
+                    // a first message from Home being sent here does, so it goes first
+                    enabled: session.read && session.sendingFirst == nil, busy: session.attaching,
                     placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
                     attached: session.attachments.map { ($0.id, $0.name) },
                     remove: { id in session.attachments.removeAll { $0.id == id } },
@@ -153,7 +154,13 @@ struct ChatView: View {
                         Task { await session.attach(read) }
                         return true
                     },
-                    memoFinished: { url in Task { await session.sendMemo(url) } },
+                    room: session.fileRoom,
+                    // a memo sends itself once recorded and put (`sendMemo`)
+                    memo: { read in
+                        guard session.beginAttaching(1) else { return false }
+                        Task { await session.sendMemo(read) }
+                        return true
+                    },
                     send: { await session.send() }, stop: { await session.stop() },
                     steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
                     quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })

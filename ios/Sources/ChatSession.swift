@@ -29,6 +29,11 @@ final class ChatSession {
     /// identity: its fragment's label (chat.js `handleOf`, bridge `answers_to`).
     var handles: [String: String] = [:] { didSet { if handles != oldValue { activityHandles = nil; timelineChanged() } } }
     @ObservationIgnored private var activityHandles: [String: String]?
+    /// The chat's agents, its lead first, as the person's list names them
+    /// now (`Library.fragments`), not as when it opened: whom a message is
+    /// for, so one added through Agents in this chat counts at once.
+    var agents: [String] = [] { didSet { if agents != oldValue { activityAgents = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityAgents: [String]?
     /// A post awaiting its agent's claim, at the chat's end (the web's
     /// pending line): each running turn's line is in the rows.
     var workingHints: [WorkingHint] {
@@ -82,8 +87,12 @@ final class ChatSession {
     /// Files being attached, from their choosing until their upload: the
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
     private(set) var attaching = false
-    /// A first message on its way, shown as sending before it is a post.
+    /// A first message from Home being sent here (`sendFirst`), from its
+    /// uploads to its post, shown as sending (its words, else its first
+    /// file's) before it is a post: until then nothing else sends, so it
+    /// goes first. Typing and attaching stay the person's.
     private(set) var sendingFirst: String?
+    static let waitForFirst = "Wait for the message being sent."
     /// Files being put, or that failed to be: each shown in the composer
     /// from its own bytes on this iPhone (`BlobStore.keep`) as it goes, then
     /// held as an attachment once put. A failed one waits to be put again
@@ -100,6 +109,7 @@ final class ChatSession {
     init(fragment: FragmentSummary, api: FragmentAPI) {
         self.fragment = fragment
         self.api = api
+        agents = fragment.agents ?? []
         do { persistence = try ChatDraftStore(api: api, fragment: fragment.name) }
         catch { self.error = "The local draft could not be opened: " + error.localizedDescription; return }
         // What was saved, within its bounds; a file that is none is cleared.
@@ -118,17 +128,18 @@ final class ChatSession {
         // a reply being written is at the chat's end, which a window paged back does not show
         let drafting = timeline.detached ? [] : Set(timeline.drafts.values.map { TurnKey(agent: $0.principal, id: $0.turn) })
         if rowsRevision != timeline.revision || activityReady != workRead || activityDrafting != drafting
-            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles {
+            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles || activityAgents != agents {
             rowsRevision = timeline.revision
             activityReady = workRead
             activityDrafting = drafting
             activityPrincipal = principal
             activityOwned = owned
             activityHandles = handles
-            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: fragment.agents ?? [], handles: handles)
+            activityAgents = agents
+            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: agents, handles: handles)
             if next != activity { activity = next }
             if next.rows != rows { rows = next.rows }
-            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: fragment.agents?.first)
+            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: agents.first)
             if let candidate, case .pending(let since) = candidate.kind,
                candidate.id == awaitingReply?.id || Int64(Date().timeIntervalSince1970 * 1000) - since < 90_000 { awaitingReply = candidate }
             else { awaitingReply = nil }
@@ -179,7 +190,8 @@ final class ChatSession {
     /// anew, once the composer is empty (`deliver`).
     func reopen(_ post: PendingPost) {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
-        guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
+        // nor while files are being attached: their places are held (`beginAttaching`)
+        guard composer.isEmpty && attachments.isEmpty && uploads.isEmpty && !attaching else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
         // its own words, files and addressees: the draft's were kept until
         // now (a command's words alone: its agent is no addressee of theirs)
@@ -279,6 +291,7 @@ final class ChatSession {
                                 if !workRead { workRead = true; timelineChanged() }
                                 if chatReadNow && !read { read = true }
                                 await earlierWork()
+                                await recentHelpers()
                                 // drafts kept across the reconnect go once their turn is read to have ended
                                 timeline.settleDrafts()
                             }
@@ -348,6 +361,9 @@ final class ChatSession {
     static let workBatch = 50
     /// Earlier `work` read back at most, a visit.
     static let earlierWorkMax = 1_000
+    /// `work` read back for the helpers working at most, a visit, past
+    /// what the backlog and `earlierWork` read (chat.js's four pages).
+    static let helpersReadMax = 4_000
 
     /// The next batch, sized by what the last one's records took: as many
     /// as half the answer's bound holds at twice their mean, between
@@ -396,12 +412,54 @@ final class ChatSession {
         }
     }
 
+    /// The helpers working as the chat opens, whatever it shows: `work`
+    /// read back to `Helpers.readBack` ago, past what the backlog and
+    /// `earlierWork` read, for helpers' records alone (chat.js
+    /// `recentHelpers`). A running helper is noted more often than that
+    /// (docs/chat-records.md, `turn.child`), so this finds each one however
+    /// old its start. Its own cursor: the window, the turns and where
+    /// earlier work goes on from stay as they were. Bounded by
+    /// `helpersReadMax`; a failure, or a helper past it, shows at its next
+    /// note.
+    private func recentHelpers() async {
+        let since = Int64(Date().timeIntervalSince1970 * 1000) - Helpers.readBack
+        guard var oldest = timeline.oldestWork else { return }
+        var read = 0
+        var batch = Self.workBatch
+        while read < Self.helpersReadMax, oldest.at >= since, oldest.seq > 1 {
+            let limit = min(batch, Self.helpersReadMax - read)
+            let page: (records: [ChannelRecord], bytes: Int)
+            do { page = try await api.historyPage(fragment.name, channel: "work", before: oldest.seq, limit: limit) }
+            catch APIError.limitExceeded where limit > Self.workBatch { batch = Self.workBatch; continue }
+            catch { return }
+            for record in page.records { timeline.learnHelper(record) }
+            guard let first = page.records.first else { return }
+            oldest = (first.seq, first.at)
+            read += page.records.count
+            if page.records.count < limit { return }
+            batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)
+        }
+    }
+
+    /// The message's files: attached, being put, or failed to be put (which
+    /// waits to go with it). Each takes one of a message's `countMax` places;
+    /// every check of what more it takes counts this, and only this.
+    var fileCount: Int { attachments.count + uploads.count }
+    /// Places the message has left (the photo picker's most).
+    var fileRoom: Int { max(0, ChatAttachment.countMax - fileCount) }
+    /// Whether `count` more files may be attached now, saying why not.
+    func admits(_ count: Int) -> Bool {
+        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return false }
+        return true
+    }
     /// Reserves the attaching of `count` files, at once, before anything is
     /// read: none while others are attaching, none past `countMax` a message.
     /// Then `attach` reads and uploads them; until it ends, nothing sends.
+    /// A voice memo reserves its place before it records (`VoiceMemo.file`),
+    /// so one is refused before it starts, never once it is recorded.
     func beginAttaching(_ count: Int) -> Bool {
-        guard !attaching else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
+        guard admits(count) else { return false }
         attaching = true
         return true
     }
@@ -411,9 +469,12 @@ final class ChatSession {
     func attach(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
         defer { attaching = false }
         let files: [OutgoingFile]
-        do { files = try await prepare() } catch { self.error = error.localizedDescription; return }
+        do { files = try await prepare() }
+        // a voice memo cancelled, or never begun (`VoiceMemo.file`): nothing to say
+        catch is CancellationError { return }
+        catch { self.error = error.localizedDescription; return }
         guard !files.isEmpty else { error = "This could not be attached."; return }
-        guard files.count + attachments.count + uploads.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
+        guard files.count <= fileRoom else { error = ChatAttachment.limits.countRefusal; return }
         var queued: [(OutgoingFile, ChatAttachment)] = []
         for file in files {
             let sha256 = await Task.detached(priority: .userInitiated) { sha256Hex(file.data) }.value
@@ -470,17 +531,17 @@ final class ChatSession {
         }
     }
 
-    /// A finished voice memo, sent as soon as it is put, with any words in the
-    /// composer. One that can't be put stays with its Retry and nothing goes:
-    /// words never go without the memo they were written beside.
-    func sendMemo(_ url: URL) async {
-        guard beginAttaching(1) else { try? FileManager.default.removeItem(at: url); return }
-        let before = attachments.count
-        await attach {
-            defer { try? FileManager.default.removeItem(at: url) }
-            return try await ComposerFiles.read([url])
-        }
-        if attachments.count > before { await send() }
+    /// A voice memo, its place reserved before it records
+    /// (`beginAttaching(1)`), sent as soon as it is put, with any words in
+    /// the composer. One that can't be put stays with its Retry and nothing
+    /// goes: words never go without the memo they were written beside. Nor
+    /// does it overtake a first message from Home still being sent
+    /// (`sendingFirst`): it stays attached, to be sent.
+    func sendMemo(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
+        let before = Set(attachments.map(\.id))
+        await attach(prepare)
+        guard attachments.contains(where: { !before.contains($0.id) }) else { return }
+        await send()
     }
 
     /// A chat just made holds nothing to wait for: it shows at once, its
@@ -488,6 +549,8 @@ final class ChatSession {
     func beginEmpty() { read = true }
 
     func send() async {
+        // nothing overtakes a first message from Home being sent (`sendFirst`)
+        guard sendingFirst == nil else { error = Self.waitForFirst; return }
         // what is being attached goes with it, or the message waits
         guard !attaching else { error = "Wait for the files being attached."; return }
         guard !uploads.contains(where: { $0.failed != nil }) else { error = "A file did not upload. Retry it or remove it."; return }
@@ -520,19 +583,23 @@ final class ChatSession {
     /// nothing is posted, so the whole message is tried again, never words
     /// alone or some of its files. Files of the same bytes go once, as this
     /// composer attaches them. It neither reads nor clears what is typed
-    /// here meanwhile.
+    /// here meanwhile, but nothing else sends until it is posted
+    /// (`sendingFirst`): no follow-up typed here goes before it.
     func sendFirst(id: String, text: String, files: [OutgoingFile]) async throws {
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty || !files.isEmpty else { return }
         guard persistence != nil else { throw APIError.server("The local draft could not be opened. Reopen this chat before sending.") }
-        guard pending.count < SavedChat.pendingMax else { throw APIError.server("Wait for the messages still sending, or edit the ones not sent.") }
-        sendingFirst = words.isEmpty ? files.first.map { ComposerMemos.label($0.name) } : words
+        guard sendingFirst == nil else { throw APIError.server(Self.waitForFirst) }
+        // the guard above: words, else a file
+        sendingFirst = words.isEmpty ? ComposerMemos.label(files[0].name) : words
         defer { sendingFirst = nil }
         var uploaded: [ChatAttachment] = []
         for file in files {
             let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
             if !uploaded.contains(where: { $0.id == put.id }) { uploaded.append(put) }
         }
+        // the outbox's room, where the send is saved: a full one would leave it unsaved
+        guard pending.count < SavedChat.pendingMax else { throw APIError.server("Wait for the messages still sending, or edit the ones not sent.") }
         let post = PendingPost(id: id, text: words, attachments: uploaded)
         try persistence?.save(SavedChat(composer: composer, attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
         pending.append(post)
@@ -584,7 +651,7 @@ final class ChatSession {
             .max { ($0.value.startAt!, $0.key.id) < ($1.value.startAt!, $1.key.id) }?.key
     }
     /// Whom a command goes to: the agent working for this person, else the lead.
-    var commandTarget: String? { myTurn?.agent ?? fragment.agents?.first }
+    var commandTarget: String? { myTurn?.agent ?? agents.first }
     /// Whether `agent`'s runtime takes `command` from this person: its
     /// menu's, offered to its owner alone (chat.js `menuOf`).
     func offers(_ command: String, _ agent: String?) -> Bool {
@@ -621,7 +688,7 @@ final class ChatSession {
             return "\(name(card.turn.agent)) is waiting for you"
         }
         if myTurn != nil { return "A message waits its turn" }
-        return fragment.agents?.first.map { "Message \(name($0))" } ?? "Message your agent"
+        return agents.first.map { "Message \(name($0))" } ?? "Message your agent"
     }
 
     /// The running turn told what is typed, at once (`/steer <words>`, a
@@ -631,6 +698,7 @@ final class ChatSession {
     /// id and body (docs/ios.md), so it never runs twice.
     func steer(recording: Bool = false) async {
         guard steers(recording: recording), let target = commandTarget else { return }
+        guard sendingFirst == nil else { error = Self.waitForFirst; return }
         guard persistence != nil else { error = "The local draft could not be opened. Reopen this chat before sending."; return }
         guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
         let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)

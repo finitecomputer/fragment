@@ -37,22 +37,28 @@ final class HomeDraft {
     /// start one (Send, a finished memo).
     var ready: Bool { (!words.isEmpty || !files.isEmpty) && text.utf8.count <= 32_768 && !launching && !reading && !recording }
 
+    /// Places the first message has left for files, of what a message carries.
+    var room: Int { max(0, ChatAttachment.countMax - files.count) }
     /// Files for the first message, read now and held: at most what a
     /// message carries, one reading at a time, none while a launch sends.
+    /// A voice memo's place is held from before it records (`VoiceMemo.file`).
     func hold(_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
         guard !launching else { error = "Wait for the message being sent."; return false }
         guard !reading else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + files.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
+        guard count > 0, count <= room else { error = ChatAttachment.limits.countRefusal; return false }
         reading = true
         holding = Task {
             defer { reading = false }
             do {
                 let read = try await read()
                 guard !read.isEmpty else { error = "This could not be attached."; return }
-                guard read.count + files.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
+                guard read.count <= room else { error = ChatAttachment.limits.countRefusal; return }
                 files += read.map { Held(id: UUID(), file: $0) }
                 error = nil
-            } catch { self.error = error.localizedDescription }
+            }
+            // a voice memo cancelled, or never begun: nothing to say
+            catch is CancellationError {}
+            catch { self.error = error.localizedDescription }
         }
         return true
     }
@@ -175,7 +181,7 @@ struct HomeView: View {
                                 placeholder: "Ask, or find a chat or app",
                                 attached: home.files.map { ($0.id.uuidString, $0.file.name) },
                                 remove: { id in if let id = UUID(uuidString: id) { home.remove(id) } },
-                                attach: { home.hold($0, $1) }, memoFinished: { url in Task { await launchMemo(url) } },
+                                attach: { home.hold($0, $1) }, room: home.room, memo: { launchMemo($0) },
                                 send: { await launch() }, editable: !home.launching, recordingChanged: recordingChanged,
                                 chrome: false, recordFirst: true, canRecord: library.agent != nil, focused: $focused)
                         .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, library.agent == nil ? 4 : -1) // 8 with the agents' own 3
@@ -273,16 +279,22 @@ struct HomeView: View {
         home.recording = recording
         if recording, let agent = library.agent { library.readyChat(with: agent, api: api) }
     }
-    /// A finished memo is held as any file is, and launches at once, with
-    /// anything typed meanwhile; not sent, Home keeps it with why.
-    private func launchMemo(_ url: URL) async {
-        home.recording = false
-        guard home.hold(1, {
-            defer { try? FileManager.default.removeItem(at: url) }
-            return try await ComposerFiles.read([url])
-        }) else { try? FileManager.default.removeItem(at: url); return }
-        await home.holding?.value
-        await launch()
+    /// A voice memo, held as any file is, its place taken before it records
+    /// (`HomeDraft.hold`), and launched once recorded, with anything typed
+    /// meanwhile. One not held (cancelled, unreadable) launches nothing:
+    /// words never go without the memo they were written beside. Not sent,
+    /// Home keeps it with why.
+    private func launchMemo(_ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
+        let before = Set(home.files.map(\.id))
+        guard home.hold(1, read), let holding = home.holding else { return false }
+        Task {
+            await holding.value
+            // its recording is over: the launch needn't wait for the view to say so
+            home.recording = false
+            guard home.files.contains(where: { !before.contains($0.id) }) else { return }
+            await launch()
+        }
+        return true
     }
     private func dismissKeyboard() { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
 }
@@ -309,8 +321,13 @@ struct ComposerBar: View {
     /// Takes `count` files that `read` will make, or refuses them (saying
     /// why itself): the composer is busy from the choosing on.
     let attach: (_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool
-    /// A finished voice memo, which goes at once: its file is its owner's.
-    let memoFinished: (URL) -> Void
+    /// Places the message has left for files, as its owner counts them (a
+    /// chat's uploads, failed ones too, `ChatSession.fileRoom`).
+    let room: Int
+    /// A voice memo, its place taken before it records as `attach(1)`
+    /// takes one, and sent once recorded (its owner's to send), refused
+    /// as `attach` refuses: `read` ends with the recording.
+    let memo: (_ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool
     let send: () async -> Void
     var stop: () async -> Void = {}
     /// Steer, given whether a voice memo is being recorded: none, no Steer.
@@ -354,9 +371,10 @@ struct ComposerBar: View {
                 if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
                 if let since = voice.startedAt { RecordingLabel(since: since) }
             }.padding(.horizontal, chrome ? 20 : 12)
-            ComposerView(text: $text, working: working, enabled: enabled, busy: busy, recording: voice.recording, placeholder: placeholder,
-                         attachPhotos: { photos = true }, attachFiles: { importer = true },
-                         pasteImages: { paste($0) }, record: { Task { await recordVoice() } },
+            // a memo being recorded holds its place as attaching, and its Finish stays
+            ComposerView(text: $text, working: working, enabled: enabled, busy: busy && !voice.recording, recording: voice.recording, placeholder: placeholder,
+                         attachPhotos: { if roomy() { photos = true } }, attachFiles: { if roomy() { importer = true } },
+                         pasteImages: { paste($0) }, record: { recordVoice() },
                          send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, editable: editable, chrome: chrome,
                          recordFirst: recordFirst, canRecord: canRecord, focused: focused)
         }
@@ -368,7 +386,7 @@ struct ComposerBar: View {
         }
         // Photos as the system's picker gives them, its most compatible
         // encoding: a picture the web shows goes as it is, any other as JPEG
-        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - attached.count),
+        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, room),
                       matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
         .onChange(of: picked) { _, items in
             guard !items.isEmpty else { return }
@@ -387,19 +405,18 @@ struct ComposerBar: View {
         guard !pictures.isEmpty else { voice.error = "This picture could not be attached."; return }
         _ = attach(pictures.count) { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value }
     }
-    /// A voice memo, handed on as it finishes, which sends it.
-    private func recordVoice() async {
-        if voice.recording {
-            if let url = voice.stop() { finishMemo(url) }
-        } else {
-            guard attached.count < ChatAttachment.countMax else { voice.error = ChatAttachment.limits.countRefusal; return }
-            await voice.start { url in finishMemo(url) }
-        }
+    /// Whether a file has a place left, saying so if not.
+    private func roomy() -> Bool {
+        guard room > 0 else { voice.error = ChatAttachment.limits.countRefusal; return false }
+        return true
     }
-    private func finishMemo(_ url: URL) {
-        // its length, read before its file goes
-        ComposerMemos.remember(url)
-        memoFinished(url)
+    /// A voice memo: its place taken before it records (`memo`), so a
+    /// message with no room refuses it before it starts, never once it is
+    /// recorded; handed on once finished, by hand or at its deadline,
+    /// which sends it.
+    private func recordVoice() {
+        if voice.recording { voice.finish(); return }
+        _ = memo { [voice] in try await voice.file() }
     }
 }
 

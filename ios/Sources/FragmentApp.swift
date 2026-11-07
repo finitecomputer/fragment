@@ -8,7 +8,15 @@ struct FragmentApp: App {
 
 @MainActor @Observable
 final class Library {
-    var fragments: [FragmentSummary] = []
+    /// The person's list. Each chat's session follows its agents in it
+    /// (`ChatSession.agents`): one added after the chat opened counts in
+    /// its cached session at once, its draft and outbox kept.
+    var fragments: [FragmentSummary] = [] {
+        didSet {
+            guard fragments != oldValue else { return }
+            for chat in fragments { if let agents = chat.agents, let session = sessions[chat.name] { session.agents = agents } }
+        }
+    }
     var error: String?
     var loading = false
     var creating = false
@@ -157,11 +165,15 @@ final class Library {
     func session(for chat: FragmentSummary, api: FragmentAPI) throws -> ChatSession {
         if let session = sessions[chat.name] { return session }
         // A bounded cache preserves unsent messages and cursors while changing screens.
-        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty })?.key {
+        // A session sending Home's first message is its one owner (`launch`):
+        // replaced, its chat would send around that message and save over it.
+        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty && $0.value.sendingFirst == nil })?.key {
             sessions.removeValue(forKey: unused)
         }
         guard sessions.count < 32 else { throw APIError.server("Finish or discard a draft in another chat before opening more conversations.") }
         let session = ChatSession(fragment: chat, api: api)
+        // its agents as the list names them, which may be newer than `chat` (a chat just made)
+        if let agents = fragments.first(where: { $0.name == chat.name })?.agents { session.agents = agents }
         sessions[chat.name] = session
         return session
     }
