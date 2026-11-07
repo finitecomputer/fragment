@@ -12,7 +12,10 @@ body { background: var(--soft); }
 .bd-frame { position: absolute; }
 .bd-body { position: absolute; inset: 0; overflow: hidden; background: #fff; box-shadow: 0 0 0 calc(1px / var(--z)) var(--line-strong), 0 calc(2px / var(--z)) calc(12px / var(--z)) rgba(0, 0, 0, .08); }
 .bd-body iframe, .bd-body img { display: block; width: 100%; height: 100%; border: 0; max-width: none; }
-.bd-body iframe.next { position: absolute; inset: 0; visibility: hidden; }
+.bd-body .next { position: absolute; inset: 0; visibility: hidden; }
+/* why a frame shows nothing (in its place), or not its newest (over it) */
+.bd-note { position: absolute; z-index: 1; inset: 0; margin: 0; display: grid; place-content: center; padding: calc(16px / var(--z)); color: var(--muted); font-size: calc(14px / max(var(--z), .1)); text-align: center; overflow-wrap: anywhere; }
+.bd-note.over { inset: 0 0 auto; display: block; padding: calc(6px / var(--z)) calc(10px / var(--z)); background: var(--surface); color: var(--danger); font-size: calc(12px / max(var(--z), .1)); box-shadow: 0 1px 0 var(--line); }
 .bd-shield { position: absolute; inset: 0; }
 .bd-frame.on .bd-shield { display: none; }
 .bd-frame.on .bd-body { box-shadow: 0 0 0 calc(2px / var(--z)) var(--accent); }
@@ -31,6 +34,8 @@ body { background: var(--soft); }
 .bd-zoom button { min-height: 2.25rem; min-width: 2.25rem; padding: 0 .75rem; background: none; color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums; }
 .bd-zoom button:hover { background: var(--soft); }
 #actual { min-width: 3.75rem; }
+.bd-done { position: fixed; top: max(.625rem, env(safe-area-inset-top)); right: max(.75rem, env(safe-area-inset-right)); min-height: 2.25rem; background: var(--accent); color: var(--on-accent); box-shadow: 0 4px 16px rgba(0, 0, 0, .12); }
+@media (pointer: coarse) { .bd-done { min-height: 2.75rem; } }
 .bd-empty { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; pointer-events: none; }
 .bd-empty h2 { margin: 0; font-size: var(--text-lg); }
 .bd-empty p { margin: .25rem 0 0; color: var(--muted); }

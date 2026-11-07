@@ -624,9 +624,9 @@ pub(crate) mod tests {
     /// its three operations are described (each a tool of `fragment mcp`),
     /// the manifest readable by whoever opens the board and changed by
     /// editors; it holds no frame of its own (an agent writes them at
-    /// main), and its page's sandbox and its frames' policy say the same.
+    /// main), and a frame's page runs only in the board's sandboxed iframe.
     /// Invalid: a dependency, a build output, a frame shipped, a sandbox
-    /// that lets a frame be this origin.
+    /// that lets a frame be this origin, a frame served as this origin's page.
     #[cfg(feature = "embed")]
     #[test]
     fn the_board_template_is_plain_files() {
@@ -646,7 +646,7 @@ pub(crate) mod tests {
         assert!(m.triggers.is_empty(), "put_frame is the one signal: a trigger pauses itself past its hourly runs");
         let page = text("site/board.js");
         assert!(page.contains("const SANDBOX = \"allow-scripts allow-forms\";"), "the board's iframes run scripts and forms");
-        assert!(text("app.mjs").contains("const FRAME_POLICY = \"sandbox allow-scripts allow-forms\";"), "a frame's files are served with the same sandbox");
+        assert!(page.contains("frame.srcdoc = body;") && !text("app.mjs").contains("text/html"), "a page is shown from its bytes, and no frame is served as a page of this origin");
         assert_eq!(page.matches("setAttribute(\"sandbox\"").count(), 1, "every frame's iframe is made in one place, with SANDBOX (never allow-same-origin)");
     }
 }

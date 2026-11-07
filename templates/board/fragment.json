@@ -4,7 +4,7 @@
     "frames": {
       "kind": "query",
       "role": "public",
-      "description": "Every frame on the board, in the order each was first put: {frames: [{id, kind, label, file, size, width, height, x, y, rev, at, by, agent}], max}. `kind` is `html` (a page at `width` × `height`, served from frames/<id>/<file> at main) or `image` (frames/<id>/<file>; `width` null shows it at its own size). `x`/`y` null: the board lays it out. `rev` goes up at each put_frame, which redraws it. `max` is how many frames a board holds.",
+      "description": "Every frame on the board, in the order each was first put: {frames: [{id, kind, label, file, size, width, height, x, y, rev, at, by, agent}], max}. `kind` is `html` (one page, everything inline, at `width` × `height`) or `image` (`width` null shows it at its own size); either is the one file frames/<id>/<file> at main. `x`/`y` null: the board lays it out. `rev` is the board's count at the frame's last put_frame, never repeated: a new one redraws it. `max` is how many frames a board holds.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -14,7 +14,7 @@
     "put_frame": {
       "kind": "mutation",
       "role": "editor",
-      "description": "Add a frame, or set one again whole; every open board redraws it, and only it. Write its files first (frames/<id>/…, at main: `fragment write` or `fragment sync`), then call this. `id` (a-z, 0-9, -; at most 48) names its folder. `kind` `html`: `file` its page (default index.html), `size` desktop (1440 × 900), tablet (768 × 1024), mobile (390 × 844), or custom with `width`; `height` for a taller page. `kind` `image`: `file` a .png, .jpg, .webp, .gif, .avif or .svg, `width` to scale it. `x` and `y` (both, board pixels) place it; without them the board lays it out. Answers {id, rev, created}.",
+      "description": "Add a frame, or set one again whole; every open board redraws it, and only it. A frame is one file: write it first (frames/<id>/<file> at main, at most 16 MiB: `fragment write`, or `fragment sync` past 1 MiB and for pictures), then call this. `id` (a-z, 0-9, -; at most 48) names its folder. `kind` `html`: `file` its page, with its CSS, scripts and pictures inside it (default index.html), `size` desktop (1440 × 900), tablet (768 × 1024), mobile (390 × 844), or custom with `width`; `height` for a taller page. `kind` `image`: `file` a .png, .jpg, .webp, .gif, .avif or .svg, `width` to scale it. `x` and `y` (both, board pixels) place it; without them the board lays it out. Answers {id, rev, created}.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -35,7 +35,7 @@
     "remove_frame": {
       "kind": "mutation",
       "role": "editor",
-      "description": "Take a frame off the board; its files stay at main. Answers {removed}: 1, or 0 when it was gone already.",
+      "description": "Take a frame off the board; its file stays at main. Answers {removed}: 1, or 0 when it was gone already.",
       "input": {
         "type": "object",
         "additionalProperties": false,
