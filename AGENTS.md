@@ -56,6 +56,10 @@ supports wasm32 (Apple's does not; `brew install llvm`, Nix, or
   host tests and host/wasm clippy with warnings denied.
 - `cargo xtask schema-lock`: append new schema steps to the lock.
   Never edit or drop a locked migration; add a step instead.
+- `cargo xtask wire`: write the wire's schema (`docs/wire`) and lock
+  (`crates/proto/wire.lock`) from `crates/proto`'s routes and types.
+  Check fails on a change an older client would feel; retire a fact in
+  `crates/proto/wire.retired` only once its clients are gone.
 - `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: dev stack
   at :8790, fragments at `http://<name>.fragment.localhost:8790/`.
   Default vendors are fakes. `--real-agent` calls real text models using

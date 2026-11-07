@@ -57,6 +57,7 @@ mod signin;
 mod site;
 mod slides;
 mod sync;
+mod telegram_settings;
 mod templates;
 mod trials;
 mod wipe;
