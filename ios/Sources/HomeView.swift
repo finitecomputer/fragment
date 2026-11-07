@@ -4,27 +4,85 @@ import SwiftUI
 import Synchronization
 import UniformTypeIdentifiers
 
+/// What the home screen's prompt holds: its words and the files of the
+/// first message, read and kept here until its chat is made (a chat's blobs
+/// are its own: launcher.js `launchFiles`), and whether a voice memo is
+/// being recorded. Kept by the `Library`, so leaving Home, or a launch that
+/// fails, loses none of it; nothing keeps the files past a relaunch, as on
+/// the web. While a launch sends what was submitted, it takes no edits,
+/// files or removals (`launching`): what is sent is what was submitted.
+@MainActor @Observable
+final class HomeDraft {
+    struct Held: Identifiable, Equatable, Sendable {
+        let id: UUID
+        let file: OutgoingFile
+    }
+    /// What is typed; while a launch sends what was submitted, it stays as submitted.
+    var text: String {
+        get { typed }
+        set { if !launching { typed = newValue } }
+    }
+    private var typed = ""
+    private(set) var files: [Held] = []
+    private(set) var reading = false
+    /// A voice memo being recorded in the prompt (`ComposerBar`): nothing
+    /// launches until it is finished and attached.
+    var recording = false
+    var error: String?
+    private(set) var launching = false
+    var words: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// Whether what is held may start a chat now: one rule for every way to
+    /// start one (Send, the Start a new chat row).
+    var ready: Bool { (!words.isEmpty || !files.isEmpty) && text.utf8.count <= 32_768 && !launching && !reading && !recording }
+
+    /// Files for the first message, read now and held: at most what a
+    /// message carries, one reading at a time, none while a launch sends.
+    func hold(_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
+        guard !launching else { error = "Wait for the message being sent."; return false }
+        guard !reading else { error = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count + files.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return false }
+        reading = true
+        Task {
+            defer { reading = false }
+            do {
+                let read = try await read()
+                guard !read.isEmpty else { error = "This could not be attached."; return }
+                guard read.count + files.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return }
+                files += read.map { Held(id: UUID(), file: $0) }
+                error = nil
+            } catch { self.error = error.localizedDescription }
+        }
+        return true
+    }
+    func remove(_ id: UUID) { guard !launching else { return }; files.removeAll { $0.id == id } }
+
+    /// The words and files a launch sends, as they are now; the prompt
+    /// locked until it ends (`ended`).
+    func begin() -> (text: String, files: [Held]) { launching = true; return (text, files) }
+    /// A launch over: once sent, what it sent goes (later edits, had there
+    /// been any, stay); not sent, all of it stays to send again.
+    func ended(sent: (text: String, files: [Held])?) {
+        launching = false
+        guard let sent else { return }
+        files.removeAll { held in sent.files.contains { $0.id == held.id } }
+        if typed == sent.text { typed = "" }
+        error = nil
+    }
+}
+
 struct HomeView: View {
     let library: Library
     let api: FragmentAPI
-    @Binding var draft: String
     let open: (FragmentSummary) -> Void
-    /// A new chat with its first message: these words and these files,
-    /// uploaded once the chat is made, as the web's launcher sends them.
-    /// Answers whether it was sent (the files go then).
-    let start: ([OutgoingFile]) async -> Bool
+    /// A new chat with what Home holds as its first message (`Library.launch`).
+    let start: () async -> Void
     let refresh: () async -> Void
     @State private var results = SearchResults()
     @State private var searching = false
     @State private var searchError: String?
-    /// The files of the first message, read and held here: a chat's blobs
-    /// are its own, so they are uploaded once its chat is made (launcher.js
-    /// `launchFiles`). Nothing keeps them past this screen, as on the web.
-    @State private var held: [(id: UUID, file: OutgoingFile)] = []
-    @State private var reading = false
-    @State private var fileError: String?
-    private var query: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canStart: Bool { (!query.isEmpty || !held.isEmpty) && draft.utf8.count <= 32_768 && library.agent != nil && !library.creating && !reading }
+    private var home: HomeDraft { library.home }
+    private var query: String { home.words }
+    private var canStart: Bool { library.canLaunch }
 
     var body: some View {
         ZStack {
@@ -33,13 +91,15 @@ struct HomeView: View {
                 Spacer(minLength: 24)
                 VStack(spacing: 0) {
                     // the chat's own composer: Return is a new line, Send starts the chat
-                    ComposerBar(text: $draft, enabled: library.agent != nil, busy: library.creating || reading,
+                    ComposerBar(text: Binding(get: { home.text }, set: { home.text = $0 }), enabled: canStart,
+                                busy: library.creating || home.reading,
                                 placeholder: "Ask, or find a chat or app",
-                                attached: held.map { ($0.id.uuidString, $0.file.name) },
-                                remove: { id in held.removeAll { $0.id.uuidString == id } },
-                                attach: hold, send: { await launch() }, chrome: false)
+                                attached: home.files.map { ($0.id.uuidString, $0.file.name) },
+                                remove: { id in if let id = UUID(uuidString: id) { home.remove(id) } },
+                                attach: { home.hold($0, $1) }, send: { await launch() },
+                                editable: !home.launching, recordingChanged: { home.recording = $0 }, chrome: false)
                         .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, 4)
-                    if let fileError { Text(fileError).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
+                    if let error = home.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
                     if let agent = library.agent {
                         HStack {
                             Menu {
@@ -143,27 +203,9 @@ struct HomeView: View {
     private func launch() async {
         guard canStart else { return }
         dismissKeyboard()
-        if await start(held.map(\.file)) { held = []; fileError = nil }
+        await start()
     }
     private func dismissKeyboard() { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
-    /// Files for the first message, read now and held until its chat is made:
-    /// at most what a message carries, one reading at a time.
-    private func hold(_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
-        guard !reading else { fileError = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + held.count <= ChatAttachment.countMax else { fileError = "Attach at most eight files per message."; return false }
-        reading = true
-        Task {
-            defer { reading = false }
-            do {
-                let files = try await read()
-                guard !files.isEmpty else { fileError = "This could not be attached."; return }
-                guard files.count + held.count <= ChatAttachment.countMax else { fileError = "Attach at most eight files per message."; return }
-                held += files.map { (UUID(), $0) }
-                fileError = nil
-            } catch { fileError = error.localizedDescription }
-        }
-        return true
-    }
 }
 
 /// The composer with what it attaches, one view for a chat and the home
@@ -191,6 +233,11 @@ struct ComposerBar: View {
     var steer: (_ recording: Bool) -> (() async -> Void)? = { _ in nil }
     /// Quoted above the words, with its cancel (a chat's reply).
     var quote: (text: String, cancel: () -> Void)? = nil
+    /// Whether its words and files may change now (none while what was
+    /// submitted is being sent from Home).
+    var editable = true
+    /// Told as a voice memo starts and stops being recorded.
+    var recordingChanged: (Bool) -> Void = { _ in }
     /// The composer's own glass: none inside a surface that has its own.
     var chrome = true
     @State private var importer = false
@@ -208,7 +255,7 @@ struct ComposerBar: View {
                     ScrollView(.horizontal) { HStack {
                         ForEach(attached, id: \.id) { file in
                             let shown = ComposerMemos.label(file.name)
-                            Button { remove(file.id) } label: { Label(shown, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered)
+                            Button { remove(file.id) } label: { Label(shown, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered).disabled(!editable)
                                 .accessibilityLabel("Remove \(shown)")
                                 .accessibilityIdentifier("attached")
                         }
@@ -220,7 +267,7 @@ struct ComposerBar: View {
             ComposerView(text: $text, working: working, enabled: enabled, busy: busy, recording: voice.recording, placeholder: placeholder,
                          attachPhotos: { photos = true }, attachFiles: { importer = true },
                          pasteImages: { paste($0) }, record: { Task { await recordVoice() } },
-                         send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, chrome: chrome)
+                         send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, editable: editable, chrome: chrome)
         }
         .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
@@ -238,6 +285,7 @@ struct ComposerBar: View {
             // busy from the choosing on, before any photo is read (an iCloud one takes a while)
             _ = attach(items.count) { try await ComposerFiles.read(items) }
         }
+        .onChange(of: voice.recording, initial: true) { _, now in recordingChanged(now) }
         .onChange(of: scenePhase) { _, phase in if phase != .active { voice.cancel() } }
         .onDisappear { voice.cancel() }
     }
@@ -352,6 +400,8 @@ struct ComposerView: View {
     var steer: (() async -> Void)? = nil
     @State private var submitting = false
     var hasAttachments = false
+    /// Whether its words may change now.
+    var editable = true
     /// Its own glass and margins: none inside a surface that has its own.
     var chrome = true
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
@@ -369,7 +419,7 @@ struct ComposerView: View {
                 Image(systemName: "plus").font(.system(size: 20))
                     .frame(width: 44, height: 44).contentShape(Rectangle())
             }
-            .accessibilityLabel("Attach").accessibilityIdentifier("attach").disabled(busy || recording)
+            .accessibilityLabel("Attach").accessibilityIdentifier("attach").disabled(busy || recording || !editable)
             Button(action: record) {
                 Image(systemName: recording ? "stop.circle.fill" : "mic")
                     .font(.system(size: 20))
@@ -379,7 +429,7 @@ struct ComposerView: View {
             .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
             .disabled(busy)
             ComposerField(text: $text, placeholder: placeholder, pasteImages: pasteImages)
-                .frame(minHeight: 44)
+                .frame(minHeight: 44).disabled(!editable)
             if let steer, !stops {
                 // Send queues the words for the turn after; Steer tells this one now
                 Button {
@@ -467,6 +517,8 @@ struct ComposerField: UIViewRepresentable {
     func updateUIView(_ view: PastingTextView, context: Context) {
         context.coordinator.text = $text
         view.pasteImages = pasteImages
+        // disabled (what was submitted being sent): no typing, no pasting
+        view.isEditable = context.environment.isEnabled
         // it says what sending does now (an answer, a message that waits its turn)
         if view.placeholder.text != placeholder { view.placeholder.text = placeholder; view.accessibilityLabel = placeholder }
         if view.text != text { view.text = text }
