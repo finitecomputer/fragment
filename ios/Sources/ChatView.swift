@@ -153,6 +153,7 @@ struct ChatView: View {
                         Task { await session.attach(read) }
                         return true
                     },
+                    memoFinished: { url in Task { await session.sendMemo(url) } },
                     send: { await session.send() }, stop: { await session.stop() },
                     steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
                     quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
@@ -310,6 +311,12 @@ struct ChatRow: View, Equatable {
 private struct PendingRows: View {
     let session: ChatSession
     var body: some View {
+        if let first = session.sendingFirst, session.pending.isEmpty {
+            VStack(alignment: .trailing, spacing: 6) {
+                MessageView(text: first, isYou: true)
+                Text("Sending…").font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .trailing)
+        }
         ForEach(session.pending) { pending in
             VStack(alignment: .trailing, spacing: 6) {
                 if let command = pending.command { CommandView(command: command, args: pending.text, isYou: true) }
@@ -341,6 +348,9 @@ private struct DraftRow: View {
     var body: some View {
         if let draft = session.drafts.first(where: { $0.turn == key.id && $0.principal == key.agent }) {
             MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
+                // A tap as words arrive, paced by the bridge's draft interval;
+                // a draft read already written, or cut back, stays quiet.
+                .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.4), trigger: draft.text.utf8.count) { old, new in new > old }
         }
     }
 }
@@ -388,6 +398,7 @@ private struct ChatEmptyState: View {
     let session: ChatSession
     var body: some View {
         let empty = session.rows.isEmpty && session.pending.isEmpty && session.drafts.isEmpty && session.activeTurns.isEmpty
+            && session.sendingFirst == nil && !session.attaching
         Group {
             if !session.read { ChatLoadingView() }
             else if empty {

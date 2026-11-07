@@ -179,12 +179,26 @@ final class UploadProgress: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
+/// A recording under way and how long it has run; the time keeps itself
+/// current, so nothing redraws around it.
+struct RecordingLabel: View {
+    let since: Date
+    var body: some View {
+        let time = Text(timerInterval: since...since.addingTimeInterval(300), countsDown: false).monospacedDigit()
+        Label { Text("Recording voice memo… \(time)") } icon: { Image(systemName: "waveform") }
+            .foregroundStyle(.red).font(.caption)
+    }
+}
+
 @MainActor @Observable
 final class VoiceMemo {
+    private static let limit = Duration.seconds(300)
     private var recorder: AVAudioRecorder?
     private var deadline: Task<Void, Never>?
     private var url: URL?
     var recording = false
+    /// When this recording began, for its running time.
+    private(set) var startedAt: Date?
     var error: String?
     func start(finished: @escaping @MainActor (URL) -> Void) async {
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iOS Settings to record a voice memo."; return }
@@ -197,14 +211,14 @@ final class VoiceMemo {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
             let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 96_000])
             guard recorder.record() else { throw APIError.server("The microphone could not start recording.") }
-            self.recorder = recorder; self.url = url; recording = true
+            self.recorder = recorder; self.url = url; recording = true; startedAt = .now
             // Voice memos share the web's five-minute bound, including an unattended recording.
-            deadline = Task { do { try await Task.sleep(for: .seconds(300)); if let url = stop() { finished(url) } } catch {} }
+            deadline = Task { do { try await Task.sleep(for: Self.limit); if let url = stop() { finished(url) } } catch {} }
         } catch { AudioPlayback.shared.recordingEnded(); self.error = error.localizedDescription }
     }
     func stop() -> URL? {
         deadline?.cancel(); deadline = nil
-        recorder?.stop(); recorder = nil; recording = false
+        recorder?.stop(); recorder = nil; recording = false; startedAt = nil
         AudioPlayback.shared.recordingEnded()
         do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
         catch { self.error = error.localizedDescription }

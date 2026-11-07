@@ -13,6 +13,7 @@ final class Library {
     var loading = false
     var creating = false
     var unfinishedChat: FragmentSummary?
+    @ObservationIgnored private var readying: (agent: String, chat: Task<FragmentSummary, Error>)?
     /// What the home screen's prompt holds (`HomeDraft`).
     let home = HomeDraft()
     /// A launch not sent yet: its chat, made for it and still empty, and
@@ -73,6 +74,27 @@ final class Library {
     /// Whether Home may start a chat now: one rule for every way to.
     var canLaunch: Bool { home.ready && agent != nil && !creating }
 
+    /// A new chat with `agent` in it, begun ahead of its first message (a
+    /// memo's, as it records) so that message need not wait. Asked again it is
+    /// the same one; a chat made outlasts a failed join, for the next try.
+    @discardableResult
+    func readyChat(with agent: FragmentSummary, api: FragmentAPI) -> Task<FragmentSummary, Error> {
+        if let readying, readying.agent == agent.name { return readying.chat }
+        let earlier = readying?.chat
+        let chat = Task { [self] in
+            do {
+                // one readied for another agent has them in it: not this one's
+                if let earlier { _ = try? await earlier.value; unfinishedChat = nil }
+                var chat: FragmentSummary
+                if let unfinishedChat { chat = unfinishedChat } else { chat = try await api.createChat(); unfinishedChat = chat }
+                chat.agents = [try await api.join(agent, to: chat)]
+                return chat
+            } catch { readying = nil; throw error }
+        }
+        readying = (agent.name, chat)
+        return chat
+    }
+
     /// A new chat with what Home holds as its first message, sent as its
     /// chat sends one (`ChatSession.sendFirst`), as the web's launcher sends
     /// it (launcher.js `startFromSearch`): what was submitted, locked while
@@ -93,17 +115,17 @@ final class Library {
         do {
             var chat = earlier
             if chat == nil {
-                if unfinishedChat == nil { unfinishedChat = try await api.createChat() }
-                guard let made = unfinishedChat else { return }
-                try await api.join(agent, to: made)
-                unfinishedChat = nil
+                let made = try await readyChat(with: agent, api: api).value
+                readying = nil; unfinishedChat = nil
                 pendingLaunch?.chat = made
                 chat = made
             }
             guard let chat, let id = pendingLaunch?.id else { return }
-            await load(api)
+            // listed at once: the list's own read comes after the chat has opened
+            if !fragments.contains(where: { $0.name == chat.name }) { fragments.insert(chat, at: 0) }
             let resolved = fragments.first { $0.name == chat.name } ?? chat
             let session = try session(for: resolved, api: api)
+            if earlier == nil { session.beginEmpty() }
             opened(resolved)
             try await session.sendFirst(id: id, text: submitted.text, files: submitted.files.map(\.file))
             pendingLaunch = nil
@@ -329,7 +351,7 @@ final class Library {
 }
 
 struct FragmentStatus: Decodable { struct URLs: Decodable { let canonical: URL }; let npub: String; let urls: URLs }
-enum ShellPage: Equatable { case launcher, chat(String), history, settings, apps }
+enum ShellPage: Equatable { case launcher, startingChat, chat(String), history, settings, apps }
 
 struct FragmentRoot: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -385,7 +407,7 @@ struct FragmentRoot: View {
                                         Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
                                     }
                                     if page != .apps {
-                                        Button("Your Apps", systemImage: "list.bullet.rectangle") { showingApps = true }.accessibilityIdentifier("yourApps")
+                                        Button("Your Apps", systemImage: "square.grid.2x2") { showingApps = true }.accessibilityIdentifier("yourApps")
                                     }
                                 }
                             }
@@ -420,7 +442,9 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) })
+            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil)
+        // a message on its way to a chat not made yet: the launcher is already left
+        case .startingChat: ChatLoadingView()
         case .chat(let name):
             if let chat = library.fragments.first(where: { $0.name == name }) {
                 if let session = try? library.session(for: chat, api: api) {
@@ -442,6 +466,7 @@ struct FragmentRoot: View {
     private var title: String {
         switch page {
         case .launcher: return "Finite.Computer"
+        case .startingChat: return "New chat"
         case .chat(let name): return library.fragments.first { $0.name == name }?.displayTitle ?? "Chat"
         case .history: return "History"
         case .apps: return "Your Apps"
@@ -465,8 +490,10 @@ struct FragmentRoot: View {
     /// what is shown (moved on, Home has them when next opened).
     private func start(_ api: FragmentAPI) async {
         var shown: String?
+        page = .startingChat
         do { try await library.launch(api) { chat in shown = chat.name; page = .chat(chat.name) } }
         catch { if let shown, page == .chat(shown) { page = .launcher } }
+        if page == .startingChat { page = .launcher }
     }
 }
 

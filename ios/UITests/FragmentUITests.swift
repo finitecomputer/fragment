@@ -17,8 +17,11 @@ final class FragmentUITests: XCTestCase {
         // a closed port on this machine: nothing answers it
         app.launchArguments = ["--ui-test", "--ui-test-saved-account", "https://finite.example", "--pair-server", "http://127.0.0.1:9"]
         app.launch()
+        let changeServer = app.buttons["changeServer"]
+        XCTAssertTrue(changeServer.waitForExistence(timeout: 10), "a saved account past loopback is never loaded")
+        changeServer.tap()
         let server = app.textFields["accountServer"]
-        XCTAssertTrue(server.waitForExistence(timeout: 10), "a saved account past loopback is never loaded")
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["This launch reaches only this machine."].exists)
         XCTAssertFalse(app.buttons["forgetAccount"].exists)
         // never ask any other server than the closed port
@@ -39,8 +42,11 @@ final class FragmentUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test"]
         app.launch()
+        let changeServer = app.buttons["changeServer"]
+        XCTAssertTrue(changeServer.waitForExistence(timeout: 10))
+        changeServer.tap()
         let server = app.textFields["accountServer"]
-        XCTAssertTrue(server.waitForExistence(timeout: 10))
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
         XCTAssertEqual(server.value as? String, "https://finite.chat")
         app.buttons["pairAccount"].tap()
         XCTAssertTrue(app.staticTexts["This launch reaches only this machine."].waitForExistence(timeout: 5))

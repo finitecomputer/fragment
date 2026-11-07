@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		14BFAE9F23A2421BD48B9714 /* GlassLogo.metal in Sources */ = {isa = PBXBuildFile; fileRef = 245E621C60208EAE05093CCE /* GlassLogo.metal */; };
+		F315F52A8970FB632AC8293E /* GlassLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82AB1F5D56356CABBC928AA9 /* GlassLogo.swift */; };
 		08013A491653D5236024FE71 /* AppAppearanceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84A48915AD6415232B1F460 /* AppAppearanceView.swift */; };
 		0891E14C0D3DD0876D0C138F /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FB5B600A80E7BE0157A6E77 /* ChatSession.swift */; };
 		08971CA7D9D652D2BABC719B /* WorkingActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C7F962BA11EC3D0BD85DB75 /* WorkingActivity.swift */; };
@@ -76,6 +78,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		245E621C60208EAE05093CCE /* GlassLogo.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GlassLogo.metal; sourceTree = "<group>"; };
+		82AB1F5D56356CABBC928AA9 /* GlassLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassLogo.swift; sourceTree = "<group>"; };
 		014FC5154C974ED4F457D381 /* FragmentWebSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentWebSheet.swift; sourceTree = "<group>"; };
 		01EF9BE87256547DD6FFAAE4 /* LaunchScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchScopeTests.swift; sourceTree = "<group>"; };
 		0A44398C694D0FA2138E5A64 /* AppSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettingsTests.swift; sourceTree = "<group>"; };
@@ -173,6 +177,8 @@
 			isa = PBXGroup;
 			children = (
 				1AFC16F9330AE76994AAFAFC /* AccountConnection.swift */,
+				245E621C60208EAE05093CCE /* GlassLogo.metal */,
+				82AB1F5D56356CABBC928AA9 /* GlassLogo.swift */,
 				B84A48915AD6415232B1F460 /* AppAppearanceView.swift */,
 				BE5117BADF017C3007F84F89 /* AppCreationSheet.swift */,
 				811C73B367475E8B5D4DB77F /* AppIcon.icon */,
@@ -377,6 +383,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				2D65CF61D8311C8A8A6B3271 /* AccountConnection.swift in Sources */,
+				14BFAE9F23A2421BD48B9714 /* GlassLogo.metal in Sources */,
+				F315F52A8970FB632AC8293E /* GlassLogo.swift in Sources */,
 				08013A491653D5236024FE71 /* AppAppearanceView.swift in Sources */,
 				667D1E87E74EA4792B9BDDA8 /* AppCreationSheet.swift in Sources */,
 				48CB6E8D2ED7B6FD4CFC7BF1 /* AppSettingsAPI.swift in Sources */,

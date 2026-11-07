@@ -82,6 +82,8 @@ final class ChatSession {
     /// Files being attached, from their choosing until their upload: the
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
     private(set) var attaching = false
+    /// A first message on its way, shown as sending before it is a post.
+    private(set) var sendingFirst: String?
     /// Files being put, or that failed to be: each shown in the composer
     /// from its own bytes on this iPhone (`BlobStore.keep`) as it goes, then
     /// held as an attachment once put. A failed one waits to be put again
@@ -468,6 +470,23 @@ final class ChatSession {
         }
     }
 
+    /// A finished voice memo, sent as soon as it is put, with any words in the
+    /// composer. One that can't be put stays with its Retry and nothing goes:
+    /// words never go without the memo they were written beside.
+    func sendMemo(_ url: URL) async {
+        guard beginAttaching(1) else { try? FileManager.default.removeItem(at: url); return }
+        let before = attachments.count
+        await attach {
+            defer { try? FileManager.default.removeItem(at: url) }
+            return try await ComposerFiles.read([url])
+        }
+        if attachments.count > before { await send() }
+    }
+
+    /// A chat just made holds nothing to wait for: it shows at once, its
+    /// first message with it, while its connection opens.
+    func beginEmpty() { read = true }
+
     func send() async {
         // what is being attached goes with it, or the message waits
         guard !attaching else { error = "Wait for the files being attached."; return }
@@ -507,6 +526,8 @@ final class ChatSession {
         guard !words.isEmpty || !files.isEmpty else { return }
         guard persistence != nil else { throw APIError.server("The local draft could not be opened. Reopen this chat before sending.") }
         guard pending.count < SavedChat.pendingMax else { throw APIError.server("Wait for the messages still sending, or edit the ones not sent.") }
+        sendingFirst = words.isEmpty ? files.first.map { ComposerMemos.label($0.name) } : words
+        defer { sendingFirst = nil }
         var uploaded: [ChatAttachment] = []
         for file in files {
             let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)

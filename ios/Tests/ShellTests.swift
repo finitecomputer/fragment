@@ -11,6 +11,70 @@ import Testing
 /// (docs/api.md): what the app asks, and what it makes of the answers.
 @MainActor
 struct ShellTests {
+    /// Tipping the phone forward turns the logo up and down, never sideways;
+    /// tipping it to one side turns it sideways, never up and down.
+    @Test func theGlassLogoTurnsOnThePhonesOwnAxes() {
+        #expect(GlassTilt.lean(gravityX: 0, gravityY: 0.3) == SIMD2(0, -0.3))
+        #expect(GlassTilt.lean(gravityX: 0.3, gravityY: 0) == SIMD2(0.3, 0))
+    }
+
+    /// A finished memo sends itself with the composer's words; one that can't
+    /// be put sends nothing, leaving the words and its Retry.
+    @Test func aFinishedMemoSendsItselfOrNothing() async throws {
+        func memo() throws -> URL {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
+            try Data(UUID().uuidString.utf8).write(to: url)
+            return url
+        }
+        let refused = Stub { _, _ in (500, #"{"error":"unavailable","message":"not now"}"#) }
+        let failing = try refused.api()
+        defer { try? ChatDraftStore.removeAccount(api: failing) }
+        let kept = ChatSession(fragment: FragmentSummary(name: "talk--c1", kind: "chat"), api: failing)
+        kept.edit("Listen to this")
+        await kept.sendMemo(try memo())
+        #expect(kept.composer == "Listen to this" && kept.pending.isEmpty && kept.attachments.isEmpty && !kept.uploads.isEmpty)
+        #expect(!refused.seen.contains { $0.method == "POST" })
+
+        let stub = Stub { seen, _ in
+            seen.method == "PUT" ? (200, #"{"ok":true,"stored":true}"#) : (500, #"{"error":"unavailable","message":"not now"}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: FragmentSummary(name: "talk--c2", kind: "chat"), api: api)
+        session.edit("Listen to this")
+        await session.sendMemo(try memo())
+        #expect(stub.seen.filter { $0.method == "POST" }.count >= 1)
+        #expect(session.composer.isEmpty && session.attachments.isEmpty)
+        #expect(session.pending.first?.attachments.count == 1 && session.pending.first?.text == "Listen to this")
+        // a chat just made shows at once, before any connection has read it
+        #expect(!session.read)
+        session.beginEmpty()
+        #expect(session.read)
+    }
+
+    /// A chat readied as a memo records is the one its message takes: made
+    /// once, and kept across a failed join.
+    @Test func aChatReadiedAheadIsMadeOnceAndOutlastsAFailedJoin() async throws {
+        let joins = Mutex(0)
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "POST /api/fragments": return (200, #"{"name":"mobile-chat--x1","npub":"npub1c"}"#)
+            case "GET /api/f/moss--a1/status": return (200, #"{"npub":"npub1moss"}"#)
+            case "PUT /api/f/mobile-chat--x1/members/npub1moss":
+                return joins.withLock { $0 += 1; return $0 == 1 } ? (500, #"{"error":"unavailable","message":"not now"}"#) : (200, "{}")
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        let library = Library(), agent = FragmentSummary(name: "moss--a1", kind: "agent")
+        await #expect(throws: (any Error).self) { try await library.readyChat(with: agent, api: api).value }
+        let first = library.readyChat(with: agent, api: api)
+        let again = library.readyChat(with: agent, api: api)
+        let chat = try await again.value
+        #expect(first == again && chat.name == "mobile-chat--x1" && chat.agents == ["npub1moss"])
+        #expect(stub.seen.filter { $0.route == "POST /api/fragments" }.count == 1)
+    }
+
     /// A person's list: two agents, a chat with both, an app, and their
     /// session archive.
     nonisolated private static let list = #"""

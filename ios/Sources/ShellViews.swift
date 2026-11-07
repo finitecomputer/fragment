@@ -47,7 +47,7 @@ struct SidebarDrawer: View {
             let width = min(350, max(1, geometry.size.width - 36))
             ZStack(alignment: .leading) {
                 if isPresented {
-                    Color.black.opacity(0.25 * max(0, 1 + dragOffset / width))
+                    Color.black.opacity(0.25 * max(0, 1 + Double(dragOffset / width)))
                         .ignoresSafeArea()
                         .onTapGesture { close() }
                         .accessibilityHidden(true)
@@ -170,7 +170,7 @@ struct SidebarView: View {
             }.refreshable { await library.load(api) }
             VStack(spacing: 4) {
                 footer("History", icon: "clock", page: .history)
-                footer("Your Apps", icon: "list.bullet.rectangle", page: .apps)
+                footer("Your Apps", icon: "square.grid.2x2", page: .apps)
                 footer("Settings", icon: "gearshape", page: .settings)
             }.padding(12)
         }

@@ -68,6 +68,9 @@ A physical phone reaches a platform over HTTPS; Release builds take nothing else
   naming, personal show/hide/archive, sharing links, member permissions and
   invitations, icon generation/upload/removal, and preview generation.
   No duplicate suggestions/empty state in the app library itself.
+- The launcher's one action records a voice memo until something is typed, then
+  sends. A finished memo sends itself, there and in a chat, with any words typed;
+  its chat is made as it records. A soft haptic tap marks a reply's new words.
 - Dismissible app sheets leave the conversation in place; a bounded in-memory
   session cache retains composer drafts, pending post ids and cursors across navigation.
 - Native message author identities, Markdown, timestamps, long-press Reply/Copy/
@@ -110,6 +113,21 @@ send/stop circle with semantic foreground/background colors. Chat addressing is
 in the sidebar agent menu’s Agents in this chat → Messages setting, rather than
 a caption above the composer. Your Apps displays each fragment’s original
 `picture` (its versioned icon URL), preserving its transparency and aspect ratio.
+
+## Glass logo
+
+`.glassLogo(size:y:)` draws the Finite logo as glass refracting the view
+it modifies (`Sources/GlassLogo.swift`, `Sources/GlassLogo.metal`), the native
+form of the web's Three.js glass. It is one SwiftUI layer effect, not a 3D
+scene: `GlassLogoHeight` holds the logo's bars as domes, and the shader takes
+their slope to bend the layer. Device motion turns it, polled once a frame;
+at rest it floats, and Reduce Motion holds it still.
+
+The height map is baked from the hand paths in `AppIcon.icon`: rasterized at
+3072 points, a Euclidean distance `d` from each edge taken to
+`sqrt(1 - (1 - min(d / 97, 1))^2)`, blurred by 3, reduced to 768 and centered
+on an 896-pixel canvas. Compiling the shader needs Xcode's Metal Toolchain
+(`xcodebuild -downloadComponent MetalToolchain`).
 
 ## Verification
 

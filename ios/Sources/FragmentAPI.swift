@@ -146,11 +146,14 @@ struct FragmentAPI: Sendable {
         return FragmentSummary(name: created.name, kind: "chat", title: "New chat")
     }
 
-    func join(_ agent: FragmentSummary, to chat: FragmentSummary) async throws {
+    /// Adds `agent` to `chat`; its identity there.
+    @discardableResult
+    func join(_ agent: FragmentSummary, to chat: FragmentSummary) async throws -> String {
         struct Status: Decodable { let npub: String }
         let status: Status = try await request("api/f/\(agent.name)/status")
         let _: JSONValue = try await request("api/f/\(chat.name)/members/\(status.npub)",
             method: "PUT", body: .object(["role": .string("editor")]))
+        return status.npub
     }
 
     /// A chat's or an app's name, in its manifest, as a person typed it
