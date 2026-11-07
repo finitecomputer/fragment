@@ -8,7 +8,7 @@
 use std::sync::OnceLock;
 
 use fragment_proto::ledger::Plan;
-use fragment_proto::{valid_fragment_name, ErrorCode};
+use fragment_proto::{limits, valid_fragment_name, ErrorCode};
 use worker::Env;
 
 use crate::error::{CellError, CellResult};
@@ -93,6 +93,11 @@ pub struct Config {
     /// a `mailto:` address (`fragment_core::computer::support_url_ok`).
     /// Unset, the shell shows them what to tell whoever runs it.
     pub support_url: Option<String>,
+    /// `FRAGMENT_UPLOAD_MAX_BYTES` (the deploy config's `upload_max_bytes`;
+    /// default `limits::UPLOAD_MAX_BYTES_DEFAULT`, at most
+    /// `limits::BLOB_MAX_BYTES`): the zone's request limit, the most one
+    /// file a person sends may be. The list and a page's hello tell clients.
+    pub uploads: fragment_proto::UploadLimits,
     /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -294,6 +299,17 @@ fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragmen
 }
 
 impl Config {
+    /// What one message of `kind`'s may carry, the one choice of it: a
+    /// person's files pass the zone (`uploads`, which the deployment
+    /// names); an agent's go from its computer, which no zone meets, and
+    /// are at most a blob's. The upload route holds it, and the list says it.
+    pub fn uploads_for(&self, kind: fragment_proto::IdentityKind) -> fragment_proto::UploadLimits {
+        match kind {
+            fragment_proto::IdentityKind::Person => self.uploads,
+            fragment_proto::IdentityKind::Agent => fragment_proto::UploadLimits { upload_max_bytes: limits::BLOB_MAX_BYTES, ..self.uploads },
+        }
+    }
+
     /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
     pub fn from_env(env: &Env) -> &'static Config {
         let cfg = CONFIG.get_or_init(|| Config::build(env));
@@ -349,6 +365,12 @@ impl Config {
                 assert!(fragment_core::computer::support_url_ok(&u), "FRAGMENT_SUPPORT_URL is an https: page or a mailto: address, not {u:?}");
                 u
             }),
+            uploads: fragment_proto::UploadLimits {
+                upload_max_bytes: var(env, "FRAGMENT_UPLOAD_MAX_BYTES")
+                    .map(|v| v.parse::<u64>().ok().filter(|n| (1..=limits::BLOB_MAX_BYTES).contains(n)).unwrap_or_else(|| panic!("FRAGMENT_UPLOAD_MAX_BYTES is 1 to {} bytes, not {v:?}", limits::BLOB_MAX_BYTES)))
+                    .unwrap_or(limits::UPLOAD_MAX_BYTES_DEFAULT),
+                files_per_message: limits::FILES_PER_MESSAGE,
+            },
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,

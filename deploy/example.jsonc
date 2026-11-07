@@ -225,6 +225,9 @@
   // or a mailto address, linked from the shell's notice. Without it, the
   // shell shows them what to tell whoever runs the deployment.
   // "support_url": "mailto:help@example.dev",
+  // One file a person may send, at most, in bytes: the zone's request body
+  // limit on its Cloudflare plan. Without it, a Free or Pro zone's 100 MB.
+  // "upload_max_bytes": 200000000,
   // The sender the platform's mail (invites, seats) comes from: a bare
   // address or an unquoted Name <address> (no comments or lists), on a
   // domain onboarded to Cloudflare Email Sending (`wrangler email sending

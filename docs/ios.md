@@ -145,9 +145,11 @@ always opens and sends. Draft edits are debounced and flushed on leaving a chat 
 backgrounding. Empty drafts are removed.
 
 The app keeps no copy of a limit the server enforces: it shows the server's
-refusal. Its own bounds are its storage's (above) and what it sends over a
-phone's network: an attachment of at most 25 MiB, and an icon fitted inside
-256×256 on the phone, as the server would fit it.
+refusal, or checks what the server names. Its own bounds are its storage's
+(above) and what it sends over a phone's network: an attachment of at most
+the platform's `limits` (`GET /api/fragments`; an older platform's, naming
+none, its old 25 MiB), and an icon fitted inside 256×256 on the phone, as the
+server would fit it.
 
 JSON text subscriptions match the Worker’s live protocol. A chat reads its last
 50 messages and a page of `work` (1000, `CHANNEL_PAGE`). Its window holds at most
@@ -198,7 +200,7 @@ onto the page it was opened from, so Back returns there; a chat's top bar has no
 New chat (the sidebar's starts one). The composer's + offers Photos (the system's picker,
 several at once) or Files; a picture pasted into its field attaches too (a long
 press offers Paste when one is on the clipboard), as the web's chat takes a
-pasted file. Any file goes, 1 byte to 25 MB, eight a message, as the web's; a
+pasted file. Any file goes, 1 byte to the platform's `limits`, as the web's; a
 picture the web shows (PNG, JPEG, WebP, GIF) goes as it is, any other (a photo's
 HEIC) as JPEG, its metadata carried over, converted off the main thread within 100
 megapixels. One attaching goes at a time, from the choosing until its upload:
