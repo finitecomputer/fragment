@@ -151,6 +151,8 @@ struct Timeline {
     /// turn's steps outgrow: whether a turn runs (and Stop shows) never
     /// depends on how much of it is on screen.
     private(set) var turns: [TurnKey: TurnState] = [:]
+    /// The helpers its agents' turns started and that have not ended (HelpersBar.swift).
+    private(set) var helpers = Helpers()
     /// The oldest `work` record read (its seq and time): where reading
     /// earlier work goes on from, and how far back it reached.
     private(set) var oldestWork: (seq: Int64, at: Int64)?
@@ -181,6 +183,7 @@ struct Timeline {
         guard record.channel == "work" else { return }
         if oldestWork.map({ record.seq < $0.seq }) ?? true { oldestWork = (record.seq, record.at) }
         indexWork(record)
+        if helpers.learn(record) { revision &+= 1 }
         guard let id = record.turn else { return }
         let key = TurnKey(agent: record.principal, id: id)
         var state = turns[key] ?? TurnState()

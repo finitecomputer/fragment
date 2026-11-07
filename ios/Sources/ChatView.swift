@@ -188,6 +188,7 @@ struct ChatView: View {
 
     private var composerAccessories: some View {
         VStack(alignment: .leading, spacing: 8) {
+            HelpersBar(helpers: session.helpers, library: library, several: (session.fragment.agents?.count ?? 0) > 1)
             if let quoted = session.replyTo {
                 HStack { Label(quoted.text, systemImage: "arrowshape.turn.up.left").font(.caption).lineLimit(2); Spacer(); Button("Cancel reply", systemImage: "xmark") { session.replyTo = nil }.labelStyle(.iconOnly) }
             }
