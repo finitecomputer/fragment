@@ -427,6 +427,46 @@ struct TransportTests {
         #expect(session.placeholder(name: { _ in "Juniper" }) == "A message waits its turn")
     }
 
+    /// An agent added after the chat opened (Agents in this chat): the list
+    /// read again names it, and the same cached session, its draft kept,
+    /// counts it at once. Rowan was known already, so no handle changed:
+    /// a message that @mentions Rowan while Rowan works waits its turn.
+    @Test func anAgentAddedAfterTheChatOpenedIsWhomItsMentionWaitsFor() async throws {
+        let juniper = "npub1juniper", rowan = "npub1rowan"
+        let stub = Stub { _, _ in (404, "{}") }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        let opened = FragmentSummary(name: chat.name, kind: "chat", agents: [juniper])
+        library.fragments = [opened]
+        let session = try library.session(for: opened, api: api)
+        session.handles = [juniper: "juniper", rowan: "rowan"]
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        // Rowan works on another's turn; Juniper, the lead, is idle
+        socket.push(#"{"type":"record",\#(record("work", 1, principal: rowan, body: #"{"kind":"turn.start","turn":"t1","asker":"npub1other"}"#).dropFirst())"#)
+        socket.push(#"{"type":"record",\#(record("chat", 1, principal: "npub1me", body: #"{"text":"@Rowan do this next"}"#).dropFirst())"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"chat","next":1,"more":false}"#)
+        try await waitUntil("the message read") { session.workRead && session.rows.contains { $0.id == "chat:1" } }
+        #expect(!session.activity.queued.contains("chat:1"), "Rowan is not of this chat yet: it is the idle lead's")
+        session.edit("A draft to keep")
+
+        // as Agents in this chat's Add reads the list again (`AgentMembershipView.add`)
+        library.fragments = [FragmentSummary(name: chat.name, kind: "chat", agents: [juniper, rowan])]
+        #expect(try library.session(for: opened, api: api) === session)
+        #expect(session.agents == [juniper, rowan] && session.handles == [juniper: "juniper", rowan: "rowan"])
+        #expect(session.activity.queued.contains("chat:1"))
+        #expect(session.composer == "A draft to keep")
+        // a chat opened after its list was read takes the list's agents, not the ones it was opened with
+        let other = FragmentSummary(name: "chat--other", kind: "chat")
+        library.fragments.append(FragmentSummary(name: other.name, kind: "chat", agents: [rowan]))
+        #expect(try library.session(for: other, api: api).agents == [rowan])
+    }
+
     /// A turn asking its asker something (`turn.asked`): the composer is the
     /// answer, and what it sends is the web's answer, a message of theirs
     /// to the chat (docs/chat-records.md: "The asker's next message to that

@@ -29,6 +29,11 @@ final class ChatSession {
     /// identity: its fragment's label (chat.js `handleOf`, bridge `answers_to`).
     var handles: [String: String] = [:] { didSet { if handles != oldValue { activityHandles = nil; timelineChanged() } } }
     @ObservationIgnored private var activityHandles: [String: String]?
+    /// The chat's agents, its lead first, as the person's list names them
+    /// now (`Library.fragments`), not as when it opened: whom a message is
+    /// for, so one added through Agents in this chat counts at once.
+    var agents: [String] = [] { didSet { if agents != oldValue { activityAgents = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityAgents: [String]?
     /// A post awaiting its agent's claim, at the chat's end (the web's
     /// pending line): each running turn's line is in the rows.
     var workingHints: [WorkingHint] {
@@ -96,6 +101,7 @@ final class ChatSession {
     init(fragment: FragmentSummary, api: FragmentAPI) {
         self.fragment = fragment
         self.api = api
+        agents = fragment.agents ?? []
         do { persistence = try ChatDraftStore(api: api, fragment: fragment.name) }
         catch { self.error = "The local draft could not be opened: " + error.localizedDescription; return }
         // What was saved, within its bounds; a file that is none is cleared.
@@ -114,17 +120,18 @@ final class ChatSession {
         // a reply being written is at the chat's end, which a window paged back does not show
         let drafting = timeline.detached ? [] : Set(timeline.drafts.values.map { TurnKey(agent: $0.principal, id: $0.turn) })
         if rowsRevision != timeline.revision || activityReady != workRead || activityDrafting != drafting
-            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles {
+            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles || activityAgents != agents {
             rowsRevision = timeline.revision
             activityReady = workRead
             activityDrafting = drafting
             activityPrincipal = principal
             activityOwned = owned
             activityHandles = handles
-            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: fragment.agents ?? [], handles: handles)
+            activityAgents = agents
+            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: agents, handles: handles)
             if next != activity { activity = next }
             if next.rows != rows { rows = next.rows }
-            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: fragment.agents?.first)
+            let candidate = WorkingActivity.pending(timeline, principal: principal, lead: agents.first)
             if let candidate, case .pending(let since) = candidate.kind,
                candidate.id == awaitingReply?.id || Int64(Date().timeIntervalSince1970 * 1000) - since < 90_000 { awaitingReply = candidate }
             else { awaitingReply = nil }
@@ -550,7 +557,7 @@ final class ChatSession {
             .max { ($0.value.startAt!, $0.key.id) < ($1.value.startAt!, $1.key.id) }?.key
     }
     /// Whom a command goes to: the agent working for this person, else the lead.
-    var commandTarget: String? { myTurn?.agent ?? fragment.agents?.first }
+    var commandTarget: String? { myTurn?.agent ?? agents.first }
     /// Whether `agent`'s runtime takes `command` from this person: its
     /// menu's, offered to its owner alone (chat.js `menuOf`).
     func offers(_ command: String, _ agent: String?) -> Bool {
@@ -587,7 +594,7 @@ final class ChatSession {
             return "\(name(card.turn.agent)) is waiting for you"
         }
         if myTurn != nil { return "A message waits its turn" }
-        return fragment.agents?.first.map { "Message \(name($0))" } ?? "Message your agent"
+        return agents.first.map { "Message \(name($0))" } ?? "Message your agent"
     }
 
     /// The running turn told what is typed, at once (`/steer <words>`, a
