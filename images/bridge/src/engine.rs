@@ -89,7 +89,7 @@ use serde_json::Value;
 
 use crate::limits;
 use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, NoticeCategory, Outcome, PromptOption, Record, Said, Task};
-use crate::runtime::{Agent, Attached, Command, Event, How, LocalFile, MenuItem, TurnStart};
+use crate::runtime::{Agent, Attached, ChildChange, Command, Event, How, LocalFile, MenuItem, TurnStart};
 
 /// The state file's formats. 2: one life per turn (no `handed` phase). 3:
 /// a turn holding an ask's return (`Turn::ret`) and the answer it owes,
@@ -213,11 +213,33 @@ pub struct State {
     /// earlier bridge's) starts each chat's count afresh.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_turns: BTreeMap<String, Vec<i64>>,
+    /// The helpers its turns started (`Event::Child`) whose end is not yet
+    /// posted, oldest first: a new life ends each one still running as
+    /// lost, as the process running it died with the life before
+    /// (`recover`), and posts again an end it had not posted. A state
+    /// without it (an earlier bridge's) holds none; an earlier bridge
+    /// reading one drops it, and those helpers show as working until
+    /// their end comes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<OpenChild>,
+}
+
+/// A helper a turn started (`State::children`): where its records go, and
+/// its end once known (posted, and kept until the lane is done with it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenChild {
+    pub agent: String,
+    pub fragment: String,
+    pub turn: String,
+    /// Its id in the records (`records::child_id`).
+    pub child: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<records::ChildOutcome>,
 }
 
 impl Default for State {
     fn default() -> State {
-        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new() }
+        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new() }
     }
 }
 
@@ -443,6 +465,11 @@ pub struct Turn {
     pub continue_after: bool,
     #[serde(skip)]
     pub open: Option<OpenReply>,
+    /// Helpers it started (`Event::Child`), recorded or not: past
+    /// `CHILDREN_PER_TURN_MAX` they go unrecorded. Never saved: a turn
+    /// starts helpers only while it runs, in one life.
+    #[serde(skip)]
+    pub children: u32,
 }
 
 /// What a turn is asked (`Engine::admit`).
@@ -513,7 +540,9 @@ pub enum Input {
     /// (appended, a replay, or refused), or given up after its tries.
     /// `kept`: the platform holds its body as this life's (appended, or a
     /// replay of this body), not another life's (409) nor refused.
-    Posted { turn: String, id: String, kept: bool },
+    /// `given_up`: not answered within its tries (the platform down or
+    /// failing): a helper's end is posted again (`posted`).
+    Posted { turn: String, id: String, kept: bool, given_up: bool },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
@@ -658,6 +687,10 @@ pub struct Engine {
     /// `NOTICE_CHATS_MAX`). Never written to `/data`: a turn runs in one
     /// life, and a notice no turn of this life's is there for goes unposted.
     noticed: VecDeque<Noticed>,
+    /// Helpers whose end was not answered within its tries (`posted`):
+    /// owed again at the next tick. Never written to `/data`: a new life
+    /// owes every end its state holds. At most `CHILDREN_OPEN_MAX`.
+    ends_again: BTreeSet<String>,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
@@ -741,6 +774,7 @@ impl Engine {
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
+            ends_again: BTreeSet::new(),
             out: Vec::new(),
             dirty: false,
             now: 0,
@@ -808,6 +842,17 @@ impl Engine {
             crate::ev!("owed.again", { "turn": turn, "id": o.id });
             self.owe(&agent, &fragment, &turn, o);
         }
+        // the helpers an earlier life knew of died with its runtime: each
+        // still running ends as lost; an end it had not posted, again
+        for c in &mut self.state.children {
+            if c.outcome.is_none() {
+                crate::ev!("child.lost", { "turn": c.turn, "child": c.child });
+                c.outcome = Some(records::ChildOutcome::Lost);
+            }
+        }
+        for c in self.state.children.clone() {
+            self.owe_child_end(&c);
+        }
         let earlier: Vec<String> = self.state.turns.values().filter(|t| t.active()).map(|t| t.id.clone()).collect();
         for id in &earlier {
             // continued once its lost end lands as this life's (`posted`),
@@ -832,7 +877,7 @@ impl Engine {
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::CutRead { turn, waited } => self.cut_read(&turn, waited),
             Input::Fenced { turn, prompt, answer } => self.fenced(&turn, &prompt, answer),
-            Input::Posted { turn, id, kept } => self.posted(&turn, &id, kept),
+            Input::Posted { turn, id, kept, given_up } => self.posted(&turn, &id, kept, given_up),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
             Input::ComputerAnswer { agent, turn, prompt, option, words, reply } => self.computer_answer(&agent, &turn, &prompt, &option, words, reply),
@@ -1381,6 +1426,7 @@ impl Engine {
             continues: None,
             continue_after: false,
             open: None,
+            children: 0,
         };
         self.dirty = true;
         if let Some(why) = refusal {
@@ -1516,7 +1562,21 @@ impl Engine {
     /// (`limits::POST_TRIES_MAX`, with jitter, on a transport error, 429 or
     /// 5xx), so a record that keeps failing holds its turn for one life's
     /// tries at most, then goes.
-    fn posted(&mut self, id: &str, post: &str, kept: bool) {
+    fn posted(&mut self, id: &str, post: &str, kept: bool, given_up: bool) {
+        // a helper's end: done once answered, whoever's it is (a 409 is
+        // another life's end of it, which ended it all the same); one not
+        // answered within its tries stays owed, posted again at the next
+        // tick (and by the next life)
+        if let Some(at) = self.state.children.iter().position(|c| c.outcome.is_some() && c.turn == id && records::child_end_id(&c.turn, &c.child) == post) {
+            if given_up {
+                crate::ev!("child.end_again", { "turn": id, "child": self.state.children[at].child });
+                self.ends_again.insert(self.state.children[at].child.clone());
+            } else {
+                self.state.children.remove(at);
+                self.dirty = true;
+            }
+            return;
+        }
         let Some(t) = self.state.turns.get_mut(id) else {
             crate::ev!("owed.stale", { "turn": id, "id": post, "why": "no turn held by that id" });
             return;
@@ -1635,6 +1695,7 @@ impl Engine {
             continues: Some(cut.id),
             continue_after: false,
             open: None,
+            children: 0,
         };
         self.state.turns.insert(id, turn);
         self.dirty = true;
@@ -2117,7 +2178,8 @@ impl Engine {
             match e {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Called { turn, .. } | Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
+                Event::Child { change: ChildChange::Started { turn, .. }, .. } => Some(turn.clone()),
+                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended(_), .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -2238,7 +2300,56 @@ impl Engine {
                 self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), files);
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
+            Event::Child { child, change: ChildChange::Started { turn, goal } } => self.child_started(&turn, &child, &goal),
+            Event::Child { child, change: ChildChange::Ended(outcome) } => self.child_ended(&child, outcome),
         }
+    }
+
+    /// A helper the running turn `turn` started: its start on `work`, and
+    /// kept open in the state until its end is posted. One said again is
+    /// one; past `CHILDREN_PER_TURN_MAX` a turn's, or `CHILDREN_OPEN_MAX`
+    /// open, it goes unrecorded (its end then finds nothing to end).
+    fn child_started(&mut self, turn: &str, runtime_id: &str, goal: &str) {
+        let child = records::child_id(runtime_id);
+        if self.state.children.iter().any(|c| c.child == child) {
+            crate::ev!("child.again", { "turn": turn, "child": child });
+            return;
+        }
+        let t = self.state.turns.get_mut(turn).expect("checked");
+        t.children = t.children.saturating_add(1);
+        if t.children > limits::CHILDREN_PER_TURN_MAX || self.state.children.len() >= limits::CHILDREN_OPEN_MAX {
+            crate::ev!("child.unrecorded", { "turn": turn, "child": child, "why": "past the helpers a turn records, or the bridge keeps open" });
+            return;
+        }
+        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+        crate::ev!("child.started", { "turn": turn, "child": child });
+        self.state.children.push(OpenChild { agent: agent.clone(), fragment: fragment.clone(), turn: turn.to_string(), child: child.clone(), outcome: None });
+        self.dirty = true;
+        self.post(&agent, &fragment, records::WORK, records::child_start_id(turn, &child), records::turn_child_start(turn, &child, goal), Vec::new());
+    }
+
+    /// A helper ended: its end, under the turn that started it (after that
+    /// turn's own end, when it outlived it), owed until the lane is done
+    /// with it. One this life never started (an earlier life's, ended as
+    /// lost at this one's start; one unrecorded) ends nothing.
+    fn child_ended(&mut self, runtime_id: &str, outcome: records::ChildOutcome) {
+        let child = records::child_id(runtime_id);
+        let Some(c) = self.state.children.iter_mut().find(|c| c.child == child && c.outcome.is_none()) else {
+            crate::ev!("child.stale", { "child": child, "why": "no helper open by that id" });
+            return;
+        };
+        c.outcome = Some(outcome);
+        self.dirty = true;
+        crate::ev!("child.ended", { "turn": c.turn, "child": child, "outcome": outcome.as_str() });
+        let c = c.clone();
+        self.owe_child_end(&c);
+    }
+
+    /// A helper's end, posted until the lane is done with it (`posted`).
+    fn owe_child_end(&mut self, c: &OpenChild) {
+        let outcome = c.outcome.expect("an ended helper's end");
+        let (id, body) = (records::child_end_id(&c.turn, &c.child), records::turn_child_end(&c.turn, &c.child, outcome));
+        self.out.push(Effect::Owed { agent: c.agent.clone(), fragment: c.fragment.clone(), channel: records::WORK, turn: c.turn.clone(), id, body });
     }
 
     /// A notice of the runtime's in a chat (`Event::Notice`): a `turn.notice`
@@ -2427,6 +2538,11 @@ impl Engine {
 
     fn tick(&mut self) {
         let now = self.now;
+        for child in std::mem::take(&mut self.ends_again) {
+            if let Some(c) = self.state.children.iter().find(|c| c.child == child && c.outcome.is_some()).cloned() {
+                self.owe_child_end(&c);
+            }
+        }
         let mut expired: Vec<(String, String)> = Vec::new();
         let mut quiet: Vec<String> = Vec::new();
         for t in self.state.turns.values() {
@@ -2563,6 +2679,18 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
             if !whole || r.said.len() > limits::ANSWER_TEXT_MAX_BYTES {
                 return Err(Corrupt(format!("turn {id}'s return is not one an ask makes")));
             }
+        }
+    }
+    if state.children.len() > limits::CHILDREN_OPEN_MAX {
+        return Err(Corrupt(format!("{} open helpers is past the bound", state.children.len())));
+    }
+    for (i, c) in state.children.iter().enumerate() {
+        let whole = records::fragment_name_ok(&c.agent) && records::fragment_name_ok(&c.fragment) && c.child.len() == 24 && c.child.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+        if !whole || !records::valid_post_id(&format!("wk:{}:ce:{}", c.turn, c.child)) {
+            return Err(Corrupt(format!("open helper {i} is not one a turn starts")));
+        }
+        if state.children[..i].iter().any(|o| o.child == c.child) {
+            return Err(Corrupt(format!("helper {} is open twice", c.child)));
         }
     }
     if state.agent_turns.len() > limits::AGENT_TURN_CHATS_MAX {

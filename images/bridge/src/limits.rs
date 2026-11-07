@@ -82,6 +82,16 @@ pub const NOTICE_TEXT_MAX_CHARS: usize = 300;
 /// one longest unused goes.
 pub const NOTICE_CHATS_MAX: usize = AGENTS_MAX * 64;
 
+/// Helpers one turn's agent starts that its records name, at most
+/// (`turn.child`); the rest go unrecorded, and their work still holds the
+/// computer.
+pub const CHILDREN_PER_TURN_MAX: u32 = 32;
+/// Helpers the bridge's state keeps open, at most (each until its end is
+/// posted). Derived: every agent's turns at their bound at once.
+pub const CHILDREN_OPEN_MAX: usize = AGENTS_MAX * CHILDREN_PER_TURN_MAX as usize;
+/// A helper's task, at most: one line, cut as a step's arguments are.
+pub const CHILD_GOAL_MAX_CHARS: usize = STEP_ARGS_MAX_CHARS;
+
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;
 

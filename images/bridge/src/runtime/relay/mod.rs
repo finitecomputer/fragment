@@ -11,6 +11,9 @@
 //! - a call the model asked for is its intent (`turn.call`), which the
 //!   plugin says on that socket before Hermes runs any call of the
 //!   response (Hermes' `post_api_request`);
+//! - a helper (a delegated child) is said beside its work's `working` as
+//!   it starts and stops (Hermes' `subagent_start`, `subagent_stop`):
+//!   `Event::Child`, its start naming its turn, its end only the child;
 //! - a `send` answering nothing that starts with a notice glyph (`💾`,
 //!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
 //!   turn running or not (its review comes after its turn's `✅`);
@@ -184,7 +187,9 @@ fn room(media: &Arc<Mutex<MediaTable>>, scratch: &Scratch, name: &str, size: u64
 /// What the connections tell the runtime's loop, and a file sent by URL
 /// once fetched (or refused): the answer to `request` on `conn`.
 enum Wire {
-    Activity { conn: u64, working: bool },
+    /// Children run on `conn` (or none do), and a helper started or ended
+    /// beside it (`wire::activity_child`).
+    Activity { conn: u64, working: bool, child: Option<(String, crate::runtime::ChildChange)> },
     Call { turn: String, call: crate::records::Call },
     Tool { turn: String, step: Step },
     Connected { conn: u64, tx: mpsc::Sender<Message> },
@@ -542,7 +547,12 @@ async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, con
                 Ok(Message::Text(text)) => {
                     let v = (text.len() <= 4096).then(|| serde_json::from_str::<Value>(&text).ok()).flatten();
                     if let Some(working) = v.as_ref().and_then(|v| v.get("working")).and_then(Value::as_bool) {
-                        let _ = wire_tx.send(Wire::Activity { conn, working }).await;
+                        // a helper said wrongly is no helper; its work holds all the same
+                        let child = wire::activity_child(v.as_ref().expect("parsed")).unwrap_or_else(|wire::ChildRefused| {
+                            crate::ev!("relay.child_refused", { "conn": conn });
+                            None
+                        });
+                        let _ = wire_tx.send(Wire::Activity { conn, working, child }).await;
                         Message::text("working")
                     } else if let Some((turn, call)) = v.as_ref().and_then(wire::asked_call) {
                         let _ = wire_tx.send(Wire::Call { turn, call }).await;
@@ -564,7 +574,7 @@ async fn activity_connection(ws: net::ServerWs, wire_tx: mpsc::Sender<Wire>, con
         }
     }
     let _ = sink.close().await;
-    let _ = wire_tx.send(Wire::Activity { conn, working: false }).await;
+    let _ = wire_tx.send(Wire::Activity { conn, working: false, child: None }).await;
 }
 
 struct Loop {
@@ -768,7 +778,11 @@ impl Loop {
         match w {
             Wire::Call { turn, call } => self.emit(Event::Called { turn, call }).await,
             Wire::Tool { turn, step } => self.step(&turn, step).await,
-            Wire::Activity { conn, working } => {
+            Wire::Activity { conn, working, child } => {
+                // a helper's end goes before the hold it leaves lets go
+                if let Some((child, change)) = child {
+                    self.emit(Event::Child { child, change }).await;
+                }
                 if working {
                     self.activity.insert(conn);
                     assert!(self.activity.len() <= 2 * limits::AGENTS_MAX, "at most two activity sockets per profile during a reconnect");

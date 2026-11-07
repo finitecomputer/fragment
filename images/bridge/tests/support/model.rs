@@ -310,6 +310,23 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let command = format!("mkdir -p /data/work/juniper--k3x9/app/public && cp -- '{image}' /data/work/juniper--k3x9/app/public/logo.png && cp -- '{pdf}' /data/work/juniper--k3x9/app/public/guide.pdf && sha256sum /data/work/juniper--k3x9/app/public/logo.png /data/work/juniper--k3x9/app/public/guide.pdf");
         return (String::new(), Some(json!({ "index": 0, "id": "call_copy_attachments", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } })));
     }
+    // FIN-432's group (docker.rs `a_groups_helpers_end_together`): two
+    // tasks of one `group`, a fast one and a slow one; the group's one
+    // report is read, never its tasks run again
+    if last_user.contains("[ASYNC DELEGATION") && (last_user.contains("group-slow-done") || last_user.contains("venues")) {
+        return ("scripted: the group reported".into(), None);
+    }
+    if last_user.contains("delegate the grouped work") {
+        if tool_result.is_some() {
+            return ("scripted: grouped delegation dispatched".into(), None);
+        }
+        let tasks = json!([
+            { "goal": "run: touch /data/work/juniper--k3x9/group-fast-done", "group": "venues" },
+            { "goal": "run: sleep 20; touch /data/work/juniper--k3x9/group-slow-done", "group": "venues" },
+        ]);
+        let call = json!({ "index": 0, "id": "call_delegate_group", "type": "function", "function": { "name": "delegate_task", "arguments": json!({ "tasks": tasks, "max_iterations": 5 }).to_string() } });
+        return (String::new(), Some(call));
+    }
     if last_user.contains("[ASYNC DELEGATION") && last_user.contains("fragment-delegate-complete") {
         return ("scripted: checked the delegated result: fragment-delegate-complete\nMEDIA:/data/work/juniper--k3x9/delegate.txt".into(), None);
     }

@@ -722,6 +722,57 @@ pub fn turn_notice(turn: &str, category: NoticeCategory, text: &str) -> Value {
     json!({ "kind": "turn.notice", "turn": turn, "category": category.as_str(), "text": cut(text, limits::NOTICE_TEXT_MAX_CHARS) })
 }
 
+/// How a helper ended (docs/chat-records.md, `turn.child`): as its runtime
+/// said, or `Lost` when the process running it died first (a restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildOutcome {
+    Completed,
+    Failed,
+    Interrupted,
+    TimedOut,
+    Lost,
+}
+
+impl ChildOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChildOutcome::Completed => "completed",
+            ChildOutcome::Failed => "failed",
+            ChildOutcome::Interrupted => "interrupted",
+            ChildOutcome::TimedOut => "timed_out",
+            ChildOutcome::Lost => "lost",
+        }
+    }
+}
+
+/// A helper's id in its records: the first 24 hex digits of SHA-256 of its
+/// runtime's id for it (Hermes' child session id, which runs long and is no
+/// post id).
+pub fn child_id(runtime_id: &str) -> String {
+    hex(&Sha256::digest(runtime_id.as_bytes()))[..24].to_string()
+}
+
+/// A helper's start record id (`c:<child>`) and its end's (`ce:<child>`).
+pub fn child_start_id(turn: &str, child: &str) -> String {
+    work_id(turn, &format!("c:{child}"))
+}
+
+pub fn child_end_id(turn: &str, child: &str) -> String {
+    work_id(turn, &format!("ce:{child}"))
+}
+
+/// A helper the turn's agent started: its task in one line.
+pub fn turn_child_start(turn: &str, child: &str, goal: &str) -> Value {
+    let line = goal.split_whitespace().collect::<Vec<_>>().join(" ");
+    json!({ "kind": "turn.child", "turn": turn, "child": child, "goal": cut(&line, limits::CHILD_GOAL_MAX_CHARS) })
+}
+
+/// That helper, ended.
+pub fn turn_child_end(turn: &str, child: &str, outcome: ChildOutcome) -> Value {
+    json!({ "kind": "turn.child", "turn": turn, "child": child, "outcome": outcome.as_str() })
+}
+
 fn cut_or_empty(text: &str, max: usize) -> String {
     if text.trim().is_empty() {
         String::new()
@@ -1180,6 +1231,15 @@ mod tests {
         assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
         assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);
+        let h = child_id("20261107_014500_ab12cd");
+        assert!(h.len() == 24 && valid_post_id(&child_end_id(&"t".repeat(24), &h)), "{h}");
+        assert_eq!(turn_child_start("t", &h, " Find three\nvenues  near Lisbon "), json!({ "kind": "turn.child", "turn": "t", "child": h, "goal": "Find three venues near Lisbon" }), "one line");
+        assert_eq!(turn_child_start("t", &h, &"g".repeat(400))["goal"].as_str().map(|g| g.chars().count()), Some(limits::CHILD_GOAL_MAX_CHARS));
+        assert_eq!(turn_child_end("t", &h, ChildOutcome::TimedOut), json!({ "kind": "turn.child", "turn": "t", "child": h, "outcome": "timed_out" }));
+        let outcomes = [ChildOutcome::Completed, ChildOutcome::Failed, ChildOutcome::Interrupted, ChildOutcome::TimedOut, ChildOutcome::Lost];
+        assert_eq!(outcomes.map(ChildOutcome::as_str), ["completed", "failed", "interrupted", "timed_out", "lost"], "docs/chat-records.md's five");
+        assert!(outcomes.iter().all(|o| serde_json::to_value(o).unwrap() == o.as_str()), "saved as said");
+        assert_eq!((child_start_id("t", "c1"), child_end_id("t", "c1")), ("wk:t:c:c1".to_string(), "wk:t:ce:c1".to_string()));
         let every = [Category::Shell, Category::Web, Category::Read, Category::Write, Category::Browser, Category::Image, Category::Delegate, Category::Memory, Category::Other];
         assert_eq!(every.map(Category::as_str), ["shell", "web", "read", "write", "browser", "image", "delegate", "memory", "other"], "docs/chat-records.md's nine");
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));

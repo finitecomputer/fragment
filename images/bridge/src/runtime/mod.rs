@@ -416,9 +416,9 @@ pub enum Command {
     Aside { agent: String, fragment: String, chat_name: String, simplex: bool, turn: Option<String>, id: String, by: String, by_name: String, text: String },
 }
 
-/// What a runtime tells the bridge. Every event but `Connected`, `Say` and
-/// `Notice` names its turn; one for a turn the bridge no longer holds is
-/// dropped.
+/// What a runtime tells the bridge. Every event but `Connected`, `Say`,
+/// `Notice` and a helper's end names its turn; one for a turn the bridge no
+/// longer holds is dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The runtime has work outside a chat turn (delegated children).
@@ -465,6 +465,18 @@ pub enum Event {
     /// updated its memory): the agent's turn running there, or, with none,
     /// the last that ran there in this life, posts it (`turn.notice`).
     Notice { agent: String, fragment: String, category: crate::records::NoticeCategory, text: String },
+    /// A helper (a child the runtime delegated work to), by the runtime's
+    /// own id for it: started by a running turn, with its task, or ended
+    /// (`turn.child`). Its end names no turn: it may come long after its
+    /// turn's, and belongs to the turn that started it.
+    Child { child: String, change: ChildChange },
+}
+
+/// What became of a helper (`Event::Child`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChildChange {
+    Started { turn: String, goal: String },
+    Ended(crate::records::ChildOutcome),
 }
 
 /// Why a runtime stopped.

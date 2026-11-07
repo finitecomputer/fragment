@@ -431,6 +431,9 @@ async fn the_hermes_image() {
     // the activity plugin holds for its children however its socket is opened again
     let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_reconnect.py")]);
     assert_eq!(code, 0, "a reopened activity socket holds while children run: {said}");
+    // and says each child of a person's turn as it starts and ends
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/opt/hermes/.venv/bin/python", "-c", include_str!("activity_children.py")]);
+    assert_eq!(code, 0, "each child's start and end are said beside its work: {said}");
     fake.until(30_000, "the local skill fork and its helper committed to the agent fragment", |w| {
         let files = &w.fragments["juniper--k3x9"].files;
         files.get("skills/research/model-council-finite/SKILL.md").is_some_and(|b| String::from_utf8_lossy(b).contains("# My Revised Council"))
@@ -1137,6 +1140,18 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert!(fake.with(|w| !w.bodies(&chat, "work", "turn.step").iter().any(|s| s["args"].as_str().is_some_and(|a| a.contains("delegate-started")))), "no child's call is a step");
     assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
     assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
+    // the helper as the chat's bar reads it (FIN-432): started under the
+    // parent's turn with its task in one line, ended under it once it
+    // finished, after the parent's own end
+    within(&fake, &chat, &c, 10_000, "the helper's start and end", |w| w.bodies(&chat, "work", "turn.child").len() >= 2).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let helpers: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).filter(|b| b["kind"] == "turn.child").collect();
+    assert_eq!(helpers.len(), 2, "one start, one end: {helpers:?}");
+    let goal = helpers[0]["goal"].as_str().unwrap_or_default();
+    assert!(helpers[0]["turn"] == parent && goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{helpers:?}");
+    assert_eq!(*helpers[1], json!({ "kind": "turn.child", "turn": parent, "child": helpers[0]["child"], "outcome": "completed" }));
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| work.iter().position(|r| pred(&r["body"])).expect("recorded");
+    assert!(at(&|b| b["kind"] == "turn.end" && b["turn"] == parent) < at(&|b| b["kind"] == "turn.child" && b.get("outcome").is_some()), "its end comes after its parent's");
     assert!(held, "the computer stays awake throughout the background delegate");
     if let Some(tier) = tier {
         let deep = if tier == "cheap" { ROUTE_FALLBACK_ID } else { "deepseek/deepseek-v4.1-flash" };
@@ -1170,6 +1185,49 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     tokio::time::sleep(Duration::from_secs(3)).await;
     let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["text"].as_str().is_some_and(|s| s.contains("checked the delegated result: fragment-delegate-complete"))).count());
     assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
+}
+
+/// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
+/// Two background tasks of one group, independent completions on: both
+/// helpers start under the parent's turn; the fast one, finished, shows as
+/// working while its sibling runs, as Hermes stops a group's children only
+/// once it joins (no supported hook says one child of a group finished:
+/// docs/bridge.md); then both end, completed, after the parent's end, and
+/// the group reports.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_groups_helpers_end_together() {
+    let (fake, _model, chat, c) = hermes_running_with_modes(None).await;
+    let parent = asked(&fake, &chat, &c, "delegate the grouped work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let helpers = |w: &support::fake::World| w.bodies(&chat, "work", "turn.child");
+    within(&fake, &chat, &c, 60_000, "both helpers started", |w| helpers(w).iter().filter(|h| h.get("goal").is_some()).count() >= 2).await;
+    let t0 = Instant::now();
+    while !c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-fast-done"]) {
+        assert!(t0.elapsed() < Duration::from_secs(90), "the fast task ran; {}", told(&fake, &chat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // the fast one done, its sibling still running: no end yet
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let early: Vec<serde_json::Value> = fake.with(|w| helpers(w).into_iter().filter(|h| h.get("outcome").is_some()).collect());
+    assert!(!c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-slow-done"]), "the slow task still runs");
+    assert!(early.is_empty(), "a group's helpers end together: {early:?}");
+    within(&fake, &chat, &c, 120_000, "both helpers ended", |w| helpers(w).iter().filter(|h| h.get("outcome").is_some()).count() >= 2).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let bodies: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).collect();
+    let starts: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("goal").is_some()).collect();
+    let ends: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("outcome").is_some()).collect();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert!(starts.iter().all(|b| b["turn"] == parent), "{starts:?}");
+    let mut started: Vec<&str> = starts.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
+    let mut ended: Vec<&str> = ends.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
+    started.sort();
+    ended.sort();
+    assert_eq!(started, ended, "each ends once");
+    assert!(ends.iter().all(|b| b["turn"] == parent && b["outcome"] == "completed"), "{ends:?}");
+    let parent_end = bodies.iter().position(|b| b["kind"] == "turn.end" && b["turn"] == parent).expect("its end");
+    assert!(bodies.iter().enumerate().filter(|(_, b)| b["kind"] == "turn.child" && b.get("outcome").is_some()).all(|(i, _)| i > parent_end));
+    within(&fake, &chat, &c, 60_000, "the group's one report", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("the group reported")))).await;
+    within(&fake, &chat, &c, 10_000, "the hold to end", |w| w.keepalive_open == 0).await;
 }
 
 /// A deployment is platform preflight, not provider silence: real Hermes
