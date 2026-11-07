@@ -772,3 +772,124 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   }
   return { simplexSection, refreshSimplex, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
 }
+
+// Settings' Telegram (templates/telegram/README.md): each agent's Telegram
+// chat, a connector of the person's own and a hosted door (docs/api.md, "An
+// agent's doors"), for an agent whose runtime takes one (agent-runtimes.js
+// `doors`). Its row: Set up, its connector's own setup page in the connector
+// setup dialog (connector-setup.js), a connector made first and bound as
+// the agent's door when it has none (the made one deleted again if its
+// binding is refused, so a press leaves a bound one or none); and, with
+// one, Open, its chat. Setting up again is how a person reconnects (a new
+// token, on that page).
+// Which chat is whose: each of the person's own chats with reach (a door
+// is reach: reach.rs) and each this page bound, its door as its owner reads
+// it (`GET /api/f/{name}/door`), as Settings opens and after a Set up, read
+// whole or not at all (a newer read, or a binding's answer, drops an older
+// one), so a Set up is never shown beside a door not read.
+export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, openSetup, openChat, notice, load }) {
+  const DOOR = "telegram";
+  const TITLE = "Telegram";
+  const SETUP = "/setup.html";
+  // each read connector's door by its name ({door, agent}, or null), or null until one read
+  let doors = null;
+  let unread = false;
+  let reads = 0;
+  const bound = new Set();
+  // the agents whose Set up is under way
+  const making = new Set();
+  const agentsNow = () => computer()?.agents ?? [];
+  async function readTelegram() {
+    const mine = ++reads;
+    // a list not read is no word that no chat is a connector
+    if (!listed()) {
+      unread = true;
+      return;
+    }
+    const names = new Set([...fragments().filter((f) => own(f) && f.kind === "chat" && f.sharing?.reach === true).map((f) => f.name), ...bound]);
+    // a connector deleted since binds nothing
+    const answers = await Promise.all([...names].map((name) => api("GET", `/api/f/${seg(name)}/door`).then((r) => [name, r.bound ?? null], (e) => [name, e.status === 404 ? null : undefined])));
+    if (mine !== reads) return;
+    unread = answers.some(([, b]) => b === undefined);
+    if (!unread) doors = new Map(answers);
+  }
+  // the connector bound as `agent`'s Telegram door, if any
+  const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
+  const openConnector = (name, agent) => openSetup({ src: framed(name, SETUP), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  async function setUp(agent) {
+    const connector = boundOf(agent);
+    if (connector) return openConnector(connector, agent);
+    if (making.has(agent)) return;
+    making.add(agent);
+    refreshTelegram();
+    let made = null;
+    try {
+      made = await api("POST", "/api/fragments", { label: connectorLabel(agent, DOOR), template: DOOR });
+      const door = await api("POST", `/api/f/${seg(made.name)}/door`, { act: "link", agent });
+      bound.add(made.name);
+      reads++;
+      doors = new Map(doors ?? []);
+      doors.set(made.name, { door: door.door, agent: door.agent });
+      // the list read first, so its chat is under its agent as its setup opens
+      await load().catch(() => {});
+      openConnector(made.name, agent);
+    } catch (e) {
+      if (made && !doors?.has(made.name)) await api("DELETE", `/api/f/${seg(made.name)}`).catch(() => {});
+      notice("Telegram was not set up", e.message);
+    } finally {
+      making.delete(agent);
+      refreshTelegram();
+    }
+  }
+  function telegramSection() {
+    const s = section(TITLE);
+    s.id = "settings-telegram";
+    // hidden, nav link and all, with none of its rows shown (agent-runtimes.js `renderOffers`)
+    s.dataset.offers = "";
+    fillTelegram(s);
+    return s;
+  }
+  const telegramKey = () => JSON.stringify([agentsNow().map((a) => a.fragment), doors && [...doors], unread, [...making]]);
+  function fillTelegram(s) {
+    s.replaceChildren(...s.querySelectorAll(":scope > h2"));
+    s.dataset.key = telegramKey();
+    // what it is, a word each, as on its setup page (Paul, 2026-10-31):
+    // less secure, literally, as Telegram's servers read its messages
+    const tags = el("div", "connector-tags");
+    const less = el("span", "role-tag connector-tag", "Less secure");
+    less.title = "Telegram's servers can read these messages";
+    tags.append(el("span", "role-tag connector-tag", "Experimental"), less);
+    s.append(tags, el("p", "muted", unread && !doors ? "Couldn't read your Telegram chats." : "Message your agents from Telegram."));
+    const rows = agentsNow().map((a) => {
+      const connector = boundOf(a.fragment);
+      const busy = making.has(a.fragment);
+      const go = el("button", "row", !doors ? "Try again" : busy ? "Setting up…" : "Set up");
+      go.type = "button";
+      go.disabled = busy;
+      go.dataset.telegramFor = a.fragment;
+      go.onclick = () => (doors ? setUp(a.fragment) : refreshTelegram(true));
+      const actions = [go];
+      if (connector) {
+        const open = el("button", "row", "Open");
+        open.type = "button";
+        open.dataset.telegramOpen = connector;
+        open.onclick = () => openChat(connector);
+        actions.unshift(open);
+      }
+      return markOffer(actionLine(named(el("span"), a.fragment), ...actions), a.fragment, "doors");
+    });
+    s.append(...rows);
+    s.hidden = !rows.some((r) => !r.hidden);
+    const jump = document.querySelector('.settings-nav-link[data-section="settings-telegram"]');
+    if (jump) jump.hidden = s.hidden;
+  }
+  // The section drawn again as its view and doors now say, while Settings
+  // show it; `read`: its doors read first.
+  async function refreshTelegram(read = false) {
+    if (!document.getElementById("settings-telegram")) return;
+    if (read) await readTelegram();
+    const s = document.getElementById("settings-telegram");
+    if (s && s.dataset.key !== telegramKey()) fillTelegram(s);
+  }
+  return { telegramSection, refreshTelegram, readTelegram };
+}

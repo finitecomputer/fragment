@@ -87,7 +87,9 @@ export class App extends DurableObject {
     const paired = this.get("paired");
     const p = this.get("pairing");
     const pairing = p && Date.now() <= p.expires ? { link: p.link, expires: p.expires, candidate: p.candidate ? { user: p.candidate.user, name: p.candidate.name } : null } : null;
-    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing };
+    // `checked`: how many of `connect`'s answers `known` has had, so a page
+    // that asked again (the same bot's token included) sees its answer come
+    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, checked: this.get("checked") ?? 0 };
   }
 
   async connect({ platform, api = TELEGRAM } = {}, job) {
@@ -110,6 +112,7 @@ export class App extends DurableObject {
 
   known({ bot, api, error }, call) {
     if (call.agent) throw new Error("its owner connects it, in person");
+    this.put("checked", (this.get("checked") ?? 0) + 1);
     if (error) {
       this.put("error", String(error).slice(0, 300));
       return { ok: false };

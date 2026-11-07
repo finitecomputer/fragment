@@ -47,7 +47,7 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
-  const { computerSection, connectionsSection, simplexSection } = sections;
+  const { computerSection, connectionsSection, simplexSection, telegramSection, readTelegram } = sections;
   const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
@@ -228,12 +228,14 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: support(), seatIs };
     const back = await returning(billingHelpers);
     if (lost()) return;
-    const reads = await Promise.all([
+    // with them, the doors its Telegram reads (connections.js), so it is
+    // drawn as it is, never a Set up beside a door not read yet
+    const [reads] = await Promise.all([Promise.all([
       read("/api/ledger"),
       read("/api/seat"),
       read("/api/connections"),
       getComputer() ? read(`/api/computers/${seg(getComputer().computer)}/uses`) : { value: null },
-    ]);
+    ]), readTelegram()]);
     if (lost()) return;
     const [ledger, mySeat, linked, uses] = reads.map((r) => r.value ?? null);
     // what failed on its way is read again by itself once these render
@@ -365,7 +367,7 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     const skills = skillsSection();
     if (lost()) return;
     returnSaid(back);
-    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
+    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), telegramSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
     renderAgentFaces();
     // a home read that answered while these were built shown now they are in
     paintHomes();

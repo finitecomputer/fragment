@@ -338,6 +338,18 @@ body.reordering iframe { pointer-events: none; }
 .rename-agent label { font: var(--type-body-sm); display: block; margin: 24px 0 8px; }
 .rename-agent input { font: var(--type-field); width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; color: inherit; background: var(--bg-window); }
 .rename-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
+/* a connector's setup (connector-setup.js): its title, its agent's name
+   hugging it, then the connector's own page, framed on the dialog's
+   surface (the page transparent, in the shell's light or dark) at one
+   height, and Done; a frame that can't sign in has its note in its place */
+.connector-setup { width: min(440px, calc(100vw - 32px)); }
+.connector-setup h2 { margin: 0; }
+.connector-setup .connector-setup-agent { margin: 4px 0 0; }
+.connector-setup-frame { display: block; width: 100%; height: 124px; margin-top: 20px; border: 0; background: transparent; }
+.connector-setup .rename-actions { margin-top: 12px; }
+.connector-setup .frame-note { margin-top: 20px; background: none; }
+.connector-setup .frame-note .notice { margin: 0; padding: 0; max-width: none; text-align: left; }
+@media (max-width: 520px) { .connector-setup-frame { height: 148px; } }
 /* a dialog's buttons: pills that keep their size and colours in every state
    (disabled while it saves or arms: fragment-title.js holds its width) */
 .rename-actions button { font: var(--type-control); min-height: 40px; padding: 0 18px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-muted); }
