@@ -673,6 +673,49 @@ struct TransportTests {
         #expect(session.pending.isEmpty && session.composer.isEmpty && session.error == nil)
     }
 
+    /// A full cache, and the person away and back while the first message's
+    /// upload is held open: the chat they come back to is the one sending
+    /// it, so a follow-up there still waits for it, and a draft typed there
+    /// is kept when the first message is saved.
+    @Test func aFirstMessageKeepsItsSessionInAFullCache() async throws {
+        let created = Count(), gate = Gate()
+        let stub = launchStub(created: created, gate: gate, holdAt: "PUT /api/f/mobile-chat--c1/blobs/")
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        for index in 0..<31 {
+            try library.session(for: FragmentSummary(name: "draft-\(index)", kind: "chat"), api: api).composer = "A draft to preserve"
+        }
+        library.home.text = "The original task"
+        try await hold(library, [first3[2]])
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
+        let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
+        let session = try #require(library.sessions[chat.name])
+        #expect(library.sessions.count == 32 && session.sendingFirst)
+        // away: to a chat not cached (refused, nothing to make room) and to one that is
+        #expect(throws: APIError.self) { try library.session(for: FragmentSummary(name: "one-more", kind: "chat"), api: api) }
+        _ = try library.session(for: FragmentSummary(name: "draft-3", kind: "chat"), api: api)
+        // and back
+        let again = try library.session(for: chat, api: api)
+        #expect(again === session && again.sendingFirst)
+        again.edit("A follow-up")
+        await again.send()
+        #expect(again.error == "Wait for the message being sent." && again.composer == "A follow-up" && again.pending.isEmpty)
+        again.edit("A draft typed meanwhile")
+        again.flushDraft()
+        gate.open()
+        try await launch.value
+        #expect(library.sessions[chat.name] === session && !session.sendingFirst)
+        #expect(session.composer == "A draft typed meanwhile" && session.pending.isEmpty)
+        #expect(ChatSession(fragment: chat, api: api).composer == "A draft typed meanwhile")
+        await session.send()
+        let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }.map { $0.json["body"]["text"] }
+        #expect(posts == [.string("The original task"), .string("A draft typed meanwhile")])
+        #expect(library.sessions.values.filter { $0 !== session }.allSatisfy { $0.composer == "A draft to preserve" })
+    }
+
     /// The outbox's last place is the first message's: nothing sent while
     /// its upload is held open takes it, and saved there, its post whose
     /// answer was lost is retried after a relaunch with the same id and body.
