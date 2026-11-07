@@ -85,6 +85,12 @@ const DRAFT_STALE_MS = 120000;
 const HERE_FACES_MAX = 5;
 // Helpers the open bar lists, the oldest first; more are counted.
 const HELPERS_SHOWN_MAX = 4;
+// The `work` kinds of a turn this page reads (docs/chat-records.md). Any
+// other (a later bridge's) is kept for paging, and changes nothing shown.
+const TURN_KINDS = new Set(["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]);
+// Those that say a turn went on past its question in words (`turn.asked`):
+// it waits on no one then. Its asker's answer is read from the chat.
+const WENT_ON = new Set(["turn.step", "turn.call", "turn.end"]);
 // Identities one `__people` call names (the platform's limit).
 const PROFILES_PER_ASK = 64;
 // The members are read again at most this often (an agent added later).
@@ -891,6 +897,8 @@ export function mount(root) {
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
     // a helper's start or end moves nothing in the chat: its bar alone
     if (b.kind === "turn.child") return onHelper(record, b);
+    // a kind this page does not know moves nothing: no turn, no place, no question
+    if (!TURN_KINDS.has(b.kind)) return;
     // A turn is its poster's: the platform stamps `record.principal`, and
     // only the chat's agents post on `work` (`"from": "agent"`). Whatever a
     // body says of an agent, a record counts toward, and can replace a card
@@ -904,7 +912,7 @@ export function mount(root) {
     const n = record.seq;
     touch(t, record.at, n);
     // the turn went on past its question: it waits on no one now
-    if (t.asked && b.kind !== "turn.asked" && record.seq > t.asked.seq) t.asked = null;
+    if (t.asked && WENT_ON.has(b.kind) && record.seq > t.asked.seq) t.asked = null;
     if (b.kind === "turn.asked" && typeof b.asks === "string") {
       if (!t.asked || record.seq > t.asked.seq) t.asked = { asks: b.asks, at: record.at, seq: record.seq };
       want(b.asks);

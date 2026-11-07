@@ -54,6 +54,9 @@ NUL and the cut turn's id; it has the cut turn's `cause` and asker, and
 a `turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut
 turn is continued once").
 
+A reader ignores a `work` kind it does not know: it starts, ends or moves
+no turn, and answers no question. Later bridges add kinds.
+
 One turn of an agent runs in a chat at a time; the rest wait in order, at
 most 16. A turn's records are its `turn.start` on `work` (its claim), any
 number of steps, replies, cards and their closings, `turn.asked` and
@@ -353,8 +356,9 @@ The turn asks `asks` (its asker) something to answer in words, reply
 `<part>` being the question, and waits, running, for their next message
 to the agent. It is posted once per question. Nothing records the answer:
 a page takes the turn as waiting until `asks` posts a message on `chat`
-at or after the record's `at`, or a later record of the turn's on `work`
-says it went on.
+at or after the record's `at`, or a later step, call or end of the turn's
+on `work` says it went on. Any other record (a notice, a card's closing,
+a kind the page does not know) leaves it waiting.
 
 **`turn.notice`**, part `n<k>`, from 1:
 

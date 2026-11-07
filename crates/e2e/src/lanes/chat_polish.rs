@@ -609,6 +609,52 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     Ok(())
 }
 
+/// Goal (Codex on #1086): a turn that asks its owner something in words
+/// keeps waiting for the answer while records that do not say it went on
+/// come: a helper's start and end (`turn.child`), a kind this page does not
+/// know. The owner's answer in the chat ends the wait. Method: a quiet
+/// agent posts the records itself; read on the owner's page.
+pub(super) fn asked_outlasts_helpers(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "asked-helpers")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the asked chat: {made}");
+    s.owned(&made.body, owner);
+    let (ada, ada_id) = quiet_agent(api, owner, &name)?;
+    let owner_id = api.identity(owner)?;
+    let post = |who: &Keys, channel: &str, id: &str, body: Value| -> Result<()> {
+        let r = api.signed(who, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id}: {r}");
+        Ok(())
+    };
+    post(&ada, "work", "wk:ask:start", json!({ "kind": "turn.start", "turn": "ask", "agent": ada_id, "asker": owner_id }))?;
+    post(&ada, "chat", "rp:ask:1", json!({ "text": "Which month suits the team?", "turn": "ask" }))?;
+    post(&ada, "work", "wk:ask:q1", json!({ "kind": "turn.asked", "turn": "ask", "asks": owner_id }))?;
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let waits = "[...document.querySelectorAll('.msg.working.asked')].some((w) => w.textContent === 'Waiting for your answer') && !document.querySelector('.msg.working:not(.asked)')";
+    anyhow::ensure!(super::shows(chrome, &page, waits), "the turn waits for its owner's answer");
+    post(&ada, "work", "wk:ask:c:h1", json!({ "kind": "turn.child", "turn": "ask", "child": "h1", "goal": "Check the venues' calendars" }))?;
+    post(&ada, "work", "wk:ask:ce:h1", json!({ "kind": "turn.child", "turn": "ask", "child": "h1", "outcome": "completed" }))?;
+    post(&ada, "work", "wk:ask:later", json!({ "kind": "turn.later-kind", "turn": "ask", "what": "a later bridge's" }))?;
+    post(&ada, "work", "wk:ask:c:h2", json!({ "kind": "turn.child", "turn": "ask", "child": "h2", "goal": "Draft the poll" }))?;
+    let helper = "document.getElementById('helpers').querySelector('.helpers-said')?.textContent === '1 helper working'";
+    anyhow::ensure!(super::shows(chrome, &page, helper), "the records arrived");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    s.ok(
+        "a helper's start and end, and a kind the page does not know, leave the turn waiting for its owner's answer",
+        chrome.eval(&page, waits)? == true,
+        chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?,
+    );
+    post(owner, "chat", "answer", json!({ "text": "March" }))?;
+    s.ok(
+        "the owner's answer ends the wait; the helper still working stays on its bar",
+        super::shows(chrome, &page, &format!("!document.querySelector('.msg.working.asked') && {helper}")),
+        chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?,
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
 /// Goal (FIN-432): the helpers an agent's turns started (`turn.child`)
 /// show in one quiet row just above the composer while they work: how
 /// many, and opened, each one's task on one line (cut short) with how long
