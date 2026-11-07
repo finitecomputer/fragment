@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
 use worker::{console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
@@ -159,7 +160,7 @@ impl Routed {
         let url = headers.get(routed::URL)?.and_then(|u| Url::parse(&u).ok()).ok_or_else(|| CellError::host("no URL from the router"))?;
         let signed = match headers.get(routed::SIGNED)? {
             Some(json) => {
-                let signed: Signed = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's signer: {e}")))?;
+                let signed: Signed = crate::json_text(&json).map_err(|e| CellError::host(format!("the router's signer: {e}")))?;
                 if !npub::is_identity(&signed.id) || signed.key.as_deref().is_some_and(|k| !npub::is_hex_key(k)) {
                     return Err(CellError::host("the router named a malformed signer"));
                 }
@@ -173,7 +174,7 @@ impl Routed {
         };
         let credential = match headers.get(routed::CREDENTIAL)? {
             Some(json) => {
-                let credential: Credential = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's credential: {e}")))?;
+                let credential: Credential = crate::json_text(&json).map_err(|e| CellError::host(format!("the router's credential: {e}")))?;
                 if !credential.well_formed() || signed.is_some() {
                     return Err(CellError::host("the router named a malformed credential"));
                 }
@@ -288,7 +289,7 @@ async fn sent_to(env: &Env, binding: &str, name: &str, stub: worker::Stub, req: 
     let Some(theirs) = resp.headers().get(release::REFUSED)?.filter(|_| resp.status_code() == 503) else {
         return Ok(Sent::Answered(resp));
     };
-    let message = match resp.json::<ErrorBody>().await {
+    let message = match resp.read_json::<ErrorBody>().await {
         Ok(b) if b.error == ErrorCode::Deploying => b.message,
         _ => format!("{binding} {name} runs another release: a deploy is going out; try again in a few seconds"),
     };
@@ -336,7 +337,7 @@ pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str,
     let body = body.to_string();
     let mut resp = send_again(env, binding, name, || internal_request(path, &body)).await?;
     let status = resp.status_code();
-    let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value = resp.read_json().await.unwrap_or(serde_json::Value::Null);
     if status == 200 {
         return Ok(v);
     }
@@ -434,7 +435,7 @@ pub(crate) async fn wake(env: &Env, class: &str, Wake { id }: Wake) -> CellResul
         Sent::Answered(resp) if resp.status_code() == 200 => Ok(serde_json::json!({ "class": class, "id": named, "ready": true })),
         Sent::Answered(mut resp) => {
             let status = resp.status_code();
-            match resp.json::<ErrorBody>().await {
+            match resp.read_json::<ErrorBody>().await {
                 Ok(b) => Err(CellError::new(b.error, b.message)),
                 Err(_) => Err(CellError::host(format!("{class} {named} answered its wake {status}"))),
             }
@@ -462,7 +463,7 @@ pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
             Ok(Sent::Answered(resp)) if resp.status_code() == 200 => serde_json::json!({ "release": cfg.deploy_id }),
             Ok(Sent::Answered(mut resp)) => {
                 let status = resp.status_code();
-                let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                let v: serde_json::Value = resp.read_json().await.unwrap_or(serde_json::Value::Null);
                 serde_json::json!({ "error": format!("{status} {}: {}", v["error"].as_str().unwrap_or("?"), v["message"].as_str().unwrap_or("")) })
             }
             Ok(Sent::Refused(_, theirs)) => serde_json::json!({ "refusedBy": theirs }),

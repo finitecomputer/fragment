@@ -72,7 +72,7 @@ impl FragmentCell {
     /// Its kind and title as its lists show them now (`MetaKey::Face`):
     /// an app's, untitled, before its first install.
     fn shown_as(&self) -> CellResult<(FragmentKind, Option<String>)> {
-        let face: Value = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok()).unwrap_or(Value::Null);
+        let face: Value = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok()).unwrap_or(Value::Null);
         let kind = face["kind"].as_str().and_then(FragmentKind::parse).unwrap_or_default();
         Ok((kind, face["title"].as_str().map(str::to_string)))
     }
@@ -122,7 +122,7 @@ impl FragmentCell {
         // has answered: read, counted and kept with no wait between, so
         // makings asked at once each count the others'
         let now = js::now_ms();
-        let started: Vec<i64> = self.meta(MetaKey::IconMakings)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let started: Vec<i64> = self.meta(MetaKey::IconMakings)?.and_then(|s| crate::json_text(&s).ok()).unwrap_or_default();
         let within = icon::admit(&started, now).map_err(refused)?;
         self.set_meta(MetaKey::IconMakings, &serde_json::to_string(&within).expect("starts serialize"))?;
         let (key, op) = (self.meter_key()?, operation(now));
@@ -149,7 +149,7 @@ impl FragmentCell {
     /// The making's subject: GLM's, or, when it named none, the hint or
     /// the title (the checks then judge what was drawn of it).
     async fn icon_subject(&self, owner: &str, key: &str, op: &str, hint: Option<&str>) -> CellResult<String> {
-        let meta: Value = self.meta(MetaKey::MetaLive)?.and_then(|m| serde_json::from_str(&m).ok()).unwrap_or(Value::Null);
+        let meta: Value = self.meta(MetaKey::MetaLive)?.and_then(|m| crate::json_text(&m).ok()).unwrap_or(Value::Null);
         let name = self.name()?;
         let label = fragment_proto::split_fragment_name(&name).map_or(name.as_str(), |(label, _)| label).to_string();
         let title = meta["title"].as_str().map(str::to_string).or(self.shown_as()?.1).unwrap_or(label);

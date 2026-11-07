@@ -569,7 +569,8 @@ pub fn chat_history(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("Chrome is installed for the chat-history section (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    polish::history_overlaps(s, api, &owner, &session, &mut chrome)
+    polish::history_overlaps(s, api, &owner, &session, &mut chrome)?;
+    polish::history_cursor(s, api, &owner, &session, &mut chrome)
 }
 
 pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
@@ -1219,6 +1220,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::work_backfill(s, api, &owner, &owner_session, &mut chrome)?;
     polish::history_recovers(s, api, &owner, &owner_session, &mut chrome)?;
+    polish::window(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
     card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;

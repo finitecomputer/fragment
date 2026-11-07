@@ -98,6 +98,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::ledger::{self, FragmentOpen, MaySpend};
@@ -661,7 +662,7 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
     if answer.status_code() != 200 {
         return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
     }
-    let whose: Whose = answer.json().await?;
+    let whose: Whose = answer.read_json().await?;
     if !whose.member {
         return Err(CellError::new(ErrorCode::Forbidden, format!("a model call names a fragment its agent is in, and it is not in {name}")));
     }

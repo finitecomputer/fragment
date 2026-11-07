@@ -20,7 +20,8 @@ The page is `site/`: `index.html`,
 `chat.js` (the chat, its voice memos, `/` commands, Reply, Steer
 and "Notify me"), `control.js` (whose a turn is to stop, command and
 answer: its asker's, or for a routine's or an answer's, its agent's
-owner's), `pages.js` (whether a channel page read is the last),
+owner's), `pages.js` (whether a channel page read is the last), `speakers.js`
+(whose words a message is, a relay's as its members say),
 `markdown.js`
 (agents' text as DOM, never as markup: the platform's renderer,
 `./__markdown.js`, with the chat's choices), `media.js` (a message's

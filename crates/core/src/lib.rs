@@ -1,6 +1,10 @@
 //! The fragment cell's pure logic. Everything here is deterministic given
 //! its inputs (randomness and the clock come from the caller), so the cell
 //! runs it as wasm and the host tests it.
+//!
+//! It decodes JSON text as `serde_json::from_slice(text.as_bytes())`, not
+//! `from_str`: the same answer, through the bytes decoder each type has in
+//! the cell's Wasm, not a second, `&str` copy of it (cell/clippy.toml).
 
 pub mod access;
 pub mod across;
