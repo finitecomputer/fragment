@@ -155,7 +155,8 @@ beside a draft, a saved file past its bounds or unreadable);
 by hand from docs/api.md.
 
 `FragmentUITests` drive what needs no server: Connect, an unreachable server,
-and a server past loopback refused. Each launches with `--ui-test` (Debug only):
+a server past loopback refused, and Home's composer above the keyboard after
+Your Apps and Back (an approved account at a closed loopback port). Each launches with `--ui-test` (Debug only):
 a Keychain service and Application Support folder of its own, emptied as it
 starts, and loopback alone, so a simulator's own account is never read and no
 other server is ever asked (`Sources/LaunchScope.swift`;

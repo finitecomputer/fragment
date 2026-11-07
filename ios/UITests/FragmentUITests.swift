@@ -36,6 +36,39 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(app.buttons["pairAccount"].isEnabled)
     }
 
+    /// Home's composer rests above the keyboard as Home opens, and again
+    /// after Your Apps and Back: the keyboard Home takes back as it returns
+    /// waits for Back's transition to end, so Home's layout makes room for
+    /// it. An approved account at a closed loopback port is Home with
+    /// nothing behind it.
+    func testHomesComposerStaysAboveTheKeyboardAfterYourApps() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", "http://127.0.0.1:9"]
+        app.launch()
+        let composer = app.textViews["composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "Home, its saved account approved")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "Home opens with the keyboard")
+        aboveTheKeyboard(composer, keyboard, "as Home opens")
+        screenshot(app, "Home")
+
+        app.buttons["yourApps"].tap()
+        XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), "Your Apps has no keyboard")
+        app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "Home takes the keyboard back")
+        aboveTheKeyboard(composer, keyboard, "after Your Apps and Back")
+        screenshot(app, "Home after Your Apps")
+    }
+
+    /// Waits for `field` to rest wholly above `keyboard`, as the keyboard
+    /// and the layout around it settle.
+    private func aboveTheKeyboard(_ field: XCUIElement, _ keyboard: XCUIElement, _ when: String) {
+        let above = NSPredicate { _, _ in field.exists && keyboard.exists && field.frame.maxY <= keyboard.frame.minY + 0.5 }
+        let settled = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: above, object: nil)], timeout: 5)
+        XCTAssertEqual(settled, .completed, "\(when): the composer ends at \(field.frame.maxY), the keyboard begins at \(keyboard.frame.minY)")
+    }
+
     /// The boundary holds for the address Connect starts with, too: a test
     /// launch tapping Connect for Finite's own server asks nothing of it.
     func testATestLaunchRefusesAServerPastLoopback() {

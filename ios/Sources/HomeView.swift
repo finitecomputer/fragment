@@ -650,8 +650,8 @@ struct ComposerField: UIViewRepresentable {
         view.pasteImages = pasteImages
         if let focused, focused.wrappedValue != view.isFirstResponder {
             // after this update: a view just made has no window to focus in yet
-            let wanted = focused.wrappedValue
-            DispatchQueue.main.async { _ = wanted ? view.becomeFirstResponder() : view.resignFirstResponder() }
+            let wanted = focused.wrappedValue, coordinator = context.coordinator
+            DispatchQueue.main.async { coordinator.focus(view, wanted) }
         }
         // disabled (what was submitted being sent): no typing, no pasting
         view.isEditable = context.environment.isEnabled
@@ -674,12 +674,38 @@ struct ComposerField: UIViewRepresentable {
         var text: Binding<String>
         var focused: Binding<Bool>?
         init(text: Binding<String>) { self.text = text }
+        /// Takes the keyboard, or gives it up. Taken as its page arrives
+        /// (Home on Back from Your Apps, whose `onAppear` asks for it), it
+        /// waits for that transition to end: a keyboard raised during it
+        /// never reaches the arriving page's layout, which leaves the
+        /// composer under the keyboard. A transition cancelled (a swipe
+        /// back let go) takes nothing, and asking again takes it.
+        func focus(_ view: UITextView, _ wanted: Bool) {
+            guard wanted else { view.resignFirstResponder(); return }
+            guard let transition = view.owningController?.transitionCoordinator else { view.becomeFirstResponder(); return }
+            transition.animate(alongsideTransition: nil) { [weak self, weak view] context in
+                guard let self, let view, self.focused?.wrappedValue == true else { return }
+                if context.isCancelled { self.focused?.wrappedValue = false } else { view.becomeFirstResponder() }
+            }
+        }
         func textViewDidBeginEditing(_ view: UITextView) { focused?.wrappedValue = true }
         func textViewDidEndEditing(_ view: UITextView) { focused?.wrappedValue = false }
         func textViewDidChange(_ view: UITextView) {
             text.wrappedValue = view.text
             (view as? PastingTextView)?.placeholder.isHidden = !view.text.isEmpty
         }
+    }
+}
+
+private extension UIView {
+    /// The view controller this view is in: the one whose transitions move it.
+    var owningController: UIViewController? {
+        var next = self.next
+        while let responder = next {
+            if let controller = responder as? UIViewController { return controller }
+            next = responder.next
+        }
+        return nil
     }
 }
 
