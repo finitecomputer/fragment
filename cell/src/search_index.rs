@@ -490,7 +490,7 @@ impl Parts {
     fn space(&self) -> CellResult<Option<wire::Space>> {
         match self.meta("space")?.filter(|s| !s.is_empty()) {
             None => Ok(None),
-            Some(s) => serde_json::from_str(&s).map(Some).map_err(|e| CellError::host(format!("an index's space reads: {e}"))),
+            Some(s) => crate::json_text(&s).map(Some).map_err(|e| CellError::host(format!("an index's space reads: {e}"))),
         }
     }
 
@@ -917,9 +917,9 @@ impl Parts {
                 revision: string(r, "revision"),
                 title: string(r, "title"),
                 heading: some(r, "heading"),
-                context: serde_json::from_str(r["context"].as_str().unwrap_or("[]")).unwrap_or_default(),
+                context: crate::json_text(r["context"].as_str().unwrap_or("[]")).unwrap_or_default(),
                 at: some(r, "at"),
-                location: r["location"].as_str().and_then(|l| serde_json::from_str(l).ok()),
+                location: r["location"].as_str().and_then(|l| crate::json_text(l).ok()),
                 snippet: engine::snippet(r["body"].as_str().unwrap_or_default(), q),
                 score: f.score,
                 signals: [f.lexical.map(|_| "lexical"), f.semantic.map(|_| "semantic")].into_iter().flatten().map(str::to_string).collect(),

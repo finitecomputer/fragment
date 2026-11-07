@@ -295,7 +295,7 @@ struct LogRow {
 
 impl LogRow {
     fn entry(self) -> GovernanceEntry {
-        let detail = serde_json::from_str(&self.detail).unwrap_or(Value::Null);
+        let detail = crate::json_text(&self.detail).unwrap_or(Value::Null);
         GovernanceEntry { seq: self.seq, at: self.at, actor: self.actor, action: self.action, subject: self.subject, request: self.request, detail }
     }
 }
@@ -381,7 +381,7 @@ impl RegistryCell {
                 let now = js::now_ms();
                 // a replay: the offer its entry names, made by the same for the same
                 if let Some(e) = tx.governed(&org, &request)? {
-                    let detail: Value = serde_json::from_str(&e.detail).unwrap_or(Value::Null);
+                    let detail: Value = crate::json_text(&e.detail).unwrap_or(Value::Null);
                     let offer = detail["offer"].as_str().map(str::to_string);
                     return match (offer, e.actor == actor) {
                         (Some(offer), true) if tx.offer(&org, &offer)?.email == email => Ok(offer),
@@ -641,7 +641,7 @@ impl RegistryCell {
         self.atomically(move |tx| {
             let detail = json!({ "note": text });
             if let Some(e) = tx.governed(&org, &request)? {
-                let same = e.action == action && e.actor == operator && serde_json::from_str::<Value>(&e.detail).ok().as_ref() == Some(&detail);
+                let same = e.action == action && e.actor == operator && crate::json_text::<Value>(&e.detail).ok().as_ref() == Some(&detail);
                 return match same {
                     true => Ok(()),
                     false => Err(CellError::new(ErrorCode::ConflictingBody, "this id was used for another command")),

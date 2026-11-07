@@ -57,6 +57,7 @@ use futures_util::future::{join, join_all};
 use serde_json::{json, Value};
 use worker::*;
 
+use crate::ReadJson;
 use crate::ask_registry;
 use crate::auth::{self, enc, esc};
 use crate::config::Config;
@@ -286,7 +287,7 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
     let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
     let mut resp = crate::routed::send(env, "FRAGMENT", name, req).await?;
     let status = resp.status_code();
-    let v: Value = resp.json().await.map_err(|e| CellError::host(format!("{inner} answered {status}, not JSON: {e}")))?;
+    let v: Value = resp.read_json().await.map_err(|e| CellError::host(format!("{inner} answered {status}, not JSON: {e}")))?;
     if status == 200 {
         return Ok(v);
     }

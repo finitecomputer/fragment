@@ -118,7 +118,7 @@ impl Question {
         let body = format!(
             r#"{{"queryId":"{QUERY_ID}","timeframe":{{"from":{from},"to":{now_ms}}},"view":"calculations","limit":{GROUPS_MAX},"parameters":{{"datasets":["cloudflare-workers"],"filters":[{{"key":"$workers.scriptName","operation":"eq","type":"string","value":"{script}"}},{{"key":"{key}","operation":"{op}","type":"{kind}","value":{value}}}],{counted}}}}}"#
         );
-        serde_json::from_str(&body).expect("a glance's query is JSON")
+        serde_json::from_slice(body.as_bytes()).expect("a glance's query is JSON")
     }
 }
 
