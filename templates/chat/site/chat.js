@@ -1156,7 +1156,6 @@ export function mount(root) {
     else if (placed?.isConnected) {
       $("scroll").scrollTop += placed.getBoundingClientRect().top - top;
       if (history.anchor) history.anchor.node = placed;
-      held = { node: placed, top };
     }
     if (!history.loading) history.anchor = null;
     if (history.watch && !history.loading) {
@@ -2053,7 +2052,6 @@ export function mount(root) {
       fitUserBubbles();
     }
     if (stuck) toEnd();
-    else keepPlace();
   }).observe($("messages"));
   document.fonts?.ready.then(() => fitUserBubbles());
 
@@ -2084,16 +2082,6 @@ export function mount(root) {
   let caughtUp = false;
   let latestSeq = 0;
   let newMessages = 0;
-  // The reader's item and where it was, as last scrolled or drawn: an item
-  // above it drawn at its own height (one skipped off screen is laid out at
-  // an estimate, chat.css) moves it back, as a browser's scroll anchoring
-  // would; Safari has none.
-  let held = null;
-  function keepPlace() {
-    if (!held?.node?.isConnected) return;
-    const moved = held.node.getBoundingClientRect().top - held.top;
-    if (Math.abs(moved) > 0.5) $("scroll").scrollTop += moved;
-  }
   function visibleAnchor() {
     const top = $("scroll").getBoundingClientRect().top;
     const node = [...$("messages").children].find((item) => item.getBoundingClientRect().bottom > top);
@@ -2121,7 +2109,6 @@ export function mount(root) {
     const s = $("scroll");
     if (s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
     else if (s.scrollTop < lastTop) stuck = false;
-    held = stuck ? null : visibleAnchor();
     lastTop = s.scrollTop;
     if (stuck) newMessages = 0;
     showLatest();
