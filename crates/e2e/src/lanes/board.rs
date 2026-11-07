@@ -14,7 +14,8 @@
 //! navigate the board (the sandbox); a frame is one file on every board, its
 //! sibling stylesheet never loads; the operations' refusals: each field's
 //! bounds (the schema), what the app checks, an added viewer's change, the
-//! 49th frame. Failure: a load that fails keeps the page shown, says why on
+//! 49th frame. Failure: a load that fails (before its headers, after them,
+//! or past 16 MiB, stopped as it streams) keeps the page shown, says why on
 //! the frame and is tried again; a file not written yet loads at the same
 //! rev once it is; a superseded or removed pending load shows nothing.
 //! Replay and restart: a retried put_frame answers its first result and
@@ -511,6 +512,31 @@ pub fn board(s: &mut Suite, api: &Api) -> Result<()> {
         "a load that fails keeps the page shown, says so on the frame, and is tried again until it loads",
         held.len() == 1 && waiting["kept"] == true && same_rev(&waiting["rev"], &rev) && noted && failed["kept"] == true && failed["note"] == "The board couldn't reach it." && recovered,
         json!({ "held": held, "waiting": waiting, "failed": failed, "after": one(&mut chrome, &a, "home") }),
+    );
+    // a body that breaks after its headers, and one that never ends: the
+    // page's next load of a frame answered so, once (the page's fetch
+    // wrapped, as a connection that drops mid-body, or a file that grew
+    // past the limit after the route measured it, would answer)
+    chrome.eval(
+        &a,
+        "(() => { window.__pulled = 0; const real = window.fetch; window.fetch = async (url, init) => { const plan = window.__plan; const r = await real(url, init); if (!plan || !String(url).startsWith(`/frames/${plan.id}?`)) return r; window.__plan = null; if (plan.kind === 'drop') { const reader = r.body.getReader(); let sent = false; return new Response(new ReadableStream({ async pull(c) { if (sent) return c.error(new TypeError('the connection dropped')); const { value } = await reader.read(); c.enqueue(value.slice(0, 16)); sent = true; } }), { status: r.status, headers: r.headers }); } r.body.cancel(); return new Response(new ReadableStream({ pull(c) { window.__pulled += 1; c.enqueue(new Uint8Array(1 << 20)); } }), { status: 200, headers: r.headers }); }; })()",
+    )?;
+    let mut broken = vec![];
+    for (kind, why) in [("drop", "The board couldn't reach it."), ("endless", "It is over 16 MiB, a frame's most.")] {
+        chrome.eval(&a, MARK)?;
+        chrome.eval(&a, &format!("window.__plan = {{ id: 'home', kind: '{kind}' }}"))?;
+        let again = put(s, &puts[0]);
+        let rev = again["result"]["rev"].clone();
+        let noted = chrome.until(&a, &format!("(() => {{ const f = document.querySelector('.bd-frame[data-id=\"home\"]'); return f.dataset.failed === '{rev}' && f.querySelector('.bd-note').textContent === {why:?}; }})()"), WAIT);
+        let failed = one(&mut chrome, &a, "home");
+        let pulled = chrome.eval(&a, "window.__pulled")?;
+        let recovered = chrome.until(&a, &shows("home", &rev), WAIT);
+        broken.push(json!({ "kind": kind, "noted": noted, "kept": failed["kept"], "pulled": pulled, "recovered": recovered, "failed": failed }));
+    }
+    s.ok(
+        "a body that breaks after its headers, or runs past 16 MiB (stopped as it streams), keeps the page shown, says why, and is tried again",
+        broken.iter().all(|b| b["noted"] == true && b["kept"] == true && b["recovered"] == true) && broken[1]["pulled"].as_u64().is_some_and(|n| (16..=18).contains(&n)),
+        json!(broken),
     );
     let later = json!({ "id": "later", "kind": "html", "label": "Later" });
     let later_put = put(s, &later);
