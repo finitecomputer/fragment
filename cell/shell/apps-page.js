@@ -135,13 +135,16 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
 }
 
 export function createAppsPage(page, h) {
+  // a visit of the page (its open, its close) is an ask (asks.js `apps`):
+  // what answers for an earlier visit changes nothing
+  const { asks } = h;
   // per app: an action in flight ("dock", "card", "archive"), what the
   // last one said (a refusal, or a preview still being taken), and its card
   const busy = new Map();
   const said = new Map();
   const cards = createCards({
     rows: () => h.state.fragments.filter((f) => listed(f) && dockable(f)),
-    visit: () => visit,
+    visit: () => asks.now("apps"),
     shown: () => shown,
     draw: () => render(),
   });
@@ -163,7 +166,6 @@ export function createAppsPage(page, h) {
   let accessed = "";
   let accessRead = 0;
   let operation = 0;
-  let visit = 0;
   let shown = false;
 
   const say = (name, text) => {
@@ -180,7 +182,7 @@ export function createAppsPage(page, h) {
   };
 
   async function loadAddresses(force = false) {
-    const mine = visit;
+    const mine = asks.now("apps");
     const rows = h.state.fragments.filter(listed);
     // The server supplies the actual scheme, suffix and preview mark.
     // Eight at a time, rather than one request per app all at once.
@@ -191,12 +193,12 @@ export function createAppsPage(page, h) {
           h.originOf(f.name).catch(() => null),
           h.api("GET", `/api/f/${seg(f.name)}/address`).catch((error) => ({ error: error.message })),
         ]);
-        if (mine !== visit) return;
+        if (!asks.current(mine)) return;
         if (origin) addresses.set(f.name, info.address?.url ?? origin);
         addressInfo.set(f.name, info);
         addressEditors.delete(f.name);
       }));
-      if (mine !== visit) return;
+      if (!asks.current(mine)) return;
       render();
     }
   }
@@ -212,15 +214,15 @@ export function createAppsPage(page, h) {
   }
   // Each app's reach, eight at a time.
   async function loadReach() {
-    const mine = visit;
+    const mine = asks.now("apps");
     const rows = h.state.fragments.filter((f) => listed(f) && edits(f));
     for (let offset = 0; offset < rows.length; offset += 8) {
       await Promise.all(rows.slice(offset, offset + 8).map(async (f) => {
         const read = await readReach(f);
-        if (mine !== visit) return;
+        if (!asks.current(mine)) return;
         reach.set(f.name, read);
       }));
-      if (mine !== visit) return;
+      if (!asks.current(mine)) return;
       render();
     }
   }
@@ -315,11 +317,11 @@ export function createAppsPage(page, h) {
   }
 
   async function loadAccess() {
-    const mine = visit;
+    const mine = asks.now("apps");
     const request = ++accessRead;
     const fingerprint = sharingOf();
     const next = await h.api("GET", "/api/access").catch((e) => ({ error: e.message }));
-    if (mine !== visit || request !== accessRead) return false;
+    if (!asks.current(mine) || request !== accessRead) return false;
     access = next;
     accessed = fingerprint;
     return true;
@@ -367,9 +369,9 @@ export function createAppsPage(page, h) {
     // given it since the page was read shows
     const f = h.state.fragments.find((x) => x.name === name);
     if (expanded.get(name) === "reach" && f) {
-      const mine = visit;
+      const mine = asks.now("apps");
       readReach(f).then((read) => {
-        if (mine !== visit) return;
+        if (!asks.current(mine)) return;
         reach.set(name, read);
         render();
       });
@@ -734,7 +736,7 @@ export function createAppsPage(page, h) {
   // a shot asked for: waited for by its report (status's `page.at` from
   // when it was wanted on), then its card read again
   async function newPreview(name) {
-    const mine = visit;
+    const mine = asks.now("apps");
     const operation = beginBusy(name, "card");
     say(name, "");
     render();
@@ -742,27 +744,27 @@ export function createAppsPage(page, h) {
     try {
       asked = await h.api("POST", `/api/f/${seg(name)}/card`);
     } catch (e) {
-      if (mine === visit) say(name, e.message);
+      if (asks.current(mine)) say(name, e.message);
       return;
     } finally {
       endBusy(name, operation);
-      if (mine === visit) render();
+      if (asks.current(mine)) render();
     }
-    if (mine !== visit) return;
+    if (!asks.current(mine)) return;
     shots.set(name, { since: asked.since, started: Date.now() });
     render();
     const until = Date.now() + SHOT_WAIT_MS;
     let done = false;
     // bounded: until the report comes, the page closes, or SHOT_WAIT_MS
-    while (shown && mine === visit && Date.now() < until) {
+    while (shown && asks.current(mine) && Date.now() < until) {
       const status = await h.api("GET", `/api/f/${seg(name)}/status`).catch(() => null);
       if (status?.page && status.page.at >= asked.since) { done = true; break; }
       await new Promise((r) => setTimeout(r, 1_000));
     }
-    if (mine !== visit) return;
+    if (!asks.current(mine)) return;
     shots.delete(name);
     await cards.read(name, mine).catch(() => "same");
-    if (mine !== visit) return;
+    if (!asks.current(mine)) return;
     say(name, done ? "" : "The preview is still being taken.");
     render();
   }
@@ -771,7 +773,7 @@ export function createAppsPage(page, h) {
     // shown at `/apps`: the list as it is, who has access, and each card
     async open() {
       shown = true;
-      ++visit;
+      asks.ask("apps");
       // preview presentation is a visit's; a Dock or archive mutation is
       // still the one server write this app may have in flight
       for (const [name, operation] of busy) if (operation.kind === "card") busy.delete(name);
@@ -788,7 +790,7 @@ export function createAppsPage(page, h) {
     },
     close() {
       shown = false;
-      ++visit;
+      asks.ask("apps");
       cards.closed();
       shots.clear();
       for (const editor of iconEditors.values()) editor.dispose();
