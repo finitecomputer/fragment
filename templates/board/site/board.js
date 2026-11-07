@@ -40,12 +40,17 @@ const CLICK_SLOP = 4;
 // A failed load is tried again after this, doubling up to the most.
 const RETRY_MS = 1000;
 const RETRY_MAX_MS = 30_000;
+// The most of a refusal's text the board shows.
+const NOTE_MAX_BYTES = 4096;
 
 const $ = (id) => document.getElementById(id);
 const viewport = $("viewport");
 const world = $("world");
 const camera = { x: 0, y: 0, z: 1 };
 let zFloor = Z_MIN;
+// A frame's file at most, as the manifest says (app.mjs FILE_MAX_BYTES);
+// nothing loads before the manifest has said it.
+let fileMax = 0;
 // id → { frame, el, body, label, note, content, url, next, ticket, tries, retry, problem, natural, order, rect }
 const shown = new Map();
 // whether this person has moved the camera: until then it fits the
@@ -196,22 +201,57 @@ function load(s) {
       if (!moved) fit();
     }
   };
-  fetch(`/frames/${f.id}?r=${f.rev}`, { cache: "no-store" }).then(
-    async (r) => {
+  // the whole of it, the body's bytes included: a connection that drops
+  // after the headers fails here like one that drops before them
+  (async () => {
+    try {
+      const r = await fetch(`/frames/${f.id}?r=${f.rev}`, { cache: "no-store" });
+      if (!current()) return void r.body?.cancel().catch(() => {});
+      if (!r.ok) {
+        // the app's refusals are plain text saying why (app.mjs `said`)
+        const plain = r.headers.get("content-type")?.startsWith("text/plain");
+        const said = plain ? new TextDecoder().decode(await bytesOf(r, NOTE_MAX_BYTES)).trim() : "";
+        return failed(said || `It didn't load (${r.status}).`);
+      }
+      const bytes = await bytesOf(r, fileMax);
       if (!current()) return;
-      // the app's refusals are plain text saying why (app.mjs `said`)
-      if (!r.ok) return failed(r.headers.get("content-type")?.startsWith("text/plain") ? (await r.text()).trim() : `It didn't load (${r.status}).`);
-      const body = f.kind === "html" ? await r.text() : await r.blob();
-      if (!current()) return;
+      const body = f.kind === "html" ? new TextDecoder().decode(bytes) : new Blob([bytes], { type: r.headers.get("content-type") ?? "" });
       const part = made(s, f, body);
       part.el.classList.add("next");
       part.el.addEventListener("load", () => ready(part), { once: true });
       if (f.kind === "image") part.el.addEventListener("error", () => (current() ? (drop(part), failed("This picture didn't load.")) : drop(part)), { once: true });
       s.next = part;
       s.body.append(part.el);
-    },
-    () => failed("The board couldn't reach it."),
-  );
+    } catch (e) {
+      failed(e instanceof TooLarge ? e.message : "The board couldn't reach it.");
+    }
+  })();
+}
+
+// A body read whole, but never past `max` bytes: past it, the read stops
+// there and the load fails saying so, whatever the file's size said.
+class TooLarge extends Error {}
+async function bytesOf(r, max) {
+  const reader = r.body.getReader();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      reader.cancel().catch(() => {});
+      throw new TooLarge(`It is over ${Math.round(max / 1024 / 1024)} MiB, a frame's most.`);
+    }
+    parts.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    bytes.set(part, at);
+    at += part.byteLength;
+  }
+  return bytes;
 }
 
 function make(f, order) {
@@ -307,7 +347,8 @@ function status(text) {
 fragment.live(
   "frames",
   {},
-  ({ frames }) => {
+  ({ frames, file_max_bytes }) => {
+    fileMax = file_max_bytes;
     status(null);
     draw(frames);
   },

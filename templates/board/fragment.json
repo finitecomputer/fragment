@@ -4,7 +4,7 @@
     "frames": {
       "kind": "query",
       "role": "public",
-      "description": "Every frame on the board, in the order each was first put: {frames: [{id, kind, label, file, size, width, height, x, y, rev, at, by, agent}], max}. `kind` is `html` (one page, everything inline, at `width` × `height`) or `image` (`width` null shows it at its own size); either is the one file frames/<id>/<file> at main. `x`/`y` null: the board lays it out. `rev` is the board's count at the frame's last put_frame, never repeated: a new one redraws it. `max` is how many frames a board holds.",
+      "description": "Every frame on the board, in the order each was first put: {frames: [{id, kind, label, file, size, width, height, x, y, rev, at, by, agent}], max, file_max_bytes}. `kind` is `html` (one page, everything inline, at `width` × `height`) or `image` (`width` null shows it at its own size); either is the one file frames/<id>/<file> at main. `x`/`y` null: the board lays it out. `rev` is the board's count at the frame's last put_frame, never repeated: a new one redraws it. `max` is how many frames a board holds, `file_max_bytes` how large a frame's file may be.",
       "input": {
         "type": "object",
         "additionalProperties": false,

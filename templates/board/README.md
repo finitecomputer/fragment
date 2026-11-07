@@ -90,7 +90,7 @@ As tools: `claude mcp add <board> -- fragment mcp <board> --write`.
 
 | Operation | Kind | Who | Answers |
 |---|---|---|---|
-| `frames` | query | whoever may open the board | `{frames: [...], max}`, in the order first put |
+| `frames` | query | whoever may open the board | `{frames: [...], max, file_max_bytes}`, in the order first put |
 | `put_frame` | mutation | editors and up | `{id, rev, created}`; sets the frame whole and redraws it |
 | `remove_frame` | mutation | editors and up | `{removed}`: 1, or 0 when it was gone already |
 

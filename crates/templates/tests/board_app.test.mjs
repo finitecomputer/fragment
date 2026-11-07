@@ -57,8 +57,9 @@ test("a frame at each named size, a custom one and a picture are listed in the o
   ["desktop", "tablet", "mobile"].forEach((size, i) => assert.deepEqual(put(app, { id: `home-${size}`, kind: "html", label: "Home", size }), { id: `home-${size}`, rev: i + 1, created: true }));
   put(app, { id: "wide", kind: "html", label: "Wide", width: 1920 });
   put(app, { id: "shot", kind: "image", label: "Shot", file: "shot.png", width: 1440, x: -10, y: 20 });
-  const { frames, max } = app.frames();
+  const { frames, max, file_max_bytes } = app.frames();
   assert.equal(max, FRAMES_MAX);
+  assert.equal(file_max_bytes, FILE_MAX_BYTES, "the board reads the file limit from here, its one definition");
   assert.deepEqual(frames.map((f) => [f.id, f.size, f.width, f.height, f.file]), [
     ["home-desktop", "desktop", SIZES.desktop.width, SIZES.desktop.height, "index.html"],
     ["home-tablet", "tablet", 768, 1024, "index.html"],

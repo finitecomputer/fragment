@@ -26,7 +26,9 @@ import { DurableObject } from "cloudflare:workers";
 // holds a few dozen before it struggles.
 export const FRAMES_MAX = 48;
 // A frame's file, which every viewer's browser downloads whole each time
-// it changes: a page with its pictures inline fits with room.
+// it changes: a page with its pictures inline fits with room. The route
+// refuses a larger one by its size at main, and the board, told this by
+// `frames`, stops reading any body past it.
 export const FILE_MAX_BYTES = 16 * 1024 * 1024;
 // One frame's row as `frames` answers it, at most: a 80-character label
 // escaped at worst, a 200-character file, the id, two principals and the
@@ -86,7 +88,7 @@ export class App extends DurableObject {
     const frames = this.ctx.storage.sql
       .exec("SELECT id, kind, label, file, size, width, height, x, y, rev, at, by, agent FROM frames ORDER BY seq LIMIT ?", FRAMES_MAX)
       .toArray();
-    return { frames, max: FRAMES_MAX };
+    return { frames, max: FRAMES_MAX, file_max_bytes: FILE_MAX_BYTES };
   }
 
   put_frame(input, call) {
