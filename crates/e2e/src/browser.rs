@@ -1020,7 +1020,7 @@ impl Browser {
             let armed = self.eval(page, &format!("({CLICK_GUARD})(), window.__clickGuard.arm({sel}, {token})"))?;
             let (Some(x), Some(y)) = (armed["at"][0].as_f64(), armed["at"][1].as_f64()) else { bail!("nothing on the page matches {selector}") };
             let missed = match armed["covered"].as_str() {
-                Some(cover) => format!("found {cover} over it, and pressed nothing"),
+                Some(cover) => format!("found {cover}, and pressed nothing"),
                 None => {
                     let pressed = press(self, page, (x, y));
                     let settled = self.eval(page, &format!("window.__clickGuard?.settle({token}) ?? {{ \"replaced\": true }}"));
@@ -1102,7 +1102,8 @@ const CLICK_AIMS: u32 = 3;
 /// first of the window's to hear a press. Dormant until `arm(selector,
 /// token)`, which scrolls the element into view and answers its middle
 /// (`at`), or what is there instead (`covered`: another element, or any
-/// frame, the element's own included; no press is made). The first trusted
+/// frame, the element's own included, or nothing, the element having no
+/// box; no press is made). The first trusted
 /// `pointerdown` decides: inside the element (the same one, or the one
 /// drawn in its place) it is accepted, and the press is the page's, whole;
 /// outside, it and the rest of that press are stopped before any other
@@ -1133,7 +1134,8 @@ const CLICK_GUARD: &str = "() => { if (window.__clickGuard) return; \
     Object.defineProperty(window, '__clickGuard', { value: Object.freeze({ \
       arm(sel, token) { aim = null; const e = document.querySelector(sel); if (!e) return null; \
         e.scrollIntoView({ block: 'nearest' }); const r = e.getBoundingClientRect(); const at = [r.x + r.width / 2, r.y + r.height / 2]; \
-        const hit = document.elementFromPoint(...at); if (!hit || !e.contains(hit) || frames.test(hit.localName)) return { at, covered: named(hit) }; \
+        if (!r.width || !r.height) return { at, covered: 'it with no box (hidden, or not drawn)' }; \
+        const hit = document.elementFromPoint(...at); if (!hit || !e.contains(hit) || frames.test(hit.localName)) return { at, covered: `${named(hit)} over it` }; \
         aim = { sel, token, state: 'armed', missed: null }; return { at }; }, \
       settle(token) { const a = aim; aim = null; if (a?.token !== token) return { replaced: true }; \
         if (a.state === 'reached') return { reached: true }; \

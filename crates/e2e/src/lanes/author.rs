@@ -1328,7 +1328,7 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
 /// and the next aim presses the button where it is now, once; the same
 /// aimed once (`click_strict`), an error and nothing pressed; one covered
 /// for good, by an element or a frame, an error naming its cover, which
-/// hears nothing; a press that fails to dispatch, which leaves no guard
+/// hears nothing; one hidden, an error saying it has no box; a press that fails to dispatch, which leaves no guard
 /// armed to take a later one; a frame drawn over the point between the aim
 /// and the press (the guard's limit: the frame takes that press), a miss
 /// said, never a success; and a document armed, left into the back/forward
@@ -1345,7 +1345,7 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
          const swap = (a, b) => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; [a.style.top, b.style.top, a.style.left, b.style.left] = [b.style.top, a.style.top, b.style.left, a.style.left]; }; \
          put('button', 'still', 20, 20); const moving = put('button', 'moving', 20, 80), other = put('button', 'other', 20, 140); \
          moving.addEventListener('pointermove', () => swap(moving, other)); \
-         put('button', 'covered', 20, 200); put('div', 'cover', 20, 200); put('button', 'off', 20, 260).disabled = true; \
+         put('button', 'covered', 20, 200); put('div', 'cover', 20, 200); put('button', 'off', 20, 260).disabled = true; put('button', 'gone', 20, 380).hidden = true; \
          const away = put('a', 'away', 20, 320); away.href = `${location.pathname}?clicked`; \
          put('button', 'framed', 300, 20); put('iframe', 'frame-cover', 300, 20); \
          const late = put('button', 'framed-late', 300, 80), lateFrame = put('iframe', 'frame-late', 540, 80); \
@@ -1396,6 +1396,14 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
         "one covered for good: the click is an error naming its cover, which heard nothing",
         err(&covered).contains("<div#cover>") && under == json!([]),
         json!({ "click": err(&covered), "heard": under }),
+    );
+
+    let gone = chrome.click(page, "#gone");
+    let unheard = heard(chrome)?;
+    s.ok(
+        "one hidden (no box): the click is an error saying so, and nothing is pressed",
+        err(&gone).contains("it with no box") && unheard == json!([]),
+        json!({ "click": err(&gone), "heard": unheard }),
     );
 
     let framed = chrome.click(page, "#framed");
