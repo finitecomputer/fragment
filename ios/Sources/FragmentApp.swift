@@ -299,6 +299,10 @@ struct FragmentRoot: View {
     }
     private func resetNavigation() {
         ImageCache.shared.removeAll()
+        BlobStore.shared.removeAll()
+        SoundFacts.shared.removeAll()
+        ShownFacts.shared.removeAll()
+        AudioPlayback.shared.stop()
         library = Library(); page = .launcher; sidebar = false; showingApps = false; openedApp = nil
     }
     private func shell(_ api: FragmentAPI) -> some View {
