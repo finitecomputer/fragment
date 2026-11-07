@@ -54,6 +54,14 @@ export function readWithin(read, ms, after = (wait, f) => { const t = setTimeout
   });
 }
 
+// Settings' cards for `roster` (each agent's, by fragment, in its order):
+// the one `kept` for an agent still there, the same card, its reads and
+// its Edit with it; one made (`make`) for an agent come. An agent gone has
+// none (FIN-424: Settings' Agents drawn again as the roster changes).
+export function cardsFor(roster, kept, make) {
+  return new Map(roster.map((a) => [a.fragment, kept.get(a.fragment) ?? make(a)]));
+}
+
 export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
