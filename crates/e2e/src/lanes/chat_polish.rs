@@ -1392,9 +1392,20 @@ pub(super) fn history_cursor(s: &mut Suite, api: &Api, owner: &Keys, session: &s
 
     // messages 1–600, answers 601–700, messages 701–1300, answers 1301–1400, message 1401
     let name = blocks_fixture(s, api, owner, "chat-cursor", &[("m", 600), ("r", 100), ("m", 600), ("r", 100), ("m", 1)])?;
-    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    // the first read of the page above held until `__letAbove()`: one
+    // message on screen leaves the sentinel in view, so the watch reads
+    // that page at once, and the newest page alone shows only while it is
+    // out (run 42415338635: 31 ms, under the 100 ms a wait looks again)
+    let hold_above = "if (window === window.top) { window.__heldAbove = false; let go; const gate = new Promise((r) => { go = r; }); window.__letAbove = () => go(); \
+        const real = window.fetch.bind(window); window.fetch = async (url, o) => { const u = String(url); \
+        if (!window.__heldAbove && u.includes('__channel/chat') && u.includes('before=')) { window.__heldAbove = true; await gate; } return real(url, o); }; }";
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), hold_above)?;
     super::fit(chrome, &page, 1280, 860, false)?;
-    anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 1 && document.getElementById('scroll').dataset.watching === '1'")), "the cursor chat opens on its newest page");
+    anyhow::ensure!(
+        super::shows(chrome, &page, &format!("{count} === 1 && {} && document.getElementById('scroll').dataset.watching === '1' && window.__heldAbove === true", has(1401))),
+        "the cursor chat opens on its newest page"
+    );
+    chrome.eval(&page, "(window.__letAbove(), true)")?;
     let up = walk(chrome, &page, true, &format!("{window} === 'up'"))?;
     chrome.click(&page, "#latest")?;
     // (one message after the reset: the sentinel, in view, reads on at once)
