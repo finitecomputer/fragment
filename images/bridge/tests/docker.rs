@@ -1187,6 +1187,49 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert_eq!(replies, 1, "no duplicate arrives after the completion settles");
 }
 
+/// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
+/// Two background tasks of one group, independent completions on: both
+/// helpers start under the parent's turn; the fast one, finished, shows as
+/// working while its sibling runs, as Hermes stops a group's children only
+/// once it joins (no supported hook says one child of a group finished:
+/// docs/bridge.md); then both end, completed, after the parent's end, and
+/// the group reports.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_groups_helpers_end_together() {
+    let (fake, _model, chat, c) = hermes_running_with_modes(None).await;
+    let parent = asked(&fake, &chat, &c, "delegate the grouped work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let helpers = |w: &support::fake::World| w.bodies(&chat, "work", "turn.child");
+    within(&fake, &chat, &c, 60_000, "both helpers started", |w| helpers(w).iter().filter(|h| h.get("goal").is_some()).count() >= 2).await;
+    let t0 = Instant::now();
+    while !c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-fast-done"]) {
+        assert!(t0.elapsed() < Duration::from_secs(90), "the fast task ran; {}", told(&fake, &chat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // the fast one done, its sibling still running: no end yet
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let early: Vec<serde_json::Value> = fake.with(|w| helpers(w).into_iter().filter(|h| h.get("outcome").is_some()).collect());
+    assert!(!c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-slow-done"]), "the slow task still runs");
+    assert!(early.is_empty(), "a group's helpers end together: {early:?}");
+    within(&fake, &chat, &c, 120_000, "both helpers ended", |w| helpers(w).iter().filter(|h| h.get("outcome").is_some()).count() >= 2).await;
+    let work = fake.with(|w| w.records(&chat, "work"));
+    let bodies: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).collect();
+    let starts: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("goal").is_some()).collect();
+    let ends: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("outcome").is_some()).collect();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert!(starts.iter().all(|b| b["turn"] == parent), "{starts:?}");
+    let mut started: Vec<&str> = starts.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
+    let mut ended: Vec<&str> = ends.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
+    started.sort();
+    ended.sort();
+    assert_eq!(started, ended, "each ends once");
+    assert!(ends.iter().all(|b| b["turn"] == parent && b["outcome"] == "completed"), "{ends:?}");
+    let parent_end = bodies.iter().position(|b| b["kind"] == "turn.end" && b["turn"] == parent).expect("its end");
+    assert!(bodies.iter().enumerate().filter(|(_, b)| b["kind"] == "turn.child" && b.get("outcome").is_some()).all(|(i, _)| i > parent_end));
+    within(&fake, &chat, &c, 60_000, "the group's one report", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("the group reported")))).await;
+    within(&fake, &chat, &c, 10_000, "the hold to end", |w| w.keepalive_open == 0).await;
+}
+
 /// A deployment is platform preflight, not provider silence: real Hermes
 /// waits beyond Fast's two stale windows without falling back or posting a
 /// provider error. The fake refuses before counting a provider dispatch.

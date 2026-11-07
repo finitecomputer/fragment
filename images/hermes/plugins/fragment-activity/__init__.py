@@ -19,6 +19,12 @@ _condition = threading.Condition()
 # each running child's session id, and whether the bridge records it (its
 # start named a person's turn of ours).
 _children = {}
+# Each recorded child's end not yet answered by the bridge, by its session
+# id: said again (on the socket opened again) until answered, so a stop
+# said while the bridge was away is never lost. An end said twice is one
+# (the bridge ends a helper once). Bounded: past `_ENDS_MAX`, the oldest go.
+_ends = {}
+_ENDS_MAX = 256
 _socket = None
 _worker = None
 # The person's turns this gateway runs, by Hermes' turn id: each our turn's
@@ -127,22 +133,42 @@ def child_stopped(*, child_session_id=None, child_status=None, **kwargs):
     # Its `parent_turn_id` is the parent's turn now, never the one that
     # started it: its end names only the child, which the bridge keeps.
     with _condition:
-        recorded = _children.pop(child_session_id, False)
-        frame = {"working": bool(_children)}
-        if recorded:
-            frame.update(child=child_session_id, status=_CHILD_STATUS.get(child_status, "failed"))
-        if recorded or _socket is not None:
-            _send(frame)
+        if _children.pop(child_session_id, False):
+            _ends[child_session_id] = _CHILD_STATUS.get(child_status, "failed")
+            while len(_ends) > _ENDS_MAX:
+                _log.warning("A helper's end was never answered; dropped")
+                del _ends[next(iter(_ends))]
+        if _ends:
+            _say_ends()
+        elif _socket is not None:
+            _send({"working": bool(_children)})
         _condition.notify_all()
+
+
+def _say_ends():
+    """Called under the condition: each end not yet answered, said (with
+    the work still running), until one goes unanswered; the hold worker
+    says the rest again. Whether all were answered."""
+    for child, status in list(_ends.items()):
+        if _send({"working": bool(_children), "child": child, "status": status}) != "working":
+            return False
+        _ends.pop(child, None)
+    return True
 
 
 def _hold():
     global _socket
-    # Bounded by the gateway's life. With no children the worker sleeps;
-    # a disconnected bridge is retried once a second while children run.
+    # Bounded by the gateway's life. With no children and no end to say the
+    # worker sleeps; a disconnected bridge is retried once a second while
+    # children run or an end waits.
     while True:
         with _condition:
-            _condition.wait_for(lambda: bool(_children))
+            _condition.wait_for(lambda: bool(_children) or bool(_ends))
+            if _ends and not _say_ends():
+                _condition.wait(timeout=1)
+                continue
+            if not _children:
+                continue
             if _socket is None:
                 _send({"working": True})
             socket = _socket

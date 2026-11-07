@@ -92,3 +92,44 @@ for status, ours in [("completed", "completed"), ("failed", "failed"), ("interru
     activity.child_stopped(child_session_id="s-" + status, child_status=status)
     assert frames()[-1]["status"] == ours
 assert not activity._children
+# Alex on #1086: the bridge away as a helper stops (its socket dropped, and
+# a new one refused), its end waits and is said once the bridge is back,
+# by the hold worker, whether children still run or it was the last
+import time
+
+refusing = [False]
+
+
+class Away(Socket):
+    def __init__(self, *args, **kwargs):
+        if refusing[0]:
+            raise ConnectionRefusedError("the bridge is away")
+        super().__init__(*args, **kwargs)
+
+
+def said_end(child):
+    return [f for s in sockets for f in s.said if f.get("child") == child and "status" in f]
+
+
+def until(what, cond):
+    deadline = time.monotonic() + 10
+    while not cond():
+        assert time.monotonic() < deadline, what
+        time.sleep(0.05)
+
+
+activity.connect = Away
+activity._turns["hermes-turn-3"] = ["m-3", None]
+activity.child_started(child_session_id="s-a", parent_turn_id="hermes-turn-3", child_goal="a")
+activity.child_started(child_session_id="s-b", parent_turn_id="hermes-turn-3", child_goal="b")
+for child, last in [("s-a", False), ("s-b", True)]:
+    with activity._condition:
+        refusing[0] = True
+        if activity._socket is not None:
+            activity._socket.close()
+        activity.child_stopped(child_session_id=child, child_status="completed")
+        assert said_end(child) == [] and activity._ends == {child: "completed"}, (child, activity._ends)
+        refusing[0] = False
+    until(f"{child}'s end said once the bridge is back", lambda: said_end(child))
+    assert said_end(child) == [{"working": not last, "child": child, "status": "completed"}], said_end(child)
+    until("nothing left to say", lambda: not activity._ends)

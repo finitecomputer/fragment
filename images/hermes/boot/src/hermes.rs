@@ -692,7 +692,8 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     // so their children continue to inherit the parent's route.
     // independent_completions: each background child ends (its
     // subagent_stop, the chat's `turn.child` end) and reports as it
-    // finishes, not when the last of its batch does (Paul, 2026-11-07).
+    // finishes, not when the last of its batch does (Paul, 2026-11-07);
+    // a `group` of tasks the model asks for ends and reports as one.
     y.push_str("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n");
     if let MainModel::Tier(tier) = main {
         if let Some(deep) = route.settings(*tier).and_then(|r| r.deep.as_ref()) {
