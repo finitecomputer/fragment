@@ -188,14 +188,21 @@ fn template_pages(s: &mut Suite, api: &Api, todo: &str, todo_cookie: &str, blank
     Ok(())
 }
 
-/// The Telegram connector's page marks it what it is for its owner, a word
-/// each (Paul, 2026-10-31): experimental, and less secure, as Telegram's
-/// servers read its messages (SimpleX's, in Settings, are end to end).
+/// The Telegram connector's pages (Paul, 2026-11-07: its setup flow in
+/// Settings, its chat just a chat). Its page is the chat template's own,
+/// linked, and starts as a chat, no setup in it. Its setup page, here in a
+/// tab of its own (where Settings' frame can't sign in: Safari's cookie
+/// rule), marks it what it is, a word each (Paul, 2026-10-31: experimental,
+/// and less secure, as Telegram's servers read its messages), asks for the
+/// bot's token, and leads back to Settings. Settings' dialog and the steps
+/// past the token are the computers lane's (`telegram_checks`), where an
+/// agent is.
 fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Result<()> {
     let Some(mut b) = s.browser()? else {
-        s.ok("Chrome is installed for the Telegram connector's page (set CHROME_BIN)", false, "no Chrome found");
+        s.ok("Chrome is installed for the Telegram connector's pages (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
+    let wait = std::time::Duration::from_secs(15);
     let name = s.named(api, owner, "ttelegram")?;
     let r = api.create_with(owner, json!({ "name": name, "template": "telegram" }))?;
     anyhow::ensure!(r.status == 200, "a Telegram connector: {r}");
@@ -203,17 +210,30 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
     let page = b.open(&api.site_url(&name, "__signin?return=/"))?;
     // it starts, every module it imports served (Alex's review: the chat's
     // `control.js`): the chat's page live and its composer open to its
-    // owner, the still-loading line gone, and its setup drawn from its state
-    let started = b.until(
-        &page,
-        "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('text').disabled && !document.getElementById('still-loading') && document.querySelectorAll('.telegram .connector-tag').length === 2",
-        std::time::Duration::from_secs(15),
-    );
-    let tags = b.eval(&page, "[document.querySelector('.telegram-head strong')?.textContent, ...[...document.querySelectorAll('.telegram .connector-tag')].map((t) => [t.textContent, t.title])]")?;
+    // owner, the still-loading line gone, and no setup in it
+    let started = b.until(&page, "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('text').disabled && !document.getElementById('still-loading')", wait);
+    let seen = b.eval(&page, "({ setup: !!document.querySelector('.telegram, .setup, .setup-tag, input[type=password]') })")?;
+    let chat = fragment_templates::blessed::site_file("chat", "site/index.html").map(|f| f.sha256);
+    let telegram = fragment_templates::blessed::site_file("telegram", "site/index.html").map(|f| f.sha256);
     s.ok(
-        "the Telegram connector's page starts, its chat live and its setup drawn, and marks it experimental and less secure (Telegram's servers read it), a word each",
-        started && tags == json!(["Connect Telegram", ["Experimental", ""], ["Less secure", "Telegram's servers can read these messages"]]),
-        &tags,
+        "the Telegram connector's page is the chat's own page, and starts as a chat, no setup in it",
+        started && seen == json!({ "setup": false }) && chat.is_some() && chat == telegram,
+        json!({ "seen": seen, "chat": chat, "telegram": telegram }),
+    );
+    b.close(page)?;
+
+    // its setup page, in a tab of its own
+    let page = b.open(&api.site_url(&name, "__signin?return=/setup.html"))?;
+    let asks = b.until(&page, "document.querySelectorAll('#setup .setup-tag').length === 2 && !!document.querySelector('#setup input[type=password]') && [...document.querySelectorAll('#setup button')].some((x) => x.textContent === 'Connect')", wait);
+    let seen = b.eval(
+        &page,
+        "({ h1: document.querySelector('#setup h1')?.textContent, tags: [...document.querySelectorAll('#setup .setup-tag')].map((t) => [t.textContent, t.title]), framed: document.documentElement.hasAttribute('data-framed'), line: document.querySelector('#setup > p')?.textContent, back: document.querySelector('#setup a.quiet')?.getAttribute('href') ?? null })",
+    )?;
+    s.ok(
+        "its setup page, in a tab of its own, marks it experimental and less secure (Telegram's servers read it), a word each, asks for the bot's token, and leads back to Settings",
+        asks && seen
+            == json!({ "h1": "Telegram", "tags": [["Experimental", ""], ["Less secure", "Telegram's servers can read these messages"]], "framed": false, "line": "Make a bot with @BotFather, then paste its token.", "back": format!("{}/settings", api.base) }),
+        &seen,
     );
     b.close(page)?;
     Ok(())

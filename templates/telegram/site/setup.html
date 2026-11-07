@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Telegram</title>
+  <!-- the Telegram connector's setup (setup.js, README.md): framed in
+       Settings' dialog, on the dialog's own surface (marked before any
+       stylesheet comes, so it never paints a page of its own there), or in
+       a tab of its own; the shell's look (__fragment.css). Every URL here
+       is relative. -->
+  <script>if (window.parent !== window) document.documentElement.dataset.framed = "";</script>
+  <link rel="stylesheet" href="./__fragment.css">
+  <link rel="stylesheet" href="./setup.css">
+</head>
+<body>
+  <main class="setup" id="setup" aria-live="polite"></main>
+  <script type="module">
+    import { setup } from "./setup.js";
+    setup(document.getElementById("setup"));
+  </script>
+</body>
+</html>

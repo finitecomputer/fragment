@@ -1,0 +1,24 @@
+/* The Telegram connector's setup (setup.js): the shell's look from
+   __fragment.css, spaced by proximity (Paul, 2026-11-04): a step's line
+   hugs its controls, and its tags sit apart above them. Framed in
+   Settings' dialog (`data-framed`) it is the dialog's content, on its
+   surface, in its type; in a tab, a narrow column under its heading. */
+:root[data-framed], :root[data-framed] body { background: transparent; }
+.setup { display: flex; flex-direction: column; max-width: 28rem; margin: 0 auto; padding: 3rem 1.25rem; font-size: .875rem; line-height: 1.45; }
+/* room for a control's focus ring, inside the frame */
+:root[data-framed] .setup { max-width: none; margin: 0; padding: 3px; }
+.setup h1 { margin: 0 0 6px; }
+.setup-tags { display: flex; gap: 6px; margin-bottom: 14px; }
+.setup-tag { padding: 0 6px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+.setup p { margin: 0; color: var(--muted); }
+.setup p.setup-now { color: var(--fg); }
+.setup p + p { margin-top: 4px; }
+.setup .setup-error { color: var(--danger); }
+.setup-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 0; }
+.setup-row + p { margin-top: 8px; }
+.setup button, .setup-row a { font-weight: 500; }
+.setup-row input { flex: 1; min-width: 10em; height: 2.25rem; padding-block: 0; }
+@media (pointer: fine) { .setup-row input { font-size: .875rem; } }
+.setup-row a { display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 1rem; border-radius: 999px; text-decoration: none; background: var(--fg); color: var(--bg); }
+/* a quiet action, as the shell's dialogs draw one: its hairline, its surface */
+.setup button.quiet, .setup-row a.quiet { color: var(--fg); background: var(--soft); box-shadow: inset 0 0 0 1px var(--line-strong); }

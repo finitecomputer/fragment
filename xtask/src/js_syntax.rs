@@ -86,6 +86,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/restart-follow.test.mjs",
     "cell/shell-tests/session-archive.test.mjs",
     "cell/shell-tests/session-text.test.mjs",
+    "cell/shell-tests/telegram-settings.test.mjs",
     "cell/shell-tests/threads.test.mjs",
 ];
 
@@ -311,7 +312,7 @@ mod tests {
         // the Worker's restore reads (beside the module it tests), the shell's
         // tests, and the brain app's and the slides' build's and presenter's (beside the
         // templates crate: a file under templates/ would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs"]].concat());
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");

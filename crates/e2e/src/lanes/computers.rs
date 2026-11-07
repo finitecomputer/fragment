@@ -947,8 +947,10 @@ struct Doors<'a> {
 /// as it still shares its owner's other fragments; a delivery without the webhook's secret, a stranger's
 /// message, an update again, a message while the deployment has it off, and
 /// one once its owner unlinked it (from its page) reach no one; and a fork
-/// lets its binding go for good. Answers the replies its agent's pokes made
-/// in the lane's own chat.
+/// lets its binding go for good. Between, Settings' Telegram
+/// (telegram_settings.rs): this connector, set up as its page did before,
+/// a release later; and, once it is no door, another its agent's Set up
+/// makes. Answers the replies its agent's pokes made in the lane's own chat.
 fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
     use fragment_fakes::telegram::{Telegram, BOT_USERNAME};
     const TOKEN: &str = "7001000:e2e-telegram-bot-token";
@@ -1053,6 +1055,11 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         stranger["output"]["ignored"] == "not its owner's" && twice["output"]["ignored"] == "taken already",
         json!({ "stranger": stranger, "twice": twice }),
     );
+    // set up as its page did before its setup moved to Settings: a release
+    // later, it works as it did, and Settings shows it and reconnects it
+    // (FIN-393, telegram_settings.rs)
+    let settings = super::telegram_settings::Connector { owner: c.owner, owner_id: c.owner_id, agent: c.agent, identity: c.identity, tg: &tg, token: TOKEN, wake };
+    super::telegram_settings::after_a_release(s, api, &settings, &name, HOOK)?;
     // its words before a tool call stay in the chat; a reply's file, which a
     // viewer cannot upload, is named in its words
     deliver(Telegram::message(12, PAUL, "Paul", "tool please"), Some(HOOK))?;
@@ -1195,6 +1202,13 @@ export class App extends DurableObject { noop() { return {}; } }
         back && r.status == 403 && r.text.contains("is no connector") && later.status == 403 && later.text.contains("bad inbox secret") && !published && secrets().is_empty(),
         json!({ "bind": r.body, "delivery": later.status, "secrets": secrets() }),
     );
+    // its agent, with no Telegram chat now, set up from Settings (FIN-393):
+    // this chat, no door for good since its fork, deleted first, so its
+    // agent has no Telegram chat at all, and Settings' shots show only what
+    // Set up makes
+    let gone = api.signed(c.owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    anyhow::ensure!(matches!(gone.status, 200 | 204), "the forked connector deleted: {gone}");
+    super::telegram_settings::from_settings(s, api, &settings)?;
     Ok(pokes)
 }
 

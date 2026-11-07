@@ -28,7 +28,8 @@ import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
-import { createConnections, createAgentHomes, createSimplex } from "./connections.js";
+import { createConnections, createAgentHomes, createSimplex, createTelegram } from "./connections.js";
+import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
@@ -371,7 +372,9 @@ addEventListener("message", async (event) => {
   const why = refused ? "cookies" : d.why;
   if (!Object.hasOwn(BLOCKED, why)) return;
   const [title, text, go, target] = BLOCKED[why](titleOf(d.name));
-  const href = why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
+  // in a tab, the page the frame was sent to (a connector's setup page), else its front
+  const page = (minted(frame) && new URL(frame.dataset.src, location.href).searchParams.get("return")) || "/";
+  const href = why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=${encodeURIComponent(page)}`;
   frame.dataset.blocked = why;
   // no chat's page is in it: it holds nothing, and is busy with nothing
   refresh.resetFrame(frame);
@@ -1383,6 +1386,11 @@ const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
   api, el, section, actionLine, named, seg, computer: () => state.computer, getSeat: () => state.seat,
   titleOf, frameOf, show, paneIcon, notice, setHome,
 });
+const { openSetup } = createConnectorSetup({ el, named, frameOf });
+const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
+  api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
+  connectorLabel, markOffer, framed, openSetup, openChat, notice, load,
+});
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.
 function seatIs(seat) {
@@ -1417,6 +1425,10 @@ const TITLE_MAX_CHARS = 48;
 // add a hash to it: continue.js)
 const chatBase = (agent) => `${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`;
 const chatLabel = (agent) => freeLabel(chatBase(agent));
+// A connector's label, its agent's and the door's (`maple-telegram`), free.
+function connectorLabel(agent, door) {
+  return freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - `-${door}-9999`.length).replace(/-+$/, "")}-${door}`);
+}
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
@@ -1735,6 +1747,7 @@ function computerIs(v) {
   renderChats();
   rosterChanged();
   refreshSimplex();
+  refreshTelegram();
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
@@ -1846,7 +1859,7 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readTelegram },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, markOffer,
@@ -1945,6 +1958,7 @@ async function load(changed = false) {
   renderComputer();
   rosterChanged();
   refreshSimplex();
+  refreshTelegram();
   markSeen();
   launcher.agentsRead();
   renderAgentFaces();
