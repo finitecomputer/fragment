@@ -818,6 +818,15 @@ label.settings-line { cursor: pointer; }
 .agent-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 16px; width: 100%; margin: 0; }
 .agent-summary-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .agent-summary dd { font: var(--type-body); margin: 0; overflow-wrap: anywhere; }
+/* a box of one size whatever its reads answer (FIN-424: a card that grew
+   as its agent.json was read moved New agent from under a hand): each
+   label a line, Role and Reaches you in a line each, what agent.json fills
+   (its model, Fast and Deep, Claude's) three, each clipped there; and three
+   or four of them always (agent-settings.js `summaryOf`), so one row at a
+   desktop's width and two on a phone */
+.agent-summary dt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-summary dd { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1; overflow: hidden; height: 1lh; }
+.agent-summary-item[data-from-settings] dd { -webkit-line-clamp: 3; line-clamp: 3; height: 3lh; }
 .agent-summary dd.muted { color: var(--text-tertiary); }
 .agent-dialog { width: min(440px, calc(100vw - 32px)); }
 /* a dialog's fields: one column, each its label above it */

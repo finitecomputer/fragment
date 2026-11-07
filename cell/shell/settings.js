@@ -1,4 +1,3 @@
-import { readRoster } from "./agent-settings.js";
 import { billingSections, returnSaid, returning } from "./billing.js";
 import { dataSection } from "./exports.js";
 import { icon } from "./icons.js";
@@ -49,7 +48,7 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
   const { computerSection, connectionsSection, simplexSection } = sections;
-  const { getComputer, getAgents, faceControls, agentSettings, readSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
+  const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
   // what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
@@ -229,9 +228,6 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: support(), seatIs };
     const back = await returning(billingHelpers);
     if (lost()) return;
-    // each agent's settings too (`readSettings`), begun with these: its
-    // card waits for them (`readRoster`, below)
-    const started = new Map([...getAgents().values()].map((a) => [a.fragment, readSettings(a.fragment)]));
     const reads = await Promise.all([
       read("/api/ledger"),
       read("/api/seat"),
@@ -334,22 +330,36 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     if (standing && standing !== "ok") {
       billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
     }
-    // the agents these settings draw: the roster now, each card drawn once
-    // its agent's settings are read (`readRoster`), so it is drawn as it
-    // stays. Drawn first, a card grew as its read answered (its Model line
-    // one line, then three), moving New agent under a hand on its way to it
-    // (FIN-424). An agent come or gone during the wait is drawn by the next
-    // load, as one come once they are drawn.
-    const mine = [...getAgents().values()];
-    const agentsRead = await readRoster(mine, started, readSettings);
-    if (lost()) return;
     const c = getComputer();
     const computer = computerSection(c);
-    const agents = section("Agents");
+    const agents = section("Agents", ...agentsDrawn(linked));
+    const connections = connectionsSection(linked, uses);
+    const skills = skillsSection();
+    if (lost()) return;
+    drawnAgents = { section: agents, linked, roster: rosterOf() };
+    returnSaid(back);
+    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
+    renderAgentFaces();
+    // a home read that answered while these were built shown now they are in
+    paintHomes();
+    settle();
+    tell();
+  }
+  // Settings' Agents, as drawn (`agentsDrawn`): its section, the connections
+  // its model picks offer, and the roster it drew, so a roster that changes
+  // while settings are shown draws it again in place (`agentsChanged`)
+  let drawnAgents = null;
+  const rosterOf = () => [...getAgents().values()].map((a) => a.fragment).join(" ");
+  // what Settings' Agents holds under its heading: each agent's card (its
+  // summary a box of one size: agent-settings.js `SETTINGS_READ_MS`) and
+  // New agent
+  function agentsDrawn(linked) {
+    const out = [];
+    const mine = [...getAgents().values()];
     // the models a provider the person connected offers (its own credit pays)
     const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
-    if (mine.length && modeled.length) agents.append(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
-    agents.append(...(mine.length ? mine.flatMap((a) => {
+    if (mine.length && modeled.length) out.push(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
+    out.push(...(mine.length ? mine.flatMap((a) => {
       // its profile, where its runtime offers one (agent-runtimes.js)
       const row = markOffer(el("button", "row", "Open"), a.fragment, "profile");
       row.type = "button";
@@ -371,18 +381,23 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
       face.append(name, picture);
       const title = el("span", "settings-agent-title");
       title.append(face, renameIt, pictures);
-      return [agentSettings(a, actionLine(title, actions, skills, row), modeled, agentsRead.get(a.fragment)), said];
+      return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
     }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
-    const connections = connectionsSection(linked, uses);
-    const skills = skillsSection();
-    if (lost()) return;
-    returnSaid(back);
-    renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
+    return out;
+  }
+  // The roster changed (shell.js `load`): settings shown draw their Agents
+  // again, in place under its heading, nothing else read again. An agent
+  // come or gone moves what is under it, as it is a change; a card's own
+  // reads never do.
+  function agentsChanged() {
+    const d = drawnAgents;
+    if (!isOpen() || !d?.section.isConnected) return;
+    const roster = rosterOf();
+    if (roster === d.roster) return;
+    d.roster = roster;
+    d.section.replaceChildren(d.section.querySelector(":scope > h2"), ...agentsDrawn(d.linked));
     renderAgentFaces();
-    // a home read that answered while these were built shown now they are in
     paintHomes();
-    settle();
-    tell();
   }
   // An action's reload of settings, only while they are shown: an answer that
   // comes once the person has gone to a chat leaves them there, and says
@@ -541,5 +556,5 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     s.append(row);
     return s;
   }
-  return { openSettings, reopenSettings, skillsFragment };
+  return { openSettings, reopenSettings, agentsChanged, skillsFragment };
 }

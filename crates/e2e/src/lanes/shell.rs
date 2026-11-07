@@ -8274,21 +8274,28 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     b.click(page, "#settings")?;
-    // one button, New agent, opens its dialog; when it shows, each agent's
-    // card above it has read its settings (`select[data-read]`), so nothing
-    // moves it under the press measured for it (FIN-424: a card that grew
-    // as its read answered took New agent from under that press)
+    // one button, New agent, opens its dialog. It stays where it showed as
+    // each agent's card reads its settings (its Model pick read: Hermes'
+    // `data-model-for`, a Claude agent's `data-claude-model-for`), so the
+    // press measured for it lands on it (FIN-424: a card that grew as its
+    // read answered moved it from under that press)
     let offered = b.until(
         page,
-        "(() => { if (!document.querySelector('#settings-page .agent-add-open') || document.getElementById('new-agent')?.open) return false; \
-          window.__cardsRead ??= [...document.querySelectorAll('#settings-page .agent-setting')].map((c) => !!c.querySelector('select[data-read]')); return true; })()",
+        "(() => { const n = document.querySelector('#settings-page .agent-add-open'); if (!n || document.getElementById('new-agent')?.open) return false; \
+          const r = n.getBoundingClientRect(); window.__newAgentAt ??= [r.x, r.y]; return true; })()",
         wait,
     );
-    let cards_read = b.eval(page, "window.__cardsRead")?;
+    let models_read = b.until(
+        page,
+        "(() => { const cards = [...document.querySelectorAll('#settings-page .agent-setting')]; \
+          return cards.length > 0 && cards.every((c) => !!c.querySelector('select[data-model-for][data-read], select[data-claude-model-for][data-read]')); })()",
+        wait,
+    );
+    let stayed = b.eval(page, "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); return { shown: window.__newAgentAt, read: [r.x, r.y] }; })()")?;
     s.ok(
-        "Settings draw each agent's card as it stays: when New agent shows, every card above it has read its agent's settings",
-        offered && cards_read.as_array().is_some_and(|c| !c.is_empty() && c.iter().all(|r| r == true)),
-        &cards_read,
+        "Settings' agent cards keep their size as their models are read: New agent stays where it showed",
+        offered && models_read && stayed["shown"] == stayed["read"],
+        &stayed,
     );
     b.click(page, "#settings-page .agent-add-open")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
