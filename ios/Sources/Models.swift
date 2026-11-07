@@ -9,6 +9,9 @@ struct FragmentSummary: Codable, Identifiable, Hashable, Sendable {
     var previewAt: Int64?
     var archived: Bool?
     var dock: Bool?
+    /// Their own choice, as archiving is (`PUT …/pinned`): a pinned agent
+    /// heads the sidebar (`Library.sidebarAgents`).
+    var pinned: Bool?
     var role: String?
     var picture: String?
     // A navigation selection in the session archive, never an authentication token.

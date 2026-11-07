@@ -589,6 +589,39 @@ struct ShellTests {
         #expect(plain.agents.map(\.name) == ["moss--a1", "juniper--a2"])
     }
 
+    /// The sidebar's agents, as the web's: the pinned ones first (their
+    /// list's `pinned`), then the rest in their computer's order; the main
+    /// agent, new chats' default, is still the computer's first. Pin to top
+    /// is `PUT …/pinned`, and the list read again draws it.
+    @Test func pinnedAgentsHeadTheSidebar() async throws {
+        let pinned = Mutex(false)
+        let stub = Stub { seen, before in
+            switch seen.route {
+            case "GET /api/computers":
+                return (200, #"{"computers":[{"computer":"c1","phase":"awake","agents":[{"fragment":"moss--a1","identity":"npub1moss"},{"fragment":"juniper--a2","identity":"npub1juniper"},{"fragment":"wren--a3","identity":"npub1wren"}]}],"support":null}"#)
+            case "PUT /api/fragments/wren--a3/pinned":
+                pinned.withLock { $0 = true }
+                return (200, #"{"name":"wren--a3","pinned":true}"#)
+            case "GET /api/fragments":
+                let wren = pinned.withLock { $0 } ? #","pinned":true"# : ""
+                return (200, #"{"fragments":[{"name":"moss--a1","kind":"agent","title":"Moss","role":"owner"},{"name":"juniper--a2","kind":"agent","title":"Juniper","role":"owner","pinned":true},{"name":"wren--a3","kind":"agent","title":"Wren","role":"owner"\#(wren)}]}"#)
+            case "GET /api/f/wren--a3/status": return (200, #"{"npub":"npub1wren","urls":{"canonical":"https://wren--a3.finite.test/"}}"#)
+            default: return Self.platform(seen, before)
+            }
+        }
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        #expect(library.agents.map(\.name) == ["moss--a1", "juniper--a2", "wren--a3"])
+        #expect(library.sidebarAgents.map(\.name) == ["juniper--a2", "moss--a1", "wren--a3"])
+        #expect(library.agent?.name == "moss--a1", "new chats are still with the main agent")
+        await library.pin(try #require(library.agents.last), api: api)
+        let put = try #require(stub.seen.first { $0.route == "PUT /api/fragments/wren--a3/pinned" })
+        #expect(put.json == .object(["pinned": .bool(true)]))
+        #expect(library.error == nil)
+        #expect(library.sidebarAgents.map(\.name) == ["juniper--a2", "wren--a3", "moss--a1"], "pinned ones keep their computer's order among them")
+    }
+
     /// The list read again saying the same tells nothing that draws from
     /// it (a chat's rows, its agents' faces) to draw again.
     @Test func aListReadAgainThatSaysTheSameRedrawsNothing() async throws {

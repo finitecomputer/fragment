@@ -48,6 +48,16 @@ final class Library {
             }
         }.map(\.element)
     }
+    /// The sidebar's agents, as the web's (cell/shell/chat-list.js
+    /// `pinnedAgentsFirst`; Paul, 2026-11-07: ordering them is a sidebar
+    /// matter): the ones they pinned first, then the rest, each in `agents`'
+    /// order. Their main agent stays `agents`' first, wherever it is drawn.
+    var sidebarAgents: [FragmentSummary] {
+        agents.enumerated().sorted { a, b in
+            let pa = a.element.pinned == true, pb = b.element.pinned == true
+            return pa != pb ? pa : a.offset < b.offset
+        }.map(\.element)
+    }
     var agent: FragmentSummary? { agents.first { $0.name == selectedAgent } ?? agents.first }
     func agent(for identity: String) -> FragmentSummary? { agents.first { identities[$0.name] == identity } }
     /// The fragment of the person's list a link is a page of (the web's
@@ -257,6 +267,13 @@ final class Library {
             attempt = min(attempt + 1, 4)
             do { try await Task.sleep(for: .seconds(min(15, 1 << attempt))) } catch { return }
         }
+    }
+    /// Pinned or not, as the person chose (`PUT …/pinned`), then the list again.
+    func pin(_ fragment: FragmentSummary, api: FragmentAPI) async {
+        do {
+            let _: JSONValue = try await api.request("api/fragments/\(fragment.name)/pinned", method: "PUT", body: .object(["pinned": .bool(fragment.pinned != true)]))
+            await load(api)
+        } catch { self.error = error.localizedDescription }
     }
     func archive(_ fragment: FragmentSummary, api: FragmentAPI) async {
         do {
