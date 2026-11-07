@@ -1,3 +1,4 @@
+import { cardsFor } from "./agent-settings.js";
 import { billingSections, returnSaid, returning } from "./billing.js";
 import { dataSection } from "./exports.js";
 import { icon } from "./icons.js";
@@ -332,38 +333,12 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     }
     const c = getComputer();
     const computer = computerSection(c);
-    const agents = section("Agents");
-    const mine = [...getAgents().values()];
-    // the models a provider the person connected offers (its own credit pays)
-    const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
-    if (mine.length && modeled.length) agents.append(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
-    agents.append(...(mine.length ? mine.flatMap((a) => {
-      // its profile, where its runtime offers one (agent-runtimes.js)
-      const row = markOffer(el("button", "row", "Open"), a.fragment, "profile");
-      row.type = "button";
-      row.onclick = () => openApp(a.fragment);
-      // its own skills: its fragment's skills/, in its files, where its
-      // runtime reads them (Paul, 2026-11-04: no copy, no move, and none
-      // of this in the Edit dialog)
-      const skills = markOffer(el("button", "row", "Skills"), a.fragment, "skills");
-      skills.type = "button";
-      skills.dataset.skillsFor = a.fragment;
-      skills.onclick = () => openFiles(a.fragment, "skills/");
-      const name = el("span", "settings-agent-name");
-      name.dataset.agentFace = a.fragment;
-      const [actions, said, renameIt, pictures, picture] = faceControls(a);
-      // its picture's pencil over its picture, and its pencil and Remove
-      // picture beside its name, all outside the name: renderAgentFaces
-      // redraws it (its picture and its title)
-      const face = el("span", "agent-face-edit");
-      face.append(name, picture);
-      const title = el("span", "settings-agent-title");
-      title.append(face, renameIt, pictures);
-      return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
-    }) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
+    const drawn = agentsDrawn(linked);
+    const agents = section("Agents", ...drawn.out);
     const connections = connectionsSection(linked, uses);
     const skills = skillsSection();
     if (lost()) return;
+    drawnAgents = { section: agents, linked, roster: rosterOf(), cards: drawn.cards };
     returnSaid(back);
     renderSettingsPage(page, [account, ...billing, computer, agents, skills, connections, simplexSection(), buildSection(), dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(c)]);
     renderAgentFaces();
@@ -371,6 +346,69 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     paintHomes();
     settle();
     tell();
+  }
+  // Settings' Agents, as drawn (`agentsDrawn`): its section, the connections
+  // its model picks offer, the roster it drew and each agent's card, so a
+  // roster that changes while settings are shown is drawn again in place
+  // (`agentsChanged`)
+  let drawnAgents = null;
+  const rosterOf = () => [...getAgents().values()].map((a) => a.fragment).join(" ");
+  // An agent's card in Settings' Agents (its summary a box of one size:
+  // agent-settings.js `SETTINGS_READ_MS`), and the line its picture and
+  // name say what came of a change on: [card, said].
+  function cardOf(a, modeled) {
+    // its profile, where its runtime offers one (agent-runtimes.js)
+    const row = markOffer(el("button", "row", "Open"), a.fragment, "profile");
+    row.type = "button";
+    row.onclick = () => openApp(a.fragment);
+    // its own skills: its fragment's skills/, in its files, where its
+    // runtime reads them (Paul, 2026-11-04: no copy, no move, and none
+    // of this in the Edit dialog)
+    const skills = markOffer(el("button", "row", "Skills"), a.fragment, "skills");
+    skills.type = "button";
+    skills.dataset.skillsFor = a.fragment;
+    skills.onclick = () => openFiles(a.fragment, "skills/");
+    const name = el("span", "settings-agent-name");
+    name.dataset.agentFace = a.fragment;
+    const [actions, said, renameIt, pictures, picture] = faceControls(a);
+    // its picture's pencil over its picture, and its pencil and Remove
+    // picture beside its name, all outside the name: renderAgentFaces
+    // redraws it (its picture and its title)
+    const face = el("span", "agent-face-edit");
+    face.append(name, picture);
+    const title = el("span", "settings-agent-title");
+    title.append(face, renameIt, pictures);
+    return [agentSettings(a, actionLine(title, actions, skills, row), modeled), said];
+  }
+  // What Settings' Agents holds under its heading (`out`): each agent's
+  // card, the one `kept` for it when there is one (`cardsFor`), and New
+  // agent; and the cards it holds, by agent (`cards`).
+  function agentsDrawn(linked, kept = new Map()) {
+    const mine = [...getAgents().values()];
+    // the models a provider the person connected offers (its own credit pays)
+    const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
+    const cards = cardsFor(mine, kept, (a) => cardOf(a, modeled));
+    const out = [];
+    if (mine.length && modeled.length) out.push(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
+    out.push(...(mine.length ? mine.flatMap((a) => cards.get(a.fragment)) : [el("p", "muted", "None yet.")]), ...(mine.length ? addAgentForm() : []));
+    return { out, cards };
+  }
+  // The roster changed (shell.js `load`): settings shown draw their Agents
+  // again, in place under its heading, nothing else read again. An agent
+  // still there keeps its card, as it is (its reads, its Edit open, a save
+  // on its way); one come has a card of its own, one gone loses its: what
+  // is under them moves, as that is a change, while a card's own reads
+  // never move anything.
+  function agentsChanged() {
+    const d = drawnAgents;
+    if (!isOpen() || !d?.section.isConnected) return;
+    const roster = rosterOf();
+    if (roster === d.roster) return;
+    const drawn = agentsDrawn(d.linked, d.cards);
+    Object.assign(d, { roster, cards: drawn.cards });
+    d.section.replaceChildren(d.section.querySelector(":scope > h2"), ...drawn.out);
+    renderAgentFaces();
+    paintHomes();
   }
   // An action's reload of settings, only while they are shown: an answer that
   // comes once the person has gone to a chat leaves them there, and says
@@ -529,5 +567,5 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     s.append(row);
     return s;
   }
-  return { openSettings, reopenSettings, skillsFragment };
+  return { openSettings, reopenSettings, agentsChanged, skillsFragment };
 }

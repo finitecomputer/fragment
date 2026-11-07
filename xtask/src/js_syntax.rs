@@ -68,6 +68,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/agent-claude.test.mjs",
     "cell/shell-tests/agent-remove.test.mjs",
     "cell/shell-tests/agent-runtimes.test.mjs",
+    "cell/shell-tests/agent-settings-read.test.mjs",
     "cell/shell-tests/apps-cards.test.mjs",
     "cell/shell-tests/apps-page.test.mjs",
     "cell/shell-tests/asked-agent.test.mjs",

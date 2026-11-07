@@ -8273,9 +8273,38 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
+    // each agent's settings read (agent.json) held until New agent shows,
+    // so the cards are drawn reading, however warm the reads
+    b.eval(page, "(() => { const f = window.fetch; window.__settingsReads = []; window.fetch = (u, o) => (String(u).includes('path=agent.json') && !window.__settingsReadsGo) ? new Promise((res) => window.__settingsReads.push(() => res(f(u, o)))) : f(u, o); return true; })()")?;
     b.click(page, "#settings")?;
-    // one button, New agent, opens its dialog
+    // one button, New agent, opens its dialog. It stays where it showed as
+    // each agent's card reads its settings (its Model pick read: Hermes'
+    // `data-model-for`, a Claude agent's `data-claude-model-for`), so the
+    // press measured for it lands on it (FIN-424: a card that grew as its
+    // read answered moved it from under that press)
     let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
+    let shown = b.eval(
+        page,
+        "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); \
+          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsReads.length }; })()",
+    )?;
+    b.eval(page, "(window.__settingsReadsGo = true, window.__settingsReads.forEach((r) => r()), true)")?;
+    let models_read = b.until(
+        page,
+        "(() => { const cards = [...document.querySelectorAll('#settings-page .agent-setting')]; \
+          return cards.length > 0 && cards.every((c) => !!c.querySelector('select[data-model-for][data-read], select[data-claude-model-for][data-read]')); })()",
+        wait,
+    );
+    let read = b.eval(page, "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); return [r.x, r.y]; })()")?;
+    s.ok(
+        "Settings' agent cards keep their size as their models are read: drawn reading, New agent stays where it showed",
+        offered
+            && shown["held"].as_u64().is_some_and(|n| n > 0)
+            && shown["reading"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|t| t == "Reading…"))
+            && models_read
+            && shown["at"] == read,
+        json!({ "shown": shown, "read": read }),
+    );
     b.click(page, "#settings-page .agent-add-open")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
@@ -8284,7 +8313,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.eval(page, &fill("#new-agent .agent-add-name", "Wren"))?;
     b.eval(page, &fill("#new-agent .agent-add-role", "editor"))?;
     let _ = b.screenshot(page, &shots.join("settings-add-agent.png"));
-    b.eval(page, "(document.querySelector('#new-agent .agent-add').requestSubmit(), true)")?;
+    // its dialog not open, nothing is asked: the check below says so
+    b.eval(page, "(document.querySelector('#new-agent .agent-add')?.requestSubmit(), true)")?;
     let mut chat = String::new();
     let made = s.eventually(wait, || own_named(api, session, "wren-chat").map(|c| chat = c).is_ok());
     let opened = made && b.until(page, &format!("!document.getElementById('new-agent')?.open && location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
@@ -8342,12 +8372,48 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     let offered = b.until(page, &format!("!!{ask}"), wait);
     // every agent's row but the main one's offers it
     let rows = b.eval(page, "[document.querySelectorAll('#settings-page .agent-setting').length, document.querySelectorAll('#settings-page [data-remove-agent]').length]")?;
-    b.eval(page, &format!("({ask}.scrollIntoView({{ block: 'center' }}), {ask}.click(), true)"))?;
+    // here, the main agent's Edit open, a change of its model on its way
+    // (its write held), while another tab removes Wren (FIN-424, #1090):
+    // its card is the one it was, and its summary and its Edit say the change
+    let lead = b.eval(page, "document.querySelector('#settings-page [data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
+    let pick = format!("document.querySelector({})", js(&format!("[data-model-for={}]", js(&lead))));
+    let card = format!("document.querySelector({})", js(&format!("#settings-page .agent-setting[data-agent={}]", js(&lead))));
+    b.until(page, &format!("{pick}?.dataset.read === '1'"), wait);
+    let choice = b.eval(page, &format!("(() => {{ const o = [...{pick}.options].find((o) => o.value !== {pick}.value); return o ? {{ was: {pick}.value, value: o.value, text: o.textContent }} : null; }})()"))?;
+    let (was, value, text) = (choice["was"].as_str().unwrap_or("").to_string(), choice["value"].as_str().unwrap_or("").to_string(), choice["text"].as_str().unwrap_or("").to_string());
+    let files = format!("/api/f/{lead}/files");
+    b.eval(page, &format!("(() => {{ const f = window.fetch; window.__writes = []; window.fetch = (u, o) => (String(u).endsWith({files:?}) && !window.__writing) ? new Promise((res) => window.__writes.push(() => res(f(u, o)))) : f(u, o); {card}.__kept = true; return true; }})()"))?;
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(&format!("[data-edit-agent={}]", js(&lead)))))?;
+    let editing = b.until(page, "document.getElementById('edit-agent')?.open === true", wait);
+    b.eval(page, &format!("(() => {{ {pick}.value = {value:?}; {pick}.dispatchEvent(new Event('change')); return true; }})()"))?;
+    let held = b.until(page, "window.__writes.length === 1", wait);
+    let other = b.open(&format!("{}/settings", api.base))?;
+    b.until(&other, &format!("!!{ask}"), wait);
+    b.eval(&other, &format!("({ask}.scrollIntoView({{ block: 'center' }}), {ask}.click(), true)"))?;
     let sure = format!("document.querySelector({})", js(&format!("[data-remove-agent-sure={}]", js(&agent))));
-    let asked = b.until(page, &format!("{sure}?.textContent === 'Remove Wren' && {sure}.parentElement.innerText.includes('Its chats go to History. Its routines stop.')"), wait);
-    let _ = b.screenshot(page, &shots.join("desktop-remove-agent-ask.png"));
-    b.eval(page, &format!("({sure}.click(), true)"))?;
+    let asked = b.until(&other, &format!("{sure}?.textContent === 'Remove Wren' && {sure}.parentElement.innerText.includes('Its chats go to History. Its routines stop.')"), wait);
+    let _ = b.screenshot(&other, &shots.join("desktop-remove-agent-ask.png"));
+    b.eval(&other, &format!("({sure}.click(), true)"))?;
     let gone_row = b.until(page, &format!("!document.querySelector({})", js(&format!(".agent-setting[data-agent={}]", js(&agent)))), wait);
+    b.close(other)?;
+    // Wren's card gone here: the main agent's save lands, its dialog closed
+    b.eval(page, "(window.__writing = true, window.__writes.forEach((w) => w()), true)")?;
+    let saved = b.until(page, &format!("{pick}?.dataset.saved === {value:?}"), wait);
+    b.eval(page, "(document.getElementById('edit-agent').close(), true)")?;
+    let home_pick = js(&format!(".agent-edit-home [data-model-for={}]", js(&lead)));
+    let after_save = b.eval(page, &format!("({{ kept: {card}?.__kept === true, summary: {card}?.querySelector('.agent-summary')?.textContent ?? null, home: !!{card}?.querySelector({home_pick}) }})"))?;
+    // opened again: its pick says the change
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(&format!("[data-edit-agent={}]", js(&lead)))))?;
+    let reopened = b.until(page, &format!("document.getElementById('edit-agent')?.open === true && {pick}?.value === {value:?}"), wait);
+    s.ok(
+        "a roster changed in another tab while an agent is edited, its save on its way: its card is the one it was, and its summary and its Edit opened again say what was saved",
+        editing && held && gone_row && saved && after_save["kept"] == true && after_save["home"] == true && after_save["summary"].as_str().is_some_and(|t| t.contains(&text)) && reopened,
+        json!({ "choice": choice, "after": after_save, "reopened": reopened }),
+    );
+    // and back to the model it had
+    b.eval(page, &format!("(() => {{ {pick}.value = {was:?}; {pick}.dispatchEvent(new Event('change')); return true; }})()"))?;
+    b.until(page, &format!("{pick}?.dataset.saved === {was:?}"), wait);
+    b.eval(page, "(document.getElementById('edit-agent').close(), true)")?;
     let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
     // off its computer a moment after its list (agent-settings.js `liveOwn`)
     let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().and_then(|r| r.body["computers"][0]["agents"].as_array().map(Vec::len)).unwrap_or(0);

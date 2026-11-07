@@ -37,6 +37,31 @@ export function claudeSet(next, field, value) {
 const ROLE_MAX_CHARS = 48;
 const AGENTS_MAX = 16;
 
+// How long an agent's card waits for its settings (its agent.json) before
+// saying they could not be read. The card is drawn at once, its summary a
+// box of one size (shell.css, `.agent-summary`), so neither a read that
+// answers nor one that does not moves anything or holds anything else up
+// (FIN-424).
+export const SETTINGS_READ_MS = 10_000;
+// `read(signal)`'s answer, or null once `ms` pass first, its request
+// aborted; null too for a read that fails. `after(ms, f)` arms the
+// deadline and answers what disarms it: a timer, or a test's own.
+export function readWithin(read, ms, after = (wait, f) => { const t = setTimeout(f, wait); return () => clearTimeout(t); }) {
+  const stop = new AbortController();
+  return new Promise((resolve) => {
+    const disarm = after(ms, () => { stop.abort(); resolve(null); });
+    read(stop.signal).then((v) => { disarm(); resolve(v); }, () => { disarm(); resolve(null); });
+  });
+}
+
+// Settings' cards for `roster` (each agent's, by fragment, in its order):
+// the one `kept` for an agent still there, the same card, its reads and
+// its Edit with it; one made (`make`) for an agent come. An agent gone has
+// none (FIN-424: Settings' Agents drawn again as the roster changes).
+export function cardsFor(roster, kept, make) {
+  return new Map(roster.map((a) => [a.fragment, kept.get(a.fragment) ?? make(a)]));
+}
+
 export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and
@@ -235,7 +260,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
   // written only onto agent.json as it is now, read just before (none there,
   // 404, is nothing to keep): a read that fails otherwise writes nothing and
   // says so, so no other setting of the agent (its tier, its model) is lost.
-  const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
+  const agentJson = (agent, signal) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`, undefined, undefined, signal);
   const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
   // One write of an agent's agent.json at a time, each on what the one before
   // wrote: `change` sets its pick on what agent.json holds now (its tier
@@ -510,13 +535,19 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     return editing;
   }
   // what an agent's fields hold, as text: each shown field's label and its
-  // value (a pick's option, both of a mode's picks), none said so
-  function summaryOf(fields) {
-    return [...fields.querySelectorAll(":scope > .agent-model-label")].filter((l) => !l.hidden && l.dataset.summary !== "skip").map((l) => {
+  // value (a pick's option, both of a mode's picks), none said so. A row
+  // its agent.json fills (`data-from-settings`) says `unread` while that is
+  // not read (reading, or it could not be); a row `data-summary="always"`
+  // is said even with nothing to pick in it.
+  function summaryOf(fields, unread) {
+    return [...fields.querySelectorAll(":scope > .agent-model-label")].filter((l) => (!l.hidden || l.dataset.summary === "always") && l.dataset.summary !== "skip").map((l) => {
       const shown = [...l.querySelectorAll("input, select")].filter((c) => !c.hidden);
       const value = shown.map((c) => (c.tagName === "SELECT" ? c.selectedOptions[0]?.textContent ?? "" : c.value.trim())).filter(Boolean).join(" · ");
       const item = el("div", "agent-summary-item");
-      item.append(el("dt", "settings-key", l.querySelector(".settings-key")?.textContent ?? ""), el("dd", value ? null : "muted", value || "None"));
+      const fromSettings = "fromSettings" in l.dataset;
+      if (fromSettings) item.dataset.fromSettings = "";
+      const said = fromSettings && unread ? unread : value;
+      item.append(el("dt", "settings-key", l.querySelector(".settings-key")?.textContent ?? ""), el("dd", said && said !== unread ? null : "muted", said || "None"));
       return item;
     });
   }
@@ -524,9 +555,14 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     const box = el("div", "agent-setting");
     box.dataset.agent = a.fragment;
     const said = el("span", "muted agent-model-said");
-    // what the picks show: agent.json, none (404: the defaults), or unread (null)
-    const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
-    read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
+    // what the picks show: agent.json, none (404: the defaults), or unread
+    // (null: its read failed, or did not answer within SETTINGS_READ_MS)
+    const read = readWithin((signal) => agentJson(a.fragment, signal).catch((e) => (e.status === 404 ? {} : Promise.reject(e))), SETTINGS_READ_MS);
+    let unread = "Reading…";
+    read.then((j) => {
+      unread = j === null ? "Couldn't read" : null;
+      if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them.";
+    });
     const write = (change) => writeAgentJson(a.fragment, change);
     // the model pick: when there may be a choice, a route the deployment
     // names (Private, Standard) or a model of a provider the person
@@ -541,7 +577,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
     home.append(fields, said);
     const summary = el("dl", "agent-summary");
     summary.dataset.summaryFor = a.fragment;
-    const summarize = () => summary.replaceChildren(...summaryOf(fields));
+    const summarize = () => summary.replaceChildren(...summaryOf(fields, unread));
     // drawn again as its fields fill (their reads answer), change, or show
     new MutationObserver(summarize).observe(fields, { subtree: true, childList: true, attributes: true, attributeFilter: ["hidden"] });
     fields.addEventListener("change", summarize);
@@ -667,6 +703,10 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       return line;
     };
     const fastRow = row("Model", fast, fastEffort), deepRow = row("Deep", deep, deepEffort);
+    // filled by its agent.json, and said in its summary from the first
+    // (`summaryOf`), as its model, whether or not there is one to pick
+    fastRow.dataset.fromSettings = deepRow.dataset.fromSettings = "";
+    fastRow.dataset.summary = "always";
     deepRow.classList.add("has-modes");
     deepRow.hidden = fastEffort.hidden = true;
     const controls = [fast, deep, fastEffort, deepEffort];
@@ -689,6 +729,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       // a Claude agent's model is Claude Code's (`claudePickers`)
       if (j?.runtime === "claude") {
         fastRow.hidden = deepRow.hidden = true;
+        delete fastRow.dataset.summary;
         return;
       }
       const modes = ownModes(j);
@@ -760,6 +801,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       pick.disabled = true;
       const row = settingLabel(key, pick);
       row.hidden = true;
+      row.dataset.fromSettings = "";
       // what agent.json holds, one it names that is none of these shown as it is
       const show = (j) => {
         const value = claudeSettings(j)[field] ?? "";

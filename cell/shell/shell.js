@@ -103,8 +103,9 @@ const UPDATING = "Updating — back in a moment";
 // this page's writes still going: a reload for a new release waits for them
 let writing = 0;
 // `body`: JSON, or bytes as they are (a File or Blob, an ArrayBuffer or a
-// typed array: an upload), sent as `type`, else as a Blob's own type
-async function api(method, path, body, type) {
+// typed array: an upload), sent as `type`, else as a Blob's own type;
+// `signal`: what may abort it (a read with a deadline)
+async function api(method, path, body, type, signal) {
   const headers = { "x-fragment-shell": "1" };
   const bytes = body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body);
   const kind = bytes ? type || body.type : body !== undefined && "application/json";
@@ -112,7 +113,7 @@ async function api(method, path, body, type) {
   const writes = method !== "GET";
   if (writes) writing++;
   try {
-    const r = await fetch(path, { method, headers, body: body === undefined || bytes ? body : JSON.stringify(body), credentials: "same-origin" });
+    const r = await fetch(path, { method, headers, body: body === undefined || bytes ? body : JSON.stringify(body), credentials: "same-origin", signal });
     heard(r);
     const out = await r.json().catch(() => ({}));
     if (r.status === 503 && out.error === "deploying") {
@@ -1853,6 +1854,7 @@ const settings = createSettings({
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
+function settingsAgentsChanged() { settings.agentsChanged(); }
 function skillsFragment() { return settings.skillsFragment(); }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
@@ -1944,6 +1946,8 @@ async function load(changed = false) {
   renderHeading();
   renderComputer();
   rosterChanged();
+  // Settings shown: their Agents drawn again in place, an agent come or gone
+  settingsAgentsChanged();
   refreshSimplex();
   markSeen();
   launcher.agentsRead();
