@@ -1313,25 +1313,27 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      its page made {calls} HTTP calls to the query");
     s.ok("and asked the query over HTTP once, before its socket opened: every re-run went over the socket", calls == 1, format!("{calls} HTTP calls to list"));
     deploying_call(s, api, &mut chrome)?;
-    click_aims(s, &mut chrome, &v)?;
+    click_aims(s, &mut chrome, &v, &api.base)?;
     super::posts::browser(s, api, &mut chrome)
 }
 
 /// The harness's `click` (browser.rs `CLICK_GUARD`) reaches the element it
-/// aims at, or nothing. A listener the page put on its window before the
-/// click hears only the press that reaches it. Valid: a still button,
-/// pressed once; a frame aimed at, its press the frame's; a disabled
-/// button, pressed and never clicked, as a hand's; a link that takes the
-/// page to another document. Invalid: one the page moves under the mouse
-/// between the aim and the press (two buttons swap places as the pointer
-/// comes, as a list drawn again moves its rows): the press on the other is
-/// stopped before the page hears it, and the next aim presses the button
-/// where it is now, once; the same aimed once (`click_strict`), an error
-/// and nothing pressed; one covered for good, by an element or a frame, an
-/// error naming its cover, which hears nothing; a frame drawn over the
-/// point meanwhile, which hears nothing of the press; and a press that
-/// fails to dispatch, which leaves no guard armed to take a later one.
-fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+/// aims at, or nothing of its page. A listener the page put on its window
+/// before the click hears only the press that reaches it. Valid: a still
+/// button, pressed once; a disabled button, pressed and never clicked, as a
+/// hand's; a link that takes the page to another document. Invalid: one
+/// the page moves under the mouse between the aim and the press (two
+/// buttons swap places as the pointer comes, as a list drawn again moves
+/// its rows): the press on the other is stopped before the page hears it,
+/// and the next aim presses the button where it is now, once; the same
+/// aimed once (`click_strict`), an error and nothing pressed; one covered
+/// for good, by an element or a frame, an error naming its cover, which
+/// hears nothing; a press that fails to dispatch, which leaves no guard
+/// armed to take a later one; a frame drawn over the point between the aim
+/// and the press (the guard's limit: the frame takes that press), a miss
+/// said, never a success; and a document armed, left into the back/forward
+/// cache and come back to, which holds no aim.
+fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate::browser::Page, base: &str) -> Result<()> {
     chrome.eval(
         page,
         "(() => { window.__heard = []; const heard = (what) => window.__heard.push(what); const box = document.createElement('div'); box.id = 'aims'; \
@@ -1347,7 +1349,7 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
          const away = put('a', 'away', 20, 320); away.href = `${location.pathname}?clicked`; \
          put('button', 'framed', 300, 20); put('iframe', 'frame-cover', 300, 20); \
          const late = put('button', 'framed-late', 300, 80), lateFrame = put('iframe', 'frame-late', 540, 80); \
-         late.addEventListener('pointermove', () => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; lateFrame.style.left = '300px'; }); put('iframe', 'frame-target', 300, 140); \
+         late.addEventListener('pointermove', () => { if (box.dataset.swap !== 'armed') return; box.dataset.swap = 'done'; lateFrame.style.left = '300px'; }); \
          addEventListener('pointerdown', (ev) => { if (ev.isTrusted) heard(`window ${ev.target.id}`); }, true); return true; })()",
     )?;
     let heard = |chrome: &mut crate::browser::Browser| -> Result<Value> { chrome.eval(page, "(() => { const h = window.__heard; window.__heard = []; return h; })()") };
@@ -1405,17 +1407,13 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
     );
 
     arm(chrome)?;
-    chrome.click(page, "#framed-late")?;
-    let late = heard(chrome)?;
+    let late = chrome.click(page, "#framed-late");
+    let took = heard(chrome)?;
     s.ok(
-        "a frame drawn over the point between the aim and the press hears none of it: the press is the button's",
-        late == json!(["window framed-late", "pointerdown framed-late", "click framed-late"]),
-        &late,
+        "a frame drawn over the point between the aim and the press takes that press (the guard's limit), which the click says is a miss, never a success: the button heard nothing, and the next aims find the frame over it",
+        err(&late).contains("pressed nothing on this page") && err(&late).contains("<iframe#frame-late>") && took == json!(["frame frame-late"]),
+        json!({ "click": err(&late), "heard": took }),
     );
-
-    chrome.click(page, "#frame-target")?;
-    let into = heard(chrome)?;
-    s.ok("a frame aimed at: its press is the frame's, which this page never hears", into == json!(["frame frame-target"]), &into);
 
     let off = chrome.click(page, "#off");
     let pressed = heard(chrome)?;
@@ -1429,6 +1427,24 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
     chrome.click(page, "#away")?;
     let landed = chrome.until(page, "location.search === '?clicked' && document.readyState === 'complete' && !document.getElementById('aims')", Duration::from_secs(15));
     s.ok("a link that takes the page to another document: the click is done, the page there", landed, json!({ "from": path }));
+
+    // armed, then left by its own link for another document and come back
+    // to from the back/forward cache (a page of the platform's with no
+    // socket, so it may be cached): the outgoing document dropped its aim
+    // (`pagehide`)
+    let legal = chrome.open(&format!("{base}/about"))?;
+    let armed = chrome.eval(&legal, "(addEventListener('pageshow', (e) => { window.__restored = e.persisted; }), window.__clickGuard.arm('body', 1), window.__clickGuard.armed())")?;
+    chrome.click(&legal, "a[href='/terms']")?;
+    let left = chrome.until(&legal, "location.pathname === '/terms' && document.readyState === 'complete'", Duration::from_secs(15));
+    chrome.back(&legal)?;
+    let back = chrome.until(&legal, "location.pathname === '/about' && document.readyState === 'complete' && window.__restored !== undefined", Duration::from_secs(15));
+    let came = chrome.eval(&legal, "({ restored: window.__restored ?? null, armed: window.__clickGuard.armed() })")?;
+    s.ok(
+        "a document armed, left, and come back to from the back/forward cache holds no aim",
+        armed == true && left && back && came == json!({ "restored": true, "armed": false }),
+        json!({ "armed": armed, "left": left, "back": back, "came": came }),
+    );
+    chrome.close(legal)?;
     Ok(())
 }
 
