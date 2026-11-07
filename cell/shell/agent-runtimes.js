@@ -5,13 +5,14 @@
 // agent's profile (its own page), its screen (its computer's desktop) and
 // its own skills (its fragment's skills/, which Hermes installs); Claude
 // Code, none of them (Paul, 2026-11-02: "different harness, different
-// capabilities"). An agent's runtime is its agent.json's `runtime` (none:
+// capabilities"); and a hosted door (`doors`: Settings' Telegram), Hermes
+// alone for now (FIN-393). An agent's runtime is its agent.json's `runtime` (none:
 // Hermes), as Settings reads it (agent-settings.js `agentJson`), chosen at
 // its making and never changed: read once a page. Until it is read, or when
 // its read fails, an agent is offered what it was before; a runtime this
 // shell does not know is offered nothing beyond its chats.
 
-export const RUNTIME_OFFERS = { hermes: ["profile", "screen", "skills"], claude: [] };
+export const RUNTIME_OFFERS = { hermes: ["profile", "screen", "skills", "doors"], claude: [] };
 
 export function createRuntimes({ agentJson, agents, own, byName }) {
   const runtimes = new Map();
@@ -50,11 +51,16 @@ export function createRuntimes({ agentJson, agents, own, byName }) {
     return node;
   }
   // Each drawn control as its agent's runtime says; a line of them alone
-  // (`data-offers`: Settings' Screens) with none shown goes too.
+  // (`data-offers`: Settings' Screens, its Telegram) with none shown goes
+  // too, and a section's link in Settings' nav with it.
   function renderOffers() {
     if (typeof document === "undefined") return;
     for (const node of document.querySelectorAll("[data-offer]")) node.hidden = !offers(node.dataset.offerFor, node.dataset.offer);
-    for (const line of document.querySelectorAll("[data-offers]")) line.hidden = ![...line.querySelectorAll("[data-offer]")].some((n) => !n.hidden);
+    for (const line of document.querySelectorAll("[data-offers]")) {
+      line.hidden = ![...line.querySelectorAll("[data-offer]")].some((n) => !n.hidden);
+      const jump = line.id ? document.querySelector(`.settings-nav-link[data-section="${line.id}"]`) : null;
+      if (jump) jump.hidden = line.hidden;
+    }
   }
   return { loadRuntimes, offers, markOffer, renderOffers };
 }

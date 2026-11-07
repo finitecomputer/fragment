@@ -28,21 +28,22 @@ function world() {
   });
   return { runtimes, asked };
 }
-const offered = (r, agent) => ["profile", "screen", "skills"].filter((what) => r.offers(agent, what));
+const ALL = ["profile", "screen", "skills", "doors"];
+const offered = (r, agent) => ALL.filter((what) => r.offers(agent, what));
 
-test("a Claude agent offers neither its profile nor its screen; a Hermes one both; none named is Hermes", async () => {
+test("a Claude agent offers neither its profile, its screen nor a door; a Hermes one all; none named is Hermes", async () => {
   const { runtimes } = world();
   await runtimes.loadRuntimes();
   assert.deepEqual(offered(runtimes, "clio--a1b2"), []);
-  assert.deepEqual(offered(runtimes, "juniper--c3d4"), ["profile", "screen", "skills"]);
-  assert.deepEqual(offered(runtimes, "rook--j9k2"), ["profile", "screen", "skills"], "no agent.json (404): Hermes");
+  assert.deepEqual(offered(runtimes, "juniper--c3d4"), ALL);
+  assert.deepEqual(offered(runtimes, "rook--j9k2"), ALL, "no agent.json (404): Hermes");
 });
 
 test("unread, or its read failed, an agent is offered what it was before; a runtime not known here, nothing", async () => {
   const { runtimes } = world();
-  assert.deepEqual(offered(runtimes, "clio--a1b2"), ["profile", "screen", "skills"], "not read yet");
+  assert.deepEqual(offered(runtimes, "clio--a1b2"), ALL, "not read yet");
   await runtimes.loadRuntimes();
-  assert.deepEqual(offered(runtimes, "wren--e5f6"), ["profile", "screen", "skills"], "its read failed");
+  assert.deepEqual(offered(runtimes, "wren--e5f6"), ALL, "its read failed");
   assert.deepEqual(offered(runtimes, "quill--g7h8"), [], "a runtime this shell does not know");
 });
 
@@ -73,6 +74,29 @@ test("a control drawn before its agent's runtime is read is hidden once it is, a
   assert.deepEqual([clioOpen.hidden, clioScreen.hidden, juniperScreen.hidden, screens.hidden], [true, true, false, true]);
 });
 
-test("Claude Code offers nothing beyond its chats; Hermes its profile, its screen and its own skills", () => {
-  assert.deepEqual(RUNTIME_OFFERS, { hermes: ["profile", "screen", "skills"], claude: [] });
+test("a section of them (Settings' Telegram) with none shown goes, and its link in Settings' nav with it", async () => {
+  const { runtimes } = world();
+  const node = () => ({ dataset: {}, hidden: false });
+  const clio = runtimes.markOffer(node(), "clio--a1b2", "doors");
+  const juniper = runtimes.markOffer(node(), "juniper--c3d4", "doors");
+  const only = (rows, id) => ({ id, dataset: { offers: "" }, hidden: false, querySelectorAll: () => rows });
+  const claudes = only([clio], "settings-telegram");
+  const both = only([clio, juniper], "settings-both");
+  const links = { "settings-telegram": { hidden: false }, "settings-both": { hidden: false } };
+  globalThis.document = {
+    querySelectorAll: (sel) => (sel === "[data-offer]" ? [clio, juniper] : [claudes, both]),
+    querySelector: (sel) => links[sel.match(/data-section="([^"]+)"/)?.[1]] ?? null,
+  };
+  try {
+    await runtimes.loadRuntimes();
+  } finally {
+    delete globalThis.document;
+  }
+  assert.deepEqual([clio.hidden, juniper.hidden], [true, false]);
+  assert.deepEqual([claudes.hidden, links["settings-telegram"].hidden], [true, true], "a Claude agent's alone: the section and its link go");
+  assert.deepEqual([both.hidden, links["settings-both"].hidden], [false, false], "a Hermes agent's shown: both stay");
+});
+
+test("Claude Code offers nothing beyond its chats; Hermes its profile, its screen, its own skills and a hosted door", () => {
+  assert.deepEqual(RUNTIME_OFFERS, { hermes: ["profile", "screen", "skills", "doors"], claude: [] });
 });

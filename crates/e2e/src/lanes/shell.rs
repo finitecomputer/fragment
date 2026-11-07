@@ -2674,7 +2674,22 @@ fn settings_navigation_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result
             if mobile {
                 b.eval(page, &format!("(document.querySelector({link:?})?.click(), true)"))?;
             } else {
-                b.click(page, &link)?;
+                // its link into view, and the page's answer to that settled,
+                // before the pointer goes where the link is then: scrolling a
+                // link of a sticky nav into view nudges the page, and the
+                // section that nudge shows is revealed in a row of links,
+                // which can move this one out from under the pointer
+                let mut at = Value::Null;
+                for _ in 0..4 {
+                    at = b.eval(
+                        page,
+                        &format!("new Promise((r) => {{ const l = document.querySelector({link:?}); l?.scrollIntoView({{ block: 'nearest' }}); requestAnimationFrame(() => requestAnimationFrame(() => {{ const b = l?.getBoundingClientRect(); const n = l?.parentElement.getBoundingClientRect(); r(b && b.left >= n.left - 1 && b.right <= n.right + 1 ? [b.x + b.width / 2, b.y + b.height / 2] : null); }})); }})"),
+                    )?;
+                    if !at.is_null() {
+                        break;
+                    }
+                }
+                b.click_at(page, (at[0].as_f64().unwrap_or(0.0), at[1].as_f64().unwrap_or(0.0)))?;
             }
             let selected = b.until(
                 page,
