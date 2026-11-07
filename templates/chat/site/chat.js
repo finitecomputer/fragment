@@ -2085,9 +2085,8 @@ export function mount(root) {
   let latestSeq = 0;
   let newMessages = 0;
   // The reader's item and where it was, as last scrolled or drawn: an item
-  // above it drawn at its own height (one skipped off screen is laid out at
-  // an estimate, chat.css) moves it back, as a browser's scroll anchoring
-  // would; Safari has none.
+  // above it that grows (a picture that loaded) moves it back, as a
+  // browser's scroll anchoring would; Safari before 27 has none.
   let held = null;
   function keepPlace() {
     if (!held?.node?.isConnected) return;
