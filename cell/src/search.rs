@@ -35,6 +35,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use worker::*;
 
+use crate::ReadJson;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
@@ -217,9 +218,9 @@ impl FragmentCell {
         let req = Request::new_with_init("https://principal.internal/search/entries", &init)?;
         let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
         if resp.status_code() != 200 {
-            let why: Value = resp.json().await.unwrap_or(Value::Null);
+            let why: Value = resp.read_json().await.unwrap_or(Value::Null);
             return Err(CellError::host(format!("their list answered {}: {why}", resp.status_code())));
         }
-        resp.json::<SearchApplied>().await.map_err(|e| CellError::host(format!("their list's answer: {e}")))
+        resp.read_json::<SearchApplied>().await.map_err(|e| CellError::host(format!("their list's answer: {e}")))
     }
 }
