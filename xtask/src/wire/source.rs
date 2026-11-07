@@ -4,6 +4,14 @@
 //! `serde_derive_internals`, serde's own attribute model); a sample cannot
 //! show where a reader does more than its schema says.
 //!
+//! What it guards against: an honest mistake. A breaking change written in
+//! ordinary Rust must never pass. A deliberate evasion inside proto's own
+//! source, code written so that the guard reads one thing while rustc
+//! compiles another, is out of its scope beyond the cheap rules below
+//! (the compiler enforces them where it can); code review catches the
+//! rest. Its successor is schema-first (FIN-379's option B: proto's Rust
+//! generated from a schema file), which ends the reading of Rust.
+//!
 //! The principle: the guard accepts only forms it resolves without
 //! evaluating Rust, and refuses everything else. It does not reimplement
 //! rustc's name resolution or `cfg` evaluation; it holds proto's source to
@@ -17,22 +25,33 @@
 //!   no `mod` reaches is not read;
 //! - names: no glob import, no `use` with an attribute or in a function's
 //!   body, no `extern crate`, no name bound twice in one scope (items and
-//!   imports), no renamed or patched serde, serde_json or schemars in the
-//!   manifests; so a path resolves through a module's own items and plain
-//!   imports alone;
+//!   imports); no item named as a standard one (`STANDARD`: `Default`,
+//!   `Serialize`, `u32`, …), and no import binding one but from its own
+//!   crate, as itself; so a path resolves through a module's own items and
+//!   plain imports alone, and a standard name is the standard one;
+//! - the manifest: proto depends on serde, serde_json and schemars alone,
+//!   each from crates.io as itself (`DEPENDENCIES`), with no build script,
+//!   and forbids `non_local_definitions`, so rustc refuses an impl inside a
+//!   function's body or a block; no `[patch]` or `[replace]` in the
+//!   workspace's; so no attribute or derive macro but serde's and
+//!   schemars' can be named anywhere;
 //! - wire types: at the top level of a module `WIRE_MODULES` lists, with
 //!   no attribute but serde's, schemars', their derives, a doc comment and
 //!   `#[default]`, and no `cfg` but `cfg_attr(feature = "schema", …)`
-//!   holding schemars' alone (serde reads the same in every build);
+//!   holding schemars' (and its derive) alone, each attribute inside it
+//!   read (serde reads the same in every build);
 //! - routes: `routes.rs`'s constants are plain literals of paths, structs,
-//!   tuples and calls, each type a route reaches `ty::<T>()`/`shape::<T>`
-//!   of a plain path; no item in any constant;
+//!   tuples and calls: each value one of the module's constants, `None`,
+//!   `Some`, or a variant its enum has, and each type a route reaches
+//!   `ty::<T>()`/`shape::<T>` of a plain path, routes.rs's own pinned
+//!   `ty` and `shape`; no item in any constant;
 //! - macros: the standard library's (by bare name, never imported) and
 //!   `json!`/`json_schema!` (imported from their crates), a macro inside
-//!   another's tokens held to the same, none defined anywhere;
+//!   another's tokens held to the same, none defined anywhere, and no
+//!   `impl`, `mod` or `use` inside any macro's tokens;
 //! - functions an attribute names: `Option::is_none`, `Vec::is_empty`,
-//!   `BTreeMap::is_empty`, and `PINNED`'s, at the crate's root, each its
-//!   text exactly, no function of their names elsewhere.
+//!   `BTreeMap::is_empty`, and `PINNED`'s, each its text exactly, no
+//!   function of their names elsewhere.
 //!
 //! Within those forms, each supported entry is represented in the lock,
 //! proven by a control, registered with a test, or inert (the PR's table):
@@ -109,16 +128,136 @@ pub const WIRE_MODULES: [&str; 3] = ["crate", "crate::live", "crate::routes"];
 /// and the frames' schemas written by hand, which the cell does not build.
 pub const SCHEMA_MODULES: [&str; 2] = ["crate::routes", "crate::live::schema"];
 
-/// The functions a `skip_serializing_if` or `default` may name beyond the
-/// standard library's (`Option::is_none`, `Vec::is_empty`,
-/// `BTreeMap::is_empty`), at the crate's root, each pinned to its text:
-/// what it omits or fills in is what its body says, so an edit fails, as
-/// does a function of one of these names anywhere else.
-pub const PINNED: [(&str, &str); 3] = [
-    ("is_default", "fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }"),
-    ("is_true", "fn is_true(b: &bool) -> bool { *b }"),
-    ("default_true", "fn default_true() -> bool { true }"),
+/// The functions pinned to their text, each by its path: what a
+/// `skip_serializing_if` or `default` may name beyond the standard
+/// library's (`Option::is_none`, `Vec::is_empty`, `BTreeMap::is_empty`),
+/// at the crate's root; and what a route names its types through,
+/// routes.rs's `ty` and `shape` (and the round trip `ty` makes). What each
+/// omits, fills in or reads is what its body says, so an edit fails, as
+/// does a function of one of these names anywhere else. `STANDARD` keeps
+/// the names in their bodies the standard ones.
+pub const PINNED: [(&str, &str); 6] = [
+    ("crate::is_default", "fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }"),
+    ("crate::is_true", "fn is_true(b: &bool) -> bool { *b }"),
+    ("crate::default_true", "fn default_true() -> bool { true }"),
+    ("crate::routes::shape", "pub fn shape<T: JsonSchema>(g: &mut SchemaGenerator) -> Schema { g.subschema_for::<T>() }"),
+    ("crate::routes::ty", "pub const fn ty<T: JsonSchema + Serialize + DeserializeOwned + std::fmt::Debug>() -> Ty { Ty { schema: shape::<T>, round_trip: round_trip::<T> } }"),
+    (
+        "crate::routes::round_trip",
+        "pub fn round_trip<T: Serialize + DeserializeOwned + std::fmt::Debug>(v: Value) -> Result<(Value, String), String> { let t: T = serde_json::from_value(v).map_err(|e| e.to_string())?; let shown = format!(\"{t:?}\"); Ok((serde_json::to_value(t).map_err(|e| e.to_string())?, shown)) }",
+    ),
 ];
+
+/// The names the guard reads as the standard library's, serde's,
+/// schemars' and serde_json's: the traits and derives it names, the types
+/// and values of the prelude, the primitives, and the crates themselves.
+/// No item of proto's (outside its tests) is named one, and no import
+/// binds one but from its own crate (`STANDARD_CRATES`), as itself, so
+/// `Default` in a pinned function, `u32` in a field or `Serialize` in a
+/// derive is the standard one wherever it is written.
+const STANDARD: [&str; 71] = [
+    "Default",
+    "PartialEq",
+    "Eq",
+    "PartialOrd",
+    "Ord",
+    "Clone",
+    "Copy",
+    "Debug",
+    "Display",
+    "Hash",
+    "Serialize",
+    "Deserialize",
+    "Serializer",
+    "Deserializer",
+    "DeserializeOwned",
+    "JsonSchema",
+    "Schema",
+    "SchemaGenerator",
+    "Option",
+    "Some",
+    "None",
+    "Result",
+    "Ok",
+    "Err",
+    "Vec",
+    "String",
+    "Box",
+    "Cow",
+    "BTreeMap",
+    "Value",
+    "RawValue",
+    "From",
+    "Into",
+    "TryFrom",
+    "TryInto",
+    "AsRef",
+    "AsMut",
+    "Drop",
+    "Iterator",
+    "IntoIterator",
+    "ToString",
+    "ToOwned",
+    "Sized",
+    "Send",
+    "Sync",
+    "bool",
+    "char",
+    "str",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "f32",
+    "f64",
+    "std",
+    "core",
+    "alloc",
+    "serde",
+    "serde_json",
+    "schemars",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+];
+
+/// The crates an import of a `STANDARD` name may name it from.
+const STANDARD_CRATES: [&str; 6] = ["std", "core", "alloc", "serde", "serde_json", "schemars"];
+
+/// proto's dependencies: serde, serde_json and schemars alone, each from
+/// crates.io as itself (a version and its features). So no proc macro but
+/// serde's and schemars' derives can reach proto's source: an attribute
+/// macro that rewrites a type, or a derive that reads JSON its own way,
+/// cannot be named, wherever it would be written.
+pub const DEPENDENCIES: [&str; 3] = ["serde", "serde_json", "schemars"];
+
+/// The tables proto's manifest has. Any other fails: `[build-dependencies]`,
+/// `[target.…]`, `[lib]`, `[dependencies.<name>]`, a workspace's
+/// `[lints]`. A dev-dependency is its tests' alone (the guard reads no
+/// test's code, and no other build links one), so any may stand there.
+const MANIFEST_TABLES: [&str; 5] = ["package", "dependencies", "dev-dependencies", "features", "lints.rust"];
+
+/// The keys of proto's `[package]`: no `build` (nor a `build.rs`), whose
+/// code would run before rustc reads the source the guard reads.
+const PACKAGE_KEYS: [&str; 9] = ["name", "version", "edition", "edition.workspace", "license", "license.workspace", "description", "publish", "rust-version"];
+
+/// The keys that make a dependency another crate than its name says.
+const SOURCE_KEYS: [&str; 8] = ["package", "path", "git", "registry", "workspace", "branch", "tag", "rev"];
+
+/// The lint proto's manifest forbids (an `allow` of it is refused too): an
+/// impl inside a function's body, a block or a constant, which the guard
+/// would not read where rustc installs it (one inside a macro's tokens).
+/// rustc's one exception, a module's `const _ = { … }`, is the guard's:
+/// no item inside a constant, nor `impl` in a macro's tokens.
+const LINT: &str = "non_local_definitions = \"forbid\"";
 
 /// The macros the crate's code may invoke, anywhere but its tests: the
 /// standard library's, each by its bare name and never imported, and
@@ -277,6 +416,8 @@ struct Module {
     uses: BTreeMap<String, Vec<String>>,
     /// Each `use <path>::*`.
     globs: Vec<Vec<String>>,
+    /// A tests' module, whose `#[test]` names alone are read.
+    tests: bool,
 }
 
 /// What the guard reads of a crate's source.
@@ -326,20 +467,23 @@ fn cfg_of(attrs: &[Attribute]) -> Cfg {
 }
 
 impl Source {
-    /// The crate whose root is `dir/lib.rs`, through its modules, and that
-    /// its manifests name serde, serde_json and schemars as themselves: no
-    /// dependency of proto's renamed (`package = …`), and no `[patch]` or
-    /// `[replace]` in the workspace's, either of which makes `serde::`
-    /// another crate.
+    /// The crate whose root is `dir/lib.rs`, through its modules, and its
+    /// manifests: proto's as `manifest` reads it, no `build.rs`, and no
+    /// `[patch]` or `[replace]` in the workspace's, which could make
+    /// `serde::` another crate.
     pub fn read_dir(dir: &Path) -> Result<Source> {
         let mut files = vec![];
         collect(dir, dir, &mut files)?;
         let mut s = Source::read(&files)?;
-        for (manifest, says) in [("../Cargo.toml", "package"), ("../../../Cargo.toml", "[patch"), ("../../../Cargo.toml", "[replace")] {
-            let text = std::fs::read_to_string(dir.join(manifest)).with_context(|| format!("read {manifest}"))?;
-            let found = text.lines().map(str::trim_start).any(|l| if says == "package" { l.split('=').next().is_some_and(|k| k.trim() == "package") || l.contains(" package =") || l.contains("{ package") } else { l.starts_with(says) });
-            if found {
-                s.refusals.push(format!("{manifest}: `{says}`, which could make `serde::` (or serde_json, schemars) another crate than the one the guard reads it as"));
+        let text = std::fs::read_to_string(dir.join("../Cargo.toml")).context("read crates/proto/Cargo.toml")?;
+        s.refusals.extend(manifest(&text).into_iter().map(|r| format!("crates/proto/Cargo.toml: {r}")));
+        if dir.join("../build.rs").exists() {
+            s.refusals.push("crates/proto/build.rs: a build script, whose code runs before rustc reads the source the guard reads".into());
+        }
+        let text = std::fs::read_to_string(dir.join("../../../Cargo.toml")).context("read the workspace's Cargo.toml")?;
+        for says in ["[patch", "[replace"] {
+            if text.lines().map(str::trim_start).any(|l| l.starts_with(says)) {
+                s.refusals.push(format!("Cargo.toml: `{says}`, which could make `serde::` (or serde_json, schemars) another crate than the one the guard reads it as"));
             }
         }
         Ok(s)
@@ -351,7 +495,31 @@ impl Source {
         let files: BTreeMap<&str, &str> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
         let mut s = Source::default();
         s.file(&files, "lib.rs", "crate", "", false)?;
+        s.standard_imports();
         Ok(s)
+    }
+
+    /// Each import of a `STANDARD` name, outside the tests, names the
+    /// standard item: its path resolves to an item of that name of one of
+    /// `STANDARD_CRATES` (`use super::Deserialize` too, where `super` has
+    /// serde's), never another renamed to it.
+    fn standard_imports(&mut self) {
+        let mut found = vec![];
+        for (module, m) in self.modules.iter().filter(|(_, m)| !m.tests) {
+            for (n, used) in m.uses.iter().filter(|(n, _)| STANDARD.contains(&n.as_str())) {
+                let own = match self.resolve_path(used, module, 0) {
+                    Some(Resolved::Foreign(f)) => {
+                        let segs: Vec<&str> = f.split("::").collect();
+                        segs.len() >= 2 && segs.last() == Some(&n.as_str()) && STANDARD_CRATES.contains(&segs[0])
+                    }
+                    _ => false,
+                };
+                if !own {
+                    found.push(format!("{module}: `use {} as {n}`, an import binding a standard name (`STANDARD`) to another item: `{n}` is imported from {STANDARD_CRATES:?}, as itself, or not at all", used.join("::")));
+                }
+            }
+        }
+        self.refusals.extend(found);
     }
 
     fn file(&mut self, files: &BTreeMap<&str, &str>, path: &str, module: &str, child_dir: &str, tests_only: bool) -> Result<()> {
@@ -365,8 +533,10 @@ impl Source {
 
     fn items(&mut self, files: &BTreeMap<&str, &str>, items: &[Item], path: &str, module: &str, child_dir: &str, tests_only: bool) -> Result<()> {
         // each name bound once in this scope, an item's or an import's
-        let mut m = Module::default();
+        let mut m = Module { tests: tests_only, ..Module::default() };
         let mut bound: BTreeMap<String, usize> = BTreeMap::new();
+        // every item's name, of either namespace, for `STANDARD`
+        let mut named: Vec<String> = vec![];
         for item in items {
             let name = match item {
                 Item::Struct(i) => Some(&i.ident),
@@ -378,15 +548,18 @@ impl Source {
                 Item::Fn(f) => {
                     if !f.attrs.iter().any(|a| a.path().is_ident("test")) {
                         m.fns.insert(f.sig.ident.to_string());
+                        named.push(f.sig.ident.to_string());
                     }
                     None
                 }
                 Item::Const(c) => {
                     m.consts.insert(c.ident.to_string());
+                    named.push(c.ident.to_string());
                     None
                 }
                 Item::Static(c) => {
                     m.consts.insert(c.ident.to_string());
+                    named.push(c.ident.to_string());
                     None
                 }
                 Item::Use(u) => {
@@ -409,9 +582,15 @@ impl Source {
             if let Some(n) = name {
                 *bound.entry(n.to_string()).or_default() += 1;
                 m.items.insert(n.to_string());
+                named.push(n.to_string());
             }
         }
         if !tests_only {
+            // a standard name is the standard one: no item takes one (an
+            // import of one is read once every module is: `standard_imports`)
+            for n in named.iter().filter(|n| STANDARD.contains(&n.as_str())) {
+                self.refusals.push(format!("{module}::{n}: an item named as a standard one (`STANDARD`), which every `{n}` its scope writes would name instead: the guard reads `{n}` as the standard one"));
+            }
             // a known macro's name, imported, names the one listed
             for (n, used) in m.uses.iter().filter(|(n, _)| MACROS.contains(&n.as_str())) {
                 let full = used.join("::");
@@ -512,8 +691,9 @@ impl Source {
                         self.tests.insert(f.sig.ident.to_string());
                     } else {
                         let name = f.sig.ident.to_string();
-                        if module != "crate" && PINNED.iter().any(|(n, _)| *n == name) {
-                            self.refusals.push(format!("{module}::{name}: a function of a pinned name outside the crate's root, where a field's attribute might name it in its stead"));
+                        let at = format!("{module}::{name}");
+                        if let Some((pinned, _)) = PINNED.iter().find(|(p, _)| p.rsplit("::").next() == Some(name.as_str()) && *p != at) {
+                            self.refusals.push(format!("{at}: a function of a pinned name (`{pinned}`) outside its module, where a field's attribute or a route might name it in its stead"));
                         }
                         self.fns.insert(format!("{module}::{name}"), f.clone());
                         self.body(&f.block, module, path);
@@ -566,7 +746,7 @@ impl Source {
                 self.macros.push(format!("{}: a `use` inside a function's body, whose names the guard does not scope", self.path));
             }
             fn visit_macro(&mut self, m: &'a syn::Macro) {
-                self.macros.extend(unknown_macros(m).into_iter().map(|n| format!("{}: {n}!, a macro the guard does not know (MACROS), which could make an item", self.path)));
+                self.macros.extend(macro_refusals(m).into_iter().map(|r| format!("{}: {r}", self.path)));
             }
         }
         let mut v = Inner { found: vec![], macros: vec![], path };
@@ -591,22 +771,21 @@ impl Source {
                 });
             }
         }
-        impl Items {
-            fn note(&mut self, m: &syn::Macro) {
-                self.0.extend(unknown_macros(m).into_iter().map(|n| format!("{n}!, a macro the guard does not know (MACROS)")));
-            }
-        }
-        struct Macros<'b>(&'b mut Items);
-        impl<'a> syn::visit::Visit<'a> for Macros<'_> {
+        struct Macros(Vec<String>);
+        impl<'a> syn::visit::Visit<'a> for Macros {
             fn visit_macro(&mut self, m: &'a syn::Macro) {
-                self.0.note(m);
+                self.0.extend(macro_refusals(m));
             }
         }
         let mut found = Items(vec![]);
         syn::visit::Visit::visit_expr(&mut found, e);
-        syn::visit::Visit::visit_expr(&mut Macros(&mut found), e);
         for what in found.0 {
             self.refusals.push(format!("{at}: {what} inside a constant's initializer, whose names the guard does not scope"));
+        }
+        let mut macros = Macros(vec![]);
+        syn::visit::Visit::visit_expr(&mut macros, e);
+        for why in macros.0 {
+            self.refusals.push(format!("{at}: {why}, in a constant's initializer"));
         }
         if route {
             self.route_consts.push((at.to_string(), e.clone()));
@@ -839,10 +1018,14 @@ impl Source {
     }
 
     /// A value a route constant names: `ty::<T>`/`shape::<T>` of a plain
-    /// path, a constant of `module`, `None`, `Some` (called), or a variant.
+    /// path, routes.rs's own (pinned); a constant of `module`; `None`;
+    /// `Some` (called); or a variant its enum has, a unit one named or a
+    /// tuple one called (never an enum's function or constant, whose body
+    /// could name another type).
     fn value(&self, p: &syn::Path, module: &str, called: bool) -> std::result::Result<(), String> {
         let segs: Vec<&syn::PathSegment> = p.segments.iter().collect();
         let names: Vec<String> = segs.iter().map(|s| s.ident.to_string()).collect();
+        let here = self.modules.get(module).ok_or("no such module")?;
         if let [s] = segs.as_slice() {
             if s.ident == "ty" || s.ident == "shape" {
                 let plain_type = match &s.arguments {
@@ -852,29 +1035,41 @@ impl Source {
                     },
                     _ => false,
                 };
-                return if plain_type { Ok(()) } else { Err(format!("`{}::<…>` of another type than a plain path", s.ident)) };
+                if !plain_type {
+                    return Err(format!("`{}::<…>` of another type than a plain path", s.ident));
+                }
+                // the function its type argument is read through: routes.rs's
+                // own, its text pinned, so the route's schema and round trip
+                // are of the type the guard reads
+                let name = s.ident.to_string();
+                return if module == "crate::routes" && here.fns.contains(&name) {
+                    Ok(())
+                } else {
+                    Err(format!("`{name}::<…>`, not routes.rs's own `{name}` (`crate::routes::{name}`, pinned): a route's type is read through it alone"))
+                };
             }
         }
         if segs.iter().any(|s| !s.arguments.is_none()) {
             return Err(format!("`{}`, a path with type arguments other than `ty::<T>`/`shape::<T>`", names.join("::")));
         }
-        let here = self.modules.get(module).ok_or("no such module")?;
-        let is_enum = |prefix: &[String]| match self.resolve_path(prefix, module, 0) {
-            Some(Resolved::Def(d)) => self.defs.get(&d).is_some_and(|d| d.variants.is_some()),
+        // `prefix::name` a variant of an enum of the crate's: a unit one
+        // named, a tuple one called
+        let variant = |prefix: &[String], name: &str| match self.resolve_path(prefix, module, 0) {
+            Some(Resolved::Def(d)) => self.defs.get(&d).and_then(|d| d.variants.as_ref()).and_then(|vs| vs.iter().find(|v| v.name == name)).is_some_and(|v| if called { !v.unit && v.fields.iter().all(|f| f.name.parse::<usize>().is_ok()) } else { v.unit }),
             _ => false,
         };
         let ok = match names.as_slice() {
-            [n] if called => n == "Some",
-            [n] if n == "None" || here.consts.contains(n) => true,
+            [n] if n == "Some" => called,
+            [n] if n == "None" || here.consts.contains(n) => !called,
             // a variant imported by name (`use ErrorCode::{NotFound}`)
-            [n] => here.uses.get(n).is_some_and(|used| used.len() >= 2 && is_enum(&used[..used.len() - 1])),
-            [ty, _] => is_enum(std::slice::from_ref(ty)),
+            [n] => here.uses.get(n).is_some_and(|used| used.len() >= 2 && variant(&used[..used.len() - 1], &used[used.len() - 1])),
+            [ty, v] => variant(std::slice::from_ref(ty), v),
             _ => false,
         };
         if ok {
             Ok(())
         } else {
-            Err(format!("`{}`, a value of another form than its module's constants, `None`, `Some`, an enum's variants and `ty::<T>()`: a route names no value or function of another module", names.join("::")))
+            Err(format!("`{}`, a value of another form than its module's constants, `None`, `Some`, the variants an enum has and `ty::<T>()`: a route names no value or function of another module, nor an enum's function or constant", names.join("::")))
         }
     }
 }
@@ -889,9 +1084,11 @@ fn has_glob(tree: &syn::UseTree) -> bool {
     }
 }
 
-/// The macros a macro invokes the guard does not know: itself, unless
-/// `MACROS` lists it, and each `name!(…)` inside its tokens.
-fn unknown_macros(m: &syn::Macro) -> Vec<String> {
+/// What the guard refuses of a macro: itself, unless `MACROS` lists it;
+/// each `name!(…)` inside its tokens that `MACROS` does not; and an item
+/// inside them (`ITEMS_IN_TOKENS`), which syn does not parse there, so the
+/// guard could not read it where rustc installs it.
+fn macro_refusals(m: &syn::Macro) -> Vec<String> {
     let mut out = vec![];
     let segs: Vec<String> = m.path.segments.iter().map(|s| s.ident.to_string()).collect();
     let known = match segs.as_slice() {
@@ -899,25 +1096,37 @@ fn unknown_macros(m: &syn::Macro) -> Vec<String> {
         path => IMPORTED_MACROS.iter().any(|(_, from)| *from == path.join("::")),
     };
     if !known {
-        out.push(segs.join("::"));
+        out.push(format!("{}!, a macro the guard does not know (MACROS), which could make an item", segs.join("::")));
     }
-    nested_macros(m.tokens.clone(), &mut out);
+    in_tokens(m.tokens.clone(), &segs.join("::"), &mut out);
     out
 }
 
-/// Each `name!(…)` in a token stream, a keyword's `!` aside (`if !(…)`).
-fn nested_macros(tokens: proc_macro2::TokenStream, out: &mut Vec<String>) {
+/// The keywords of an item the guard refuses inside a macro's tokens:
+/// `impl` (a reader by hand it would not register), and the `mod` and
+/// `use` it refuses in a function's body.
+const ITEMS_IN_TOKENS: [&str; 3] = ["impl", "mod", "use"];
+
+/// Each `name!(…)` in `of!`'s tokens, a keyword's `!` aside (`if !(…)`),
+/// and each `ITEMS_IN_TOKENS` keyword.
+fn in_tokens(tokens: proc_macro2::TokenStream, of: &str, out: &mut Vec<String>) {
     use proc_macro2::TokenTree;
     const KEYWORDS: [&str; 12] = ["if", "while", "match", "return", "in", "else", "let", "as", "break", "yield", "move", "await"];
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
     for (i, t) in trees.iter().enumerate() {
         if let TokenTree::Group(g) = t {
-            nested_macros(g.stream(), out);
+            in_tokens(g.stream(), of, out);
+        }
+        if let TokenTree::Ident(word) = t {
+            let word = word.to_string();
+            if ITEMS_IN_TOKENS.contains(&word.as_str()) {
+                out.push(format!("`{word}` inside `{of}!`'s tokens, an item the guard does not read there (syn leaves a macro's tokens unparsed)"));
+            }
         }
         if let (TokenTree::Ident(name), Some(TokenTree::Punct(bang)), Some(TokenTree::Group(_))) = (t, trees.get(i + 1), trees.get(i + 2)) {
             let name = name.to_string();
             if bang.as_char() == '!' && !KEYWORDS.contains(&name.as_str()) && !MACROS.contains(&name.as_str()) {
-                out.push(name);
+                out.push(format!("{name}!, a macro the guard does not know (MACROS), which could make an item"));
             }
         }
     }
@@ -968,6 +1177,72 @@ fn uses(tree: &syn::UseTree, mut prefix: Vec<String>, m: &mut Module) {
             }
         }
     }
+}
+
+/// What proto's manifest says that the guard does not hold: a table but
+/// `MANIFEST_TABLES`, a `[package]` key but `PACKAGE_KEYS`, a dependency
+/// but `DEPENDENCIES` or one from another source (`SOURCE_KEYS`), a line
+/// it cannot read, and no `LINT`. Read line by line, failing closed: a
+/// form the reader does not know is refused, never skipped.
+pub fn manifest(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut table = String::new();
+    let mut lint = false;
+    for line in text.lines() {
+        let l = uncommented(line).trim();
+        if l.is_empty() {
+            continue;
+        }
+        if let Some(t) = l.strip_prefix('[') {
+            table = t.trim_end_matches(']').trim().to_string();
+            if !MANIFEST_TABLES.contains(&table.as_str()) {
+                out.push(format!("`[{table}]`, a table proto's manifest does not have ({MANIFEST_TABLES:?})"));
+            }
+            continue;
+        }
+        let Some((key, value)) = l.split_once('=') else {
+            // a feature's list may span lines, and a dev-dependency is not read
+            if table != "features" && table != "dev-dependencies" {
+                out.push(format!("`{l}` in `[{table}]`, a line the guard does not read"));
+            }
+            continue;
+        };
+        let key = key.trim();
+        match table.as_str() {
+            "package" if !PACKAGE_KEYS.contains(&key) => out.push(format!("`{key}` in `[package]`, a key proto's manifest does not have ({PACKAGE_KEYS:?})")),
+            "dependencies" if !DEPENDENCIES.contains(&key) => out.push(format!("a dependency `{key}`: proto depends on {DEPENDENCIES:?} alone, so no macro but serde's and schemars' can be named in its source")),
+            "dependencies" => {
+                for k in SOURCE_KEYS.iter().filter(|k| has_key(value, k)) {
+                    out.push(format!("`{key}`'s `{k}`, which could make `{key}::` another crate than the one the guard reads it as: each dependency is a version from crates.io, as itself"));
+                }
+            }
+            "lints.rust" => lint |= l.split_whitespace().collect::<Vec<_>>().join(" ") == LINT,
+            _ => {}
+        }
+    }
+    if !lint {
+        out.push(format!("no `[lints.rust] {LINT}`: rustc would compile an impl inside a function's body or a block, where the guard does not read it"));
+    }
+    out
+}
+
+/// A TOML line without its comment (a `#` outside a string).
+fn uncommented(line: &str) -> &str {
+    let mut quote = None;
+    for (i, c) in line.char_indices() {
+        match (c, quote) {
+            ('"' | '\'', None) => quote = Some(c),
+            (c, Some(q)) if c == q => quote = None,
+            ('#', None) => return &line[..i],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// Whether an inline table (`{ version = "1", package = "x" }`) sets `k`.
+fn has_key(value: &str, k: &str) -> bool {
+    value.trim().trim_start_matches('{').split(',').any(|pair| pair.split_once('=').is_some_and(|(name, _)| name.trim() == k))
 }
 
 /// Each `.rs` file under `dir`, by its path from `root`.
@@ -1022,15 +1297,20 @@ fn metas(attrs: &[Attribute]) -> Result<Vec<(String, Meta, bool)>> {
             if !schema {
                 bail!("`#[cfg_attr({}, …)]`: the guard evaluates `feature = \"schema\"` alone", inner.first().map(|p| p.path().get_ident().map(ToString::to_string).unwrap_or_default()).unwrap_or_default());
             }
+            // every attribute inside it is one the guard reads: an attribute
+            // macro there would rewrite the item in the schema's build alone
             for m in inner.iter().skip(1) {
-                let Meta::List(l) = m else { continue };
-                let ns = l.path.get_ident().map(ToString::to_string).unwrap_or_default();
-                if ns == "cfg_attr" {
-                    bail!("a `cfg_attr` nested in another, which the guard does not read");
-                }
-                if NAMESPACES.contains(&ns.as_str()) {
-                    for m in l.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)? {
-                        out.push((ns.clone(), m, true));
+                let ns = m.path().get_ident().map(ToString::to_string).unwrap_or_default();
+                match m {
+                    _ if ns == "cfg_attr" => bail!("a `cfg_attr` nested in another, which the guard does not read"),
+                    Meta::List(l) if NAMESPACES.contains(&ns.as_str()) => {
+                        for m in l.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)? {
+                            out.push((ns.clone(), m, true));
+                        }
+                    }
+                    _ => {
+                        let name = m.path().segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+                        bail!("`#[cfg_attr(feature = \"schema\", {name})]`, an attribute the guard does not read, which could rewrite the item (an attribute macro): under `cfg_attr` stand schemars' and its derive alone")
                     }
                 }
             }
@@ -1150,16 +1430,16 @@ pub fn guard(source: &Source, roots: &[(Type, String)], components: &[String], a
             g.refusals.push(format!("{}: a wire type in `{}`: wire types live at the top level of {:?} alone", d.name, d.module, allowed.wire_modules));
         }
     }
-    // each pinned function is its text, wherever it is defined
-    for (name, text) in PINNED {
-        if let Some(f) = source.fns.get(&format!("crate::{name}")) {
+    // each pinned function is its text, where it is defined
+    for (path, text) in PINNED {
+        if let Some(f) = source.fns.get(path) {
             if let Some(a) = f.attrs.iter().find(|a| !a.path().is_ident("doc")) {
-                g.refusals.push(format!("crate::{name}: under `#[{}]`, an attribute that could rewrite its pinned text", a.path().get_ident().map(ToString::to_string).unwrap_or_default()));
+                g.refusals.push(format!("{path}: under `#[{}]`, an attribute that could rewrite its pinned text", a.path().get_ident().map(ToString::to_string).unwrap_or_default()));
             }
             let mut f = f.clone();
             f.attrs.clear();
             if syn::parse_str::<syn::ItemFn>(text).ok().as_ref() != Some(&f) {
-                g.refusals.push(format!("crate::{name}: not its pinned text (`{text}`): what it omits or fills in is what that body says, so an edit fails"));
+                g.refusals.push(format!("{path}: not its pinned text (`{text}`): what it omits, fills in or reads is what that body says, so an edit fails"));
             }
         }
     }

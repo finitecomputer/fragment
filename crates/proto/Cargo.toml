@@ -16,3 +16,9 @@ schemars = { version = "1.2.3", optional = true, default-features = false, featu
 
 [features]
 schema = ["dep:schemars"]
+
+# No impl may stand inside a function's body, a block or a constant, where
+# the wire lock's source guard does not read it (xtask/src/wire/source.rs,
+# `LINT`): rustc refuses one, and `forbid` refuses an `allow` of it too.
+[lints.rust]
+non_local_definitions = "forbid"

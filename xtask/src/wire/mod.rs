@@ -10,6 +10,17 @@
 //! wire.retired is appended to by hand, never edited: master's
 //! lines stay as they are. Master is read as the schema lock reads it
 //! (`schema_lock::master_file`).
+//!
+//! The threat model: the lock guards against honest mistakes. A change to
+//! proto written in ordinary Rust that would break an older client or
+//! computer must never pass. A deliberate evasion inside proto's own
+//! source, code written so that the guard reads one thing while rustc
+//! compiles another, is out of scope beyond source.rs's cheap rules
+//! (proto's manifest holds the rest to the compiler: its dependencies,
+//! and `non_local_definitions` forbidden); code review catches the rest.
+//! What is left is in the PR's "Known gaps" and FIN-426. The planned
+//! successor is schema-first (FIN-379's option B): proto's Rust generated
+//! from a schema file, when the web and iOS generators come.
 
 mod defaults;
 #[cfg(test)]

@@ -1739,7 +1739,7 @@ fn the_round_ten_false_passes_are_refused() {
     assert!(found.contains("`#[serde(default = …)]` naming `crate::nested::on_the_dock`") && found.contains("(crate::nested::is_on_the_dock, on `bool`"), "{found}");
     let shadow = format!("fn default_true() -> bool {{ true }}\nfn is_true(b: &bool) -> bool {{ *b }}\npub mod nested {{\nfn is_true(_: &bool) -> bool {{ true }}\n{}}}\n", row("#[serde(default = \"crate::default_true\", skip_serializing_if = \"is_true\")]"));
     let found = refused(&[("lib.rs", &shadow)], "Row", "crate::nested");
-    assert!(found.contains("crate::nested::is_true: a function of a pinned name outside the crate's root") && found.contains("(crate::nested::is_true, on `bool`"), "{found}");
+    assert!(found.contains("crate::nested::is_true: a function of a pinned name (`crate::is_true`) outside its module") && found.contains("(crate::nested::is_true, on `bool`"), "{found}");
     // 2. a predicate whose body omits more than the default: `is_zero` is no
     // known predicate, and the pinned `is_default` is its text alone
     let zero = "fn is_zero(n: &u32) -> bool { *n == 0 || *n == 42 }\n#[derive(Debug)]\npub struct Row { #[serde(default, skip_serializing_if = \"is_zero\")] pub n: u32 }\n";
@@ -1781,7 +1781,7 @@ fn only_plain_forms_are_read() {
         ("pub mod other { pub const T: u8 = 0; }\npub mod routes {\n#[derive(Debug)]\npub struct S { pub a: u16 }\npub const R: u8 = crate::other::T;\n}\n", "crate::routes::R: `crate::other::T`, a value of another form"),
         ("pub mod other { pub const fn hidden() -> u8 { 0 } }\npub mod routes {\nuse crate::other::hidden;\n#[derive(Debug)]\npub struct S { pub a: u16 }\npub const R: u8 = hidden();\n}\n", "crate::routes::R: `hidden`, a value of another form"),
         ("fn default_true() -> bool { false }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::default_true: not its pinned text"),
-        ("pub mod m { pub fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() } }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::m::is_default: a function of a pinned name outside the crate's root"),
+        ("pub mod m { pub fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() } }\n#[derive(Debug)]\npub struct S { pub a: u16 }\n", "crate::m::is_default: a function of a pinned name (`crate::is_default`) outside its module"),
         ("fn yes() -> bool { true }\n#[derive(Debug)]\npub struct S { #[serde(default = \"yes\")] pub a: bool }\n", "`#[serde(default = …)]` naming `crate::yes`"),
         ("pub struct Vec;\n#[derive(Debug)]\npub struct S { #[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub a: Vec<u16> }\n", "`skip_serializing_if = \"Vec::is_empty\"` (a function the guard cannot resolve"),
         ("fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }\n#[derive(Debug, Default, PartialEq)]\npub struct Inner { pub n: u16 }\n#[derive(Debug)]\npub struct S { #[serde(default, skip_serializing_if = \"is_default\")] pub a: Inner }\n", "(crate::is_default, on `?`, beside default)"),
@@ -1808,20 +1808,11 @@ fn only_plain_forms_are_read() {
     }
     // a manifest that could make `serde::` another crate
     for (manifest, text, says) in [
-        ("crates/proto/Cargo.toml", "[dependencies]\nserde = { package = \"other\", version = \"1\" }\n", "`package`"),
+        ("crates/proto/Cargo.toml", "[dependencies]\nserde = { package = \"other\", version = \"1\" }\n[lints.rust]\nnon_local_definitions = \"forbid\"\n", "`serde`'s `package`"),
         ("Cargo.toml", "[workspace]\n[patch.crates-io]\nserde = { path = \"other\" }\n", "`[patch`"),
     ] {
-        let root = scratch(&format!("manifest-{}", says.trim_matches(|c: char| !c.is_alphanumeric())));
-        std::fs::create_dir_all(root.join("crates/proto/src")).unwrap();
-        std::fs::write(root.join("crates/proto/src/lib.rs"), "#[derive(Debug)]\npub struct S { pub a: u16 }\n").unwrap();
-        for m in ["Cargo.toml", "crates/proto/Cargo.toml"] {
-            std::fs::write(root.join(m), if m == manifest { text } else { "[package]\nname = \"x\"\n" }).unwrap();
-        }
-        let src = super::source::Source::read_dir(&root.join("crates/proto/src")).unwrap();
-        let roots = vec![(syn::parse_str("S").unwrap(), "crate".to_string())];
-        let found = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &["crate"] }).unwrap_err().to_string();
+        let found = proto_dir(&format!("manifest-{}", says.trim_matches(|c: char| !c.is_alphanumeric())), &[(manifest, text)]).unwrap_err();
         assert!(found.contains(says), "{manifest}: {found}");
-        std::fs::remove_dir_all(&root).unwrap();
     }
     // a wire type outside WIRE_MODULES, or below one's top level
     let src = super::source::Source::read(&[("lib.rs".into(), "pub mod deep { #[derive(Debug)] pub struct S { pub a: u16 } }\n".into())]).unwrap();
@@ -1829,12 +1820,192 @@ fn only_plain_forms_are_read() {
     let found = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &["crate"] }).unwrap_err().to_string();
     assert!(found.contains("S: a wire type in `crate::deep`: wire types live at the top level of [\"crate\"] alone"), "{found}");
     // the plain forms: the pinned functions, the standard library's predicates,
-    // and a route constant of literals
-    let plain = "fn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }\nfn is_true(b: &bool) -> bool { *b }\nfn default_true() -> bool { true }\npub mod routes {\n#[derive(Debug)]\npub struct S {\n#[serde(default, skip_serializing_if = \"crate::is_default\")] pub n: u32,\n#[serde(default = \"crate::default_true\", skip_serializing_if = \"crate::is_true\")] pub dock: bool,\n#[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub list: Vec<u16>,\n#[serde(default, skip_serializing_if = \"Option::is_none\")] pub maybe: Option<u16>,\n}\npub const T: &[(u8, &str)] = &[(1, \"a\")];\npub const R: u8 = ty::<S>();\n}\n";
-    let src = super::source::Source::read(&[("lib.rs".into(), plain.into())]).unwrap();
-    let roots = src.route_types();
-    assert_eq!(roots.len(), 1, "one route root");
-    let modules = src.modules();
-    let held = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &modules }).unwrap();
+    // and route constants of literals, variants and routes.rs's own `ty`/`shape`
+    let held = guarded(&[("lib.rs", &routes_module(PLAIN_ROUTE))], "S", "crate::routes", &[], &[]).unwrap();
     assert_eq!(held.reached.into_iter().collect::<Vec<_>>(), ["crate::routes::S"]);
+    let src = super::source::Source::read(&[("lib.rs".into(), routes_module(PLAIN_ROUTE))]).unwrap();
+    let roots: Vec<syn::Type> = src.route_types().into_iter().map(|(t, _)| t).collect();
+    assert_eq!(roots, [syn::parse_str::<syn::Type>("S").unwrap(), syn::parse_str("String").unwrap()], "the route roots");
+}
+
+/// A route constant's plain forms: a constant's literals, `ty::<T>()` and
+/// `shape::<T>`, a unit variant named (by its enum, or imported), a tuple
+/// one called, `Some` and `None`.
+const PLAIN_ROUTE: &str = "use Kind::Unit;\n#[derive(Debug)]\npub struct S {\n#[serde(default, skip_serializing_if = \"crate::is_default\")] pub n: u32,\n#[serde(default = \"crate::default_true\", skip_serializing_if = \"crate::is_true\")] pub dock: bool,\n#[serde(default, skip_serializing_if = \"Vec::is_empty\")] pub list: Vec<u16>,\n#[serde(default, skip_serializing_if = \"Option::is_none\")] pub maybe: Option<u16>,\n}\npub enum Kind { Unit, Held(u8) }\npub const T: &[(u8, &str)] = &[(1, \"a\")];\npub const R: u8 = ty::<S>();\npub const K: [Kind; 3] = [Kind::Unit, Kind::Held(1), Unit];\npub const O: (Option<u8>, Option<u8>) = (Some(1), None);\npub const P: u8 = shape::<String>;\n";
+
+/// A crate of the pinned functions, its root's and a `routes` module's
+/// (with the imports the real one has), and `routes` holding `body`.
+fn routes_module(body: &str) -> String {
+    routes_crate("", body)
+}
+
+/// `routes_module`, with `root` at the crate's root besides.
+fn routes_crate(root: &str, body: &str) -> String {
+    let pinned = |m: &str| super::source::PINNED.iter().filter(|(p, _)| p.rsplit_once("::").is_some_and(|(at, _)| at == m)).map(|(_, t)| *t).collect::<Vec<_>>().join("\n");
+    format!(
+        "{}\n{root}\npub mod routes {{\nuse schemars::{{JsonSchema, Schema, SchemaGenerator}};\nuse serde::de::DeserializeOwned;\nuse serde::Serialize;\nuse serde_json::Value;\n{}\n{body}}}\n",
+        pinned("crate"),
+        pinned("crate::routes")
+    )
+}
+
+/// The proto manifest the guard holds: serde, serde_json and schemars, and
+/// the lint.
+const MANIFEST: &str = include_str!("../../../crates/proto/Cargo.toml");
+
+/// The source guard over a scratch tree laid out as the workspace is,
+/// proto's manifest `MANIFEST` and the workspace's `[workspace]` but those
+/// `files` replace (or add), from proto's `S`: its refusals, if any.
+fn proto_dir(name: &str, files: &[(&str, &str)]) -> std::result::Result<(), String> {
+    let root = scratch(name);
+    std::fs::create_dir_all(root.join("crates/proto/src")).unwrap();
+    for (path, text) in [("Cargo.toml", "[workspace]\n"), ("crates/proto/Cargo.toml", MANIFEST), ("crates/proto/src/lib.rs", "#[derive(Debug)]\npub struct S { pub a: u16 }\n")].into_iter().chain(files.iter().copied()) {
+        std::fs::write(root.join(path), text).unwrap();
+    }
+    let src = super::source::Source::read_dir(&root.join("crates/proto/src")).unwrap();
+    let roots = vec![(syn::parse_str("S").unwrap(), "crate".to_string())];
+    let found = super::source::guard(&src, &roots, &[], &super::source::Allowed { hand_written: &[], open: &[], wire_modules: &["crate"] });
+    std::fs::remove_dir_all(&root).unwrap();
+    found.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Round eleven's first finding, compiled: a local `Default` that the
+/// pinned `is_default`'s text names, so it omits a value serde's
+/// `#[serde(default)]` (the standard one) does not fill in.
+mod shadowed_default {
+    pub trait Default {
+        fn default() -> Self;
+    }
+    impl Default for u32 {
+        fn default() -> Self {
+            42
+        }
+    }
+    pub fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+        *v == T::default()
+    }
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Row {
+        #[serde(default, skip_serializing_if = "is_default")]
+        pub n: u32,
+    }
+}
+
+/// Whether rustc compiles `text` as a library, with
+/// `non_local_definitions` forbidden (as proto's manifest does) or not.
+fn rustc_compiles(name: &str, text: &str, forbid: bool) -> bool {
+    let dir = scratch(name);
+    std::fs::write(dir.join("lib.rs"), text).unwrap();
+    let mut rustc = std::process::Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()));
+    rustc.args(["--edition", "2021", "--crate-type", "lib", "--emit=metadata", "--crate-name", "fixture", "-o"]).arg(dir.join("fixture.rmeta")).arg(dir.join("lib.rs")).env("TMPDIR", &dir);
+    if forbid {
+        rustc.args(["-F", "non_local_definitions"]);
+    }
+    let out = rustc.output().expect("rustc runs");
+    std::fs::remove_dir_all(&dir).unwrap();
+    out.status.success()
+}
+
+/// The review's five false passes at `386be540`, each refused by its rule
+/// (`only_plain_forms_are_read` holds what the rules accept): a local item
+/// of a standard name, an attribute inside `cfg_attr`, a route value that
+/// is no variant, a `ty` that is not routes.rs's own, an impl inside a
+/// macro's tokens; and the manifest rules that hold the rest to the
+/// compiler (a dependency allowlist, `non_local_definitions` forbidden).
+#[test]
+fn the_round_eleven_false_passes_are_refused() {
+    use serde_json::from_value;
+    let refused = |files: &[(&str, &str)], root: &str, module: &str| guarded(files, root, module, &[], &[]).unwrap_err().to_string();
+    // 1. a local `Default` shadows the standard one in the pinned `is_default`:
+    // serde writes 42 as nothing, and reads nothing as 0
+    let written = serde_json::to_value(shadowed_default::Row { n: 42 }).unwrap();
+    assert_eq!(written, json!({}));
+    assert_eq!(from_value::<shadowed_default::Row>(written).unwrap().n, 0, "42 written, 0 read");
+    let lib = "trait Default { fn default() -> Self; }\nimpl Default for u32 { fn default() -> Self { 42 } }\nfn is_default<T: Default + PartialEq>(v: &T) -> bool { *v == T::default() }\npub mod live;\npub use live::Row;\n";
+    let live = "#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]\npub struct Row {\n#[serde(default, skip_serializing_if = \"crate::is_default\")]\n#[schemars(extend(\"default\" = 0))]\npub n: u32,\n}\n";
+    let found = refused(&[("lib.rs", lib), ("live.rs", live)], "Row", "crate");
+    assert!(found.contains("crate::Default: an item named as a standard one (`STANDARD`)"), "{found}");
+    // ... or an import renamed to the standard name, from the crate or another crate
+    for (import, says) in [("pub mod zero { pub trait Zero { fn default() -> Self; } }\nuse zero::Zero as Default;\n", "`use zero::Zero as Default`"), ("use serde::Serialize as Default;\n", "`use serde::Serialize as Default`")] {
+        let found = refused(&[("lib.rs", &format!("{import}fn is_default<T: Default + PartialEq>(v: &T) -> bool {{ *v == T::default() }}\n{live}"))], "Row", "crate");
+        assert!(found.contains(says) && found.contains("an import binding a standard name"), "{found}");
+    }
+    // ... or a primitive's name, which a field's `u32` would name
+    let found = refused(&[("lib.rs", "#[derive(Debug)]\npub struct u32 { pub n: u16 }\n#[derive(Debug)]\npub struct Row { pub n: u32 }\n")], "Row", "crate");
+    assert!(found.contains("crate::u32: an item named as a standard one"), "{found}");
+    // 2. an attribute macro inside the allowed `cfg_attr`, in each form
+    for attr in ["rewrite::alias()", "rewrite", "rewrite = \"x\""] {
+        let text = format!("#[cfg_attr(feature = \"schema\", {attr})]\n#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]\npub struct Row {{ pub flag: bool }}\n");
+        let found = refused(&[("lib.rs", &text)], "Row", "crate");
+        let name = attr.split(['(', ' ']).next().unwrap();
+        assert!(found.contains(&format!("`#[cfg_attr(feature = \"schema\", {name})]`, an attribute the guard does not read")), "{found}");
+    }
+    // ... nor can its crate be one of proto's
+    let found = super::source::manifest(&MANIFEST.replace("[dependencies]\n", "[dependencies]\nrewrite = { path = \"../rewrite\" }\n"));
+    assert!(found.iter().any(|r| r.contains("a dependency `rewrite`")), "{found:?}");
+    // 3a. an enum's function or constant standing as a variant, whose body names
+    // another type than the one the constant's turbofish shows
+    let decoy = "pub mod live { #[derive(Debug)] pub struct Row { #[serde(alias = \"legacy\")] pub flag: bool } }\n";
+    let body = "#[derive(Debug)]\npub struct Row { pub flag: bool }\npub enum Choice { A }\nimpl Choice {\npub const fn hidden() -> Ty { ty::<crate::live::Row>() }\npub const HIDDEN: Ty = ty::<crate::live::Row>();\n}\npub const DECLARED: Ty = ty::<Row>();\npub const T: Ty = Choice::hidden();\npub const U: Ty = Choice::HIDDEN;\npub const A: Choice = Choice::A;\n";
+    let found = refused(&[("lib.rs", &routes_crate(decoy, body))], "Row", "crate::routes");
+    assert!(found.contains("crate::routes::T: `Choice::hidden`, a value of another form") && found.contains("crate::routes::U: `Choice::HIDDEN`, a value of another form"), "{found}");
+    assert!(!found.contains("crate::routes::A:"), "a variant it has is a value: {found}");
+    // 3b. a `ty` that is not routes.rs's own pinned one: edited in place, or
+    // imported from elsewhere
+    let ty = super::source::PINNED.iter().find(|(p, _)| *p == "crate::routes::ty").unwrap().1;
+    let edited = routes_crate(decoy, "#[derive(Debug)]\npub struct Row { pub flag: bool }\npub const T: Ty = ty::<Row>();\n").replace(ty, &ty.replace("shape::<T>, round_trip: round_trip::<T>", "shape::<crate::live::Row>, round_trip: round_trip::<crate::live::Row>"));
+    let found = refused(&[("lib.rs", &edited)], "Row", "crate::routes");
+    assert!(found.contains("crate::routes::ty: not its pinned text"), "{found}");
+    let elsewhere = format!("pub mod other {{ pub const fn ty<T>() -> super::routes::Ty {{ todo!() }} }}\n{decoy}");
+    let imported = routes_crate(&elsewhere, "use crate::other::ty;\n#[derive(Debug)]\npub struct Row { pub flag: bool }\npub const T: Ty = ty::<Row>();\n").replace(ty, "");
+    let found = refused(&[("lib.rs", &imported)], "Row", "crate::routes");
+    assert!(found.contains("crate::routes::T: `ty::<…>`, not routes.rs's own `ty`") && found.contains("crate::other::ty: a function of a pinned name (`crate::routes::ty`) outside its module"), "{found}");
+    // 4. a reader by hand inside a macro's tokens, where syn does not parse it:
+    // in a function's body, or a module's `const _`
+    let reader = "impl<'de> serde::Deserialize<'de> for Row {\nfn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {\n#[derive(serde::Deserialize)]\nstruct Inner { #[serde(alias = \"legacy\")] flag: bool }\nlet Inner { flag } = <Inner as serde::Deserialize>::deserialize(d)?;\nOk(Row { flag })\n}\n}";
+    let row = "#[derive(Debug, serde::Serialize, schemars::JsonSchema)]\npub struct Row { pub flag: bool }\n";
+    for (text, says) in [
+        (format!("{row}#[allow(dead_code, non_local_definitions)]\nfn install() {{ let _ = vec![{{ {reader} 0 }}]; }}\n"), "lib.rs: `impl` inside `vec!`'s tokens"),
+        (format!("{row}const _: bool = matches!({{ {reader} 0 }}, 0);\n"), "crate::_: `impl` inside `matches!`'s tokens"),
+        (format!("{row}fn f() -> String {{ format!(\"{{}}\", vec![{{ mod m {{}} use m as n; 0 }}].len()) }}\n"), "lib.rs: `mod` inside `format!`'s tokens"),
+    ] {
+        let found = refused(&[("lib.rs", &text)], "Row", "crate");
+        assert!(found.contains(says), "{text}\n{found}");
+    }
+    // ... which rustc refuses in a function's body once the lint is forbidden,
+    // `allow` or not, but not in a module's `const _` (the guard's)
+    let read = "pub trait Read { fn read() -> Self; }\npub struct Row { pub flag: bool }\n";
+    let hidden = format!("{read}#[allow(dead_code)]\nfn install() {{ let _ = vec![{{ impl Read for Row {{ fn read() -> Row {{ Row {{ flag: true }} }} }} 0 }}]; }}\n");
+    assert!(rustc_compiles("lint-plain", &hidden, false) && !rustc_compiles("lint-forbidden", &hidden, true));
+    assert!(!rustc_compiles("lint-allowed", &hidden.replace("allow(dead_code)", "allow(dead_code, non_local_definitions)"), true));
+    let anonymous = format!("{read}const _: bool = matches!({{ impl Read for Row {{ fn read() -> Row {{ Row {{ flag: true }} }} }} 0 }}, 0);\n");
+    assert!(rustc_compiles("lint-anonymous", &anonymous, true), "rustc's one exception, which the guard refuses");
+    // 5. the manifest: proto's own passes; each way out of the allowlist, or
+    // without the lint, is refused
+    assert_eq!(super::source::manifest(MANIFEST), Vec::<String>::new());
+    let without_lint = MANIFEST.replace("non_local_definitions = \"forbid\"", "");
+    for (text, says) in [
+        (MANIFEST.replace("[dependencies]\n", "[dependencies]\nrewrite = \"1\"\n"), "a dependency `rewrite`"),
+        (MANIFEST.replace("serde = { version = \"1\",", "serde = { package = \"serde_evil\", version = \"1\","), "`serde`'s `package`"),
+        (MANIFEST.replace("serde = { version = \"1\",", "serde = { workspace = true,"), "`serde`'s `workspace`"),
+        (MANIFEST.replace("serde = { version = \"1\",", "serde = { git = \"https://example.com/serde\","), "`serde`'s `git`"),
+        (format!("{MANIFEST}\n[build-dependencies]\ncc = \"1\"\n"), "`[build-dependencies]`, a table"),
+        (format!("{MANIFEST}\n[target.'cfg(unix)'.dependencies]\nrewrite = \"1\"\n"), "`[target.'cfg(unix)'.dependencies]`, a table"),
+        (format!("{MANIFEST}\n[dependencies.rewrite]\nversion = \"1\"\n"), "`[dependencies.rewrite]`, a table"),
+        (MANIFEST.replace("[package]\n", "[package]\nbuild = \"gen.rs\"\n"), "`build` in `[package]`"),
+        (without_lint.clone(), "no `[lints.rust] non_local_definitions = \"forbid\"`"),
+        (without_lint.replace("[lints.rust]\n", "[lints.rust]\nnon_local_definitions = \"deny\"\n"), "no `[lints.rust] non_local_definitions = \"forbid\"`"),
+        (format!("{}\n[lints]\nworkspace = true\n", without_lint.replace("[lints.rust]\n", "")), "`[lints]`, a table"),
+    ] {
+        let found = super::source::manifest(&text);
+        assert!(found.iter().any(|r| r.contains(says)), "{text}\n{found:?}");
+    }
+    // a dev-dependency is its tests' alone
+    assert_eq!(super::source::manifest(&format!("{MANIFEST}\n[dev-dependencies]\nproptest = {{ version = \"1\", features = [\n\"std\",\n] }}\n")), Vec::<String>::new());
+    // and read from the tree: a build script, and the manifest's refusals
+    let found = proto_dir("build-script", &[("crates/proto/build.rs", "fn main() {}\n")]).unwrap_err();
+    assert!(found.contains("crates/proto/build.rs: a build script"), "{found}");
+    let found = proto_dir("unlisted-dependency", &[("crates/proto/Cargo.toml", &MANIFEST.replace("[dependencies]\n", "[dependencies]\nrewrite = \"1\"\n"))]).unwrap_err();
+    assert!(found.contains("crates/proto/Cargo.toml: a dependency `rewrite`"), "{found}");
+    assert_eq!(proto_dir("manifest-plain", &[]), Ok(()));
 }
