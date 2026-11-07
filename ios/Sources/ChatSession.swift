@@ -85,6 +85,11 @@ final class ChatSession {
     /// Files being attached, from their choosing until their upload: the
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
     private(set) var attaching = false
+    /// A first message from Home being sent here (`sendFirst`), from its
+    /// uploads to its post: until then nothing else sends, so it goes first.
+    /// Typing and attaching stay the person's.
+    private(set) var sendingFirst = false
+    static let waitForFirst = "Wait for the message being sent."
     /// Files being put, or that failed to be: each shown in the composer
     /// from its own bytes on this iPhone (`BlobStore.keep`) as it goes, then
     /// held as an attachment once put. A failed one waits to be put again
@@ -489,6 +494,8 @@ final class ChatSession {
     }
 
     func send() async {
+        // nothing overtakes a first message from Home being sent (`sendFirst`)
+        guard !sendingFirst else { error = Self.waitForFirst; return }
         // what is being attached goes with it, or the message waits
         guard !attaching else { error = "Wait for the files being attached."; return }
         guard !uploads.contains(where: { $0.failed != nil }) else { error = "A file did not upload. Retry it or remove it."; return }
@@ -509,6 +516,37 @@ final class ChatSession {
         } catch { self.error = "The message could not be saved on this iPhone: " + error.localizedDescription; return }
         pending.append(post)
         composer = ""; attachments = []; replyTo = nil
+        await deliver(post)
+    }
+
+    /// A new chat's first message from the home screen, as submitted there
+    /// (`Library.launch`): its files, held on the phone until this chat was
+    /// made, put in this chat's blobs, then its words and them posted as one
+    /// message through the outbox, as a message is sent here (saved with
+    /// `id` before any request; the web's launcher, `startFromSearch`).
+    /// Each upload is checked as it answers: one that fails throws, and
+    /// nothing is posted, so the whole message is tried again, never words
+    /// alone or some of its files. Files of the same bytes go once, as this
+    /// composer attaches them. It neither reads nor clears what is typed
+    /// here meanwhile, but nothing else sends until it is posted
+    /// (`sendingFirst`): no follow-up typed here goes before it.
+    func sendFirst(id: String, text: String, files: [OutgoingFile]) async throws {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty || !files.isEmpty else { return }
+        guard persistence != nil else { throw APIError.server("The local draft could not be opened. Reopen this chat before sending.") }
+        guard !sendingFirst else { throw APIError.server(Self.waitForFirst) }
+        sendingFirst = true
+        defer { sendingFirst = false }
+        var uploaded: [ChatAttachment] = []
+        for file in files {
+            let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
+            if !uploaded.contains(where: { $0.id == put.id }) { uploaded.append(put) }
+        }
+        // the outbox's room, where the send is saved: a full one would leave it unsaved
+        guard pending.count < SavedChat.pendingMax else { throw APIError.server("Wait for the messages still sending, or edit the ones not sent.") }
+        let post = PendingPost(id: id, text: words, attachments: uploaded)
+        try persistence?.save(SavedChat(composer: composer, attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
+        pending.append(post)
         await deliver(post)
     }
 
@@ -604,6 +642,7 @@ final class ChatSession {
     /// id and body (docs/ios.md), so it never runs twice.
     func steer(recording: Bool = false) async {
         guard steers(recording: recording), let target = commandTarget else { return }
+        guard !sendingFirst else { error = Self.waitForFirst; return }
         guard persistence != nil else { error = "The local draft could not be opened. Reopen this chat before sending."; return }
         guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
         let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)

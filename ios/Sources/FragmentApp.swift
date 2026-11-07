@@ -21,6 +21,13 @@ final class Library {
     var loading = false
     var creating = false
     var unfinishedChat: FragmentSummary?
+    /// What the home screen's prompt holds (`HomeDraft`).
+    let home = HomeDraft()
+    /// A launch not sent yet: its chat, made for it and still empty, and
+    /// the id its message goes with (launcher.js `pendingLaunch`). Sent
+    /// again, the same words and files are the same post in the same chat;
+    /// changed, a post of their own, still in that chat.
+    private(set) var pendingLaunch: (id: String, text: String, files: [UUID], agent: String, chat: FragmentSummary?)?
     var selectedAgent: String?
     var imported: [ImportedSession] = []
     var identities: [String: String] = [:]
@@ -71,6 +78,51 @@ final class Library {
     func leftChat(_ name: String) {
         if sessions[name]?.closed != nil { sessions.removeValue(forKey: name) }
     }
+    /// Whether Home may start a chat now: one rule for every way to.
+    var canLaunch: Bool { home.ready && agent != nil && !creating }
+
+    /// A new chat with what Home holds as its first message, sent as its
+    /// chat sends one (`ChatSession.sendFirst`), as the web's launcher sends
+    /// it (launcher.js `startFromSearch`): what was submitted, locked while
+    /// it goes; its chat opened (`opened`) once made. Not sent, all of it
+    /// stays on Home with why, and its chat is kept for it: sent again, it
+    /// goes there. Throws what kept it.
+    func launch(_ api: FragmentAPI, opened: (FragmentSummary) -> Void) async throws {
+        guard canLaunch, let agent else { return }
+        creating = true
+        let submitted = home.begin()
+        var sent = false
+        defer { creating = false; home.ended(sent: sent ? submitted : nil) }
+        let ids = submitted.files.map(\.id)
+        let same = pendingLaunch.map { $0.text == submitted.text && $0.files == ids && $0.agent == agent.name } == true
+        // the chat made for the last try, if it was for this agent: nothing was posted to it
+        let earlier = pendingLaunch?.agent == agent.name ? pendingLaunch?.chat : nil
+        pendingLaunch = (same ? pendingLaunch!.id : UUID().uuidString, submitted.text, ids, agent.name, earlier)
+        do {
+            var chat = earlier
+            if chat == nil {
+                if unfinishedChat == nil { unfinishedChat = try await api.createChat() }
+                guard let made = unfinishedChat else { return }
+                try await api.join(agent, to: made)
+                unfinishedChat = nil
+                pendingLaunch?.chat = made
+                chat = made
+            }
+            guard let chat, let id = pendingLaunch?.id else { return }
+            await load(api)
+            let resolved = fragments.first { $0.name == chat.name } ?? chat
+            let session = try session(for: resolved, api: api)
+            opened(resolved)
+            try await session.sendFirst(id: id, text: submitted.text, files: submitted.files.map(\.file))
+            pendingLaunch = nil
+            sent = true
+            await load(api)
+        } catch {
+            home.error = "Your message wasn't sent. " + error.localizedDescription
+            throw error
+        }
+    }
+
     /// The identities of the person's own agents: whose menus they may use
     /// in a chat (chat.js `menuOf`, an agent's owner by `__members`).
     var ownedIdentities: Set<String> { Set(agents.filter { $0.role == "owner" }.compactMap { identities[$0.name] }) }
@@ -91,7 +143,9 @@ final class Library {
     func session(for chat: FragmentSummary, api: FragmentAPI) throws -> ChatSession {
         if let session = sessions[chat.name] { return session }
         // A bounded cache preserves unsent messages and cursors while changing screens.
-        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty })?.key {
+        // A session sending Home's first message is its one owner (`launch`):
+        // replaced, its chat would send around that message and save over it.
+        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty && !$0.value.sendingFirst })?.key {
             sessions.removeValue(forKey: unused)
         }
         guard sessions.count < 32 else { throw APIError.server("Finish or discard a draft in another chat before opening more conversations.") }
@@ -299,7 +353,6 @@ struct FragmentRoot: View {
     @State private var sidebar = false
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
-    @State private var homeDraft = ""
 
     var body: some View {
         Group {
@@ -362,7 +415,7 @@ struct FragmentRoot: View {
         .sheet(item: $openedApp) { app in
             if app.name == "add-app" {
                 AppCreationSheet { prompt in
-                    openedApp = nil; showingApps = false; homeDraft = prompt; page = .launcher
+                    openedApp = nil; showingApps = false; library.home.text = prompt; page = .launcher
                 }
             } else { FragmentWebSheet(fragment: app, api: api) }
         }
@@ -379,7 +432,7 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, draft: $homeDraft, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) })
+            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) })
         case .chat(let name):
             if let chat = library.fragments.first(where: { $0.name == name }) {
                 if let session = try? library.session(for: chat, api: api) {
@@ -419,24 +472,13 @@ struct FragmentRoot: View {
         else if fragment.kind == "launcher" { page = .launcher }
         else { openedApp = fragment }
     }
+    /// Home's launch (`Library.launch`): its chat shown once made; not
+    /// sent, Home again with its words, files and why, if that chat is still
+    /// what is shown (moved on, Home has them when next opened).
     private func start(_ api: FragmentAPI) async {
-        guard let agent = library.agent, !library.creating else { return }
-        library.creating = true
-        defer { library.creating = false }
-        do {
-            if library.unfinishedChat == nil { library.unfinishedChat = try await api.createChat() }
-            guard let chat = library.unfinishedChat else { return }
-            try await api.join(agent, to: chat)
-            library.unfinishedChat = nil
-            await library.load(api)
-            let resolved = library.fragments.first { $0.name == chat.name } ?? chat
-            let session = try library.session(for: resolved, api: api)
-            session.edit(homeDraft)
-            homeDraft = ""
-            page = .chat(chat.name)
-            await session.send()
-            await library.load(api)
-        } catch { library.error = error.localizedDescription }
+        var shown: String?
+        do { try await library.launch(api) { chat in shown = chat.name; page = .chat(chat.name) } }
+        catch { if let shown, page == .chat(shown) { page = .launcher } }
     }
 }
 

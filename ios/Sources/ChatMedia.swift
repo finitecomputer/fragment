@@ -275,8 +275,8 @@ final class VoiceMemo {
     func file() async throws -> [OutgoingFile] {
         guard let url = await record() else { throw CancellationError() }
         defer { try? FileManager.default.removeItem(at: url) }
-        return [try await Task.detached(priority: .userInitiated) {
-            try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
-        }.value]
+        // its length, read before its file goes (its chip's "Voice memo · 0:07")
+        ComposerMemos.remember(url)
+        return try await ComposerFiles.read([url])
     }
 }

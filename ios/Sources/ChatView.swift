@@ -19,10 +19,6 @@ struct ChatView: View {
     let library: Library
     /// Opens a fragment of the person's (a chat, or an app at a page).
     let open: (FragmentSummary) -> Void
-    @State private var importer = false
-    @State private var photos = false
-    @State private var picked: [PhotosPickerItem] = []
-    @State private var voice = VoiceMemo()
 
     init(session: ChatSession, library: Library, open: @escaping (FragmentSummary) -> Void) {
         _session = State(initialValue: session)
@@ -141,37 +137,26 @@ struct ChatView: View {
                 if let error = session.error {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
-                composerAccessories
-                let steers = session.steers(recording: voice.recording)
-                ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
-                    // sends go over HTTP: a reconnect never holds the composer
-                    // a memo being recorded holds its place as attaching, and its Finish stays
-                    enabled: session.read, busy: session.attaching && !voice.recording, recording: voice.recording,
+                ComposerBar(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
+                    // sends go over HTTP: a reconnect never holds the composer;
+                    // a first message from Home being sent here does, so it goes first
+                    enabled: session.read && !session.sendingFirst, busy: session.attaching,
                     placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
-                    attachPhotos: { if session.admits(1) { photos = true } }, attachFiles: { if session.admits(1) { importer = true } },
-                    pasteImages: { pasteboard in paste(pasteboard) },
-                    record: { Task { await recordVoice() } },
+                    attached: session.attachments.map { ($0.id, $0.name) },
+                    remove: { id in session.attachments.removeAll { $0.id == id } },
+                    // each file from its bytes here, an upload with its progress and Retry
+                    files: AnyView(ComposerAttachments(session: session)),
+                    // uploaded at once, one attaching at a time (`beginAttaching`)
+                    attach: { count, read in
+                        guard session.beginAttaching(count) else { return false }
+                        Task { await session.attach(read) }
+                        return true
+                    },
+                    room: session.fileRoom,
                     send: { await session.send() }, stop: { await session.stop() },
-                    steer: steers ? { await session.steer(recording: voice.recording) } : nil,
-                    hasAttachments: !session.attachments.isEmpty)
+                    steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
+                    quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
             }.background(FragmentStyle.background)
-        }
-        .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            switch result {
-            case .success(let urls): uploadFiles(urls)
-            case .failure(let error): session.error = error.localizedDescription
-            }
-        }
-        // Photos as the system's picker gives them, its most compatible
-        // encoding: a picture the web shows goes as it is, any other as JPEG
-        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, session.fileRoom),
-                      matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
-        .onChange(of: picked) { _, items in
-            guard !items.isEmpty else { return }
-            picked = []
-            // busy from the choosing on, before any photo is read (an iCloud one takes a while)
-            guard session.beginAttaching(items.count) else { return }
-            Task { await session.attach { try await Self.read(items) } }
         }
         // Seen only once its newest messages are on screen: read, the window
         // the chat's own (not paged back), following its end; and again on
@@ -188,72 +173,12 @@ struct ChatView: View {
         .onChange(of: library.handles, initial: true) { _, handles in session.handles = handles }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.flushDraft() } }
         .task(id: scenePhase) {
-            guard scenePhase == .active else { voice.cancel(); AudioPlayback.shared.pause(); return }
+            guard scenePhase == .active else { AudioPlayback.shared.pause(); return }
             await session.run()
         }
-        // a sound playing stops with its chat
-        .onDisappear { voice.cancel(); AudioPlayback.shared.stop() }
-    }
-
-    private var composerAccessories: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let quoted = session.replyTo {
-                HStack { Label(quoted.text, systemImage: "arrowshape.turn.up.left").font(.caption).lineLimit(2); Spacer(); Button("Cancel reply", systemImage: "xmark") { session.replyTo = nil }.labelStyle(.iconOnly) }
-            }
-            ComposerAttachments(session: session)
-            if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-            if voice.recording { Label("Recording voice memo…", systemImage: "waveform").foregroundStyle(.red).font(.caption) }
-        }.padding(.horizontal, 20)
-    }
-
-    /// Files picked, read and put as the message's attachments (the
-    /// session's one attaching at a time).
-    private func uploadFiles(_ urls: [URL]) {
-        guard session.beginAttaching(urls.count) else { return }
-        Task {
-            await session.attach {
-                try await Task.detached(priority: .userInitiated) {
-                    try urls.map { url in
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                        let limits = ChatAttachment.limits
-                        guard size > 0, size <= limits.uploadMaxBytes else { throw APIError.server(limits.sizeRefusal) }
-                        return try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
-                    }
-                }.value
-            }
-        }
-    }
-    /// Photos picked: each read in the picker's most compatible encoding,
-    /// a picture made one the web shows (`AttachmentInput.image`), off the
-    /// main actor.
-    private nonisolated static func read(_ items: [PhotosPickerItem]) async throws -> [OutgoingFile] {
-        var files: [OutgoingFile] = []
-        for (index, item) in items.enumerated() {
-            guard let data = try await item.loadTransferable(type: Data.self) else { throw APIError.server("This item could not be read.") }
-            let type = item.supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) } ?? .data
-            files.append(try await Task.detached(priority: .userInitiated) {
-                type.conforms(to: .image)
-                    ? try AttachmentInput.image(data, type: type, name: "photo-\(index + 1)")
-                    : try AttachmentInput.file(data, name: "video-\(index + 1).\(type.preferredFilenameExtension ?? "mov")", type: type)
-            }.value)
-        }
-        return files
-    }
-    /// Pictures pasted: read from the pasteboard here, made off the main actor.
-    private func paste(_ pasteboard: UIPasteboard) {
-        let pictures = AttachmentInput.snapshot(pasteboard)
-        guard !pictures.isEmpty else { session.error = "This picture could not be attached."; return }
-        guard session.beginAttaching(pictures.count) else { return }
-        Task { await session.attach { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value } }
-    }
-    /// A voice memo: its place in the message reserved before it records,
-    /// then attached once finished (by hand, or at its deadline).
-    private func recordVoice() async {
-        if voice.recording { voice.finish(); return }
-        guard session.beginAttaching(1) else { return }
-        await session.attach { [voice] in try await voice.file() }
+        // a sound playing stops with its chat (a voice memo being recorded
+        // stops with its ComposerBar)
+        .onDisappear { AudioPlayback.shared.stop() }
     }
 }
 
