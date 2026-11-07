@@ -154,6 +154,7 @@ pub fn project(doc: &Value) -> Result<String> {
     }
     let schemas = doc["components"]["schemas"].as_object().context("the document has components")?;
     for (name, schema) in schemas {
+        wire_name(name, "a component")?;
         let direction = schema["x-fragment-direction"].as_str().and_then(Direction::parse).with_context(|| format!("{name} names its direction"))?;
         Projector { lines: &mut lines, params: 0, predicates: vec![] }.node(name, schema, direction, schema["x-fragment-open"] == true)?;
     }
@@ -177,13 +178,31 @@ struct Projector<'a> {
     predicates: Vec<BTreeSet<String>>,
 }
 
-/// A schema's keywords, every one of them known.
+/// A schema's keywords, every one of them known, and every name it gives
+/// one the lock can write.
 fn known<'s>(schema: &'s Value, at: &str) -> Result<&'s Map<String, Value>> {
     let map = schema.as_object().with_context(|| format!("{at}: a schema is an object"))?;
     if let Some(k) = map.keys().find(|k| !STRUCTURAL.contains(&k.as_str()) && !BOUNDS.contains(&k.as_str()) && !DOCUMENTARY.contains(&k.as_str())) {
         bail!("{at}: the wire lock does not know `{k}`, so it cannot say what changing it breaks: teach xtask/src/wire/lock.rs, or describe the type another way");
     }
+    let props = map.get("properties").and_then(Value::as_object).into_iter().flat_map(|p| p.keys().map(String::as_str));
+    let required = map.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    let values = map.get("enum").and_then(Value::as_array).into_iter().flatten().chain(map.get("const")).filter_map(Value::as_str);
+    for name in props.chain(required).chain(values) {
+        wire_name(name, at)?;
+    }
     Ok(map)
+}
+
+/// A name the lock writes as a segment of a path or a word of a line:
+/// letters, digits, `_` and `-` alone, so no name can stand for another
+/// shape's (`settings.mode`, read back, is the field `mode` of a shape
+/// `settings`).
+fn wire_name(name: &str, at: &str) -> Result<()> {
+    if !super::source::wire_name_ok(name) {
+        bail!("{at}: the wire name {name:?}: the lock writes names of letters, digits, `_` and `-` alone, as its paths are dotted and its lines spaced (xtask/src/wire/lock.rs)");
+    }
+    Ok(())
 }
 
 /// The keywords that make its shape.
@@ -678,8 +697,32 @@ pub struct Facts {
 
 const BOUND_KINDS: [&str; 9] = ["range", "length", "items", "props", "unique", "pattern", "format", "multiple", "default"];
 
-/// A lock's facts: what `project` writes, read back.
+/// A lock's facts: what `project` writes, read back, each of a shape a
+/// `type` line declares.
 pub fn parse(text: &str) -> Result<Facts> {
+    let f = facts(text)?;
+    // a fact is of a shape the lock declares: one of another's would go
+    // uncompared (a dotted name read back as a field of a shape of its own)
+    for (name, t) in &f.types {
+        if t.direction.is_none() {
+            bail!("wire.lock: facts of `{name}`, which no `type` line declares");
+        }
+    }
+    for (path, kind) in f.bounds.keys() {
+        let declared = f.types.contains_key(path) || path.rsplit_once('.').is_some_and(|(owner, field)| f.types.get(owner).is_some_and(|t| t.fields.contains_key(field)));
+        if !declared {
+            bail!("wire.lock: `bound {path} {kind}`, of no shape or field a line declares");
+        }
+    }
+    Ok(f)
+}
+
+/// One line of the lock, alone (a retirement's): that it is a fact.
+pub fn parse_fact(line: &str) -> Result<()> {
+    facts(line).map(|_| ())
+}
+
+pub(super) fn facts(text: &str) -> Result<Facts> {
     let mut f = Facts::default();
     for (n, line) in text.lines().enumerate() {
         let line = line.trim_end();

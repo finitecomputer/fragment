@@ -1,29 +1,27 @@
 //! What the wire's schema says of fields left out, held to serde: each
 //! route's own types read samples of the shapes the schema gives them
-//! (`routes::Ty`), and every conclusion drawn from a reading stands on a
-//! control that rules out another cause. A control that cannot be met
-//! refuses generation, naming the type, branch and field, and asks for an
-//! `examples` value serde reads (or a tag). The inferences:
+//! (`routes::Ty`). It runs after the source guard (source.rs), so every
+//! type it reads is one whose schema schemars derived from serde's
+//! supported attributes, or one of `HAND_WRITTEN`. Every conclusion stands
+//! on a control that rules out another cause; a control that cannot be
+//! met refuses generation, naming the lock's field (type, branch, field).
+//!
+//! Supported:
+//! - **a stated default** (`extend("default" = …)`) of an optional field,
+//!   held in each condition branch that lets the field be left out;
+//! - **a forbidding** (`false` in a condition branch) at a `FORBIDDINGS`
+//!   site alone, of a field read as any JSON.
 //!
 //! | inference | evidence | control (`Controls`) |
 //! |-----------|----------|----------------------|
-//! | D. omitted `F` reads as its stated default `D`, in context `C` | `C` without `F` and `C` with `F = D` read the same | D1 both read (`samples_read`); D2 the same by `Debug` as well as by JSON, which hides what `skip_serializing_if` drops (`by_debug`); D3 `C` reads `F`: a value of a kind `F`'s schema does not admit is refused there, or, `F` being any JSON, two kinds read apart (`field_read`); D4 `C` is each branch that lets `F` be left out (`every_branch`) |
-//! | B. a sample of a union's branch is read as that branch | its tag, its key, or its conditions on one object's fields | B1 a union whose branches bring fields of their own that neither a tag nor a key of each branch's own tells apart (an untagged enum's), which serde reads by trying each branch in turn, holds no default or forbidding (`branch_is_its_own`) |
-//! | F. branch `B` forbids `F` | `B` with `F = X` is refused, for each `X` tried | F1 `B` as it is reads (`branch_reads`); F2 some `X` reads in a branch `A` that allows `F` (`value_reads`); F3 `A` reads `F`, as D3 (`context_reads_field`); F4 the `X` tried: one of each kind of JSON, `F`'s sample, and every value its schema lists, bounds to a few, or gives as `examples` (`every_value`); no branch allows `F`: refused |
-//! | H. every default and forbidding the lock records is held | the sites of the probes that passed | each such fact is a site; one no probe reaches fails `hold` (`unheld`), a route parameter's default among them (no type reads one) |
+//! | D. omitted `F` reads as its stated default `D`, in context `C` | `C` without `F` and `C` with `F = D` read the same | D1 both read (`samples_read`); D2 the same by `Debug` as well as JSON, which hides what `skip_serializing_if` drops (`by_debug`); D3 `C` reads `F`: a value of a kind `F`'s schema does not admit is refused there, or, `F` any JSON, two kinds read apart (`field_read`); D4 `C` is each branch that lets `F` be left out (`every_branch`); N1 none of those branches has branches of its own, else refused (`flat_conditions`) |
+//! | F. branch `B` forbids `F` | `B` with `F` set to one value of each JSON kind is refused, in each of `B`'s nested contexts | F0 the site is one of `FORBIDDINGS` (`forbidding_listed`); F1 each context of `B` reads as it is (`branch_reads`); F2 `F`'s schema admits any JSON (`field_any_json`); F3 a branch that allows `F` reads every kind of it, each apart (`allowing_reads_any`); F4 every nested context of `B`, not its first (`every_leaf`) |
+//! | H. every default and forbidding the lock records was read | the sites of the probes that passed | one no probe reaches fails `hold` (`unheld`), a route parameter's default among them |
 //!
 //! A sample is the least the schema asks (its required fields, constants,
 //! a union's first branch, an `examples` value first). `Debug` shows a
-//! read value faithfully as `#[derive(Debug)]` writes it: crates/proto
-//! has no `Debug` written by hand.
-//!
-//! The evidence is samples, so one assumption stands under every row: a
-//! reader treats the instances it is not shown as it treats those it is,
-//! within a branch and a kind. serde's derived readers do (a default is its
-//! variant's and its field's; a field is read by its type), as do the
-//! readers written by hand behind the wire's own types (`live.rs`'s two
-//! frames, which agreement tests hold to their schemas; `ErrorBody.reason`,
-//! read as a string or none).
+//! read value faithfully as `#[derive(Debug)]` writes it: crates/proto has
+//! no `Debug` written by hand.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,6 +38,12 @@ use super::openapi::COMPONENTS;
 /// held where it was first met.
 const DEPTH_MAX: usize = 64;
 
+/// The forbiddings the wire holds, each with the proto test that holds its
+/// reader to its schema: a refusal's `result`, read through a `Value` by
+/// `AnswerFrame` (`HAND_WRITTEN`), so any JSON, and refused beside a
+/// refusal by `Answer`'s `TryFrom`, whatever the value.
+pub const FORBIDDINGS: [(&str, &str); 1] = [("LiveOut.result.#1.result", "a_result_is_a_result_or_a_refusal_as_its_decoder_reads_it")];
+
 /// The controls each inference stands on (the module's table): all on,
 /// but in the mutation tests, which turn one off to show its fixture then
 /// passes, so each is what fails it.
@@ -49,11 +53,14 @@ pub struct Controls {
     pub by_debug: bool,
     pub field_read: bool,
     pub every_branch: bool,
-    pub branch_is_its_own: bool,
+    pub flat_conditions: bool,
+    pub forbidding_listed: bool,
     pub branch_reads: bool,
-    pub value_reads: bool,
-    pub context_reads_field: bool,
-    pub every_value: bool,
+    pub field_any_json: bool,
+    pub allowing_reads_any: bool,
+    pub every_leaf: bool,
+    /// The sites a forbidding may stand at (`FORBIDDINGS`', or a test's).
+    pub forbiddings: &'static [&'static str],
 }
 
 impl Controls {
@@ -62,11 +69,13 @@ impl Controls {
         by_debug: true,
         field_read: true,
         every_branch: true,
-        branch_is_its_own: true,
+        flat_conditions: true,
+        forbidding_listed: true,
         branch_reads: true,
-        value_reads: true,
-        context_reads_field: true,
-        every_value: true,
+        field_any_json: true,
+        allowing_reads_any: true,
+        every_leaf: true,
+        forbiddings: &[FORBIDDINGS[0].0],
     };
 }
 
@@ -124,16 +133,7 @@ pub fn unheld(lock: &str, held: &BTreeSet<String>) -> Vec<String> {
     missed
 }
 
-/// What a probe concludes, if its samples read as it says.
-#[derive(Debug)]
-enum Claim {
-    /// The field left out reads as this default.
-    Default(Value),
-    /// A condition branch forbids the field.
-    Forbidden,
-}
-
-/// Whether a field is read where a sample sets it.
+/// Whether a field is read where a sample sets it (D3).
 #[derive(Debug)]
 enum Reach {
     /// Set to a value of a kind its schema does not admit: must be refused.
@@ -142,17 +142,19 @@ enum Reach {
     Apart(Vec<Value>),
 }
 
-impl Reach {
-    fn map(self, f: &dyn Fn(Value) -> Value) -> Reach {
-        match self {
-            Reach::Refused(v) => Reach::Refused(f(v)),
-            Reach::Apart(vs) => Reach::Apart(vs.into_iter().map(f).collect()),
-        }
-    }
+/// What a probe concludes, and the samples of the root its evidence and
+/// its controls read.
+#[derive(Debug)]
+enum Claim {
+    /// The field left out reads as this default.
+    Default { default: Value, without: Value, with: Value, reach: Reach },
+    /// A condition branch forbids the field: each of its contexts as it
+    /// is, then with the field set to each kind; a branch that allows the
+    /// field, with it set to each kind.
+    Forbidden { contexts: Vec<Value>, trials: Vec<Value>, allowing: Vec<Value> },
 }
 
-/// A conclusion about one field, and the samples of the root its evidence
-/// and its controls read.
+/// A conclusion about one field.
 #[derive(Debug)]
 struct Probe {
     claim: Claim,
@@ -160,32 +162,26 @@ struct Probe {
     path: String,
     /// The lock's name of the field (`<shape>.<field>`).
     site: String,
-    /// A default's: its context without the field. A forbidding's: the
-    /// forbidding branch's sample as it is.
-    without: Value,
-    /// A default's: its context with the field its default.
-    with: Value,
-    /// A default's: whether its context reads the field (D3). A
-    /// forbidding's: whether the allowing context does (F3).
-    reach: Reach,
-    /// A forbidding's: for each value tried, the forbidding branch with it,
-    /// and the allowing context with it.
-    trials: Vec<(Value, Value)>,
 }
 
 impl Probe {
     /// The probe of a sample nested in a larger one: `f` puts each of its
     /// samples where it stands in the larger.
     fn lift(self, path: String, f: &dyn Fn(Value) -> Value) -> Probe {
-        Probe {
-            claim: self.claim,
-            path,
-            site: self.site,
-            without: f(self.without),
-            with: f(self.with),
-            reach: self.reach.map(f),
-            trials: self.trials.into_iter().map(|(b, a)| (f(b), f(a))).collect(),
-        }
+        let all = |vs: Vec<Value>| vs.into_iter().map(f).collect();
+        let claim = match self.claim {
+            Claim::Default { default, without, with, reach } => Claim::Default {
+                default,
+                without: f(without),
+                with: f(with),
+                reach: match reach {
+                    Reach::Refused(v) => Reach::Refused(f(v)),
+                    Reach::Apart(vs) => Reach::Apart(all(vs)),
+                },
+            },
+            Claim::Forbidden { contexts, trials, allowing } => Claim::Forbidden { contexts: all(contexts), trials: all(trials), allowing: all(allowing) },
+        };
+        Probe { claim, path, site: self.site }
     }
 }
 
@@ -203,40 +199,48 @@ pub fn check_with(label: &str, schema: &Value, defs: &Map<String, Value>, round_
         let at = format!("the lock's {}; xtask/src/wire/defaults.rs", p.site);
         let path = &p.path;
         match &p.claim {
-            Claim::Default(default) => {
-                match (round_trip(p.without.clone()), round_trip(p.with.clone())) {
+            Claim::Default { default, without: out, with: has, reach } => {
+                match (round_trip(out.clone()), round_trip(has.clone())) {
                     (Ok(without), Ok(with)) => {
                         let same = without.0 == with.0 && (!controls.by_debug || without.1 == with.1);
                         if !same {
-                            bail!("{label}: `{path}` left out is not its stated default {default}, beside {}: serde reads {} of it left out and {} of it as its default ({at})", p.without, without.1, with.1);
+                            bail!("{label}: `{path}` left out is not its stated default {default}, beside {out}: serde reads {} of it left out and {} of it as its default ({at})", without.1, with.1);
                         }
                     }
                     (Err(_), Err(_)) if !controls.samples_read => {}
-                    (Err(e), _) => bail!("{label}: a sample of it with `{path}` left out does not read ({}): {e}; give the type serde refuses there an `examples` value it reads ({at})", p.without),
-                    (_, Err(e)) => bail!("{label}: a sample of it with `{path}` its stated default does not read ({}): {e}; give the type serde refuses there an `examples` value it reads ({at})", p.with),
+                    (Err(e), _) => bail!("{label}: a sample of it with `{path}` left out does not read ({out}): {e}; give the type serde refuses there an `examples` value it reads ({at})"),
+                    (_, Err(e)) => bail!("{label}: a sample of it with `{path}` its stated default does not read ({has}): {e}; give the type serde refuses there an `examples` value it reads ({at})"),
                 }
                 if controls.field_read {
-                    reached(label, path, &p.reach, round_trip, "where its default is held", &at)?;
+                    reached(label, path, reach, round_trip, &at)?;
                 }
             }
-            Claim::Forbidden => {
+            Claim::Forbidden { contexts, trials, allowing } => {
                 if controls.branch_reads {
-                    if let Err(e) = round_trip(p.without.clone()) {
-                        bail!("{label}: a sample of the branch that forbids `{path}` does not read ({}): {e}; give the type serde refuses there an `examples` value it reads, or the forbidding cannot be held ({at})", p.without);
+                    for c in contexts {
+                        if let Err(e) = round_trip(c.clone()) {
+                            bail!("{label}: a sample of the branch that forbids `{path}` does not read ({c}): {e}; give the type serde refuses there an `examples` value it reads, or the forbidding cannot be held ({at})");
+                        }
                     }
                 }
-                let mut shown = false;
-                for (forbidding, allowing) in &p.trials {
-                    if round_trip(forbidding.clone()).is_ok() {
-                        bail!("{label}: a condition branch forbids `{path}`, but serde reads it there ({forbidding}): leaving it out there means a value its reader fills in, which no fact holds; give each branch its own fields ({at})");
+                for t in trials {
+                    if round_trip(t.clone()).is_ok() {
+                        bail!("{label}: a condition branch forbids `{path}`, but serde reads it there ({t}): leaving it out there means a value its reader fills in, which no fact holds; give each branch its own fields ({at})");
                     }
-                    shown |= !controls.value_reads || round_trip(allowing.clone()).is_ok();
                 }
-                if !shown {
-                    bail!("{label}: none of the values tried for `{path}` reads where a branch allows it, so its refusal in the branch that forbids it may be the value's own: give its schema `examples` values serde reads ({at})");
-                }
-                if controls.context_reads_field {
-                    reached(label, path, &p.reach, round_trip, "where a branch allows it", &at)?;
+                if controls.allowing_reads_any {
+                    let mut shown = BTreeSet::new();
+                    for a in allowing {
+                        match round_trip(a.clone()) {
+                            Ok((_, d)) => {
+                                shown.insert(d);
+                            }
+                            Err(e) => bail!("{label}: where a branch allows `{path}`, it is not read as any JSON ({a}: {e}), so its refusal where it is forbidden may be its type's: only a field read as any JSON may be forbidden ({at})"),
+                        }
+                    }
+                    if shown.len() < allowing.len() {
+                        bail!("{label}: where a branch allows `{path}`, two kinds of it read the same, so it is not read as any JSON: only a field read as any JSON may be forbidden ({at})");
+                    }
                 }
             }
         }
@@ -244,18 +248,18 @@ pub fn check_with(label: &str, schema: &Value, defs: &Map<String, Value>, round_
     Ok(probes.into_iter().map(|p| p.site).collect())
 }
 
-/// That a sample reads the field where it sets it (D3, F3).
-fn reached(label: &str, path: &str, reach: &Reach, round_trip: RoundTrip, there: &str, at: &str) -> Result<()> {
+/// That a sample reads the field where it sets it (D3).
+fn reached(label: &str, path: &str, reach: &Reach, round_trip: RoundTrip, at: &str) -> Result<()> {
     match reach {
         Reach::Refused(v) => {
             if round_trip(v.clone()).is_ok() {
-                bail!("{label}: `{path}` is not read {there}: a value of a kind its schema does not admit reads ({v}), so what it is there is no evidence; the schema and the type disagree ({at})");
+                bail!("{label}: `{path}` is not read where its default is held: a value of a kind its schema does not admit reads ({v}), so what it is there is no evidence; the schema and the type disagree ({at})");
             }
         }
         Reach::Apart(samples) => {
             let read: BTreeSet<String> = samples.iter().filter_map(|v| round_trip(v.clone()).ok()).map(|(_, shown)| shown).collect();
             if read.len() < 2 {
-                bail!("{label}: `{path}` is not shown to be read {there}: no two kinds of value read apart; give its schema `examples` values serde reads ({at})");
+                bail!("{label}: `{path}` is not shown to be read where its default is held: no two kinds of value read apart; give its schema `examples` values serde reads ({at})");
             }
         }
     }
@@ -341,14 +345,16 @@ fn sample_object(m: &Map<String, Value>, defs: &Map<String, Value>, depth: usize
         obj.insert(name.to_string(), sample(s, defs, depth + 1)?);
     }
     if let Some(first) = branches(m).and_then(|b| b.first()) {
-        apply_branch(&mut obj, first, props, defs, depth + 1)?;
+        obj = leaves(&obj, first, props, defs, depth + 1)?.swap_remove(0);
     }
     Ok(obj)
 }
 
-/// A condition branch's requirements laid on a sample of its object.
-fn apply_branch(obj: &mut Map<String, Value>, b: &Value, parent: Option<&Map<String, Value>>, defs: &Map<String, Value>, depth: usize) -> Result<()> {
+/// A condition branch's requirements laid on a sample of its object, once
+/// for each branch nested in it, to its leaves: a sample per context.
+fn leaves(obj: &Map<String, Value>, b: &Value, parent: Option<&Map<String, Value>>, defs: &Map<String, Value>, depth: usize) -> Result<Vec<Map<String, Value>>> {
     anyhow::ensure!(depth <= DEPTH_MAX, "a sample nested past {DEPTH_MAX}");
+    let mut obj = obj.clone();
     let own = b["properties"].as_object();
     for name in b["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         let s = own.and_then(|p| p.get(name)).filter(|s| **s != Value::Bool(false)).or(parent.and_then(|p| p.get(name))).unwrap_or(&Value::Bool(true));
@@ -359,12 +365,15 @@ fn apply_branch(obj: &mut Map<String, Value>, b: &Value, parent: Option<&Map<Str
             obj.insert(name.clone(), sample(s, defs, depth + 1)?);
         }
     }
-    if let Some(inner) = b.as_object().and_then(branches).and_then(|bs| bs.first()) {
-        let mut merged = parent.cloned().unwrap_or_default();
-        merged.extend(own.cloned().unwrap_or_default());
-        apply_branch(obj, inner, Some(&merged), defs, depth + 1)?;
+    let Some(inner) = b.as_object().and_then(branches) else { return Ok(vec![obj]) };
+    let mut merged = parent.cloned().unwrap_or_default();
+    merged.extend(own.cloned().unwrap_or_default());
+    let mut all = vec![];
+    for i in inner {
+        all.extend(leaves(&obj, i, Some(&merged), defs, depth + 1)?);
     }
-    Ok(())
+    anyhow::ensure!(!all.is_empty(), "a union has a branch");
+    Ok(all)
 }
 
 /// The kinds of JSON value a schema admits: none for any JSON.
@@ -428,7 +437,7 @@ fn kind_of(v: &Value) -> &'static str {
 
 /// One value of each kind of JSON.
 fn every_kind() -> Vec<Value> {
-    vec![Value::Null, json!(true), json!(0), json!("x"), json!([]), json!({})]
+    vec![Value::Null, json!(true), json!(0), json!(1.5), json!("x"), json!([]), json!({})]
 }
 
 /// Whether a sample reads a field it sets to these: a value of a kind the
@@ -449,83 +458,6 @@ fn reach_of(ctx: &Map<String, Value>, name: &str, field: &Value, defs: &Map<Stri
             }
         }
     })
-}
-
-/// The values a forbidding is tried with (F4): one of each kind of JSON,
-/// the field's least sample, and every value its schema lists or bounds
-/// to a few (constants, enums, booleans, null, a small integer range) or
-/// gives as `examples`, through its references and unions.
-fn tried(field: &Value, defs: &Map<String, Value>, controls: Controls) -> Result<Vec<Value>> {
-    if !controls.every_value {
-        return Ok(vec![sample(field, defs, 0)?]);
-    }
-    let mut all = every_kind();
-    all.push(sample(field, defs, 0)?);
-    listed(field, defs, 0, &mut all)?;
-    let mut seen = BTreeSet::new();
-    all.retain(|v| seen.insert(v.to_string()));
-    Ok(all)
-}
-
-fn listed(s: &Value, defs: &Map<String, Value>, depth: usize, out: &mut Vec<Value>) -> Result<()> {
-    anyhow::ensure!(depth <= DEPTH_MAX, "a schema nested past {DEPTH_MAX}");
-    let Some(m) = s.as_object() else { return Ok(()) };
-    out.extend(m.get("examples").and_then(Value::as_array).into_iter().flatten().cloned());
-    out.extend(m.get("const").cloned());
-    out.extend(m.get("enum").and_then(Value::as_array).into_iter().flatten().cloned());
-    if let Some(r) = m.get("$ref").and_then(Value::as_str) {
-        listed(target(r, defs)?, defs, depth + 1, out)?;
-    }
-    for b in branches(m).into_iter().flatten() {
-        listed(b, defs, depth + 1, out)?;
-    }
-    for t in types(m) {
-        match t {
-            "boolean" => out.extend([json!(false), json!(true)]),
-            "integer" => {
-                if let (Some(lo), Some(hi)) = (m.get("minimum").and_then(Value::as_i64), m.get("maximum").and_then(Value::as_i64)) {
-                    if hi >= lo && hi - lo < 16 {
-                        out.extend((lo..=hi).map(|n| json!(n)));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Whether a union is one serde reads by trying each branch in turn: its
-/// branches bring fields of their own (or a type by reference), and
-/// neither a tag nor a key of each branch's own tells them apart (an
-/// untagged enum's `anyOf`), so a sample of one branch may be read as
-/// another and no reading of it is evidence of its own branch's.
-fn tried_in_turn(m: &Map<String, Value>, bs: &[Value]) -> bool {
-    let parent = m.get("properties").and_then(Value::as_object);
-    let own = |b: &&Value| b.get("$ref").is_some() || b["properties"].as_object().is_some_and(|p| p.keys().any(|k| !parent.is_some_and(|pp| pp.contains_key(k))));
-    let data: Vec<&Value> = bs.iter().filter(|b| !is_null(b)).filter(own).collect();
-    if data.is_empty() || bs.iter().filter(|b| !is_null(b)).count() < 2 || super::lock::tag_of(bs).is_some() {
-        return false;
-    }
-    // an externally tagged enum's: each branch one key of its own, and closed
-    fn key(b: &Value) -> Option<&str> {
-        match (b["required"].as_array().map(Vec::as_slice), b["properties"].as_object()) {
-            (Some([k]), Some(p)) if p.len() == 1 && b["additionalProperties"] == false => k.as_str(),
-            _ => None,
-        }
-    }
-    let keys: Option<BTreeSet<&str>> = data.iter().map(|b| key(b)).collect();
-    !keys.is_some_and(|k| k.len() == data.len())
-}
-
-/// That a union's branch holds nothing to check, unless serde reads each
-/// branch as its own (B1).
-fn own_branch(m: &Map<String, Value>, bs: &[Value], found: &[Probe], site: &str, controls: Controls) -> Result<()> {
-    if controls.branch_is_its_own && !found.is_empty() && tried_in_turn(m, bs) {
-        let names: Vec<&str> = found.iter().map(|p| p.site.as_str()).collect();
-        bail!("{site}: an untagged union (no tag or key tells its branches apart) holds {}: serde reads the first branch that reads, so a sample of one branch may be read as another and no default or forbidding in it can be held; tag it (`#[serde(tag = ...)]`) (xtask/src/wire/defaults.rs)", names.join(", "));
-    }
-    Ok(())
 }
 
 /// Each optional field with a default, and each a condition forbids,
@@ -578,14 +510,14 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
         let base = sample_object(m, defs, depth)?;
         let props = m.get("properties").and_then(Value::as_object);
         let required: BTreeSet<&str> = m.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
-        // a sample of the object as each condition branch beside it has it
-        let in_branch = |b: &Value| -> Result<Map<String, Value>> {
+        // a sample of the object as each condition branch beside it has
+        // it, in each context nested in it
+        let in_branch = |b: &Value| -> Result<Vec<Map<String, Value>>> {
             let mut base_b = base.clone();
             for (k, _) in base.iter().filter(|(k, _)| !required.contains(k.as_str())) {
                 base_b.remove(k);
             }
-            apply_branch(&mut base_b, b, props, defs, depth + 1)?;
-            Ok(base_b)
+            leaves(&base_b, b, props, defs, depth + 1)
         };
         for (name, ps) in props.into_iter().flatten() {
             if let (false, Some(d)) = (required.contains(name.as_str()), ps.get("default")) {
@@ -593,7 +525,15 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
                 // names it or tells instances apart by another field: each such
                 // branch's sample, for each may read it its own way
                 let mut contexts: Vec<Map<String, Value>> = match branches(m) {
-                    Some(bs) => bs.iter().filter(|b| permits_absence(b, name)).map(&in_branch).collect::<Result<_>>()?,
+                    Some(bs) => {
+                        let permitting: Vec<&Value> = bs.iter().filter(|b| permits_absence(b, name)).collect();
+                        // N1: a branch with branches of its own has contexts its first
+                        // nested one does not stand for
+                        if controls.flat_conditions && permitting.iter().any(|b| b.as_object().and_then(branches).is_some()) {
+                            bail!("{site}.{name}: a default its object states once, beside a condition branch with branches of its own: the checker reads it in each branch's context, not in each nested one's, so it is refused; state it in each branch's own fields (xtask/src/wire/defaults.rs)");
+                        }
+                        permitting.into_iter().map(|b| in_branch(b).map(|mut l| l.swap_remove(0))).collect::<Result<_>>()?
+                    }
                     None => vec![base.clone()],
                 };
                 if !controls.every_branch {
@@ -604,13 +544,9 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
                     with.insert(name.clone(), d.clone());
                     without.remove(name);
                     out.push(Probe {
-                        claim: Claim::Default(d.clone()),
+                        claim: Claim::Default { default: d.clone(), without: Value::Object(without), with: Value::Object(with), reach: reach_of(&ctx, name, ps, defs)? },
                         path: name.clone(),
                         site: format!("{site}.{name}"),
-                        without: Value::Object(without),
-                        with: Value::Object(with),
-                        reach: reach_of(&ctx, name, ps, defs)?,
-                        trials: vec![],
                     });
                 }
             }
@@ -641,10 +577,10 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
         // of the branch, read beside the fields of the object it stands in
         if let Some(bs) = branches(m) {
             let tag = super::lock::tag_of(bs);
-            let before = out.len();
             for (i, b) in bs.iter().enumerate() {
                 let key = branch_key(b, tag.as_deref(), i);
-                let base_b = in_branch(b)?;
+                let contexts = in_branch(b)?;
+                let base_b = contexts[0].clone();
                 for p in probes(b, &format!("{site}.{key}"), defs, walk)? {
                     let field = p.path.split('.').next().unwrap_or(&p.path).to_string();
                     // a predicate on a field its object describes is no data of its own
@@ -663,35 +599,12 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
                     };
                     out.push(p.lift(path, &lift));
                 }
-                // each field it forbids of those its object describes: refused
-                // there with each value tried, each of which reads where a branch
-                // allows the field, a branch that reads it
+                // each field it forbids of those its object describes
                 for (name, _) in b["properties"].as_object().into_iter().flatten().filter(|(_, ps)| **ps == Value::Bool(false)) {
                     let at = format!("{site}.{key}.{name}");
-                    let described = props.and_then(|pp| pp.get(name)).with_context(|| format!("{at}: forbidden, though its object does not describe it"))?;
-                    let allowing = bs
-                        .iter()
-                        .find(|other| other["properties"][name.as_str()] != Value::Bool(false))
-                        .with_context(|| format!("{at}: every branch forbids it, so no value of it can be shown to read: give each branch its own fields (xtask/src/wire/defaults.rs)"))?;
-                    let base_a = in_branch(allowing)?;
-                    let set = |base: &Map<String, Value>, v: &Value| {
-                        let mut o = base.clone();
-                        o.insert(name.clone(), v.clone());
-                        Value::Object(o)
-                    };
-                    let trials = tried(described, defs, controls)?.iter().map(|x| (set(&base_b, x), set(&base_a, x))).collect();
-                    out.push(Probe {
-                        claim: Claim::Forbidden,
-                        path: format!("{key}.{name}"),
-                        site: at,
-                        without: Value::Object(base_b.clone()),
-                        with: Value::Null,
-                        reach: reach_of(&base_a, name, described, defs)?,
-                        trials,
-                    });
+                    out.push(forbidding(&at, name, props, bs, &contexts, &in_branch, defs, controls, format!("{key}.{name}"))?);
                 }
             }
-            own_branch(m, bs, &out[before..], site, controls)?;
         }
         return Ok(out);
     }
@@ -705,7 +618,6 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
             let at = if nullable { site.to_string() } else { format!("{site}.{}", branch_key(b, tag.as_deref(), i)) };
             out.extend(probes(b, &at, defs, walk)?);
         }
-        own_branch(m, bs, &out, site, controls)?;
         return Ok(out);
     }
     if let Some(items) = m.get("items") {
@@ -721,6 +633,50 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
         }
     }
     Ok(out)
+}
+
+/// A sample of an object in each context of a condition branch.
+type InBranch<'a> = &'a dyn Fn(&Value) -> Result<Vec<Map<String, Value>>>;
+
+/// A forbidding's probe (F): at a listed site, of a field any JSON, its
+/// branch's every context with the field set to each kind, and a branch
+/// that allows it with the same.
+#[allow(clippy::too_many_arguments)]
+fn forbidding(
+    at: &str,
+    name: &str,
+    props: Option<&Map<String, Value>>,
+    bs: &[Value],
+    contexts: &[Map<String, Value>],
+    in_branch: InBranch,
+    defs: &Map<String, Value>,
+    controls: Controls,
+    path: String,
+) -> Result<Probe> {
+    if controls.forbidding_listed && !controls.forbiddings.contains(&at) {
+        bail!("{at}: a condition branch forbids it, and the wire holds a forbidding at FORBIDDINGS' sites alone, each a field a reader takes as any JSON and its branch refuses whatever it holds (xtask/src/wire/defaults.rs)");
+    }
+    let described = props.and_then(|pp| pp.get(name)).with_context(|| format!("{at}: forbidden, though its object does not describe it"))?;
+    if controls.field_any_json && admitted(described, defs, 0)?.is_some() {
+        bail!("{at}: forbidden, though its field is not any JSON ({described}): a refusal of values tried is no evidence that the branch refuses every value its own reader takes, so only a field any JSON may be forbidden (xtask/src/wire/defaults.rs)");
+    }
+    let allowing = bs
+        .iter()
+        .find(|other| other["properties"][name] != Value::Bool(false))
+        .with_context(|| format!("{at}: every branch forbids it, so it cannot be shown read anywhere: give each branch its own fields (xtask/src/wire/defaults.rs)"))?;
+    let base_a = in_branch(allowing)?.swap_remove(0);
+    let set = |base: &Map<String, Value>, v: Value| {
+        let mut o = base.clone();
+        o.insert(name.to_string(), v);
+        Value::Object(o)
+    };
+    let mut contexts = contexts.to_vec();
+    if !controls.every_leaf {
+        contexts.truncate(1);
+    }
+    let trials = contexts.iter().flat_map(|c| every_kind().into_iter().map(|v| set(c, v))).collect();
+    let allowing = every_kind().into_iter().map(|v| set(&base_a, v)).collect();
+    Ok(Probe { claim: Claim::Forbidden { contexts: contexts.into_iter().map(Value::Object).collect(), trials, allowing }, path, site: at.to_string() })
 }
 
 /// A component's name, as `$ref` names it.

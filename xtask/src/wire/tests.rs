@@ -366,7 +366,8 @@ fn master_holds_the_lock_and_its_retirements() {
     // master held a field this tree renamed: refused, naming it
     let title = "field ListedFragment.title optional string|null";
     assert!(generated.lock.contains(&format!("\n{title}\n")));
-    let held = Base { lock: generated.lock.replace(title, "field ListedFragment.titled optional string|null"), retired: RETIRED_HEADER.into(), at: "master".into() };
+    let renamed = generated.lock.replace(title, "field ListedFragment.titled optional string|null").replace("bound ListedFragment.title default null\n", "");
+    let held = Base { lock: renamed, retired: RETIRED_HEADER.into(), at: "master".into() };
     let refused = verdict(&generated, &disk, Some(&held), true).unwrap_err().to_string();
     assert!(refused.contains("field ListedFragment.titled optional string|null") && refused.contains("removed or renamed"), "{refused}");
     // retired on purpose, it passes
@@ -1180,7 +1181,7 @@ fn conditions_hide_no_default() {
     assert!(serde_json::from_value::<forbid_said::Wrap>(written).unwrap().dock, "an older reader fills it in");
     assert!(breaches(&lock_of::<forbid_said::Wrap>(true), &lock_of::<forbid_stale::Wrap>(true), &none).is_empty(), "the lock is the same");
     for refused in [defaults_hold::<forbid_said::Wrap>().unwrap_err().to_string(), defaults_hold::<forbid_stale::Wrap>().unwrap_err().to_string()] {
-        assert!(refused.contains("forbids `#1.dock`") && refused.contains("serde reads it there"), "{refused}");
+        assert!(refused.contains("Wrap.#1.dock") && refused.contains("FORBIDDINGS' sites alone"), "{refused}");
     }
     // a shared default, read in every branch
     let written = serde_json::to_value(shared_stale::SharedDefault::B { dock: false }).unwrap();
@@ -1198,63 +1199,6 @@ fn conditions_hide_no_default() {
     assert_eq!(super::defaults::unheld(lock, &BTreeSet::new()), ["X.#1.f"]);
 }
 
-#[allow(dead_code)]
-mod derived_baseline {
-    /// A name serde refuses under two characters: the least sample of a
-    /// string (`"x"`) does not read, unless its schema gives an example.
-    macro_rules! validated {
-        ($m:ident, $($example:tt)*) => {
-            pub mod $m {
-                #[derive(Clone, Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
-                #[serde(try_from = "String", into = "String")]
-                $($example)*
-                pub struct Name(String);
-                impl TryFrom<String> for Name {
-                    type Error = String;
-                    fn try_from(s: String) -> Result<Name, String> {
-                        if s.len() < 2 { Err(format!("{s:?} is too short")) } else { Ok(Name(s)) }
-                    }
-                }
-                impl From<Name> for String {
-                    fn from(n: Name) -> String {
-                        n.0
-                    }
-                }
-                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
-                #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
-                pub struct ValidatedForbidden {
-                    pub id: Name,
-                    #[serde(default = "yes", skip_serializing_if = "is_yes")]
-                    pub dock: bool,
-                }
-                fn yes() -> bool {
-                    true
-                }
-                fn is_yes(b: &bool) -> bool {
-                    *b
-                }
-            }
-        };
-    }
-    validated!(unread,);
-    validated!(read, #[schemars(example = &"ok")]);
-}
-
-/// A forbidding branch's refusal counts only beside a sample of the
-/// branch that reads: one serde refuses for another reason (a name too
-/// short) is refused, naming the branch; with an example that reads, the
-/// field serde reads there is refused as before.
-#[test]
-fn a_forbidding_needs_a_sample_that_reads() {
-    use derived_baseline::*;
-    let written = serde_json::to_value(read::ValidatedForbidden { id: serde_json::from_value(json!("ok")).unwrap(), dock: false }).unwrap();
-    assert!(serde_json::from_value::<read::ValidatedForbidden>(written).is_ok(), "dock is no forbidden field: serde reads it");
-    let unread = defaults_hold::<unread::ValidatedForbidden>().unwrap_err().to_string();
-    assert!(unread.contains("a sample of the branch that forbids `#1.dock` does not read") && unread.contains("examples"), "{unread}");
-    let refused = defaults_hold::<read::ValidatedForbidden>().unwrap_err().to_string();
-    assert!(refused.contains("forbids `#1.dock`") && refused.contains("serde reads it there"), "{refused}");
-}
-
 /// The checker's controls (defaults.rs's table), each with a fixture whose
 /// claim is false and that only it refuses.
 #[allow(dead_code)]
@@ -1263,6 +1207,9 @@ mod derived_controls {
 
     use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
     use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    use super::super::fixtures::mode::Mode;
 
     /// A name serde refuses under two characters, and its schema's example.
     macro_rules! name {
@@ -1294,19 +1241,18 @@ mod derived_controls {
     }
     name!(Name,);
     name!(NameOk, #[schemars(example = &"ok")]);
-    name!(NameBad, #[schemars(example = &"y")]);
 
-    fn yes() -> bool {
-        true
-    }
     fn no() -> bool {
         false
     }
-    fn is_yes(b: &bool) -> bool {
-        *b
-    }
     fn is_no(b: &bool) -> bool {
         !*b
+    }
+    fn red() -> Mode {
+        Mode::Red
+    }
+    fn is_red(m: &Mode) -> bool {
+        *m == Mode::Red
     }
 
     /// D1: a default stated wrong, beside a name no sample of which reads.
@@ -1343,70 +1289,9 @@ mod derived_controls {
         *n == 0
     }
 
-    /// B1: an untagged union whose first branch reads the second's sample.
-    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
-    #[serde(untagged)]
-    pub enum Shadowed {
-        Wide {
-            #[serde(default = "yes", skip_serializing_if = "is_yes")]
-            #[schemars(extend("default" = true))]
-            dock: bool,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            #[schemars(extend("default" = null))]
-            n: Option<u8>,
-        },
-        Narrow {
-            #[serde(default = "no", skip_serializing_if = "is_no")]
-            #[schemars(extend("default" = true))]
-            dock: bool,
-            b: u8,
-        },
-    }
-
-    /// B1 again: the same reader under a schema that says `oneOf`.
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(transparent)]
-    pub struct ShadowedOneOf(pub Shadowed);
-    impl JsonSchema for ShadowedOneOf {
-        fn schema_name() -> Cow<'static, str> {
-            "ShadowedOneOf".into()
-        }
-        fn json_schema(g: &mut SchemaGenerator) -> Schema {
-            let mut v = Shadowed::json_schema(g).to_value();
-            let branches = v.as_object_mut().and_then(|m| m.remove("anyOf")).expect("an untagged enum's branches");
-            v["oneOf"] = branches;
-            Schema::try_from(v).expect("a schema")
-        }
-    }
-
-    /// An externally tagged enum: each branch its own key, read as itself.
-    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
-    pub enum External {
-        Docked {
-            #[serde(default = "yes", skip_serializing_if = "is_yes")]
-            #[schemars(extend("default" = true))]
-            dock: bool,
-        },
-        Other {
-            other: u8,
-        },
-    }
-
-    /// F1: a forbidding read beside a name no sample of which reads.
-    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
-    #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "required": ["g"], "properties": { "dock": false } }]))]
-    pub struct BranchUnread {
-        pub id: String,
-        #[serde(default = "yes", skip_serializing_if = "is_yes")]
-        pub dock: bool,
-        #[serde(default = "Name::anon", skip_serializing_if = "Name::is_anon")]
-        pub g: Name,
-    }
-
     /// The schema of a union tagged by `kind`: branch `a` requires `field`,
     /// branch `b` forbids it.
-    fn a_requires_b_forbids(name: &str, field: &str, schema: serde_json::Value) -> Schema {
-        let _ = name;
+    fn a_requires_b_forbids(field: &str, schema: Value) -> Schema {
         json_schema!({
             "type": "object",
             "properties": { "kind": { "type": "string" }, field: schema },
@@ -1418,142 +1303,81 @@ mod derived_controls {
         })
     }
 
-    /// F2: the review's case: branch `b` reads `tag`, a name, which its schema
-    /// says `b` forbids; the least sample of a name does not read anywhere.
-    macro_rules! forbidden_name {
-        ($m:ident, $name:ident) => {
-            pub mod $m {
-                use super::*;
-                use super::$name as N;
-                #[derive(Debug, Serialize, Deserialize)]
-                #[serde(tag = "kind")]
-                pub enum Tagged {
-                    #[serde(rename = "a")]
-                    A { tag: N },
-                    #[serde(rename = "b")]
-                    B {
-                        #[serde(default = "N::anon", skip_serializing_if = "N::is_anon")]
-                        tag: N,
-                    },
+    /// F0, F2, F3: branch `b` reads `mode` as a `Mode` while its schema
+    /// says `b` forbids it; `a` reads it as `$a`; the field's schema is
+    /// `$schema`.
+    macro_rules! tagged_mode {
+        ($name:ident, $a:ty, $schema:tt) => {
+            #[derive(Debug, Serialize, Deserialize)]
+            #[serde(tag = "kind", rename_all = "lowercase")]
+            pub enum $name {
+                A {
+                    mode: $a,
+                },
+                B {
+                    #[serde(default = "red", skip_serializing_if = "is_red")]
+                    mode: Mode,
+                },
+            }
+            impl JsonSchema for $name {
+                fn schema_name() -> Cow<'static, str> {
+                    stringify!($name).into()
                 }
-                impl JsonSchema for Tagged {
-                    fn schema_name() -> Cow<'static, str> {
-                        "Tagged".into()
-                    }
-                    fn json_schema(g: &mut SchemaGenerator) -> Schema {
-                        a_requires_b_forbids("Tagged", "tag", g.subschema_for::<N>().to_value())
-                    }
-                }
-                /// The review's own shape: a required-or-forbidden `anyOf`
-                /// over a defaulted, skipped name.
-                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
-                #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
-                pub struct InvalidTarget {
-                    pub id: String,
-                    #[serde(default = "N::anon", skip_serializing_if = "N::is_anon")]
-                    pub dock: N,
+                fn json_schema(_: &mut SchemaGenerator) -> Schema {
+                    a_requires_b_forbids("mode", serde_json::json!($schema))
                 }
             }
         };
     }
-    forbidden_name!(named_unread, Name);
-    forbidden_name!(named_read, NameOk);
-    forbidden_name!(named_bad_example, NameBad);
+    tagged_mode!(Unlisted, Value, {});
+    tagged_mode!(NotAny, Value, { "type": "string" });
+    tagged_mode!(Blinkered, Mode, {});
 
-    /// F3: branch `a`, which allows `f`, never reads it; `b` reads it.
+    /// F1: the forbidding branch requires a name `"x"` fails; serde reads
+    /// `f` there.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    #[schemars(extend("anyOf" = [{ "required": ["f"] }, { "required": ["g"], "properties": { "f": false } }]))]
+    pub struct BranchUnread {
+        pub id: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        pub f: Value,
+        #[serde(default = "Name::anon", skip_serializing_if = "Name::is_anon")]
+        pub g: Name,
+    }
+
+    /// F4: the forbidding branch has two contexts: `b` refuses `f`, `c`
+    /// reads it.
     #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "kind")]
-    pub enum Blind {
-        #[serde(rename = "a")]
-        A {},
-        #[serde(rename = "b")]
-        B {
-            #[serde(default = "Name::anon", skip_serializing_if = "Name::is_anon")]
-            f: Name,
+    #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+    pub enum Leafy {
+        A {
+            f: Value,
+        },
+        B {},
+        C {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            f: Option<Value>,
         },
     }
-    impl JsonSchema for Blind {
+    impl JsonSchema for Leafy {
         fn schema_name() -> Cow<'static, str> {
-            "Blind".into()
+            "Leafy".into()
         }
         fn json_schema(_: &mut SchemaGenerator) -> Schema {
-            a_requires_b_forbids("Blind", "f", serde_json::json!({ "type": "string" }))
+            json_schema!({
+                "type": "object",
+                "properties": { "kind": { "type": "string" }, "f": {} },
+                "required": ["kind"],
+                "oneOf": [
+                    { "properties": { "kind": { "const": "a" } }, "required": ["f"] },
+                    { "oneOf": [{ "properties": { "kind": { "const": "b" } } }, { "properties": { "kind": { "const": "c" } } }], "properties": { "f": false } },
+                ],
+            })
         }
     }
 
-    /// F4: branch `b` reads one value of an enum its schema says it forbids.
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum Mode {
-        A,
-        B,
-        C,
-    }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(try_from = "String", into = "String")]
-    pub struct OnlyC(String);
-    impl TryFrom<String> for OnlyC {
-        type Error = String;
-        fn try_from(s: String) -> Result<OnlyC, String> {
-            if s == "c" { Ok(OnlyC(s)) } else { Err(format!("{s:?} is not c")) }
-        }
-    }
-    impl From<OnlyC> for String {
-        fn from(c: OnlyC) -> String {
-            c.0
-        }
-    }
-    fn c() -> OnlyC {
-        OnlyC("c".into())
-    }
-    fn is_c(_: &OnlyC) -> bool {
-        true
-    }
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "kind")]
-    pub enum Narrowed {
-        #[serde(rename = "a")]
-        A { mode: Mode },
-        #[serde(rename = "b")]
-        B {
-            #[serde(default = "c", skip_serializing_if = "is_c")]
-            mode: OnlyC,
-        },
-    }
-    impl JsonSchema for Narrowed {
-        fn schema_name() -> Cow<'static, str> {
-            "Narrowed".into()
-        }
-        fn json_schema(_: &mut SchemaGenerator) -> Schema {
-            a_requires_b_forbids("Narrowed", "mode", serde_json::json!({ "type": "string", "enum": ["a", "b", "c"] }))
-        }
-    }
-
-    /// F4 again: branch `b` reads the field as another kind than its
-    /// schema's.
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "kind")]
-    pub enum Kinded {
-        #[serde(rename = "a")]
-        A { flag: bool },
-        #[serde(rename = "b")]
-        B {
-            #[serde(default, skip_serializing_if = "String::is_empty")]
-            flag: String,
-        },
-    }
-    impl JsonSchema for Kinded {
-        fn schema_name() -> Cow<'static, str> {
-            "Kinded".into()
-        }
-        fn json_schema(_: &mut SchemaGenerator) -> Schema {
-            a_requires_b_forbids("Kinded", "flag", serde_json::json!({ "type": "boolean" }))
-        }
-    }
-
-    /// A validated name inside a nested object of a branch, inside a
-    /// flattened struct, and beside a forbidding nested in a branch: each
-    /// with a default or a forbidding that is false.
+    /// A validated name inside a nested object of a branch, and inside a
+    /// flattened struct, each beside a default that is false.
     macro_rules! nest {
         ($m:ident, $name:ident) => {
             pub mod $m {
@@ -1580,21 +1404,6 @@ mod derived_controls {
                     #[serde(flatten)]
                     pub inner: Inner,
                 }
-                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
-                #[serde(tag = "kind")]
-                pub enum DeepForbid {
-                    #[serde(rename = "a")]
-                    A { inner: Cond },
-                    #[serde(rename = "b")]
-                    B { other: u8 },
-                }
-                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
-                #[schemars(extend("anyOf" = [{ "required": ["tag"] }, { "properties": { "tag": false } }]))]
-                pub struct Cond {
-                    pub id: String,
-                    #[serde(default = "N::anon", skip_serializing_if = "N::is_anon")]
-                    pub tag: N,
-                }
             }
         };
     }
@@ -1607,44 +1416,48 @@ mod derived_controls {
 /// control covers for it); and serde shows the claim false.
 #[test]
 fn each_control_is_what_refuses_its_fixture() {
+    use super::fixtures::mode::Mode;
     use derived_conditions::shared_stale::SharedDefault;
     use derived_controls::*;
     use serde_json::from_value;
-    /// A control, turned off; its fixture's run; what refuses it; and
-    /// serde's showing that the fixture's claim is false.
-    type Mutation = (&'static str, fn(&mut Controls), fn(Controls) -> anyhow::Result<BTreeSet<String>>, &'static str, fn() -> bool);
+    /// A control, turned off; the forbidding sites its fixture is held
+    /// with; its fixture's run; what refuses it; and serde's showing that
+    /// the fixture's claim is false.
+    type Mutation = (&'static str, fn(&mut Controls), &'static [&'static str], fn(Controls) -> anyhow::Result<BTreeSet<String>>, &'static str, fn() -> bool);
+    let real = Controls::ALL.forbiddings;
     let table: [Mutation; 10] = [
-        ("D1 samples_read", |c| c.samples_read = false, held_with::<Unread>, "with `dock` left out does not read", || !from_value::<Unread>(json!({ "id": "ok" })).unwrap().dock),
-        ("D2 by_debug", |c| c.by_debug = false, held_with::<Hidden>, "serde reads Hidden { n: 7 } of it left out and Hidden { n: 0 }", || from_value::<Hidden>(json!({})).unwrap().n == 7),
-        ("D3 field_read", |c| c.field_read = false, held_with::<Ignored>, "`n` is not read where its default is held", || from_value::<Ignored>(json!({})).unwrap().n == 0),
-        ("D4 every_branch", |c| c.every_branch = false, held_with::<SharedDefault>, "`dock` left out is not its stated default true", || {
+        ("D1 samples_read", |c| c.samples_read = false, real, held_with::<Unread>, "with `dock` left out does not read", || !from_value::<Unread>(json!({ "id": "ok" })).unwrap().dock),
+        ("D2 by_debug", |c| c.by_debug = false, real, held_with::<Hidden>, "serde reads Hidden { n: 7 } of it left out and Hidden { n: 0 }", || from_value::<Hidden>(json!({})).unwrap().n == 7),
+        ("D3 field_read", |c| c.field_read = false, real, held_with::<Ignored>, "`n` is not read where its default is held", || from_value::<Ignored>(json!({})).unwrap().n == 0),
+        ("D4 every_branch", |c| c.every_branch = false, real, held_with::<SharedDefault>, "`dock` left out is not its stated default true", || {
             matches!(from_value::<SharedDefault>(json!({ "kind": "b" })).unwrap(), SharedDefault::B { dock: false })
         }),
-        ("B1 branch_is_its_own", |c| c.branch_is_its_own = false, held_with::<Shadowed>, "an untagged union", || {
-            matches!(from_value::<Shadowed>(json!({ "b": 0, "n": 300 })).unwrap(), Shadowed::Narrow { dock: false, .. })
+        ("N1 flat_conditions", |c| c.flat_conditions = false, real, held_with::<super::fixtures::nested::new::Nested>, "beside a condition branch with branches of its own", || {
+            matches!(from_value::<super::fixtures::nested::new::Nested>(json!({ "kind": "c" })).unwrap(), super::fixtures::nested::new::Nested::C { dock: false })
         }),
-        ("F1 branch_reads", |c| c.branch_reads = false, held_with::<BranchUnread>, "a sample of the branch that forbids `#1.dock` does not read", || {
-            from_value::<BranchUnread>(json!({ "id": "x", "g": "ok", "dock": false })).is_ok()
+        ("F0 forbidding_listed", |c| c.forbidding_listed = false, real, held_with::<Unlisted>, "Unlisted.b.mode: a condition branch forbids it, and the wire holds a forbidding at FORBIDDINGS' sites alone", || {
+            matches!(from_value::<Unlisted>(json!({ "kind": "b", "mode": "Blue" })), Ok(Unlisted::B { mode: Mode::Blue }))
         }),
-        ("F2 value_reads", |c| c.value_reads = false, held_with::<named_unread::Tagged>, "none of the values tried for `b.tag` reads where a branch allows it", || {
-            matches!(from_value::<named_unread::Tagged>(json!({ "kind": "b", "tag": "ok" })), Ok(named_unread::Tagged::B { .. }))
+        ("F1 branch_reads", |c| c.branch_reads = false, &["BranchUnread.#1.f"], held_with::<BranchUnread>, "a sample of the branch that forbids `#1.f` does not read", || {
+            from_value::<BranchUnread>(json!({ "id": "x", "g": "ok", "f": 1 })).is_ok_and(|r| r.f == json!(1))
         }),
-        ("F3 context_reads_field", |c| c.context_reads_field = false, held_with::<Blind>, "`b.f` is not read where a branch allows it", || {
-            matches!(from_value::<Blind>(json!({ "kind": "b", "f": "ok" })), Ok(Blind::B { .. }))
+        ("F2 field_any_json", |c| c.field_any_json = false, &["NotAny.b.mode"], held_with::<NotAny>, "NotAny.b.mode: forbidden, though its field is not any JSON", || {
+            matches!(from_value::<NotAny>(json!({ "kind": "b", "mode": "Blue" })), Ok(NotAny::B { mode: Mode::Blue }))
         }),
-        ("F4 every_value (an enum's)", |c| c.every_value = false, held_with::<Narrowed>, "forbids `b.mode`, but serde reads it there", || {
-            matches!(from_value::<Narrowed>(json!({ "kind": "b", "mode": "c" })), Ok(Narrowed::B { .. }))
+        ("F3 allowing_reads_any", |c| c.allowing_reads_any = false, &["Blinkered.b.mode"], held_with::<Blinkered>, "where a branch allows `b.mode`, it is not read as any JSON", || {
+            matches!(from_value::<Blinkered>(json!({ "kind": "b", "mode": "Blue" })), Ok(Blinkered::B { mode: Mode::Blue }))
         }),
-        ("F4 every_value (a kind)", |c| c.every_value = false, held_with::<Kinded>, "forbids `b.flag`, but serde reads it there", || {
-            matches!(from_value::<Kinded>(json!({ "kind": "b", "flag": "x" })), Ok(Kinded::B { .. }))
+        ("F4 every_leaf", |c| c.every_leaf = false, &["Leafy.#1.f"], held_with::<Leafy>, "a condition branch forbids `#1.f`, but serde reads it there", || {
+            matches!(from_value::<Leafy>(json!({ "kind": "c", "f": 1 })), Ok(Leafy::C { f: Some(_) }))
         }),
     ];
-    for (control, off, run, refused, false_claim) in table {
+    for (control, off, listed, run, refused, false_claim) in table {
         assert!(false_claim(), "{control}: serde shows the fixture's claim false");
-        let with = run(Controls::ALL).map(|held| format!("{held:?}")).unwrap_err().to_string();
-        assert!(with.contains(refused), "{control} refuses it: {with}");
-        assert!(with.contains("the lock's ") || with.contains("untagged union"), "{control} names the lock's field: {with}");
-        let mut without = Controls::ALL;
+        let with = Controls { forbiddings: listed, ..Controls::ALL };
+        let found = run(with).map(|held| format!("{held:?}")).unwrap_err().to_string();
+        assert!(found.contains(refused), "{control} refuses it: {found}");
+        assert!(found.contains("the lock's ") || found.contains("xtask/src/wire/defaults.rs"), "{control} names where: {found}");
+        let mut without = with;
         off(&mut without);
         assert!(run(without).is_ok(), "{control}: without it the false claim passes");
     }
@@ -1654,36 +1467,179 @@ fn each_control_is_what_refuses_its_fixture() {
     assert_eq!(super::defaults::unheld(lock, &held), ["Gone.g"]);
 }
 
-/// Attempts at a false pass, each refused: the review's case (a forbidden
-/// field's own type refusing the value tried), in the review's shape and
-/// tagged, without an example, with one that reads (serde reads the field
-/// where it is forbidden) and with one that does not; an untagged reader under a `oneOf` (while an externally
-/// tagged enum's branches are held as their own); a validated name inside a nested object of a branch, a
-/// flattened struct, and a forbidding nested in a branch, each refused for
-/// want of an example, then, given one, for its false claim.
+/// Attempts at a false pass, each refused: a validated name inside a
+/// nested object of a branch, and inside a flattened struct, refused for
+/// want of an example, then, given one, for the stale default; a
+/// forbidding of anything but the one listed, any JSON.
 #[test]
 fn false_passes_tried_are_refused() {
+    use derived_conditions::forbid_said;
     use derived_controls::*;
     let refused = |r: anyhow::Result<BTreeSet<String>>| r.unwrap_err().to_string();
-    let unread = refused(defaults_hold::<named_unread::InvalidTarget>());
-    assert!(unread.contains("none of the values tried for `#1.dock`") && unread.contains("examples") && unread.contains("InvalidTarget.#1.dock"), "{unread}");
-    let read = refused(defaults_hold::<named_read::InvalidTarget>());
-    assert!(read.contains("forbids `#1.dock`, but serde reads it there"), "{read}");
-    let read = refused(defaults_hold::<named_read::Tagged>());
-    assert!(read.contains("forbids `b.tag`, but serde reads it there") && read.contains("Tagged.b.tag"), "{read}");
-    let bad = refused(defaults_hold::<named_bad_example::Tagged>());
-    assert!(bad.contains("none of the values tried for `b.tag`") && bad.contains("examples"), "{bad}");
     for (unread, site) in [(refused(defaults_hold::<nest_unread::Nest>()), "Inner.dock"), (refused(defaults_hold::<nest_unread::Flat>()), "Flat.dock")] {
         assert!(unread.contains("does not read") && unread.contains("too short") && unread.contains("examples") && unread.contains(site), "{unread}");
     }
     for stale in [refused(defaults_hold::<nest_read::Nest>()), refused(defaults_hold::<nest_read::Flat>())] {
         assert!(stale.contains("dock` left out is not its stated default true"), "{stale}");
     }
-    let one_of = refused(defaults_hold::<ShadowedOneOf>());
-    assert!(one_of.contains("untagged union") && one_of.contains("#1.dock"), "{one_of}");
-    assert!(defaults_hold::<External>().unwrap().iter().any(|s| s.ends_with(".dock")), "an externally tagged branch is its own");
-    let deep = refused(defaults_hold::<nest_unread::DeepForbid>());
-    assert!(deep.contains("none of the values tried for `inner.#1.tag`") && deep.contains("Cond.#1.tag"), "{deep}");
-    let deep = refused(defaults_hold::<nest_read::DeepForbid>());
-    assert!(deep.contains("forbids `inner.#1.tag`, but serde reads it there"), "{deep}");
+    // a forbidding at no listed site, though its field is any JSON and serde
+    // refuses it there (BranchUnread's, with a name that reads), is refused
+    let unlisted = refused(defaults_hold::<BranchUnread>());
+    assert!(unlisted.contains("BranchUnread.#1.f") && unlisted.contains("FORBIDDINGS"), "{unlisted}");
+    let unlisted = refused(defaults_hold::<forbid_said::Wrap>());
+    assert!(unlisted.contains("Wrap.#1.dock") && unlisted.contains("FORBIDDINGS"), "{unlisted}");
+}
+
+/// The source guard over fixtures.rs (or other files), from one root type
+/// as `module` names it.
+fn guarded(files: &[(&str, &str)], root: &str, module: &str, components: &[&str], hand: &[(&str, &str)]) -> anyhow::Result<BTreeSet<String>> {
+    let files: Vec<(String, String)> = files.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect();
+    let src = super::source::Source::read(&files)?;
+    let roots = vec![(syn::parse_str::<syn::Type>(root)?, module.to_string())];
+    let components: Vec<String> = components.iter().map(|c| c.to_string()).collect();
+    super::source::guard(&src, &roots, &components, &super::source::Allowed { hand_written: hand, flattened: &[], open: &[] })
+}
+
+const FIXTURES: [(&str, &str); 1] = [("lib.rs", include_str!("fixtures.rs"))];
+
+/// The review's five false passes at `8672f486`, each refused with a
+/// clear error, by each layer that sees it; serde shows each a break.
+#[test]
+fn the_reviews_false_passes_are_refused() {
+    use super::fixtures::*;
+    use serde_json::from_value;
+    let none = BTreeSet::new();
+    let guard = |root: &str, module: &str| guarded(&FIXTURES, root, module, &[], &[]).unwrap_err().to_string();
+    // 1. a default stated once beside nested branches: the guard refuses the
+    // schema written by hand, the checker the default it cannot hold
+    assert!(matches!(from_value::<nested::old::Nested>(json!({ "kind": "c" })).unwrap(), nested::old::Nested::C { dock: true }));
+    assert!(matches!(from_value::<nested::new::Nested>(json!({ "kind": "c" })).unwrap(), nested::new::Nested::C { dock: false }));
+    let refused = guard("Nested", "crate::nested::new");
+    assert!(refused.contains("impl JsonSchema for Nested: written by hand"), "{refused}");
+    for refused in [defaults_hold::<nested::old::Nested>().unwrap_err().to_string(), defaults_hold::<nested::new::Nested>().unwrap_err().to_string()] {
+        assert!(refused.contains("Nested.dock: a default its object states once, beside a condition branch with branches of its own"), "{refused}");
+    }
+    // 2. a forbidding of a field `b` reads as a derived enum
+    assert!(matches!(from_value::<mode::old::Tagged>(json!({ "kind": "b", "mode": "Blue" })), Ok(mode::old::Tagged::B { mode: mode::Mode::Blue })));
+    let refused = guard("Tagged", "crate::mode::new");
+    assert!(refused.contains("impl JsonSchema for Tagged: written by hand"), "{refused}");
+    let refused = defaults_hold::<mode::new::Tagged>().unwrap_err().to_string();
+    assert!(refused.contains("Tagged.b.mode") && refused.contains("FORBIDDINGS"), "{refused}");
+    let listed = Controls { forbiddings: &["Tagged.b.mode"], ..Controls::ALL };
+    let refused = held_with::<mode::new::Tagged>(listed).unwrap_err().to_string();
+    assert!(refused.contains("not any JSON"), "{refused}");
+    // 3. a dotted wire name: the guard, the projection and the parser each refuse it
+    assert!(from_value::<dotted::new::Row>(json!({ "id": "q" })).is_err() && from_value::<dotted::old::Row>(json!({ "id": "q" })).is_ok());
+    let refused = guard("Row", "crate::dotted::new");
+    assert!(refused.contains("Row.mode: serde(rename = \"settings.mode\")"), "{refused}");
+    let refused = project(&doc_of::<dotted::new::Row>(false).0).unwrap_err().to_string();
+    assert!(refused.contains("\"settings.mode\""), "{refused}");
+    let (was, now) = ("type Row in object\nfield Row.id required string\n", "type Row in object\nfield Row.id required string\nfield Row.settings.mode required boolean\n");
+    assert!(breaches(&super::lock::facts(was).unwrap(), &super::lock::facts(now).unwrap(), &none).is_empty(), "read without its owners declared, it passes");
+    let refused = parse(now).unwrap_err().to_string();
+    assert!(refused.contains("`Row.settings`, which no `type` line declares"), "{refused}");
+    // 4. an untagged enum told apart by constants serde does not read: the
+    // guard refuses it; without it, both versions hold and nothing breaks
+    let written = serde_json::to_value(shadow::new::Shadow::B { kind: "b".into(), dock: false, n: 300 }).unwrap();
+    assert!(matches!(from_value::<shadow::old::Shadow>(written).unwrap(), shadow::old::Shadow::B { dock: true, .. }));
+    let refused = guard("Shadow", "crate::shadow::new");
+    assert!(refused.contains("Shadow: `#[serde(untagged)]`") && refused.contains("extend(\"const\""), "{refused}");
+    assert!(defaults_hold::<shadow::old::Shadow>().is_ok() && defaults_hold::<shadow::new::Shadow>().is_ok());
+    assert!(breaches(&lock_of::<shadow::old::Shadow>(true), &lock_of::<shadow::new::Shadow>(true), &none).is_empty());
+    // 5. an alias dropped: the guard refuses it; without it, nothing breaks
+    assert!(from_value::<alias::old::Alias>(json!({ "legacy": true })).is_ok() && from_value::<alias::new::Alias>(json!({ "legacy": true })).is_err());
+    let refused = guard("Alias", "crate::alias::old");
+    assert!(refused.contains("Alias.flag: `#[serde(alias)]`"), "{refused}");
+    assert!(breaches(&lock_of::<alias::old::Alias>(false), &lock_of::<alias::new::Alias>(false), &none).is_empty());
+}
+
+/// Each of the source guard's refusals, on its fixture; where the rest of
+/// the check would pass the change it hides, that too.
+#[test]
+fn each_source_rule_refuses_its_fixture() {
+    use super::fixtures::*;
+    use serde_json::from_value;
+    let none = BTreeSet::new();
+    let guard = |root: &str, module: &str| guarded(&FIXTURES, root, module, &[], &[]).unwrap_err().to_string();
+    let rows: [(&str, &str, &str); 11] = [
+        ("Shadow", "crate::shadow::old", "`#[serde(untagged)]`: serde reads the first branch that reads"),
+        ("Shadow", "crate::shadow::old", "`#[schemars(extend(\"const\" = …))]`"),
+        ("Alias", "crate::alias::old", "`#[serde(alias)]`: the schema does not hold an alias"),
+        ("Row", "crate::dotted::new", "serde(rename = \"settings.mode\"): a wire name of letters, digits"),
+        ("Dotted", "crate::refused", "Dotted::A: serde(rename = \"a.b\")"),
+        ("Lying", "crate::lying::old", "impl JsonSchema for Lying: written by hand"),
+        ("Hooked", "crate::hooked::old", "Hooked.n: serde(deserialize_with = \"lenient\"): written by hand"),
+        ("Flat", "crate::refused", "Flat.inner: serde(flatten): a flattened field"),
+        ("Skipped", "crate::refused", "Skipped.n: `#[serde(skip_deserializing)]`"),
+        ("External", "crate::refused", "External: an enum with data and no `#[serde(tag = …)]`"),
+        ("Timed", "crate::refused", "Timed.after: a type `std::time::Duration` the source guard cannot read"),
+    ];
+    for (root, module, says) in rows {
+        let refused = guard(root, module);
+        assert!(refused.contains(says), "{root}: {refused}");
+    }
+    let refused = guard("Generic<u8>", "crate::refused");
+    assert!(refused.contains("Generic: a generic wire type"), "{refused}");
+    let refused = guard("Renamed", "crate::refused");
+    assert!(refused.contains("Renamed: `#[schemars(rename)]`"), "{refused}");
+    // what the rest of the check would pass: a schema written by hand over a
+    // renamed field, and a reader hook schemars does not see
+    assert!(from_value::<lying::old::Lying>(json!({ "b": 1 })).is_ok() && from_value::<lying::new::Lying>(json!({ "b": 1 })).is_err());
+    assert!(breaches(&lock_of::<lying::old::Lying>(false), &lock_of::<lying::new::Lying>(false), &none).is_empty());
+    assert!(from_value::<hooked::old::Hooked>(json!({ "n": "5" })).is_ok() && from_value::<hooked::new::Hooked>(json!({ "n": "5" })).is_err());
+    assert!(breaches(&lock_of::<hooked::old::Hooked>(false), &lock_of::<hooked::new::Hooked>(false), &none).is_empty());
+    // read as source alone: a macro at item level or in a function's body,
+    // which could make what the guard cannot see; a derive not serde's,
+    // schemars' or the standard library's; another crate's `Value`; an
+    // untagged enum under nested `cfg_attr`s; a validator's bound; an impl
+    // in a function's body
+    let source_only = [
+        ("macro_rules! m { () => {} }\npub struct S { pub a: u8 }\n", "lib.rs: macro_rules!: a macro at item level"),
+        ("pub struct S { pub a: u8 }\nfn f() { macro_rules! m { () => {} } }\n", "lib.rs: macro_rules!: a macro at item level"),
+        ("use serde_repr::Deserialize_repr;\n#[derive(Deserialize_repr)]\npub struct S { pub a: u8 }\n", "S: `#[derive(serde_repr::Deserialize_repr)]`, a derive the source guard does not know"),
+        ("pub struct S { pub v: toml::Value }\n", "S.v: a type `toml::Value` the source guard cannot read"),
+        ("#[cfg_attr(a, cfg_attr(b, serde(untagged)))]\npub enum S { A { n: u8 } }\n", "S: `#[serde(untagged)]`"),
+        ("pub struct S { #[validate(length(min = 1))] pub a: String }\n", "S.a: `#[validate(…)]`, which schemars writes as bounds serde never checks"),
+        ("use serde::Serialize;\npub struct S { pub a: u8 }\nfn f() { impl Serialize for S { fn serialize<T: serde::Serializer>(&self, s: T) -> Result<T::Ok, T::Error> { s.serialize_u8(self.a) } } }\n", "impl Serialize for S: written by hand"),
+    ];
+    for (text, says) in source_only {
+        let refused = guarded(&[("lib.rs", text)], "S", "crate", &[], &[]).unwrap_err().to_string();
+        assert!(refused.contains(says), "{text}: {refused}");
+    }
+    // a type marked open that OPEN does not list
+    let open = "#[derive(schemars::JsonSchema)]\n#[schemars(extend(\"x-fragment-open\" = true))]\npub enum S { A }\n";
+    let refused = guarded(&[("lib.rs", open)], "S", "crate", &[], &[]).unwrap_err().to_string();
+    assert!(refused.contains("S: marked open, so the lock lets a new value of it pass: list it in OPEN"), "{refused}");
+    // a path through `super::super` resolves where it names
+    let nested = "pub mod a { pub mod b { pub struct S { pub t: super::super::T } } }\npub struct T { pub n: u8, pub v: serde_json::Value }\n";
+    assert_eq!(guarded(&[("lib.rs", nested)], "S", "crate::a::b", &[], &[]).unwrap().into_iter().collect::<Vec<_>>(), ["crate::T", "crate::a::b::S"]);
+    // a component of the document no type it read is named for
+    let refused = guarded(&FIXTURES, "Row", "crate::dotted::old", &["Ghost"], &[]).unwrap_err().to_string();
+    assert!(refused.contains("component Ghost: no type the source guard read"), "{refused}");
+    // an allowlisted hook no type has, and one whose test is not there
+    let refused = guarded(&FIXTURES, "Row", "crate::dotted::old", &[], &[("impl JsonSchema for Nope", "t")]).unwrap_err().to_string();
+    assert!(refused.contains("HAND_WRITTEN lists `impl JsonSchema for Nope`, which no wire type has now"), "{refused}");
+    let refused = guarded(&FIXTURES, "Lying", "crate::lying::old", &[], &[("impl JsonSchema for Lying", "no_such_test")]).unwrap_err().to_string();
+    assert!(refused.contains("HAND_WRITTEN names its test `no_such_test`, which crates/proto does not have"), "{refused}");
+    // what passes: the review's dotted fixture's old version
+    assert_eq!(guarded(&FIXTURES, "Row", "crate::dotted::old", &["Row"], &[]).unwrap().into_iter().collect::<Vec<_>>(), ["crate::dotted::old::Row"]);
+}
+
+/// The wire's own types pass the guard, read from crates/proto's source:
+/// each by its own module's name (`live::Answer`, not `routes::Answer`),
+/// the hand-written ones each with its test, every component one of them.
+#[test]
+fn the_wires_types_are_read_from_their_source() {
+    let doc = super::openapi::document().unwrap();
+    let src = super::source::Source::read_dir(&super::source::proto_src()).unwrap();
+    let mut roots = src.route_types();
+    roots.push((syn::parse_str("ErrorBody").unwrap(), "crate".into()));
+    let components: Vec<String> = doc["components"]["schemas"].as_object().unwrap().keys().cloned().collect();
+    let reached = super::source::guard(&src, &roots, &components, &super::source::Allowed::wire()).unwrap();
+    for t in ["crate::live::Answer", "crate::live::AnswerFrame", "crate::live::SubscribeFrame", "crate::live::Query", "crate::Reason", "crate::ErrorBody", "crate::routes::ListWatchFrame"] {
+        assert!(reached.contains(t), "{t} reached: {reached:?}");
+    }
+    for t in ["crate::routes::Answer", "crate::search::Query", "crate::live::Cursor"] {
+        assert!(!reached.contains(t), "{t} is no wire type: {reached:?}");
+    }
 }

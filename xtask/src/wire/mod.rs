@@ -3,16 +3,21 @@
 //! routes.rs and the types it names); `cargo xtask check` fails when any
 //! is not what proto makes, or when the lock breaks a fact master's holds
 //! in a way an older client would feel (lock.rs), but those wire.retired
-//! names. Every default the document states is held to serde's reading
-//! of its field left out (defaults.rs) as it is made.
+//! names. Before any of it, the types the routes reach are read from
+//! crates/proto's source and held to the serde attributes the wire
+//! supports (source.rs); then every default the document states is held
+//! to serde's reading of its field left out (defaults.rs).
 //! wire.retired is appended to by hand, never edited: master's
 //! lines stay as they are. Master is read as the schema lock reads it
 //! (`schema_lock::master_file`).
 
 mod defaults;
+#[cfg(test)]
+mod fixtures;
 mod lock;
 mod openapi;
 mod reference;
+mod source;
 #[cfg(test)]
 mod tests;
 
@@ -43,6 +48,14 @@ pub struct Generated {
 
 pub fn generate() -> Result<Generated> {
     let doc = openapi::document()?;
+    // what serde reads of the types reached, from their source, holds to
+    // the supported list (source.rs), before anything is read of their schemas
+    let src = source::Source::read_dir(&source::proto_src())?;
+    let mut roots = src.route_types();
+    // the refusal every route may answer
+    roots.push((syn::parse_str("ErrorBody").context("a refusal's type")?, "crate".to_string()));
+    let components: Vec<String> = doc["components"]["schemas"].as_object().context("the document has components")?.keys().cloned().collect();
+    source::guard(&src, &roots, &components, &source::Allowed::wire())?;
     let lock = lock::project(&doc)?;
     // each default it states is what serde reads of its field left out
     defaults::hold(&doc, &lock)?;
@@ -190,7 +203,7 @@ pub fn retired(text: &str) -> Result<BTreeSet<String>> {
         if fact.trim().is_empty() || fact.starts_with('#') {
             bail!(bad("no fact"));
         }
-        lock::parse(fact).with_context(|| bad("not one of the lock's facts"))?;
+        lock::parse_fact(fact).with_context(|| bad("not one of the lock's facts"))?;
         facts.insert(fact.trim().to_string());
     }
     Ok(facts)
