@@ -103,6 +103,29 @@ struct HelpersTests {
         #expect(timeline.helpers.running.map(\.child) == ["h9"])
     }
 
+    /// Codex on #1086: a turn asking its owner in words keeps asking while
+    /// records that do not say it went on come (a helper's start and end,
+    /// a kind this app does not know); the owner's answer in the chat, or
+    /// a step, ends it.
+    @Test func aQuestionOutlastsHelpersAndUnknownKinds() throws {
+        let key = TurnKey(agent: "npub1ada", id: "t1")
+        var timeline = Timeline()
+        timeline.insert(try work(1, #"{"kind":"turn.start","turn":"t1","agent":"npub1ada"}"#))
+        timeline.insert(try work(2, #"{"kind":"turn.asked","turn":"t1","asks":"npub1paul"}"#))
+        let asks = { (t: Timeline) in WorkingActivity(t).hints.first { $0.id == key }?.kind }
+        #expect(asks(timeline) == .asked("npub1paul"))
+        timeline.insert(try start(3, "h1", "Check the calendars"))
+        timeline.insert(try end(4, "h1", "completed"))
+        timeline.insert(try work(5, #"{"kind":"turn.later-kind","turn":"t1"}"#))
+        #expect(asks(timeline) == .asked("npub1paul"), "still asking")
+        var answered = timeline
+        answered.insert(ChannelRecord(channel: "chat", seq: 1, at: 6000, principal: "npub1paul", kind: "message", body: .object(["text": .string("March")])))
+        #expect(asks(answered) != .asked("npub1paul"), "the owner's answer ends it")
+        var went = timeline
+        went.insert(try work(7, #"{"kind":"turn.step","turn":"t1","step":1,"tool":"terminal","category":"shell","args":"ls","ok":true}"#))
+        #expect(asks(went) != .asked("npub1paul"), "a step says it went on")
+    }
+
     @Test func heldToItsBound() throws {
         var timeline = Timeline()
         for n in 0...Helpers.keptMax { timeline.insert(try start(Int64(n + 1), "h\(n)", "task \(n)")) }
