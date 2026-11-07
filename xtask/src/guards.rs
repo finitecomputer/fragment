@@ -214,7 +214,7 @@ mod tests {
     const ZONE_BOUND: &str = "100000000";
     const ZONE_WORDS: [&str; 6] = ["byte", "size", "upload", "file", "attach", "blob"];
     /// What ends a clause: an item of a list, an object or a statement.
-    const CLAUSE_ENDS: [u8; 6] = [b',', b';', b'{', b'}', b'[', b']'];
+    const CLAUSE_ENDS: [u8; 6] = *b",;{}[]";
 
     /// How many times `line` writes a file bound (`FILE_BOUNDS`): each
     /// whole, no digit, letter or point before it, and no digit after it
