@@ -133,8 +133,11 @@ lists, joins, renames, archiving, attachments, search, sharing and icons. `Timel
 `DeviceIdentityTests` NIP-98 binding, origins and Keychain; `DraftTests` the
 saved draft and outbox across restarts (a paste past a message, a refused send
 beside a draft, a saved file past its bounds or unreadable);
-`MarkdownTests` a code fence arriving in parts. The stubs' answers are written
-by hand from docs/api.md.
+`MarkdownTests` a code fence arriving in parts. `TimelineLayoutTests` lay a
+chat out for real in a window of the test host: a short chat, scrolled by hand
+once, follows two streamed turns, and must settle each render (a watchdog ends
+the process if not) and keep its margins (FIN-419). The stubs' answers are
+written by hand from docs/api.md.
 
 `FragmentUITests` drive what needs no server: Connect, an unreachable server,
 and a server past loopback refused. Each launches with `--ui-test` (Debug only):
