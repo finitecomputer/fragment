@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Board</title>
+  <link rel="stylesheet" href="./__fragment.css">
+  <link rel="stylesheet" href="./board.css">
+</head>
+<body>
+  <div class="bd-viewport" id="viewport">
+    <div class="bd-world" id="world"></div>
+  </div>
+  <header class="bd-head">
+    <h1 id="title">Board</h1>
+    <p id="count"></p>
+  </header>
+  <div class="bd-empty" id="empty" hidden>
+    <h2>No frames yet</h2>
+    <p>Ask your agent to put some here.</p>
+  </div>
+  <nav class="bd-zoom" aria-label="Zoom">
+    <button type="button" id="out" aria-label="Zoom out">−</button>
+    <button type="button" id="actual" aria-label="Actual size">100%</button>
+    <button type="button" id="in" aria-label="Zoom in">+</button>
+    <button type="button" id="fit">Fit</button>
+  </nav>
+  <p class="bd-status" id="status" hidden></p>
+  <script type="module" src="./board.js"></script>
+</body>
+</html>

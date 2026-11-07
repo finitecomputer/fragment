@@ -1,0 +1,37 @@
+/* The board: one canvas the frames sit on, moved and zoomed with CSS
+   transforms (board.js), and the few controls over it. */
+html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+body { background: var(--soft); }
+
+.bd-viewport { position: fixed; inset: 0; overflow: hidden; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+.bd-viewport.panning { cursor: grabbing; }
+.bd-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; --z: 1; }
+
+/* a frame: its label above it, its page or picture, and a shield over a
+   page until someone clicks into it (so a drag over it moves the board) */
+.bd-frame { position: absolute; }
+.bd-body { position: absolute; inset: 0; overflow: hidden; background: #fff; box-shadow: 0 0 0 calc(1px / var(--z)) var(--line-strong), 0 calc(2px / var(--z)) calc(12px / var(--z)) rgba(0, 0, 0, .08); }
+.bd-body iframe, .bd-body img { display: block; width: 100%; height: 100%; border: 0; max-width: none; }
+.bd-body iframe.next { position: absolute; inset: 0; visibility: hidden; }
+.bd-shield { position: absolute; inset: 0; }
+.bd-frame.on .bd-shield { display: none; }
+.bd-frame.on .bd-body { box-shadow: 0 0 0 calc(2px / var(--z)) var(--accent); }
+/* labels stay one size on screen as the board zooms, down to a tenth */
+.bd-label { position: absolute; left: 0; bottom: 100%; max-width: 100%; display: flex; gap: .5em; align-items: baseline; padding-bottom: .45em; font-size: calc(12px / max(var(--z), .1)); line-height: 1.2; white-space: nowrap; pointer-events: none; }
+.bd-label b { overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--fg); }
+.bd-label span { flex: none; color: var(--muted); }
+
+/* the controls, over the board */
+.bd-head { position: fixed; top: max(.75rem, env(safe-area-inset-top)); left: max(.875rem, env(safe-area-inset-left)); right: 6rem; pointer-events: none; }
+.bd-head h1 { margin: 0; font-size: 1rem; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-head p { margin: .125rem 0 0; color: var(--muted); font-size: var(--text-sm); }
+.bd-zoom { position: fixed; right: max(.75rem, env(safe-area-inset-right)); bottom: max(.75rem, env(safe-area-inset-bottom)); display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--line), 0 4px 16px rgba(0, 0, 0, .08); }
+.bd-zoom button { min-height: 2.25rem; min-width: 2.25rem; padding: 0 .75rem; background: none; color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums; }
+.bd-zoom button:hover { background: var(--soft); }
+#actual { min-width: 3.75rem; }
+.bd-empty { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; pointer-events: none; }
+.bd-empty h2 { margin: 0; font-size: var(--text-lg); }
+.bd-empty p { margin: .25rem 0 0; color: var(--muted); }
+.bd-status { position: fixed; left: max(.875rem, env(safe-area-inset-left)); bottom: max(1.125rem, env(safe-area-inset-bottom)); right: 14rem; margin: 0; color: var(--muted); font-size: var(--text-sm); }
+@media (pointer: coarse) { .bd-zoom button { min-height: 2.75rem; min-width: 2.75rem; } }
+@media (max-width: 30rem) { .bd-status { right: 1rem; bottom: 4.25rem; } }
