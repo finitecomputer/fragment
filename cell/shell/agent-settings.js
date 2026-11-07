@@ -37,6 +37,17 @@ export function claudeSet(next, field, value) {
 const ROLE_MAX_CHARS = 48;
 const AGENTS_MAX = 16;
 
+// The settings of each agent of `roster` (a snapshot: the agents Settings
+// draw), read: the read `started` for it (by fragment), or one begun now.
+// Answers, once all have answered, each agent's read by fragment: those of
+// `roster`, every one, and no other (FIN-424: Settings draw a card once its
+// read answered, so none grows once drawn).
+export async function readRoster(roster, started, read) {
+  const reads = new Map(roster.map((a) => [a.fragment, started.get(a.fragment) ?? read(a.fragment)]));
+  await Promise.all(reads.values());
+  return reads;
+}
+
 export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, agents, named, rename, retitle, load, nameScreen, renderNames, computer, homePicker, addAgent, primaryAgent, chats, own, me }) {
   // ---- an agent's name and picture (docs/api.md, "An agent's name and
   // picture"): its agent fragment's title and its avatar.png, written and

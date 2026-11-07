@@ -1,3 +1,4 @@
+import { readRoster } from "./agent-settings.js";
 import { billingSections, returnSaid, returning } from "./billing.js";
 import { dataSection } from "./exports.js";
 import { icon } from "./icons.js";
@@ -228,9 +229,9 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: support(), seatIs };
     const back = await returning(billingHelpers);
     if (lost()) return;
-    // each agent's settings too (`readSettings`), awaited before its card
-    // is built, so it is drawn as it stays
-    const agentsRead = new Map([...getAgents().values()].map((a) => [a.fragment, readSettings(a.fragment)]));
+    // each agent's settings too (`readSettings`), begun with these: its
+    // card waits for them (`readRoster`, below)
+    const started = new Map([...getAgents().values()].map((a) => [a.fragment, readSettings(a.fragment)]));
     const reads = await Promise.all([
       read("/api/ledger"),
       read("/api/seat"),
@@ -333,18 +334,18 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     if (standing && standing !== "ok") {
       billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
     }
-    // every agent's settings answered (one come since these reads began
-    // read now), and nothing awaited from here to the drawing: each card is
-    // drawn as it stays. Drawn first, a card grew as its read answered (its
-    // Model line one line, then three), moving New agent under a hand on
-    // its way to it (FIN-424).
-    for (const a of getAgents().values()) if (!agentsRead.has(a.fragment)) agentsRead.set(a.fragment, readSettings(a.fragment));
-    await Promise.all(agentsRead.values());
+    // the agents these settings draw: the roster now, each card drawn once
+    // its agent's settings are read (`readRoster`), so it is drawn as it
+    // stays. Drawn first, a card grew as its read answered (its Model line
+    // one line, then three), moving New agent under a hand on its way to it
+    // (FIN-424). An agent come or gone during the wait is drawn by the next
+    // load, as one come once they are drawn.
+    const mine = [...getAgents().values()];
+    const agentsRead = await readRoster(mine, started, readSettings);
     if (lost()) return;
     const c = getComputer();
     const computer = computerSection(c);
     const agents = section("Agents");
-    const mine = [...getAgents().values()];
     // the models a provider the person connected offers (its own credit pays)
     const modeled = (linked?.providers ?? []).filter((p) => p.models?.length && p.state === "set");
     if (mine.length && modeled.length) agents.append(say("Each agent runs on the platform's own model, included in your credit, unless you pick one of a provider you connected, which your account there pays for."));
