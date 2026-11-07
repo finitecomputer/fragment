@@ -263,6 +263,12 @@ struct ChatRow: View, Equatable {
                 // a message of files alone is its files, without an empty bubble
                 if !(isYou && files.count > 0 && record.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                     MessageView(text: record.text, isYou: isYou, agent: agent)
+                        // an agent's words have no bubble: held, they lift on
+                        // a card of the chat's own color (unseen in place),
+                        // as a person's lift on theirs (FIN-442)
+                        .padding(isYou ? 0 : 14)
+                        .background(isYou ? .clear : FragmentStyle.background, in: RoundedRectangle(cornerRadius: 20))
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20))
                         .contextMenu {
                             Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
                             Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
@@ -281,6 +287,7 @@ struct ChatRow: View, Equatable {
                                 }
                             }
                         }
+                        .padding(isYou ? 0 : -14)
                 }
                 if !opens.isEmpty {
                     HStack(spacing: 8) {
