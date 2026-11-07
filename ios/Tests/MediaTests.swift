@@ -178,7 +178,9 @@ struct MediaTests {
     }
 
     /// One sound plays at a time: playing another stops the first, and the
-    /// chat's leaving stops either.
+    /// chat's leaving stops either. The audio session is held only while
+    /// one plays: a pause, its end or a stop lets it go, once, so others'
+    /// audio resumes.
     @Test func oneSoundPlaysAtATime() async throws {
         final class Engine: PlaybackEngine {
             let url: URL
@@ -203,6 +205,7 @@ struct MediaTests {
         #expect(playback.place("a") == nil && playback.place("b")?.playing == true)
         playback.toggle("b", url: b)
         #expect(!playback.playing && !engines[1].playing && playback.current == "b")
+        #expect(active == 0, "paused, its session let go")
         // moving another's place loads it, paused, by the length read before its player knows one
         playback.seek("a", url: a, to: 0.5, of: 8)
         #expect(playback.current == "a" && !playback.playing && engines.count == 3 && engines[2].elapsed == 5)
@@ -211,16 +214,16 @@ struct MediaTests {
         #expect(engines[2].elapsed == 2 && playback.place("a")?.elapsed == 2)
         engines[2].duration = 10; engines[2].elapsed = 5
         playback.toggle("a", url: a)
-        #expect(engines[2].playing && engines[2].elapsed == 5)
+        #expect(engines[2].playing && engines[2].elapsed == 5 && active == 1, "played again, held again")
         // played to its end: back to its start, paused
         engines[2].elapsed = 10; engines[2].ended = true
         try await Task.sleep(for: .milliseconds(150))
-        #expect(!playback.playing && playback.place("a")?.elapsed == 0)
+        #expect(!playback.playing && playback.place("a")?.elapsed == 0 && active == 0, "ended, its session let go")
         playback.toggle("a", url: a)
         #expect(playback.playing && engines[2].elapsed == 0)
         playback.stop()
         #expect(playback.current == nil && !playback.playing && !engines[2].playing)
-        #expect(active <= 0, "its session let go")
+        #expect(active == 0, "its session let go, once")
     }
 
     /// The person's own file shows from its bytes as it is put; one that
