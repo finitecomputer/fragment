@@ -433,6 +433,32 @@ final class ChatSession {
         await deliver(post)
     }
 
+    /// A new chat's first message from the home screen, as submitted there
+    /// (`Library.launch`): its files, held on the phone until this chat was
+    /// made, put in this chat's blobs, then its words and them posted as one
+    /// message through the outbox, as a message is sent here (saved with
+    /// `id` before any request; the web's launcher, `startFromSearch`).
+    /// Each upload is checked as it answers: one that fails throws, and
+    /// nothing is posted, so the whole message is tried again, never words
+    /// alone or some of its files. Files of the same bytes go once, as this
+    /// composer attaches them. It neither reads nor clears what is typed
+    /// here meanwhile.
+    func sendFirst(id: String, text: String, files: [OutgoingFile]) async throws {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty || !files.isEmpty else { return }
+        guard persistence != nil else { throw APIError.server("The local draft could not be opened. Reopen this chat before sending.") }
+        guard pending.count < SavedChat.pendingMax else { throw APIError.server("Wait for the messages still sending, or edit the ones not sent.") }
+        var uploaded: [ChatAttachment] = []
+        for file in files {
+            let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
+            if !uploaded.contains(where: { $0.id == put.id }) { uploaded.append(put) }
+        }
+        let post = PendingPost(id: id, text: words, attachments: uploaded)
+        try persistence?.save(SavedChat(composer: composer, attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
+        pending.append(post)
+        await deliver(post)
+    }
+
     func retry(_ post: PendingPost) async {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].failed, pending[index].refused == nil else { return }
         pending[index].failed = false
