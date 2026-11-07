@@ -545,6 +545,9 @@ export function mount(root) {
         const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
         if (gen !== history.gen) return;
         for (const record of page.records) onChat(record, true);
+        // (the cursor goes by the page, whatever of it was seen before: a
+        // reply's card answer, a Stop, shown or not, never holds it)
+        if (page.records.length) history.first.chat = Math.min(history.first.chat, page.records[0].seq);
         history.done = !moreOf(page, CHAT_LAST);
         windowed("older");
       } else history.done = true;
@@ -633,6 +636,9 @@ export function mount(root) {
       state.chat = [];
       history.first.chat = null;
       for (const record of page.records) onChat(record, true);
+      // (by the page, not what of it is shown: a page of answers alone, seen
+      // before, still says where older messages are)
+      history.first.chat = page.records[0]?.seq ?? null;
       history.done = !moreOf(page, CHAT_LAST);
       reachedEnd();
       // (what came meanwhile joins it: the window at its bound again)
@@ -2930,6 +2936,26 @@ export function mount(root) {
   let unsent = null; // { id, body }
   async function send(text) {
     if (sending || !canPost() || setupHolds()) return;
+    if (!text.trim() && !attachments.length) return;
+    // said away from the end (the window up the chat, or the reader up within
+    // it): the window goes to the end first, where the message shows. Its
+    // words stay in the composer until it is there, so a read that fails
+    // keeps them (and whatever was typed meanwhile, sent with them after).
+    if (!history.live || !stuck) {
+      const fromComposer = text === input.value;
+      sending = true;
+      let there = true;
+      try {
+        if (!history.live) there = await toLatest();
+      } finally {
+        sending = false;
+      }
+      if (!there) return problem("Your message was not sent: the latest messages could not be shown.");
+      stuck = true;
+      toEnd();
+      if (fromComposer) text = input.value;
+      if (!text.trim() && !attachments.length) return;
+    }
     text = cutBytes(text.trim(), TEXT_MAX_BYTES);
     const files = attachments.slice();
     if (!text && !files.length) return;
@@ -2948,13 +2974,6 @@ export function mount(root) {
     for (const f of files) f.uploading = true;
     renderAttachments();
     try {
-      // said up the chat: the window goes to the end first, where it shows
-      if (!history.live) {
-        // (not at the end, the message is not sent: it would show nowhere)
-        if (!(await toLatest())) throw new Error("the latest messages could not be shown");
-        stuck = true;
-        toEnd();
-      }
       if (command) {
         const body = { kind: "command", command: command.name, ...(command.args ? { args: command.args } : {}), to: [command.target] };
         const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
