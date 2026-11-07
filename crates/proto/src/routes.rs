@@ -79,18 +79,25 @@ pub fn shape<T: JsonSchema>(g: &mut SchemaGenerator) -> Schema {
 #[derive(Clone, Copy)]
 pub struct Ty {
     pub schema: Shape,
-    pub round_trip: fn(Value) -> Result<Value, String>,
+    pub round_trip: RoundTrip,
 }
 
+/// What serde reads of a JSON value, as it writes it again and as its
+/// `Debug` shows it (a value `skip_serializing_if` leaves out of the one
+/// is in the other; every wire type's `Debug` is derived), or why it is
+/// refused.
+pub type RoundTrip = fn(Value) -> Result<(Value, String), String>;
+
 /// `T` as a route's body, answer or frame.
-pub const fn ty<T: JsonSchema + Serialize + DeserializeOwned>() -> Ty {
+pub const fn ty<T: JsonSchema + Serialize + DeserializeOwned + std::fmt::Debug>() -> Ty {
     Ty { schema: shape::<T>, round_trip: round_trip::<T> }
 }
 
-/// `v` read as a `T`, then written again.
-pub fn round_trip<T: Serialize + DeserializeOwned>(v: Value) -> Result<Value, String> {
+/// `v` read as a `T`, then written again, and its `Debug`.
+pub fn round_trip<T: Serialize + DeserializeOwned + std::fmt::Debug>(v: Value) -> Result<(Value, String), String> {
     let t: T = serde_json::from_value(v).map_err(|e| e.to_string())?;
-    serde_json::to_value(t).map_err(|e| e.to_string())
+    let shown = format!("{t:?}");
+    Ok((serde_json::to_value(t).map_err(|e| e.to_string())?, shown))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

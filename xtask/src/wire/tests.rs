@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Map, Value};
 
+use super::defaults::Controls;
 use super::lock::{breaches, parse, project, Breach, Facts};
 use super::{generate, retired, verdict, write_files, Base, OnDisk, LOCK_PATH, RETIRED_HEADER, RETIRED_PATH};
 
@@ -669,7 +670,7 @@ fn inline_nullability_and_enum_branches_are_read() {
 mod derived_absence {
     /// A row on the dock until it is taken off: left out while true.
     pub mod on_unless_off {
-        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
         pub struct Row {
             #[serde(default = "yes", skip_serializing_if = "is_yes")]
             #[schemars(extend("default" = true))]
@@ -684,7 +685,7 @@ mod derived_absence {
     }
     /// The same field, off until it is put on: left out while false.
     pub mod off_unless_on {
-        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
         pub struct Row {
             #[serde(default, skip_serializing_if = "std::ops::Not::not")]
             #[schemars(extend("default" = false))]
@@ -763,16 +764,21 @@ fn doc_of<T: schemars::JsonSchema>(answers: bool) -> (Value, Value) {
 
 /// That `T`'s stated defaults are what serde reads of their fields left
 /// out: the lock's fields it held.
-fn defaults_hold<T: schemars::JsonSchema + serde::Serialize + serde::de::DeserializeOwned>() -> anyhow::Result<BTreeSet<String>> {
+fn defaults_hold<T: schemars::JsonSchema + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug>() -> anyhow::Result<BTreeSet<String>> {
+    held_with::<T>(Controls::ALL)
+}
+
+/// `defaults_hold`, with the checker's controls given.
+fn held_with<T: schemars::JsonSchema + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug>(controls: Controls) -> anyhow::Result<BTreeSet<String>> {
     let (doc, root) = doc_of::<T>(true);
-    super::defaults::check("t", &root, doc["components"]["schemas"].as_object().unwrap(), fragment_proto::routes::round_trip::<T>)
+    super::defaults::check_with("t", &root, doc["components"]["schemas"].as_object().unwrap(), fragment_proto::routes::round_trip::<T>, controls)
 }
 
 #[allow(dead_code)]
 mod derived_hidden {
     /// Absent is `Some(true)`, and written as nothing.
     pub mod on {
-        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
         pub struct Row {
             #[serde(default = "on", skip_serializing_if = "is_on")]
             #[schemars(extend("default" = true))]
@@ -787,7 +793,7 @@ mod derived_hidden {
     }
     /// Absent is `Some(false)` now.
     pub mod off {
-        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
         pub struct Row {
             #[serde(default = "off", skip_serializing_if = "is_off")]
             #[schemars(extend("default" = false))]
@@ -816,7 +822,7 @@ mod derived_hidden {
     }
     /// Said wrong.
     pub mod lying {
-        #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+        #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
         pub struct Row {
             #[serde(default = "on", skip_serializing_if = "is_on")]
             #[schemars(extend("default" = null))]
@@ -834,14 +840,14 @@ mod derived_hidden {
             pub mod $m {
                 /// A field of a flattened union's branch that its wrapper does
                 /// not describe: data, not a condition on the wrapper's.
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 pub struct Wrap {
                     pub id: String,
                     #[serde(flatten)]
                     pub value: Choice,
                 }
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
-                #[serde(untagged)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[serde(tag = "t")]
                 pub enum Choice {
                     Docked {
                         #[serde(default = $fn, skip_serializing_if = "is_it")]
@@ -891,10 +897,10 @@ fn hidden_defaults_are_said_held_and_locked() {
     let written = serde_json::to_value(flat_off::Wrap { id: "a".into(), value: flat_off::Choice::Docked { dock: false, kind: "k".into() } }).unwrap();
     let read: flat_on::Wrap = serde_json::from_value(written).unwrap();
     assert!(matches!(read.value, flat_on::Choice::Docked { dock: true, .. }), "an older reader reads it docked");
-    assert_eq!(facts_of(&breaches(&lock_of::<flat_on::Wrap>(true), &lock_of::<flat_off::Wrap>(true), &none)), ["bound Wrap.#0.dock default true"]);
-    assert_eq!(defaults_hold::<flat_on::Wrap>().unwrap().into_iter().collect::<Vec<_>>(), ["Wrap.#0.dock"]);
+    assert_eq!(facts_of(&breaches(&lock_of::<flat_on::Wrap>(true), &lock_of::<flat_off::Wrap>(true), &none)), ["bound Wrap.Docked.dock default true"]);
+    assert_eq!(defaults_hold::<flat_on::Wrap>().unwrap().into_iter().collect::<Vec<_>>(), ["Wrap.Docked.dock"]);
     let lie = defaults_hold::<flat_lying::Wrap>().unwrap_err().to_string();
-    assert!(lie.contains("`#0.dock` left out is not its stated default false"), "{lie}");
+    assert!(lie.contains("`Docked.dock` left out is not its stated default false"), "{lie}");
 }
 
 /// The wire's own defaults hold, and every optional field's default the
@@ -907,11 +913,10 @@ fn the_wires_defaults_hold_every_one() {
     for field in ["ListedFragment.dock", "ListedFragment.unread", "OpDecl.ephemeral", "PageError.source", "ErrorBody.reason", "LiveIn.presence.data", "LiveOut.draft.thinking"] {
         assert!(held.contains(field), "{field} held: {held:?}");
     }
-    // one no sample reaches is named
-    let ops = || ["a.get"].into_iter();
+    // one no sample reaches is named, as a parameter's default is: no type reads it
     let lock = "field X.f optional boolean\nbound X.f default true\nfield a.get.query.q optional string\nbound a.get.query.q default \"x\"\n";
-    assert_eq!(super::defaults::unheld(lock, &BTreeSet::new(), ops()), ["X.f"]);
-    assert!(super::defaults::unheld(lock, &BTreeSet::from(["X.f".to_string()]), ops()).is_empty());
+    assert_eq!(super::defaults::unheld(lock, &BTreeSet::new()), ["X.f", "a.get.query.q"]);
+    assert_eq!(super::defaults::unheld(lock, &BTreeSet::from(["X.f".to_string()])), ["a.get.query.q"]);
 }
 
 #[allow(dead_code)]
@@ -919,21 +924,21 @@ mod derived_nested {
     macro_rules! nested {
         ($m:ident, $flag:literal) => {
             pub mod $m {
-                /// A nested struct inside a flattened untagged branch, its
+                /// A nested struct inside a flattened tagged branch, its
                 /// stated default `true` whatever serde does.
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 pub struct Wrap {
                     pub id: String,
                     #[serde(flatten)]
                     pub value: Choice,
                 }
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
-                #[serde(untagged)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[serde(tag = "t")]
                 pub enum Choice {
                     Row { inner: Inner },
                     Other { other: u8 },
                 }
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 pub struct Inner {
                     #[serde(default = "flag", skip_serializing_if = "skip_flag")]
                     #[schemars(extend("default" = true))]
@@ -959,12 +964,12 @@ mod derived_nested {
 fn a_nested_default_in_a_flattened_branch_is_held() {
     use derived_nested::*;
     let written = serde_json::to_value(stale::Wrap { id: "x".into(), value: stale::Choice::Row { inner: stale::Inner { dock: false } } }).unwrap();
-    assert_eq!(written, json!({ "id": "x", "inner": {} }));
+    assert_eq!(written, json!({ "id": "x", "t": "Row", "inner": {} }));
     assert!(matches!(serde_json::from_value::<said::Wrap>(written).unwrap().value, said::Choice::Row { inner: said::Inner { dock: true } }));
     assert!(breaches(&lock_of::<said::Wrap>(true), &lock_of::<stale::Wrap>(true), &BTreeSet::new()).is_empty(), "the lock is the same");
     assert_eq!(defaults_hold::<said::Wrap>().unwrap().into_iter().collect::<Vec<_>>(), ["Inner.dock"]);
     let stale = defaults_hold::<stale::Wrap>().unwrap_err().to_string();
-    assert!(stale.contains("`#0.inner.dock` left out is not its stated default true"), "{stale}");
+    assert!(stale.contains("`Row.inner.dock` left out is not its stated default true"), "{stale}");
 }
 
 #[allow(dead_code)]
@@ -973,19 +978,19 @@ mod derived_reach {
     macro_rules! listed {
         ($m:ident, $flag:literal) => {
             pub mod $m {
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 pub struct Wrap {
                     pub id: String,
                     #[serde(flatten)]
                     pub value: Choice,
                 }
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 #[serde(tag = "kind")]
                 pub enum Choice {
                     Row { children: Vec<Child> },
                     Other { other: u8 },
                 }
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 pub struct Child {
                     #[serde(default = "flag", skip_serializing_if = "skip_flag")]
                     #[schemars(extend("default" = true))]
@@ -1007,7 +1012,7 @@ mod derived_reach {
     macro_rules! either {
         ($m:ident, $flag:literal, $($said:tt)*) => {
             pub mod $m {
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "required": ["id"] }]))]
                 pub struct Wrap {
                     pub id: String,
@@ -1027,14 +1032,14 @@ mod derived_reach {
     either!(either_unsaid, true,);
     either!(either_stale, false, #[schemars(extend("default" = true))]);
 
-    #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
     #[serde(bound = "T: serde::Serialize + serde::de::DeserializeOwned")]
     pub struct Layer<T> {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[schemars(extend("default" = null))]
         pub next: Option<Box<T>>,
     }
-    #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
     pub struct Leaf {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         #[schemars(extend("default" = true))]
@@ -1044,7 +1049,7 @@ mod derived_reach {
     pub type TwentyFive = Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Layer<Leaf>>>>>>>>>>>>>>>>>>>>>>>>>;
 
     /// A recursive type: its walk stops where it meets itself.
-    #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
     pub struct Tree {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[schemars(extend("default" = null))]
@@ -1091,7 +1096,7 @@ mod derived_conditions {
     macro_rules! forbidding {
         ($m:ident, $flag:literal) => {
             pub mod $m {
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
                 pub struct Wrap {
                     pub id: String,
@@ -1115,7 +1120,7 @@ mod derived_conditions {
     macro_rules! shared {
         ($m:ident, $b:literal) => {
             pub mod $m {
-                #[derive(serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, serde::Serialize, serde::Deserialize)]
                 #[serde(tag = "kind")]
                 pub enum SharedDefault {
                     #[serde(rename = "a")]
@@ -1183,14 +1188,14 @@ fn conditions_hide_no_default() {
     assert!(matches!(serde_json::from_value::<shared_said::SharedDefault>(written).unwrap(), shared_said::SharedDefault::B { dock: true }));
     assert_eq!(defaults_hold::<shared_said::SharedDefault>().unwrap().into_iter().collect::<Vec<_>>(), ["SharedDefault.dock"]);
     let stale = defaults_hold::<shared_stale::SharedDefault>().unwrap_err().to_string();
-    assert!(stale.contains("`dock` left out is not its stated default true") && stale.contains("\"kind\":\"b\""), "{stale}");
+    assert!(stale.contains("`dock` left out is not its stated default true") && stale.contains("\"kind\":\"b\"") && stale.contains("B { dock: false }"), "{stale}");
     // `false` anywhere but a condition's forbidding of a described field
     let doc = json!({ "paths": {}, "components": { "schemas": { "T": { "x-fragment-direction": "out", "type": "object", "properties": { "x": false } } } } });
     let refused = project(&doc).unwrap_err().to_string();
     assert!(refused.contains("T.x") && refused.contains("admits no value"), "{refused}");
     // a forbidding no sample reaches is named
     let lock = "type X out object\nfield X.#1.f optional never\n";
-    assert_eq!(super::defaults::unheld(lock, &BTreeSet::new(), [].into_iter()), ["X.#1.f"]);
+    assert_eq!(super::defaults::unheld(lock, &BTreeSet::new()), ["X.#1.f"]);
 }
 
 #[allow(dead_code)]
@@ -1200,7 +1205,7 @@ mod derived_baseline {
     macro_rules! validated {
         ($m:ident, $($example:tt)*) => {
             pub mod $m {
-                #[derive(Clone, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Clone, Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 #[serde(try_from = "String", into = "String")]
                 $($example)*
                 pub struct Name(String);
@@ -1215,7 +1220,7 @@ mod derived_baseline {
                         n.0
                     }
                 }
-                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[derive(Debug, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
                 #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
                 pub struct ValidatedForbidden {
                     pub id: Name,
@@ -1248,4 +1253,437 @@ fn a_forbidding_needs_a_sample_that_reads() {
     assert!(unread.contains("a sample of the branch that forbids `#1.dock` does not read") && unread.contains("examples"), "{unread}");
     let refused = defaults_hold::<read::ValidatedForbidden>().unwrap_err().to_string();
     assert!(refused.contains("forbids `#1.dock`") && refused.contains("serde reads it there"), "{refused}");
+}
+
+/// The checker's controls (defaults.rs's table), each with a fixture whose
+/// claim is false and that only it refuses.
+#[allow(dead_code)]
+mod derived_controls {
+    use std::borrow::Cow;
+
+    use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
+    use serde::{Deserialize, Serialize};
+
+    /// A name serde refuses under two characters, and its schema's example.
+    macro_rules! name {
+        ($name:ident, $($example:tt)*) => {
+            #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
+            #[serde(try_from = "String", into = "String")]
+            $($example)*
+            pub struct $name(String);
+            impl TryFrom<String> for $name {
+                type Error = String;
+                fn try_from(s: String) -> Result<$name, String> {
+                    if s.len() < 2 { Err(format!("{s:?} is too short")) } else { Ok($name(s)) }
+                }
+            }
+            impl From<$name> for String {
+                fn from(n: $name) -> String {
+                    n.0
+                }
+            }
+            impl $name {
+                pub fn anon() -> $name {
+                    $name("anon".into())
+                }
+                pub fn is_anon(&self) -> bool {
+                    self.0 == "anon"
+                }
+            }
+        };
+    }
+    name!(Name,);
+    name!(NameOk, #[schemars(example = &"ok")]);
+    name!(NameBad, #[schemars(example = &"y")]);
+
+    fn yes() -> bool {
+        true
+    }
+    fn no() -> bool {
+        false
+    }
+    fn is_yes(b: &bool) -> bool {
+        *b
+    }
+    fn is_no(b: &bool) -> bool {
+        !*b
+    }
+
+    /// D1: a default stated wrong, beside a name no sample of which reads.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    pub struct Unread {
+        pub id: Name,
+        #[serde(default = "no", skip_serializing_if = "is_no")]
+        #[schemars(extend("default" = true))]
+        pub dock: bool,
+    }
+
+    /// D2: a default stated wrong that its writer leaves out either way.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    pub struct Hidden {
+        #[serde(default = "seven", skip_serializing_if = "small")]
+        #[schemars(extend("default" = 0))]
+        pub n: u32,
+    }
+    fn seven() -> u32 {
+        7
+    }
+    fn small(n: &u32) -> bool {
+        *n < 10
+    }
+
+    /// D3: a field written but never read: no reading of it is evidence.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    pub struct Ignored {
+        #[serde(skip_deserializing, skip_serializing_if = "zero")]
+        #[schemars(extend("default" = 5))]
+        pub n: u32,
+    }
+    fn zero(n: &u32) -> bool {
+        *n == 0
+    }
+
+    /// B1: an untagged union whose first branch reads the second's sample.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum Shadowed {
+        Wide {
+            #[serde(default = "yes", skip_serializing_if = "is_yes")]
+            #[schemars(extend("default" = true))]
+            dock: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            #[schemars(extend("default" = null))]
+            n: Option<u8>,
+        },
+        Narrow {
+            #[serde(default = "no", skip_serializing_if = "is_no")]
+            #[schemars(extend("default" = true))]
+            dock: bool,
+            b: u8,
+        },
+    }
+
+    /// B1 again: the same reader under a schema that says `oneOf`.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ShadowedOneOf(pub Shadowed);
+    impl JsonSchema for ShadowedOneOf {
+        fn schema_name() -> Cow<'static, str> {
+            "ShadowedOneOf".into()
+        }
+        fn json_schema(g: &mut SchemaGenerator) -> Schema {
+            let mut v = Shadowed::json_schema(g).to_value();
+            let branches = v.as_object_mut().and_then(|m| m.remove("anyOf")).expect("an untagged enum's branches");
+            v["oneOf"] = branches;
+            Schema::try_from(v).expect("a schema")
+        }
+    }
+
+    /// An externally tagged enum: each branch its own key, read as itself.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    pub enum External {
+        Docked {
+            #[serde(default = "yes", skip_serializing_if = "is_yes")]
+            #[schemars(extend("default" = true))]
+            dock: bool,
+        },
+        Other {
+            other: u8,
+        },
+    }
+
+    /// F1: a forbidding read beside a name no sample of which reads.
+    #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+    #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "required": ["g"], "properties": { "dock": false } }]))]
+    pub struct BranchUnread {
+        pub id: String,
+        #[serde(default = "yes", skip_serializing_if = "is_yes")]
+        pub dock: bool,
+        #[serde(default = "Name::anon", skip_serializing_if = "Name::is_anon")]
+        pub g: Name,
+    }
+
+    /// The schema of a union tagged by `kind`: branch `a` requires `field`,
+    /// branch `b` forbids it.
+    fn a_requires_b_forbids(name: &str, field: &str, schema: serde_json::Value) -> Schema {
+        let _ = name;
+        json_schema!({
+            "type": "object",
+            "properties": { "kind": { "type": "string" }, field: schema },
+            "required": ["kind"],
+            "oneOf": [
+                { "properties": { "kind": { "const": "a" } }, "required": [field] },
+                { "properties": { "kind": { "const": "b" }, field: false } },
+            ],
+        })
+    }
+
+    /// F2: the review's case: branch `b` reads `tag`, a name, which its schema
+    /// says `b` forbids; the least sample of a name does not read anywhere.
+    macro_rules! forbidden_name {
+        ($m:ident, $name:ident) => {
+            pub mod $m {
+                use super::*;
+                use super::$name as N;
+                #[derive(Debug, Serialize, Deserialize)]
+                #[serde(tag = "kind")]
+                pub enum Tagged {
+                    #[serde(rename = "a")]
+                    A { tag: N },
+                    #[serde(rename = "b")]
+                    B {
+                        #[serde(default = "N::anon", skip_serializing_if = "N::is_anon")]
+                        tag: N,
+                    },
+                }
+                impl JsonSchema for Tagged {
+                    fn schema_name() -> Cow<'static, str> {
+                        "Tagged".into()
+                    }
+                    fn json_schema(g: &mut SchemaGenerator) -> Schema {
+                        a_requires_b_forbids("Tagged", "tag", g.subschema_for::<N>().to_value())
+                    }
+                }
+                /// The review's own shape: a required-or-forbidden `anyOf`
+                /// over a defaulted, skipped name.
+                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+                #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
+                pub struct InvalidTarget {
+                    pub id: String,
+                    #[serde(default = "N::anon", skip_serializing_if = "N::is_anon")]
+                    pub dock: N,
+                }
+            }
+        };
+    }
+    forbidden_name!(named_unread, Name);
+    forbidden_name!(named_read, NameOk);
+    forbidden_name!(named_bad_example, NameBad);
+
+    /// F3: branch `a`, which allows `f`, never reads it; `b` reads it.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind")]
+    pub enum Blind {
+        #[serde(rename = "a")]
+        A {},
+        #[serde(rename = "b")]
+        B {
+            #[serde(default = "Name::anon", skip_serializing_if = "Name::is_anon")]
+            f: Name,
+        },
+    }
+    impl JsonSchema for Blind {
+        fn schema_name() -> Cow<'static, str> {
+            "Blind".into()
+        }
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            a_requires_b_forbids("Blind", "f", serde_json::json!({ "type": "string" }))
+        }
+    }
+
+    /// F4: branch `b` reads one value of an enum its schema says it forbids.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Mode {
+        A,
+        B,
+        C,
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(try_from = "String", into = "String")]
+    pub struct OnlyC(String);
+    impl TryFrom<String> for OnlyC {
+        type Error = String;
+        fn try_from(s: String) -> Result<OnlyC, String> {
+            if s == "c" { Ok(OnlyC(s)) } else { Err(format!("{s:?} is not c")) }
+        }
+    }
+    impl From<OnlyC> for String {
+        fn from(c: OnlyC) -> String {
+            c.0
+        }
+    }
+    fn c() -> OnlyC {
+        OnlyC("c".into())
+    }
+    fn is_c(_: &OnlyC) -> bool {
+        true
+    }
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind")]
+    pub enum Narrowed {
+        #[serde(rename = "a")]
+        A { mode: Mode },
+        #[serde(rename = "b")]
+        B {
+            #[serde(default = "c", skip_serializing_if = "is_c")]
+            mode: OnlyC,
+        },
+    }
+    impl JsonSchema for Narrowed {
+        fn schema_name() -> Cow<'static, str> {
+            "Narrowed".into()
+        }
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            a_requires_b_forbids("Narrowed", "mode", serde_json::json!({ "type": "string", "enum": ["a", "b", "c"] }))
+        }
+    }
+
+    /// F4 again: branch `b` reads the field as another kind than its
+    /// schema's.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind")]
+    pub enum Kinded {
+        #[serde(rename = "a")]
+        A { flag: bool },
+        #[serde(rename = "b")]
+        B {
+            #[serde(default, skip_serializing_if = "String::is_empty")]
+            flag: String,
+        },
+    }
+    impl JsonSchema for Kinded {
+        fn schema_name() -> Cow<'static, str> {
+            "Kinded".into()
+        }
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            a_requires_b_forbids("Kinded", "flag", serde_json::json!({ "type": "boolean" }))
+        }
+    }
+
+    /// A validated name inside a nested object of a branch, inside a
+    /// flattened struct, and beside a forbidding nested in a branch: each
+    /// with a default or a forbidding that is false.
+    macro_rules! nest {
+        ($m:ident, $name:ident) => {
+            pub mod $m {
+                use super::*;
+                use super::$name as N;
+                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+                #[serde(tag = "kind")]
+                pub enum Nest {
+                    #[serde(rename = "a")]
+                    A { inner: Inner },
+                    #[serde(rename = "b")]
+                    B { other: u8 },
+                }
+                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+                pub struct Inner {
+                    pub name: N,
+                    #[serde(default = "no", skip_serializing_if = "is_no")]
+                    #[schemars(extend("default" = true))]
+                    pub dock: bool,
+                }
+                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+                pub struct Flat {
+                    pub id: String,
+                    #[serde(flatten)]
+                    pub inner: Inner,
+                }
+                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+                #[serde(tag = "kind")]
+                pub enum DeepForbid {
+                    #[serde(rename = "a")]
+                    A { inner: Cond },
+                    #[serde(rename = "b")]
+                    B { other: u8 },
+                }
+                #[derive(Debug, JsonSchema, Serialize, Deserialize)]
+                #[schemars(extend("anyOf" = [{ "required": ["tag"] }, { "properties": { "tag": false } }]))]
+                pub struct Cond {
+                    pub id: String,
+                    #[serde(default = "N::anon", skip_serializing_if = "N::is_anon")]
+                    pub tag: N,
+                }
+            }
+        };
+    }
+    nest!(nest_unread, Name);
+    nest!(nest_read, NameOk);
+}
+
+/// Each control is what refuses its fixture: with it, the fixture is
+/// refused; without it, the fixture's false claim passes (so no other
+/// control covers for it); and serde shows the claim false.
+#[test]
+fn each_control_is_what_refuses_its_fixture() {
+    use derived_conditions::shared_stale::SharedDefault;
+    use derived_controls::*;
+    use serde_json::from_value;
+    /// A control, turned off; its fixture's run; what refuses it; and
+    /// serde's showing that the fixture's claim is false.
+    type Mutation = (&'static str, fn(&mut Controls), fn(Controls) -> anyhow::Result<BTreeSet<String>>, &'static str, fn() -> bool);
+    let table: [Mutation; 10] = [
+        ("D1 samples_read", |c| c.samples_read = false, held_with::<Unread>, "with `dock` left out does not read", || !from_value::<Unread>(json!({ "id": "ok" })).unwrap().dock),
+        ("D2 by_debug", |c| c.by_debug = false, held_with::<Hidden>, "serde reads Hidden { n: 7 } of it left out and Hidden { n: 0 }", || from_value::<Hidden>(json!({})).unwrap().n == 7),
+        ("D3 field_read", |c| c.field_read = false, held_with::<Ignored>, "`n` is not read where its default is held", || from_value::<Ignored>(json!({})).unwrap().n == 0),
+        ("D4 every_branch", |c| c.every_branch = false, held_with::<SharedDefault>, "`dock` left out is not its stated default true", || {
+            matches!(from_value::<SharedDefault>(json!({ "kind": "b" })).unwrap(), SharedDefault::B { dock: false })
+        }),
+        ("B1 branch_is_its_own", |c| c.branch_is_its_own = false, held_with::<Shadowed>, "an untagged union", || {
+            matches!(from_value::<Shadowed>(json!({ "b": 0, "n": 300 })).unwrap(), Shadowed::Narrow { dock: false, .. })
+        }),
+        ("F1 branch_reads", |c| c.branch_reads = false, held_with::<BranchUnread>, "a sample of the branch that forbids `#1.dock` does not read", || {
+            from_value::<BranchUnread>(json!({ "id": "x", "g": "ok", "dock": false })).is_ok()
+        }),
+        ("F2 value_reads", |c| c.value_reads = false, held_with::<named_unread::Tagged>, "none of the values tried for `b.tag` reads where a branch allows it", || {
+            matches!(from_value::<named_unread::Tagged>(json!({ "kind": "b", "tag": "ok" })), Ok(named_unread::Tagged::B { .. }))
+        }),
+        ("F3 context_reads_field", |c| c.context_reads_field = false, held_with::<Blind>, "`b.f` is not read where a branch allows it", || {
+            matches!(from_value::<Blind>(json!({ "kind": "b", "f": "ok" })), Ok(Blind::B { .. }))
+        }),
+        ("F4 every_value (an enum's)", |c| c.every_value = false, held_with::<Narrowed>, "forbids `b.mode`, but serde reads it there", || {
+            matches!(from_value::<Narrowed>(json!({ "kind": "b", "mode": "c" })), Ok(Narrowed::B { .. }))
+        }),
+        ("F4 every_value (a kind)", |c| c.every_value = false, held_with::<Kinded>, "forbids `b.flag`, but serde reads it there", || {
+            matches!(from_value::<Kinded>(json!({ "kind": "b", "flag": "x" })), Ok(Kinded::B { .. }))
+        }),
+    ];
+    for (control, off, run, refused, false_claim) in table {
+        assert!(false_claim(), "{control}: serde shows the fixture's claim false");
+        let with = run(Controls::ALL).map(|held| format!("{held:?}")).unwrap_err().to_string();
+        assert!(with.contains(refused), "{control} refuses it: {with}");
+        assert!(with.contains("the lock's ") || with.contains("untagged union"), "{control} names the lock's field: {with}");
+        let mut without = Controls::ALL;
+        off(&mut without);
+        assert!(run(without).is_ok(), "{control}: without it the false claim passes");
+    }
+    // H: a default the lock records and no probe reaches fails `hold`
+    let held = defaults_hold::<derived_hidden::on::Row>().unwrap();
+    let lock = "field Row.flag optional boolean\nbound Row.flag default true\nfield Gone.g optional boolean\nbound Gone.g default false\n";
+    assert_eq!(super::defaults::unheld(lock, &held), ["Gone.g"]);
+}
+
+/// Attempts at a false pass, each refused: the review's case (a forbidden
+/// field's own type refusing the value tried), in the review's shape and
+/// tagged, without an example, with one that reads (serde reads the field
+/// where it is forbidden) and with one that does not; an untagged reader under a `oneOf` (while an externally
+/// tagged enum's branches are held as their own); a validated name inside a nested object of a branch, a
+/// flattened struct, and a forbidding nested in a branch, each refused for
+/// want of an example, then, given one, for its false claim.
+#[test]
+fn false_passes_tried_are_refused() {
+    use derived_controls::*;
+    let refused = |r: anyhow::Result<BTreeSet<String>>| r.unwrap_err().to_string();
+    let unread = refused(defaults_hold::<named_unread::InvalidTarget>());
+    assert!(unread.contains("none of the values tried for `#1.dock`") && unread.contains("examples") && unread.contains("InvalidTarget.#1.dock"), "{unread}");
+    let read = refused(defaults_hold::<named_read::InvalidTarget>());
+    assert!(read.contains("forbids `#1.dock`, but serde reads it there"), "{read}");
+    let read = refused(defaults_hold::<named_read::Tagged>());
+    assert!(read.contains("forbids `b.tag`, but serde reads it there") && read.contains("Tagged.b.tag"), "{read}");
+    let bad = refused(defaults_hold::<named_bad_example::Tagged>());
+    assert!(bad.contains("none of the values tried for `b.tag`") && bad.contains("examples"), "{bad}");
+    for (unread, site) in [(refused(defaults_hold::<nest_unread::Nest>()), "Inner.dock"), (refused(defaults_hold::<nest_unread::Flat>()), "Flat.dock")] {
+        assert!(unread.contains("does not read") && unread.contains("too short") && unread.contains("examples") && unread.contains(site), "{unread}");
+    }
+    for stale in [refused(defaults_hold::<nest_read::Nest>()), refused(defaults_hold::<nest_read::Flat>())] {
+        assert!(stale.contains("dock` left out is not its stated default true"), "{stale}");
+    }
+    let one_of = refused(defaults_hold::<ShadowedOneOf>());
+    assert!(one_of.contains("untagged union") && one_of.contains("#1.dock"), "{one_of}");
+    assert!(defaults_hold::<External>().unwrap().iter().any(|s| s.ends_with(".dock")), "an externally tagged branch is its own");
+    let deep = refused(defaults_hold::<nest_unread::DeepForbid>());
+    assert!(deep.contains("none of the values tried for `inner.#1.tag`") && deep.contains("Cond.#1.tag"), "{deep}");
+    let deep = refused(defaults_hold::<nest_read::DeepForbid>());
+    assert!(deep.contains("forbids `inner.#1.tag`, but serde reads it there"), "{deep}");
 }
