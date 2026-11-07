@@ -715,9 +715,6 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
-    /// `exit`'s: the start whose exit it reports.
-    #[serde(default)]
-    generation: Option<u64>,
     /// `clock`'s: how far its uses' months are moved.
     #[serde(default, rename = "offsetMs")]
     offset_ms: Option<i64>,
@@ -898,10 +895,16 @@ impl ComputerCell {
     /// The lever's `slow-tell`, taken once: the restart that takes it waits
     /// its ms before its owner is told, as a slow principal answers.
     async fn slow_tell(&self) {
-        let Ok(Some(ms)) = self.meta(MetaKey::SlowTell) else { return };
-        let _ = self.delete_meta(MetaKey::SlowTell);
-        let ms = ms.parse::<u64>().unwrap_or(0).min(SLOW_TELL_MAX_MS);
-        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": "slow-tell", "waits": ms }));
+        self.lever_wait(MetaKey::SlowTell, SLOW_TELL_MAX_MS).await;
+    }
+
+    /// A lever's wait (`key`'s ms, at most `max_ms`), taken once: the wait
+    /// `slow-tell` and `stall-failing-start` put where they say.
+    async fn lever_wait(&self, key: MetaKey, max_ms: u64) {
+        let Ok(Some(ms)) = self.meta(key) else { return };
+        let _ = self.delete_meta(key);
+        let ms = ms.parse::<u64>().unwrap_or(0).min(max_ms);
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": key.key(), "waits": ms }));
         Delay::from(std::time::Duration::from_millis(ms)).await;
     }
 
@@ -1524,11 +1527,7 @@ impl ComputerCell {
     /// its ms between storing that it fails and its destroy, the gap an
     /// isolate that goes leaves (a test crashes the node in it).
     async fn stall_failing_start(&self) {
-        let Ok(Some(ms)) = self.meta(MetaKey::StallFailingStart) else { return };
-        let _ = self.delete_meta(MetaKey::StallFailingStart);
-        let ms = ms.parse::<u64>().unwrap_or(0).min(STALL_FAILING_START_MAX_MS);
-        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": "stall-failing-start", "waits": ms }));
-        Delay::from(std::time::Duration::from_millis(ms)).await;
+        self.lever_wait(MetaKey::StallFailingStart, STALL_FAILING_START_MAX_MS).await;
     }
 
     /// Whether a container runs here now.
@@ -2320,16 +2319,6 @@ impl ComputerCell {
                 }
                 Ok(json!({ "computer": id, "stallFailingStart": ms }))
             }
-            "exit" => {
-                // the runtime's report that start `generation`'s container
-                // exited (`computer/exited`), as it sends it
-                let generation = b.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
-                if let Some(event) = self.exit_of(generation)? {
-                    self.drive(event).await?;
-                }
-                let life = self.lifecycle()?;
-                Ok(json!({ "computer": id, "phase": life.phase, "failures": life.failures(), "running": self.container_running().await }))
-            }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
                 // minutes would leave it: its row stays, refused by its expiry
@@ -2399,7 +2388,7 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, exit or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start or always-on"))),
         }
     }
 

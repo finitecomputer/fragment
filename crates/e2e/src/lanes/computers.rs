@@ -2547,8 +2547,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // the runtime's report of its exit: this isolate takes the computer
     // over first (its container destroyed, the start failed once), then
     // the report, of a start no longer under way
-    let first = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
-    let again = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let reported = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let first = saves(api);
+    let replayed = lever_with(api, &id, json!({ "op": "exit", "generation": generation }))?;
+    let again = saves(api);
     let up = s.eventually(wake, || {
         let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
         v["phase"] == "awake" && v["generation"].as_u64().is_some_and(|g| g > generation)
@@ -2561,14 +2563,14 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             && gap
             && found["running"] == true
             && found["phase"]["destroying"] == true
-            && first.status == 200
-            && first.body["running"] == false
-            && first.body["failures"] == 1
-            && first.body["phase"]["phase"] == "asleep"
-            && again.status == 200
-            && again.body["failures"] == 1
+            && reported.status == 200
+            && first["running"] == false
+            && first["failures"] == 1
+            && first["phase"]["phase"] == "asleep"
+            && replayed.status == 200
+            && again["failures"] == 1
             && up,
-        json!({ "stalled": stalled, "found": found, "first": first.body, "again": again.body }),
+        json!({ "stalled": stalled, "found": found, "first": first, "again": again }),
     );
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once; its

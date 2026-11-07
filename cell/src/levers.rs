@@ -220,7 +220,13 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
                 }
             }
-            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms, "generation": t.generation })).await?)
+            if t.op == "exit" {
+                // the runtime's own report that start `generation`'s
+                // container exited (`computer/exited`), sent as it sends it
+                let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
+                return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
+            }
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "offsetMs": t.offset_ms })).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),
