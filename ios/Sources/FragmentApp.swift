@@ -143,7 +143,9 @@ final class Library {
     func session(for chat: FragmentSummary, api: FragmentAPI) throws -> ChatSession {
         if let session = sessions[chat.name] { return session }
         // A bounded cache preserves unsent messages and cursors while changing screens.
-        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty })?.key {
+        // A session sending Home's first message is its one owner (`launch`):
+        // replaced, its chat would send around that message and save over it.
+        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty && !$0.value.sendingFirst })?.key {
             sessions.removeValue(forKey: unused)
         }
         guard sessions.count < 32 else { throw APIError.server("Finish or discard a draft in another chat before opening more conversations.") }
