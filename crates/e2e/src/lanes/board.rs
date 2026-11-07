@@ -64,6 +64,8 @@ fn frame_page(id: &str, title: &str, extra_head: &str, extra_body: &str) -> Stri
 {extra_body}
 <script>
 addEventListener("load", async () => {{
+  // its width as its scripts see it at load, before anything waits
+  const width = innerWidth;
   const tried = (f) => {{ try {{ f(); return "reached"; }} catch {{ return "blocked"; }} }};
   let fetched;
   try {{
@@ -82,7 +84,7 @@ addEventListener("load", async () => {{
   parent.postMessage({{
     board_e2e: {id:?},
     text: document.querySelector("h1").innerText,
-    width: innerWidth,
+    width,
     origin: self.origin,
     color: getComputedStyle(document.querySelector("h1")).color,
     inline: document.getElementById("inline")?.naturalWidth ?? null,

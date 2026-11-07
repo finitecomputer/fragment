@@ -141,15 +141,15 @@ function sizeLabel(f) {
   return `${f.size[0].toUpperCase()}${f.size.slice(1)} ${f.width}`;
 }
 
-// What a load brought, made ready behind the content shown: a page, or a
-// picture (its bytes as an object URL, given back when it goes).
+// What a load brought, made ready behind the content shown: a page (its
+// bytes given to it once it is in place: `placed`), or a picture (its
+// bytes as an object URL, given back when it goes).
 function made(s, f, body) {
   if (f.kind === "html") {
     const frame = document.createElement("iframe");
     frame.setAttribute("sandbox", SANDBOX);
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.title = f.label;
-    frame.srcdoc = body;
     return { el: frame, url: null };
   }
   const img = document.createElement("img");
@@ -158,6 +158,18 @@ function made(s, f, body) {
   const url = URL.createObjectURL(body);
   img.src = url;
   return { el: img, url };
+}
+
+// A page's frame, in place, given its page. Chrome runs a sandboxed
+// frame in a process of its own, which learns its size from this page's
+// layout: a page given to a frame not laid out yet loads at width 0
+// (`innerWidth`, what its scripts measure at load) and is sized after.
+// Laid out first (the read of its box), it loads at its frame's width.
+// Its listeners come after: the blank page a frame holds before its own
+// says it has loaded as it goes in.
+function placed(frame, body) {
+  frame.getBoundingClientRect();
+  frame.srcdoc = body;
 }
 
 function drop(part) {
@@ -218,10 +230,11 @@ function load(s) {
       const body = f.kind === "html" ? new TextDecoder().decode(bytes) : new Blob([bytes], { type: r.headers.get("content-type") ?? "" });
       const part = made(s, f, body);
       part.el.classList.add("next");
-      part.el.addEventListener("load", () => ready(part), { once: true });
-      if (f.kind === "image") part.el.addEventListener("error", () => (current() ? (drop(part), failed("This picture didn't load.")) : drop(part)), { once: true });
       s.next = part;
       s.body.append(part.el);
+      if (f.kind === "html") placed(part.el, body);
+      part.el.addEventListener("load", () => ready(part), { once: true });
+      if (f.kind === "image") part.el.addEventListener("error", () => (current() ? (drop(part), failed("This picture didn't load.")) : drop(part)), { once: true });
     } catch (e) {
       failed(e instanceof TooLarge ? e.message : "The board couldn't reach it.");
     }
