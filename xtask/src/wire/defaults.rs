@@ -93,7 +93,8 @@ struct Probe {
     default: Value,
     /// A field a condition branch forbids: `with` holds it in a sample of
     /// that branch, which serde must refuse (else leaving it out there
-    /// means a value its reader fills in).
+    /// means a value its reader fills in), while `without`, the branch's
+    /// sample as it is, must read: else the refusal could be another's.
     forbidden: bool,
 }
 
@@ -103,6 +104,10 @@ pub fn check(label: &str, schema: &Value, defs: &Map<String, Value>, round_trip:
     let probes = probes(schema, "", defs, &mut Walk::default())?;
     for p in &probes {
         if p.forbidden {
+            // a refusal is evidence only beside a sample of the branch that reads
+            if let Err(e) = round_trip(p.without.clone()) {
+                bail!("{label}: a sample of the branch that forbids `{}` does not read ({}): {e}; give the type serde refuses there an `examples` value it reads, or the forbidding cannot be held (xtask/src/wire/defaults.rs)", p.path, p.without);
+            }
             if round_trip(p.with.clone()).is_ok() {
                 bail!("{label}: a condition branch forbids `{}`, but serde reads it there ({}): leaving it out there means a value its reader fills in, which no fact holds; give each branch its own fields (xtask/src/wire/defaults.rs)", p.path, p.with);
             }
@@ -346,7 +351,7 @@ fn probes_of(m: &Map<String, Value>, site: &str, defs: &Map<String, Value>, walk
                     with.insert(name.clone(), sample(described, defs, depth + 1)?);
                     out.push(Probe {
                         with: Value::Object(with),
-                        without: Value::Null,
+                        without: Value::Object(base_b.clone()),
                         path: format!("{key}.{name}"),
                         site: format!("{site}.{key}.{name}"),
                         default: Value::Null,

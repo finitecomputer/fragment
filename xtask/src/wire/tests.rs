@@ -1192,3 +1192,60 @@ fn conditions_hide_no_default() {
     let lock = "type X out object\nfield X.#1.f optional never\n";
     assert_eq!(super::defaults::unheld(lock, &BTreeSet::new(), [].into_iter()), ["X.#1.f"]);
 }
+
+#[allow(dead_code)]
+mod derived_baseline {
+    /// A name serde refuses under two characters: the least sample of a
+    /// string (`"x"`) does not read, unless its schema gives an example.
+    macro_rules! validated {
+        ($m:ident, $($example:tt)*) => {
+            pub mod $m {
+                #[derive(Clone, schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[serde(try_from = "String", into = "String")]
+                $($example)*
+                pub struct Name(String);
+                impl TryFrom<String> for Name {
+                    type Error = String;
+                    fn try_from(s: String) -> Result<Name, String> {
+                        if s.len() < 2 { Err(format!("{s:?} is too short")) } else { Ok(Name(s)) }
+                    }
+                }
+                impl From<Name> for String {
+                    fn from(n: Name) -> String {
+                        n.0
+                    }
+                }
+                #[derive(schemars::JsonSchema, serde::Serialize, serde::Deserialize)]
+                #[schemars(extend("anyOf" = [{ "required": ["dock"] }, { "properties": { "dock": false } }]))]
+                pub struct ValidatedForbidden {
+                    pub id: Name,
+                    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+                    pub dock: bool,
+                }
+                fn yes() -> bool {
+                    true
+                }
+                fn is_yes(b: &bool) -> bool {
+                    *b
+                }
+            }
+        };
+    }
+    validated!(unread,);
+    validated!(read, #[schemars(example = &"ok")]);
+}
+
+/// A forbidding branch's refusal counts only beside a sample of the
+/// branch that reads: one serde refuses for another reason (a name too
+/// short) is refused, naming the branch; with an example that reads, the
+/// field serde reads there is refused as before.
+#[test]
+fn a_forbidding_needs_a_sample_that_reads() {
+    use derived_baseline::*;
+    let written = serde_json::to_value(read::ValidatedForbidden { id: serde_json::from_value(json!("ok")).unwrap(), dock: false }).unwrap();
+    assert!(serde_json::from_value::<read::ValidatedForbidden>(written).is_ok(), "dock is no forbidden field: serde reads it");
+    let unread = defaults_hold::<unread::ValidatedForbidden>().unwrap_err().to_string();
+    assert!(unread.contains("a sample of the branch that forbids `#1.dock` does not read") && unread.contains("examples"), "{unread}");
+    let refused = defaults_hold::<read::ValidatedForbidden>().unwrap_err().to_string();
+    assert!(refused.contains("forbids `#1.dock`") && refused.contains("serde reads it there"), "{refused}");
+}
