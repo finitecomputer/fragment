@@ -534,7 +534,7 @@ fn helpers_are_recorded_under_their_turn() {
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "plan the trip" }), T0)).expect("started").turn;
     let (h1, h2, h3) = (records::child_id("s-1"), records::child_id("s-2"), records::child_id("s-3"));
     let s = ev(&mut e, start(&turn, "s-1"), T0 + 1);
-    assert_eq!(posts(&s), vec![(records::child_start_id(&turn, &h1), json!({ "kind": "turn.child", "turn": turn, "child": h1, "goal": "Find three venues near Lisbon" }))]);
+    assert_eq!(posts(&s), vec![(records::child_start_id(&turn, &h1), json!({ "kind": "turn.child", "parent": turn, "child": h1, "goal": "Find three venues near Lisbon" }))]);
     assert!(s.dirty, "kept open in the state before its start is posted");
     assert!(posts(&ev(&mut e, start(&turn, "s-1"), T0 + 1)).is_empty(), "said again");
     ev(&mut e, start(&turn, "s-2"), T0 + 1);
@@ -544,7 +544,7 @@ fn helpers_are_recorded_under_their_turn() {
     ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 2);
     assert_eq!(e.state().children.len(), 3);
     let s = ev(&mut e, end("s-1", ChildOutcome::Completed), T0 + 3);
-    assert_eq!(posts(&s), vec![(records::child_end_id(&turn, &h1), json!({ "kind": "turn.child", "turn": turn, "child": h1, "outcome": "completed" }))]);
+    assert_eq!(posts(&s), vec![(records::child_end_id(&turn, &h1), json!({ "kind": "turn.child", "parent": turn, "child": h1, "outcome": "completed" }))]);
     assert!(posts(&ev(&mut e, end("s-1", ChildOutcome::Failed), T0 + 3)).is_empty(), "ended once");
     // s-2's end is said but not yet posted when the life ends; s-3 still runs
     let s = e.step(heard(end("s-2", ChildOutcome::TimedOut)), T0 + 4);
@@ -555,8 +555,8 @@ fn helpers_are_recorded_under_their_turn() {
     e2.step(Input::Agents(vec![a.clone()]), T0 + 5);
     let r = e2.recover(T0 + 5);
     let want = vec![
-        (records::child_end_id(&turn, &h2), json!({ "kind": "turn.child", "turn": turn, "child": h2, "outcome": "timed_out" })),
-        (records::child_end_id(&turn, &h3), json!({ "kind": "turn.child", "turn": turn, "child": h3, "outcome": "lost" })),
+        (records::child_end_id(&turn, &h2), json!({ "kind": "turn.child", "parent": turn, "child": h2, "outcome": "timed_out" })),
+        (records::child_end_id(&turn, &h3), json!({ "kind": "turn.child", "parent": turn, "child": h3, "outcome": "lost" })),
     ];
     assert_eq!(posts(&r), want, "its own end again, and the running one lost");
     assert!(r.dirty);
@@ -609,6 +609,67 @@ fn a_helpers_end_not_answered_is_owed_again() {
     assert!(posts(&r).iter().any(|(id, body)| *id == end && body["outcome"] == "completed"), "{:?}", posts(&r));
     e2.step(Input::Posted { turn: turn.clone(), id: end, kept: true, given_up: false }, T0 + 7);
     assert!(e2.state().children.is_empty());
+}
+
+/// Goal (FIN-432, Paul's (b) of 11-07): a helper still running is noted on
+/// `work` every `CHILD_NOTE_EVERY_MS` from its start, as its start again
+/// with when it started (`since`), so a page that reads back only the last
+/// `CHILD_READ_BACK_MS` of records finds it however old its start is, and
+/// after its turn's end too. Replay: a tick within a period posts nothing
+/// more, and ticks missed post the latest note alone, so a helper's notes
+/// never double. Bound: `CHILD_NOTES_MAX` a helper. Its end stops them.
+/// Restart: the next life ends it lost and notes nothing; no note's state
+/// is saved.
+#[test]
+fn a_long_helper_is_noted_while_it_works() {
+    use crate::records::ChildOutcome;
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let every = limits::CHILD_NOTE_EVERY_MS;
+    let notes = |s: &Step| posts(s).into_iter().filter(|(id, _)| id.contains(":cw:")).collect::<Vec<_>>();
+    let ids = |s: &Step| notes(s).into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "plan the trip" }), T0)).expect("started").turn;
+    let since = T0 + 1;
+    for (child, goal) in [("s-1", "Find three venues\nnear Lisbon"), ("s-2", "Compare the quotes")] {
+        ev(&mut e, Event::Child { child: child.into(), change: ChildChange::Started { turn: turn.clone(), goal: goal.into() } }, since);
+    }
+    let (h1, h2) = (records::child_id("s-1"), records::child_id("s-2"));
+    assert!(notes(&e.step(Input::Tick, since + every - 1)).is_empty(), "none before a period has passed");
+    let first = e.step(Input::Tick, since + every);
+    assert_eq!(notes(&first), vec![
+        (records::child_note_id(&turn, &h1, 1), json!({ "kind": "turn.child", "parent": turn, "child": h1, "goal": "Find three venues near Lisbon", "since": since })),
+        (records::child_note_id(&turn, &h2, 1), json!({ "kind": "turn.child", "parent": turn, "child": h2, "goal": "Compare the quotes", "since": since })),
+    ]);
+    assert!(!first.dirty, "a note is this life's alone: nothing saved");
+    assert!(notes(&e.step(Input::Tick, since + every + 1000)).is_empty(), "once a period");
+    // the turn ends; its helpers still work, noted under it; one ends, and
+    // is noted no more
+    ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, since + every + 2000);
+    ev(&mut e, Event::Child { child: "s-1".into(), change: ChildChange::Ended(ChildOutcome::Completed) }, since + 2 * every - 1);
+    // ticks missed: the latest note alone
+    assert_eq!(ids(&e.step(Input::Tick, since + 4 * every + 5)), vec![records::child_note_id(&turn, &h2, 4)], "the ended helper none; the running one its 4th alone");
+    // the bound
+    let last = since + u64::from(limits::CHILD_NOTES_MAX) * every;
+    assert_eq!(ids(&e.step(Input::Tick, last)), vec![records::child_note_id(&turn, &h2, limits::CHILD_NOTES_MAX)]);
+    assert!(notes(&e.step(Input::Tick, last + 10 * every)).is_empty(), "at most {} notes a helper", limits::CHILD_NOTES_MAX);
+    // restart: the next life ends s-2 lost, and notes nothing
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert!(saved.children.iter().all(|c| c.since.is_none() && c.goal.is_empty() && c.notes == 0), "no note's state is saved, nor a task");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    let restarted = last + 11 * every;
+    e2.step(Input::Agents(vec![a.clone()]), restarted);
+    let r = e2.recover(restarted);
+    assert!(posts(&r).iter().any(|(id, b)| *id == records::child_end_id(&turn, &h2) && b["outcome"] == "lost"), "{:?}", posts(&r));
+    for k in 1..4 {
+        assert!(notes(&e2.step(Input::Tick, restarted + k * every)).is_empty(), "a helper an earlier life started is never noted");
+    }
+    // an agent gone from this computer: its helper is noted no more
+    let mut e3 = engine(std::slice::from_ref(&a));
+    let t3 = started(&said(&mut e3, &a, &v, 1, "npub1paul", json!({ "text": "go" }), T0)).expect("started").turn;
+    ev(&mut e3, Event::Child { child: "s-3".into(), change: ChildChange::Started { turn: t3, goal: "Draft".into() } }, since);
+    e3.step(Input::Agents(Vec::new()), since + 1);
+    assert!(notes(&e3.step(Input::Tick, since + every)).is_empty(), "its agent left");
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the

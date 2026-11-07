@@ -370,16 +370,23 @@ notice the runtime sends after the turn's end still belongs to that turn,
 and is posted after its `turn.end`. If the agent has run no turn in that
 chat in this life, the notice is not posted. A notice is never pushed.
 
-**`turn.child`**, part `c:<child>` as a helper starts and `ce:<child>`
-as it ends: a helper (a child the agent's runtime delegated work to)
-that the turn started.
+**`turn.child`**, part `c:<child>` as a helper starts, `cw:<child>:<n>`
+for its `n`th note that it still works (from 1), and `ce:<child>` as it
+ends: a helper (a child the agent's runtime delegated work to) that the
+turn started.
 
 ```json
-{ "kind": "turn.child", "turn": "…", "child": "<child>",
+{ "kind": "turn.child", "parent": "…", "child": "<child>",
   "goal": "Find three venues near Lisbon for a team offsite" }
-{ "kind": "turn.child", "turn": "…", "child": "<child>", "outcome": "completed" }
+{ "kind": "turn.child", "parent": "…", "child": "<child>",
+  "goal": "Find three venues near Lisbon for a team offsite", "since": 1790000000000 }
+{ "kind": "turn.child", "parent": "…", "child": "<child>", "outcome": "completed" }
 ```
 
+`parent` is the turn that started it. It is named so, not `turn`, because
+a reader from before `turn.child` passes over a `work` record without
+`turn`: no page or app already out there takes a helper's record for its
+turn going on (as one that hid the turn's question in words would).
 `child` is the first 24 hex digits of SHA-256 of the runtime's id for the
 helper (Hermes' child session id). A start has `goal`: its task, one line
 of at most 140 characters. The goal is the chat's content, read by whoever
@@ -394,12 +401,33 @@ together, when their group reports. A turn records at most 32 helpers;
 a computer's bridge keeps at most 1,024 open (each until its end is
 posted), and our image's plugin records at most 256 running or waiting
 to say their end. A helper past a bound holds the computer and is
-recorded nowhere. A page shows the helpers
-started and not ended as working (a bar above the composer); a helper's
-result comes back as a reply of the agent's own. Only our Hermes image's
-helpers are recorded; older bridges post none. Known gap: the helpers of
-a computer that crashed and stays asleep show as working until it next
-wakes.
+recorded nowhere.
+
+**A note** is a running helper's start again, with `since`: when its
+bridge saw it start (ms). The bridge that saw it start posts one every 10
+minutes from then (`limits::CHILD_NOTE_EVERY_MS`), the latest alone after
+a pause, at most 144 a helper (a day's), until its end. A restart ends
+the helper (`lost`), and its notes stop with the life. So a helper's
+records grow by at most 144 notes, and every 15 minutes of `work` holds a
+record of each helper running, however long ago its start was.
+
+**A reader** reads back 15 minutes of `work` as a page opens
+(`limits::CHILD_READ_BACK_MS`), whatever window of history it shows, and
+takes as working a helper started (a start or a note) and not ended, whose
+newest start or note is at most 15 minutes old. A helper is its poster's,
+whatever a body names; its records count in any order and however often
+(a note read again, or after its end, starts nothing). A note whose
+`since` is not a positive whole number of ms at or before its record's
+`at`, or with no `goal`, is no record of it. So a page opened at any time
+shows the helpers working, with how long each has run (`since`); a
+computer that crashed shows none, once 15 minutes pass with no note. A
+page shows them in a bar above the composer; a helper's result comes back
+as a reply of the agent's own. Only our Hermes image's helpers are
+recorded; older bridges post none.
+
+This is the bounded version: a reader finds a running helper from 15
+minutes of records, never a listing. A durable listing of the helpers
+running (one a page asks for, however busy the chat) may come later.
 
 **`turn.end`**, part `end`:
 

@@ -91,6 +91,23 @@ pub const CHILDREN_PER_TURN_MAX: u32 = 32;
 pub const CHILDREN_OPEN_MAX: usize = AGENTS_MAX * CHILDREN_PER_TURN_MAX as usize;
 /// A helper's task, at most: one line, cut as a step's arguments are.
 pub const CHILD_GOAL_MAX_CHARS: usize = STEP_ARGS_MAX_CHARS;
+/// How often a helper still running is noted on `work` (`turn.child` with
+/// `since`), so a page opened later finds it in the last
+/// `CHILD_READ_BACK_MS` of records, however long ago its start was
+/// (FIN-432, Paul's (b) of 11-07). The bounded version: a durable listing
+/// of the helpers running may come later.
+pub const CHILD_NOTE_EVERY_MS: u64 = 10 * 60 * 1000;
+/// What a reader reads back of `work` for helpers, and how old a helper's
+/// newest start or note may be for it to show as working: a note's period
+/// and five minutes to spare (docs/chat-records.md, `turn.child`; the
+/// readers' own copies, `HELPERS_READ_BACK_MS` in chat.js and
+/// `Helpers.readBack` in the iOS app, are this contract's).
+pub const CHILD_READ_BACK_MS: u64 = 15 * 60 * 1000;
+const _: () = assert!(CHILD_NOTE_EVERY_MS < CHILD_READ_BACK_MS, "a running helper has a record in every window a reader reads back");
+/// Notes one helper gets, at most: a day's. Past it the helper still runs
+/// and its end still comes, but a page opened then no longer finds it, so
+/// its records grow by at most this many.
+pub const CHILD_NOTES_MAX: u32 = 144;
 
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;

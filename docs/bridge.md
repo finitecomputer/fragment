@@ -304,9 +304,18 @@ it, and the hook returns only then:
   ends nothing. The bridge never outlives the
   gateway: `hermes-boot` stops it and exits when the gateway exits, so the
   next start ends those helpers. A bridge restarted under a live gateway
-  ends them as lost too; their results still come back as replies. Known
-  gap: a computer that crashed and stays asleep shows its helpers as
-  working until it next wakes. No timer ends them.
+  ends them as lost too; their results still come back as replies.
+- **A helper still working is noted.** On its tick, the engine posts a
+  note (docs/chat-records.md, `turn.child`) for each helper this life saw
+  start that has not ended, every `CHILD_NOTE_EVERY_MS` (10 minutes) from
+  its start, at most `CHILD_NOTES_MAX` (144) a helper. When it started
+  and its task are kept in memory alone (`OpenChild::since`, `goal`), so
+  a new life, which ends that helper lost, notes nothing. A page reads
+  back 15 minutes of `work` and shows a helper only while it has a start
+  or note that new, so a page opened at any time finds a long helper, and
+  a computer that crashed and stays asleep shows none 15 minutes after
+  its last note. The bounded version: a durable listing of the helpers
+  running may come later.
 - A call the model asked for, before Hermes runs any call of its
   response (Hermes' `post_api_request`): `{turn, response, call:
   {position, tool_call_id, tool, args}}` → `called`. It is the call's

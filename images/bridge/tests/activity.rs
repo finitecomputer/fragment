@@ -235,9 +235,9 @@ async fn a_helper_is_recorded_and_a_crash_ends_it_lost() {
     let (h1, h2) = (fragment_bridge::records::child_id("session-1"), fragment_bridge::records::child_id("session-2"));
     fake.until(10_000, "two starts and an end", |w| w.bodies(&chat, "work", "turn.child").len() >= 3).await;
     assert_eq!(fake.with(|w| w.bodies(&chat, "work", "turn.child")), vec![
-        json!({ "kind": "turn.child", "turn": turn, "child": h1, "goal": "Find three venues near Lisbon" }),
-        json!({ "kind": "turn.child", "turn": turn, "child": h2, "goal": "Compare the two quotes" }),
-        json!({ "kind": "turn.child", "turn": turn, "child": h1, "outcome": "completed" }),
+        json!({ "kind": "turn.child", "parent": turn, "child": h1, "goal": "Find three venues near Lisbon" }),
+        json!({ "kind": "turn.child", "parent": turn, "child": h2, "goal": "Compare the two quotes" }),
+        json!({ "kind": "turn.child", "parent": turn, "child": h1, "outcome": "completed" }),
     ]);
     assert!(fake.with(|w| w.keepalive_open == 1), "its work holds the computer");
     fake.until(10_000, "its card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
@@ -246,7 +246,7 @@ async fn a_helper_is_recorded_and_a_crash_ends_it_lost() {
     fake.until(10_000, "its sockets closed", |w| w.live_sockets() == 0).await;
     let bridge = support::start_killable(cfg, relay(&port, &dir));
     let _woken = hermes.after_boot(listen, "activity-test", SECRET);
-    let lost = json!({ "kind": "turn.child", "turn": turn, "child": h2, "outcome": "lost" });
+    let lost = json!({ "kind": "turn.child", "parent": turn, "child": h2, "outcome": "lost" });
     fake.until(10_000, "the running helper ended as lost", |w| w.bodies(&chat, "work", "turn.child").contains(&lost)).await;
     let mut plugin = dial(listen, SECRET).await;
     plugin.next().await.unwrap().unwrap();

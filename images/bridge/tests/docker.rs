@@ -1148,8 +1148,8 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     let helpers: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).filter(|b| b["kind"] == "turn.child").collect();
     assert_eq!(helpers.len(), 2, "one start, one end: {helpers:?}");
     let goal = helpers[0]["goal"].as_str().unwrap_or_default();
-    assert!(helpers[0]["turn"] == parent && goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{helpers:?}");
-    assert_eq!(*helpers[1], json!({ "kind": "turn.child", "turn": parent, "child": helpers[0]["child"], "outcome": "completed" }));
+    assert!(helpers[0]["parent"] == parent && goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{helpers:?}");
+    assert_eq!(*helpers[1], json!({ "kind": "turn.child", "parent": parent, "child": helpers[0]["child"], "outcome": "completed" }));
     let at = |pred: &dyn Fn(&serde_json::Value) -> bool| work.iter().position(|r| pred(&r["body"])).expect("recorded");
     assert!(at(&|b| b["kind"] == "turn.end" && b["turn"] == parent) < at(&|b| b["kind"] == "turn.child" && b.get("outcome").is_some()), "its end comes after its parent's");
     assert!(held, "the computer stays awake throughout the background delegate");
@@ -1217,13 +1217,13 @@ async fn a_groups_helpers_end_together() {
     let starts: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("goal").is_some()).collect();
     let ends: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("outcome").is_some()).collect();
     assert_eq!(starts.len(), 2, "{starts:?}");
-    assert!(starts.iter().all(|b| b["turn"] == parent), "{starts:?}");
+    assert!(starts.iter().all(|b| b["parent"] == parent), "{starts:?}");
     let mut started: Vec<&str> = starts.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
     let mut ended: Vec<&str> = ends.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
     started.sort();
     ended.sort();
     assert_eq!(started, ended, "each ends once");
-    assert!(ends.iter().all(|b| b["turn"] == parent && b["outcome"] == "completed"), "{ends:?}");
+    assert!(ends.iter().all(|b| b["parent"] == parent && b["outcome"] == "completed"), "{ends:?}");
     let parent_end = bodies.iter().position(|b| b["kind"] == "turn.end" && b["turn"] == parent).expect("its end");
     assert!(bodies.iter().enumerate().filter(|(_, b)| b["kind"] == "turn.child" && b.get("outcome").is_some()).all(|(i, _)| i > parent_end));
     within(&fake, &chat, &c, 60_000, "the group's one report", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("the group reported")))).await;

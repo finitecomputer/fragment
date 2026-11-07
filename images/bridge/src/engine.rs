@@ -218,8 +218,8 @@ pub struct State {
     /// lost, as the process running it died with the life before
     /// (`recover`), and posts again an end it had not posted. A state
     /// without it (an earlier bridge's) holds none; an earlier bridge
-    /// reading one drops it, and those helpers show as working until
-    /// their end comes.
+    /// reading one drops it, and those helpers show as working until a
+    /// page finds no note of theirs (`limits::CHILD_READ_BACK_MS`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<OpenChild>,
 }
@@ -235,6 +235,16 @@ pub struct OpenChild {
     pub child: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<records::ChildOutcome>,
+    /// When this life saw it start (ms), its task, and the notes posted
+    /// that it still works (`tick`). Never saved: a helper runs in one
+    /// life, and one an earlier life started (none: ended lost at this
+    /// one's start) is never noted.
+    #[serde(skip)]
+    pub since: Option<u64>,
+    #[serde(skip)]
+    pub goal: String,
+    #[serde(skip)]
+    pub notes: u32,
 }
 
 impl Default for State {
@@ -2323,7 +2333,7 @@ impl Engine {
         }
         let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
         crate::ev!("child.started", { "turn": turn, "child": child });
-        self.state.children.push(OpenChild { agent: agent.clone(), fragment: fragment.clone(), turn: turn.to_string(), child: child.clone(), outcome: None });
+        self.state.children.push(OpenChild { agent: agent.clone(), fragment: fragment.clone(), turn: turn.to_string(), child: child.clone(), outcome: None, since: Some(self.now), goal: records::child_goal(goal), notes: 0 });
         self.dirty = true;
         self.post(&agent, &fragment, records::WORK, records::child_start_id(turn, &child), records::turn_child_start(turn, &child, goal), Vec::new());
     }
@@ -2541,6 +2551,27 @@ impl Engine {
         for child in std::mem::take(&mut self.ends_again) {
             if let Some(c) = self.state.children.iter().find(|c| c.child == child && c.outcome.is_some()).cloned() {
                 self.owe_child_end(&c);
+            }
+        }
+        // each helper this life saw start and still running, noted every
+        // `CHILD_NOTE_EVERY_MS` from its start, so a page that reads back
+        // the last minutes of `work` finds it: its nth note once n periods
+        // have passed (ticks missed, the latest alone), at most
+        // `CHILD_NOTES_MAX`. Its end stops them; so does a restart (the new
+        // life ends it lost). An agent gone from this computer posts none.
+        let mut noting = Vec::new();
+        for c in &mut self.state.children {
+            let Some(since) = c.since.filter(|_| c.outcome.is_none()) else { continue };
+            let n = u32::try_from(now.saturating_sub(since) / limits::CHILD_NOTE_EVERY_MS).unwrap_or(u32::MAX).min(limits::CHILD_NOTES_MAX);
+            if n > c.notes {
+                c.notes = n;
+                noting.push(c.clone());
+            }
+        }
+        for c in noting {
+            if self.agent(&c.agent).is_some() {
+                let (id, body) = (records::child_note_id(&c.turn, &c.child, c.notes), records::turn_child_note(&c.turn, &c.child, &c.goal, c.since.expect("noted")));
+                self.post(&c.agent, &c.fragment, records::WORK, id, body, Vec::new());
             }
         }
         let mut expired: Vec<(String, String)> = Vec::new();
