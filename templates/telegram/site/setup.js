@@ -21,7 +21,7 @@ import { KIND } from "./frame-messages.js";
 
 const TELEGRAM_HOST = "api.telegram.org";
 const POLL_MS = 1000;
-// how long a Connect waits for its job's answer (`state.checked`)
+// how long a Connect waits for its job's answer (`state.attempt`)
 const CONNECT_WAIT_MS = 60_000;
 const JSON_TYPE = { "content-type": "application/json" };
 const framed = window.parent !== window;
@@ -131,17 +131,18 @@ export async function setup(root) {
     return;
   }
 
-  // the token set, and checked: drawn once `known` has its answer, a bot
-  // or why not (the same bot again included: `checked` counts them)
+  // the token set, and checked: drawn once `known` has this attempt's
+  // answer, a bot or why not (an attempt of its own: another dialog's
+  // connect, answered meanwhile, is not this one's)
   async function connect(token) {
     const first = !state.bot;
-    const before = state.checked ?? 0;
+    const attempt = randomHex(16);
     await secret("TELEGRAM_BOT_TOKEN", token);
     if (first) await secret("TELEGRAM_WEBHOOK_SECRET", randomHex(32));
-    await fragment.call("connect", { platform: me.platform });
+    await fragment.call("connect", { platform: me.platform, attempt });
     for (const until = Date.now() + CONNECT_WAIT_MS; Date.now() < until; ) {
       await sleep(POLL_MS);
-      if (((await fragment.call("state")).checked ?? 0) > before) {
+      if ((await fragment.call("state")).attempt === attempt) {
         replacing = false;
         return;
       }

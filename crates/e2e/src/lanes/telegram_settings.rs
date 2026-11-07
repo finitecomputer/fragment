@@ -240,7 +240,7 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
     let inbox = format!("{}/api/f/{name}/inbox", api.base);
     s.ok(
         "a token pasted there again reconnects it: Telegram's answer comes, its account stays paired, and its webhook is set again with the same secret",
-        asks && pasted && back && after["checked"].as_i64() > before["checked"].as_i64() && after["paired"]["name"] == "Paul" && c.tg.webhook() == Some((inbox.clone(), hook.to_string())),
+        asks && pasted && back && after["attempt"].as_str().is_some_and(|a| a.len() == 32) && after["attempt"] != before["attempt"] && after["paired"]["name"] == "Paul" && c.tg.webhook() == Some((inbox.clone(), hook.to_string())),
         json!({ "before": before, "after": after, "webhook": c.tg.webhook() }),
     );
     shoot(&mut b, &page, &shots, "a4-reconnected", None)?;

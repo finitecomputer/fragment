@@ -29,8 +29,9 @@ where that frame can't sign in, in a tab.
   __secrets/{KEY}`: written, never read back, never through its code or
   a model); then `connect` checks the token (`getMe`) and points the
   bot's webhook at this chat's inbox (`setWebhook`, with the secret as
-  its `secret_token`); `state`'s `checked` counts its answers, so the
-  page sees one come. The inbox takes a delivery only with that secret in
+  its `secret_token`); the page names its attempt, and `state`'s
+  `attempt` says which one Telegram's answer was for, so a page sees its
+  own come. The inbox takes a delivery only with that secret in
   Telegram's header (`fragment.json` `inbox`); only its owner may set it,
   so no one else can forge a delivery. One bot's token in two connectors:
   the second `connect` takes the bot's webhook from the first.
