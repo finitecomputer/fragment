@@ -113,6 +113,11 @@ struct Deployment {
     /// (`FRAGMENT_SUPPORT_URL`): an `https:` page or a `mailto:` address
     /// (`fragment_core::computer::support_url_ok`), linked from the shell.
     support_url: Option<String>,
+    /// One file a person may send, at most (`FRAGMENT_UPLOAD_MAX_BYTES`;
+    /// default `fragment_proto::limits::UPLOAD_MAX_BYTES_DEFAULT`): the
+    /// zone's request body limit on its Cloudflare plan, at most
+    /// `BLOB_MAX_BYTES`. Clients read it from the platform.
+    upload_max_bytes: Option<u64>,
     /// The address the platform's mail comes from (`FRAGMENT_MAIL_FROM`;
     /// cell/src/mail.rs), on a domain onboarded to Cloudflare Email
     /// Sending (`wrangler email sending enable <domain>`). Without it, the
@@ -657,6 +662,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
     }
     if let Some(u) = d.support_url.as_deref().filter(|u| !fragment_core::computer::support_url_ok(u)) {
         bail!("support_url: {u:?} is no https: page or mailto: address of at most {} visible characters", fragment_core::computer::SUPPORT_URL_MAX_BYTES);
+    }
+    if let Some(n) = d.upload_max_bytes.filter(|n| !(1..=fragment_proto::limits::BLOB_MAX_BYTES).contains(n)) {
+        bail!("upload_max_bytes: {n} is not 1 to {} bytes (a blob's most)", fragment_proto::limits::BLOB_MAX_BYTES);
     }
     if let Some(f) = &d.mail_from {
         fragment_core::mail::Sender::parse(f).map_err(|e| anyhow::anyhow!("mail_from: {e}"))?;
@@ -1319,6 +1327,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(u) = &d.support_url {
         v.insert("FRAGMENT_SUPPORT_URL".into(), json!(u));
     }
+    if let Some(n) = d.upload_max_bytes {
+        v.insert("FRAGMENT_UPLOAD_MAX_BYTES".into(), json!(n.to_string()));
+    }
     if let Some(f) = &d.mail_from {
         v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
     }
@@ -1638,6 +1649,7 @@ mod tests {
             models: None,
             default_plan: None,
             support_url: None,
+            upload_max_bytes: None,
             mail_from: None,
             computers: None,
             connectors: None,
@@ -2420,5 +2432,31 @@ mod tests {
         let d = load(&config_file("support-named", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
         assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
+    }
+
+    /// A person's upload bound: the zone's, named or the default (no
+    /// variable), refused before a deploy past a blob's or at 0; named, it
+    /// is the cell's `FRAGMENT_UPLOAD_MAX_BYTES`.
+    #[test]
+    fn an_upload_bound_is_checked_and_rendered() {
+        let with = |n: Option<u64>| {
+            let mut d = deployment(None, None);
+            d.upload_max_bytes = n;
+            d
+        };
+        let most = fragment_proto::limits::BLOB_MAX_BYTES;
+        assert!(checked(with(Some(200_000_000))).is_ok() && checked(with(Some(most))).is_ok() && checked(with(None)).is_ok());
+        for refused in [0, most + 1] {
+            let said = checked(with(Some(refused))).err().map(|e| format!("{e:#}")).unwrap_or_default();
+            assert!(said.contains(&format!("upload_max_bytes: {refused} is not 1 to {most} bytes")), "{said}");
+        }
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let d = load(&config_file("upload-default", &v)).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].get("FRAGMENT_UPLOAD_MAX_BYTES").is_none(), "the default names none");
+        v["upload_max_bytes"] = json!(200_000_000);
+        let d = load(&config_file("upload-named", &v)).unwrap();
+        assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_UPLOAD_MAX_BYTES"], "200000000");
     }
 }

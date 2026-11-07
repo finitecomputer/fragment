@@ -294,8 +294,18 @@ pub mod limits {
     /// A push's `who`, the tag a page subscribed with, in characters
     /// (Unicode scalar values: `chars()` here, `[...who]` in JavaScript).
     pub const PUSH_WHO_MAX_CHARS: usize = 64;
-    /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
+    /// The largest blob an upload may carry (files of 1 MiB or more are
+    /// blobs): a computer's file's bound, as a computer's requests never
+    /// leave Cloudflare's network.
     pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    /// One file a person sends (from a browser, a phone or a laptop), at
+    /// most, unless the deployment names its own (`upload_max_bytes`):
+    /// the request body Cloudflare takes on a Free or Pro zone, which each
+    /// such upload passes. Clients read the deployment's (`UploadLimits`).
+    pub const UPLOAD_MAX_BYTES_DEFAULT: u64 = 100_000_000;
+    const _: () = assert!(UPLOAD_MAX_BYTES_DEFAULT <= BLOB_MAX_BYTES);
+    /// Files one chat message carries, at most (docs/chat-records.md).
+    pub const FILES_PER_MESSAGE: u32 = 8;
     /// Finished runs are kept this long, and at most this many.
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
@@ -1423,6 +1433,25 @@ pub struct AccessAgent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FragmentList {
     pub fragments: Vec<ListedFragment>,
+    /// What a message of the signer's may carry here, which every client
+    /// checks its files against before it sends them: a person's, the
+    /// deployment's bound; an agent's (`?for=` too), a blob's (add-only:
+    /// absent from an older platform, and from a list read inside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<UploadLimits>,
+}
+
+/// The one statement of what a person's message may carry, as the
+/// deployment sets it: on `GET /api/fragments` (the shell, the app) and
+/// a page's hello (`fragment.me()`). A file over `uploadMaxBytes`, or
+/// more files than `filesPerMessage`, is refused before it is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadLimits {
+    /// One file's bytes (`limits::UPLOAD_MAX_BYTES_DEFAULT` unless named).
+    pub upload_max_bytes: u64,
+    /// `limits::FILES_PER_MESSAGE`.
+    pub files_per_message: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2639,11 +2668,16 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }], limits: None };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
+        // the limits a person's client checks its files against, when the platform names them
+        let limited = FragmentList { fragments: vec![], limits: Some(UploadLimits { upload_max_bytes: limits::UPLOAD_MAX_BYTES_DEFAULT, files_per_message: limits::FILES_PER_MESSAGE }) };
+        assert_eq!(value(&limited), serde_json::json!({ "fragments": [], "limits": { "uploadMaxBytes": limits::UPLOAD_MAX_BYTES_DEFAULT, "filesPerMessage": 8 } }));
+        assert_eq!(serde_json::from_value::<FragmentList>(value(&limited)).unwrap(), limited);
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
             fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            limits: None,
         };
         assert_eq!(
             value(&listed),

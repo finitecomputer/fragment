@@ -290,6 +290,7 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
+        upload_max_bytes: None,
         // text and images: the Workers AI fake, every tier on it, unless
         // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
