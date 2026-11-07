@@ -1,0 +1,3467 @@
+{
+  "components": {
+    "schemas": {
+      "Archived": {
+        "description": "Its answer: the fragment, and whether it is archived now.",
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "archived"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "ChannelPage": {
+        "description": "`GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):\nA page in ascending seq order. `next` is its last seq for a forward\nread, its first seq for a backwards read, or the input cursor if empty.\n`more`: whether the channel holds records past the page in the\ndirection read (added 2026-11; absent from older releases' pages).",
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "more": {
+            "default": false,
+            "description": "Whether records remain past the page in the direction read: a page\ncut short by its bytes (`limits::CHANNEL_HTTP_PAGE_MAX_BYTES`) says\nso here, so it is not read as the last.",
+            "type": "boolean"
+          },
+          "next": {
+            "description": "The next page's cursor: `after` it reading forward, `before` it\nreading back.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "channel",
+          "records",
+          "next",
+          "more"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "ChannelRecord": {
+        "description": "One record in a channel. Records are appended by the platform (`events`,\n`ops`, and posts to a channel its fragment.json declares postable) or by\nmutations' effects (app channels), never by a client's own hand.",
+        "properties": {
+          "at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "body": {
+            "description": "The JSON text the cell stored, passed through as it is: the cell\nneither parses a body it just wrote nor one it reads back."
+          },
+          "channel": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "principal": {
+            "description": "npub, `anon:…`, or `platform`",
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "channel",
+          "seq",
+          "at",
+          "principal",
+          "kind",
+          "body"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "CodeStatus": {
+        "description": "The app code installed from the `live` pin.",
+        "properties": {
+          "error": {
+            "description": "Why the latest live commit's code was not installed, if it was not.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "What runs: `app:<hash>` (the live commit's `app.mjs` and `applib/`),\nor `blessed:<template>@<release>` (the platform release's code, which\na fragment on a blessed template runs whatever its commit: decision 40).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/OpDecl"
+            },
+            "type": "object"
+          },
+          "sha": {
+            "description": "The live commit the code was installed from; `None` without app code.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sha",
+          "id",
+          "operations",
+          "error"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Counts": {
+        "properties": {
+          "events": {
+            "description": "Records of its `events` channel.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files": {
+            "description": "Files at main.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "members": {
+            "description": "Its members.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "files",
+          "events",
+          "members"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Docked": {
+        "description": "Its answer: the fragment, and whether it is on their dock now.",
+        "properties": {
+          "dock": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "dock"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Done": {
+        "description": "`{ok: true}`: the call did what it asked, and there is nothing more to\nsay (a draft shown, say).",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "ErrorBody": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Reason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why, where one status means several causes a person acts on\ndifferently (billing's, seats' and orgs' refusals): the shell picks\nits plain words by it. Add-only: absent from every other refusal, and\na client that knows none ignores it, and one that does not know this\none reads none (`reason_or_none`)."
+          },
+          "retry_after_ms": {
+            "default": null,
+            "description": "How long to wait before asking again, in ms, where a refusal knows\n(a 429 `rate_limited` of an embeddings model's rate limit: its\nwriter waits exactly this, then writes again). Add-only: absent\nfrom every other refusal.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "ErrorCode": {
+        "description": "Every refusal the platform answers with, as `{\"error\": code, \"message\"}`.\n\nOpen (`x-fragment-open`, docs/wire): a code this reader does not know\nis read by its HTTP status (the CLI's `Resp::refusal`), so one is added\nwithout breaking a shipped client.",
+        "oneOf": [
+          {
+            "const": "invalid_request",
+            "description": "400: the request is malformed or breaks a rule.",
+            "type": "string"
+          },
+          {
+            "const": "unauthenticated",
+            "description": "401: no valid NIP-98 signature.",
+            "type": "string"
+          },
+          {
+            "const": "forbidden",
+            "description": "403: signed, but this principal may not do this.",
+            "type": "string"
+          },
+          {
+            "const": "not_found",
+            "description": "404: no such fragment or route.",
+            "type": "string"
+          },
+          {
+            "const": "unknown_operation",
+            "description": "404: the fragment has no operation by that name.",
+            "type": "string"
+          },
+          {
+            "const": "no_code",
+            "description": "404: the fragment's live commit has no `app.mjs`.",
+            "type": "string"
+          },
+          {
+            "const": "already_exists",
+            "description": "409: the fragment already exists.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_body",
+            "description": "409: this operation id was used with a different input.",
+            "type": "string"
+          },
+          {
+            "const": "conflict",
+            "description": "409: a write's precondition no longer holds (a search source's\nrevision is not the one the write replaces).",
+            "type": "string"
+          },
+          {
+            "const": "too_large",
+            "description": "413: a body, input, or result is over its limit.",
+            "type": "string"
+          },
+          {
+            "const": "app_failed",
+            "description": "422: the author's code refused or failed.",
+            "type": "string"
+          },
+          {
+            "const": "rate_limited",
+            "description": "429: too many calls; retry later.",
+            "type": "string"
+          },
+          {
+            "const": "host_failed",
+            "description": "500: the platform failed.",
+            "type": "string"
+          },
+          {
+            "const": "upstream_failed",
+            "description": "502: code.storage (or another service the platform calls) failed.",
+            "type": "string"
+          },
+          {
+            "const": "registry_unavailable",
+            "description": "503: the identity registry did not answer; nothing signed is\ndecided without it (docs/cloudflare-v1.md, R15, rule 7).",
+            "type": "string"
+          },
+          {
+            "const": "budget_used_up",
+            "description": "402: the paying person's ledger refused the spend (no credit, a\nfragment's cap, a read-only overdraft; the message says which:\ndocs/ledger.md).",
+            "type": "string"
+          },
+          {
+            "const": "storage_full",
+            "description": "507: the app's database is at its cap (`limits::APP_DB_MAX_BYTES`);\nthe mutation was rolled back.",
+            "type": "string"
+          },
+          {
+            "const": "node_full",
+            "description": "503: the app is answering as many calls at once as the runtime lets\nit (a dynamic worker's concurrency limit); try again shortly.",
+            "type": "string"
+          },
+          {
+            "const": "wont_wake",
+            "description": "503: the computer won't wake (its starts kept failing); its owner\ncan wake it to try again.",
+            "type": "string"
+          },
+          {
+            "const": "not_connected",
+            "description": "403: a computer's swap found no account to swap in: the agent's\nowner has not connected that provider, or must connect it again.",
+            "type": "string"
+          },
+          {
+            "const": "schema_refused",
+            "description": "500: the platform's object refuses its code's schema (fragment_core::\nmigrate): it holds a newer version (a rollback), another code's step,\nor tables from before versions that need a reset. It answers nothing\nelse until newer code is deployed or an operator resets it; the\nmessage names it and why.",
+            "type": "string"
+          },
+          {
+            "const": "deploying",
+            "description": "503: a deploy is going out, and a call between the platform's own\nWorker and one of its objects met another release on the other\nside, which refused it before doing anything (docs/MODEL.md, \"Calls\nbetween releases\"); try again in a few seconds.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
+      "FragmentKind": {
+        "description": "What a fragment is to the people who use it (`fragment.json`'s `kind`,\ndecision 6): the shell lists each kind in its own place. An app unless\nit says otherwise.\n\nOpen (`x-fragment-open`, docs/wire): a kind this build does not know\nreads as `Other`.",
+        "oneOf": [
+          {
+            "enum": [
+              "app",
+              "chat",
+              "agent",
+              "brain"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "skills",
+            "description": "A person's managed skills (decision 17: the blessed `skills`\ntemplate), which their agents' computers install.",
+            "type": "string"
+          },
+          {
+            "const": "sessions",
+            "description": "A person's session archive (the blessed `sessions` template): the\nconversations they had with an agent elsewhere, which `fragment\nsession import` brings in (templates/sessions/README.md).",
+            "type": "string"
+          },
+          {
+            "const": "other",
+            "description": "A kind this build does not know: one a newer platform's list,\nstatus or access view names (#587's), read as this so that one new\nkind breaks no shipped CLI or pinned image. It is only ever read:\n`parse` never answers it, so no `fragment.json` names it (the cell\nrefuses its install, as any kind it does not know), and it is\nwritten only as `other`, a name no kind may take, never as a kind\nit is not. Last: serde's `other` must be.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
+      "FragmentList": {
+        "description": "`GET /api/fragments` (any signer).",
+        "properties": {
+          "fragments": {
+            "items": {
+              "$ref": "#/components/schemas/ListedFragment"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fragments"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "FragmentStatus": {
+        "description": "`GET /api/f/<name>/status` (viewer and up).",
+        "properties": {
+          "agentRole": {
+            "default": null,
+            "description": "An agent fragment's role, as its face says it (`ListedFragment`'s\n`agent_role`): what its runtime tells it it does.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "blobMinBytes": {
+            "default": null,
+            "description": "Files this large or larger are stored as blobs, their pointers in\ngit (absent from hosts without blobs: the TypeScript runtime).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "code": {
+            "$ref": "#/components/schemas/CodeStatus"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "inboxToken": {
+            "description": "Editors and up see the inbox token.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FragmentKind",
+            "default": "app",
+            "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "npub": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PageReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "What the page reported as its last preview card's shot loaded it\n(docs/api.md, Cards); absent before the first."
+          },
+          "pins": {
+            "$ref": "#/components/schemas/Pins"
+          },
+          "reach": {
+            "default": false,
+            "description": "It holds a secret or a door, so it is shared with no one but its\nowner and their own agents (FIN-352, `Sharing::reach`): the share\nsheet says so. Add-only: left out when false.",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "Its code.storage repo: `\"\"` while not made yet (a chat's, made\nafter the create answers: docs/api.md, Names).",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role",
+            "description": "The caller's role."
+          },
+          "title": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "urls": {
+            "$ref": "#/components/schemas/Urls"
+          },
+          "viewToken": {
+            "description": "The share link's token: its owner's alone (and their agent's,\nsharing for them, but on a connector), as the share sheet shows it. A member does not\nshare by link: they ask its owner.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "npub",
+          "owner",
+          "role",
+          "visibility",
+          "repo",
+          "pins",
+          "counts",
+          "code",
+          "viewToken",
+          "inboxToken",
+          "urls"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "IdentityKind": {
+        "description": "What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key\nstays the fragment's and is not registered. An agent has a designated\nowner, a person.",
+        "enum": [
+          "person",
+          "agent"
+        ],
+        "type": "string",
+        "x-fragment-direction": "out"
+      },
+      "ListWatchFrame": {
+        "description": "A frame of `GET /api/fragments/watch`, the socket that follows a\nsigner's list. Frames name nothing: on `changed` or `invited` the page\nreads its list, or its invites, again with its own credential. The\ncell writes these as constant text (cell/src/principal.rs).\n\nOpen (`x-fragment-open`, docs/wire): a reader ignores a frame it does\nnot know (the shell's list, the iOS app).",
+        "oneOf": [
+          {
+            "description": "First, as the socket opens.",
+            "properties": {
+              "type": {
+                "const": "hello",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Their list changed: a row added, gone, or changed.",
+            "properties": {
+              "type": {
+                "const": "changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The invites waiting on their emails changed: one made, renewed or\ntaken back.",
+            "properties": {
+              "type": {
+                "const": "invited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
+      "ListedFragment": {
+        "description": "A fragment the signer holds a role on: a row of `GET /api/fragments`\n(and of a search's fragments), with the role they hold.",
+        "properties": {
+          "agentRole": {
+            "default": null,
+            "description": "An agent fragment's role (its live `fragment.json`'s `meta.role`,\ntrimmed; none when it says nothing), as its last install said: the\ntag the shell shows beside its name. Never any other fragment's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agents": {
+            "default": [],
+            "description": "Its agent members, the first added (a chat's lead) first, at most\n`limits::LISTED_AGENTS_MAX`, as the fragment last said.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "archived": {
+            "default": false,
+            "description": "The signer archived it: their own view, not the fragment's (the\nshell's sidebar leaves it out; search still finds it).",
+            "type": "boolean"
+          },
+          "dock": {
+            "default": true,
+            "description": "On the signer's dock: their own choice, not the fragment's (`PUT\n/api/fragments/{name}/dock`), true until they take it off (the\nshell's dock shows apps and brains, less these and the archived).\nLeft out while true, so a row from before the choice, or from an\nolder platform, reads as on it.",
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FragmentKind",
+            "default": "app",
+            "description": "What it is, and its title, as its live `fragment.json` last said\n(an app with no title until it has)."
+          },
+          "listed": {
+            "default": [],
+            "description": "What its members are doing, as its channels that declare `listed`\nlast said (each member's newest such record, the newest first, at\nmost `limits::LISTED_POSTERS_MAX`): only those of channels this\nrow's role may read; none when there are none.",
+            "items": {
+              "$ref": "#/components/schemas/ListedRecord"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owned": {
+            "default": false,
+            "description": "An agent's list `for` someone: whether that someone owns it (beside\nthe role the agent acts with there), as no name says any more.",
+            "type": "boolean"
+          },
+          "picture": {
+            "default": null,
+            "description": "Its picture, as the address on the platform that serves it: an\nagent fragment's `avatar.png` at live (its agent's identity's\n`/api/identities/<npub>/picture?v=…`), any other's icon\n(`/api/f/<name>/icon?v=…`, docs/api.md, Icons).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "default": false,
+            "description": "The signer pinned it: their own view, not the fragment's (`PUT\n/api/fragments/{name}/pinned`; the shell's sidebar shows it first in\nits section). Left out while false, so a row from an older platform\nreads as not pinned.",
+            "type": "boolean"
+          },
+          "preview": {
+            "default": null,
+            "description": "A chat's newest message, its first line (at most\n`limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it\n(none when it holds none: docs/api.md, Search).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previewAt": {
+            "default": null,
+            "description": "With `preview`: when its message was said (ms), so a list can put\nits chats newest first.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "sharing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Sharing"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Its owner's row only: who else is in it, as the fragment last said\n(`None` until it has)."
+          },
+          "title": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unread": {
+            "default": 0,
+            "description": "A chat's messages the signer's search holds that came after the\nlast they saw (`PUT /api/fragments/{name}/seen`), at most\n`limits::LISTED_UNREAD_MAX`; left out at 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "role",
+          "kind"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "ListedRecord": {
+        "description": "A listed record as a person's list carries it (`ListedFragment.listed`):\na member's newest record of a kind its channel lists, sent to the lists\nof the members whose role may read that channel, and to no one else's.",
+        "properties": {
+          "at": {
+            "description": "When it was posted (ms); a poster who posts the same again moves it\nat most `limits::LISTED_FRESH_MS` behind.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Its body's listed fields that are strings, each cut to\n`limits::LISTED_VALUE_MAX_CHARS` characters.",
+            "type": "object"
+          },
+          "kind": {
+            "description": "Its body's `kind`.",
+            "type": "string"
+          },
+          "principal": {
+            "description": "Who posted it: a member of the fragment.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "principal",
+          "kind",
+          "at"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "LiveIn": {
+        "description": "A frame a page sends. One that does not decode is answered with\n`LiveOut::Error`, naming what was wrong.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One page of a channel's records from a cursor; the page that\nreaches the end makes the socket live on the channel.",
+            "oneOf": [
+              {
+                "properties": {
+                  "after": {
+                    "type": "integer"
+                  },
+                  "last": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "after"
+                ]
+              },
+              {
+                "properties": {
+                  "after": {
+                    "type": "null"
+                  },
+                  "last": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "last"
+                ]
+              }
+            ],
+            "properties": {
+              "after": {
+                "default": null,
+                "description": "The records with `seq` after this one (0: from the start).",
+                "format": "int64",
+                "maximum": 9223372036854775807,
+                "minimum": -9223372036854775808,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "channel": {
+                "type": "string"
+              },
+              "last": {
+                "default": null,
+                "description": "The channel's last this many records (at most `limits::CHANNEL_PAGE`).",
+                "format": "int64",
+                "maximum": 9223372036854775807,
+                "minimum": -9223372036854775808,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "subscribe",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "channel"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "type": {
+                "const": "unsubscribe",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "channel"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Runs a query as the socket's principal and role; a `result` with the\nsame id answers it.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "input": {
+                "default": null
+              },
+              "op": {
+                "type": "string"
+              },
+              "type": {
+                "const": "query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Shares `data` with everyone on the page (at most\n`limits::PRESENCE_MAX_BYTES`); `null`, or no `data`, clears it. At\nmost `limits::PRESENCE_PER_S` a second, after a burst of\n`limits::PRESENCE_BURST`: faster ones are dropped, each with an error.",
+            "properties": {
+              "data": {
+                "default": null
+              },
+              "type": {
+                "const": "presence",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "ping",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ],
+        "x-fragment-direction": "in"
+      },
+      "LiveOut": {
+        "description": "A frame the fragment sends.\n\nOpen (`x-fragment-open`, docs/wire): a reader skips a frame it does not\nknow (the CLI's `channel --follow`, cell/client.mjs, the iOS app).",
+        "oneOf": [
+          {
+            "description": "First on every socket: who the page is to the fragment (the role is\nfixed while the socket stays open), the platform's origin (the one\npage that frames it with its person's session, whose messages a\nframed page may take: docs/api.md, The shell), and everyone on the\npage who shares presence.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "presence": {
+                "items": {
+                  "$ref": "#/components/schemas/Present"
+                },
+                "type": "array"
+              },
+              "principal": {
+                "type": "string"
+              },
+              "role": {
+                "$ref": "#/components/schemas/Role"
+              },
+              "type": {
+                "const": "hello",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "principal",
+              "role",
+              "platform",
+              "presence"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/ChannelRecord",
+            "description": "A record of a channel: one of a page, or a new one while live.",
+            "properties": {
+              "type": {
+                "const": "record",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "After each page: the cursor past it, and whether more follow. With\n`more`, the socket is not live on the channel yet: subscribe again\nfrom `next`.",
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "more": {
+                "type": "boolean"
+              },
+              "next": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": {
+                "const": "subscribed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "channel",
+              "next",
+              "more"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/Present",
+            "description": "One socket's presence changed: its data, or `null` once it cleared\nit or left.",
+            "properties": {
+              "type": {
+                "const": "presence",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A channel's draft: a record its poster is writing (a reply as it\nstreams), its whole text so far, or `null` once they stopped.\nNever stored; the record that carries the same `turn` replaces it.\n`thinking`: a job's text step whose model reasons with no words yet\n(its text empty), for this many ms so far.",
+            "properties": {
+              "at": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "channel": {
+                "type": "string"
+              },
+              "principal": {
+                "type": "string"
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "default": null,
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "turn": {
+                "type": "string"
+              },
+              "type": {
+                "const": "draft",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "channel",
+              "principal",
+              "turn",
+              "text",
+              "at"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A mutation applied: re-run live queries.",
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "type": {
+                "const": "changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "op"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A query's answer.",
+            "oneOf": [
+              {
+                "properties": {
+                  "error": {
+                    "type": "null"
+                  },
+                  "message": {
+                    "type": "null"
+                  },
+                  "status": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "invalid_request"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 400
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "unauthenticated"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 401
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "budget_used_up"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 402
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "forbidden",
+                          "not_connected"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 403
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "not_found",
+                          "unknown_operation",
+                          "no_code"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 404
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "already_exists",
+                          "conflicting_body",
+                          "conflict"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 409
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "too_large"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 413
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "app_failed"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 422
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "rate_limited"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 429
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "host_failed",
+                          "schema_refused"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 500
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "upstream_failed"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 502
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "registry_unavailable",
+                          "node_full",
+                          "wont_wake",
+                          "deploying"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 503
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "error": {
+                        "enum": [
+                          "storage_full"
+                        ],
+                        "x-fragment-open": true
+                      },
+                      "status": {
+                        "const": 507
+                      }
+                    }
+                  }
+                ],
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "result": false
+                },
+                "required": [
+                  "error",
+                  "message",
+                  "status"
+                ],
+                "x-fragment-open": true
+              }
+            ],
+            "properties": {
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ErrorCode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "id": {
+                "type": "string"
+              },
+              "message": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "result": {
+                "description": "The query's answer, any JSON (`null` included), as the app gave it."
+              },
+              "status": {
+                "default": null,
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A frame the fragment refused, and why; the socket stays open.",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "pong",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
+      "Member": {
+        "properties": {
+          "addedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "addedBy": {
+            "description": "Who granted it: the owner, or their agent for them (an invite's maker).",
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IdentityKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`person` or `agent`."
+          },
+          "owner": {
+            "default": null,
+            "description": "An agent member's owner, who reads what it reads.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "principal": {
+            "description": "The member's identity (an npub).",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        },
+        "required": [
+          "principal",
+          "role",
+          "addedBy",
+          "addedAt"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "MemberList": {
+        "description": "`GET /api/f/<name>/members` (viewer).",
+        "properties": {
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/Member"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "members"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "MessageHit": {
+        "description": "One record whose text matched: where it is, when it was written, and\na snippet of its text around the match (plain text, at most\n`limits::SEARCH_SNIPPET_MAX_BYTES`).",
+        "properties": {
+          "at": {
+            "description": "When it was written (ms).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "fragment": {
+            "type": "string"
+          },
+          "seq": {
+            "description": "The record's place in its channel.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "snippet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fragment",
+          "channel",
+          "seq",
+          "at",
+          "snippet"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "OpDecl": {
+        "description": "An operation as `fragment.json` declares it.",
+        "properties": {
+          "description": {
+            "default": null,
+            "description": "What it does, in plain text, for a person or an agent choosing it\n(1 to `limits::OP_DESCRIPTION_MAX_CHARS` characters). None when the\nmanifest gives none, and then absent from the wire.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ephemeral": {
+            "default": false,
+            "description": "A mutation whose calls leave no ledger row (`\"ephemeral\": true`):\nno replay (the same id runs again) and no effects (docs/api.md, Apps).",
+            "type": "boolean"
+          },
+          "input": {
+            "default": null,
+            "description": "Its input's JSON Schema (the supported subset); also its tool schema."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OpKind"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role",
+            "description": "The weakest role that may call it."
+          }
+        },
+        "required": [
+          "kind",
+          "role"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "OpKind": {
+        "oneOf": [
+          {
+            "enum": [
+              "query",
+              "mutation"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "job",
+            "description": "Runs as a Workflow, one durable step at a time.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out"
+      },
+      "PageError": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PageErrorKind"
+          },
+          "source": {
+            "default": null,
+            "description": "The script or resource it names (`url`, or `url:line:column`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "What the page or the browser said (cut to\n`fragment_core::card::ERROR_BYTES_MAX`, as `source` is).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "PageErrorKind": {
+        "oneOf": [
+          {
+            "const": "exception",
+            "description": "An uncaught exception or an unhandled rejection (a syntax error too).",
+            "type": "string"
+          },
+          {
+            "const": "console",
+            "description": "`console.error`, or a `console.assert` that failed.",
+            "type": "string"
+          },
+          {
+            "const": "network",
+            "description": "A load that failed: the page itself, a script, an image, a fetch.",
+            "type": "string"
+          },
+          {
+            "const": "security",
+            "description": "A load the browser refused for its security: a Content Security\nPolicy violation, mixed content.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out"
+      },
+      "PageReport": {
+        "description": "The errors a page reported as the platform loaded it for its preview\ncard, as a visitor without an account sees it: as it loaded and in\nthe second after, with no interaction.",
+        "properties": {
+          "at": {
+            "description": "When the shot landed (ms).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "dropped": {
+            "description": "How many more it reported past those.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "errors": {
+            "description": "The first it reported, in order (at most `fragment_core::card::ERRORS_MAX`).",
+            "items": {
+              "$ref": "#/components/schemas/PageError"
+            },
+            "type": "array"
+          },
+          "live": {
+            "description": "The live commit the shot loaded.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "live",
+          "at",
+          "errors",
+          "dropped"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Pinned": {
+        "description": "Its answer: the fragment, and whether it is pinned now.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "pinned"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Pins": {
+        "description": "Where its refs point (`PINNED_REFS`).",
+        "properties": {
+          "live": {
+            "description": "The commit installed as `live`; none before the first deploy.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "main": {
+            "description": "The commit `main` points at; none before its first.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "main",
+          "live"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "PostRecord": {
+        "additionalProperties": false,
+        "description": "`POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a\nrecord the platform appends as the poster. `id` is the poster's own\n(`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the\nrecord it appended and appends nothing; with another body it is 409.",
+        "properties": {
+          "body": {
+            "description": "At most `limits::RECORD_BODY_MAX_BYTES` of JSON."
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "body"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "Posted": {
+        "description": "A post's answer: the record, and whether this id had posted it before.",
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ChannelRecord"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "record",
+          "replayed"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Present": {
+        "description": "One socket's presence (`data` is never `null` in a `hello`).",
+        "properties": {
+          "data": true,
+          "id": {
+            "type": "string"
+          },
+          "principal": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "principal",
+          "data"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "PutDraft": {
+        "description": "`PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post\nthere: a record not written yet, as it is written (a reply as it\nstreams), shown to the channel's readers live and never stored (a\n`draft` frame on `__live`); `text: null` stops it. The record its poster\nthen writes with the same `turn` replaces it on a page.",
+        "properties": {
+          "text": {
+            "default": null,
+            "description": "At most `limits::RECORD_BODY_MAX_BYTES`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turn": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "Reason": {
+        "description": "A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.",
+        "enum": [
+          "trial_unknown",
+          "trial_ended",
+          "trial_used",
+          "trial_taken",
+          "trial_not_here",
+          "not_sold",
+          "stripe_refused",
+          "holds_seat",
+          "org_pays",
+          "no_seat",
+          "not_payer",
+          "pays",
+          "last_admin",
+          "step_down_first",
+          "payer_only",
+          "gone",
+          "org_not_paying",
+          "not_admin",
+          "not_an_email",
+          "already_offered",
+          "org_full",
+          "admins_full",
+          "too_many_offers",
+          "offers_per_day",
+          "last_paid_seat",
+          "private_while_reaching",
+          "unshare_first"
+        ],
+        "type": "string",
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
+      "Role": {
+        "description": "A member's role in a fragment. `Public` is the floor anyone who can see\nthe fragment holds; the others are granted. Ordered weakest first.",
+        "enum": [
+          "public",
+          "viewer",
+          "editor",
+          "owner"
+        ],
+        "type": "string",
+        "x-fragment-direction": "out"
+      },
+      "SearchAnswer": {
+        "description": "`GET /api/search?q=` (any signer): the signer's fragments whose title\nor name match every word of the query, then the messages that do,\nnewest first, from the fragments they hold a role on now.",
+        "properties": {
+          "fragments": {
+            "items": {
+              "$ref": "#/components/schemas/ListedFragment"
+            },
+            "type": "array"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageHit"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fragments",
+          "messages"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Seen": {
+        "description": "`PUT /api/fragments/{name}/seen`'s answer: the signer has seen the\nfragment's messages their search holds, so its row counts none unread.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "unread": {
+            "description": "Always 0: none of its messages is unread now.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "unread"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "SetArchived": {
+        "description": "`PUT /api/fragments/{name}/archived`: the signer's own view of a\nfragment they hold a role on.",
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "archived"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "SetDock": {
+        "description": "`PUT /api/fragments/{name}/dock`: the signer's own choice of whether\ntheir dock shows a fragment they hold a role on.",
+        "properties": {
+          "dock": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dock"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "SetPinned": {
+        "description": "`PUT /api/fragments/{name}/pinned`: the signer's own choice of whether\na fragment they hold a role on is pinned in their sidebar.",
+        "properties": {
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pinned"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "Sharing": {
+        "description": "A fragment's sharing, in its owner's list (the platform's page): who\nmay open it, how many members it has, how many of them are guests\n(neither the owner nor an agent of theirs), and how many invites wait\non an email (`None` in a row sent before rows counted them).",
+        "properties": {
+          "guests": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "invites": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "members": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reach": {
+            "default": false,
+            "description": "It holds a secret or a door, so it is shared with no one but its\nowner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,\n`Reason::UnshareFirst`). Add-only: left out when false, and a row\nfrom before it reads none.",
+            "type": "boolean"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          }
+        },
+        "required": [
+          "visibility",
+          "members",
+          "guests"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Urls": {
+        "properties": {
+          "canonical": {
+            "description": "Its own origin, where its page is served.",
+            "type": "string"
+          },
+          "platform": {
+            "default": "",
+            "description": "The platform's own origin, where people open its join links and\nsend its inbox's webhooks: a client inside a computer reaches the\nAPI at an internal host, so a link for a person names this one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "canonical",
+          "platform"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Visibility": {
+        "description": "Who can see a fragment: everyone, holders of its share link, or members.",
+        "enum": [
+          "public",
+          "link",
+          "members"
+        ],
+        "type": "string",
+        "x-fragment-direction": "out"
+      }
+    },
+    "securitySchemes": {
+      "frame": {
+        "description": "The session of a fragment's page framed by another page (docs/api.md, Frame sessions); `fragment_frame` over plain http.",
+        "in": "cookie",
+        "name": "__Host-fragment_frame",
+        "type": "apiKey"
+      },
+      "link": {
+        "description": "A fragment's share link's token (docs/api.md, Sharing); its page keeps it in a cookie of its origin after.",
+        "in": "query",
+        "name": "view",
+        "type": "apiKey"
+      },
+      "nip98": {
+        "description": "NIP-98: `Authorization: Nostr <base64 event>`, a kind-27235 event signed over the method, the URL and the body's SHA-256 (crates/nip98).",
+        "scheme": "Nostr",
+        "type": "http"
+      },
+      "session": {
+        "description": "The shell's session, from the platform's own page (docs/api.md, Sign-in); `fragment_session` over plain http.",
+        "in": "cookie",
+        "name": "__Host-fragment_session",
+        "type": "apiKey"
+      },
+      "site": {
+        "description": "A fragment's own page's session, on its origin (docs/api.md, Sign-in); `fragment_site` over plain http.",
+        "in": "cookie",
+        "name": "__Host-fragment_site",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "The routes clients call and the shapes they send and read, generated by `cargo xtask wire` from crates/proto (its routes.rs and the types it names). docs/api.md says what each route means, who may call it, and its limits; crates/proto/wire.lock is what may not change.",
+    "title": "Fragment",
+    "version": "1"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/f/{name}/channels/{channel}": {
+      "get": {
+        "operationId": "channels.read",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The channel's name.",
+            "in": "path",
+            "name": "channel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read forward from past this seq (0 when neither cursor is named).",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Read the records just below this seq.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "At most `CHANNEL_PAGE`.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "A page of a channel's records, always ascending.",
+        "tags": [
+          "channels"
+        ]
+      },
+      "post": {
+        "operationId": "channels.post",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The channel's name.",
+            "in": "path",
+            "name": "channel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostRecord"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Posted"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`budget_used_up`",
+            "x-fragment-codes": [
+              "budget_used_up"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflicting_body`",
+            "x-fragment-codes": [
+              "conflicting_body"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Append a `message` record as the poster.",
+        "tags": [
+          "channels"
+        ]
+      }
+    },
+    "/api/f/{name}/channels/{channel}/draft": {
+      "put": {
+        "operationId": "channels.draft",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The channel's name.",
+            "in": "path",
+            "name": "channel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`rate_limited`",
+            "x-fragment-codes": [
+              "rate_limited"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Show a record as it is written to the channel's live readers; never stored.",
+        "tags": [
+          "channels"
+        ]
+      }
+    },
+    "/api/f/{name}/members": {
+      "get": {
+        "operationId": "members.list",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "A fragment's members, the first added first.",
+        "tags": [
+          "members"
+        ]
+      }
+    },
+    "/api/f/{name}/status": {
+      "get": {
+        "operationId": "fragments.status",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FragmentStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "A fragment's status, as the caller's role sees it.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments": {
+      "get": {
+        "operationId": "fragments.list",
+        "parameters": [
+          {
+            "description": "An agent's: the identity it acts for. The rows are the fragments that identity holds a role on where the agent or its owner is a member, each with the role the agent acts with there, `owned` on that identity's own, and no `listed`.",
+            "in": "query",
+            "name": "for",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FragmentList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`, `registry_unavailable`",
+            "x-fragment-codes": [
+              "deploying",
+              "registry_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The signer's fragments, a row each.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments/watch": {
+      "get": {
+        "operationId": "fragments.watch",
+        "responses": {
+          "101": {
+            "description": "Switching Protocols: a WebSocket of JSON text frames (`x-fragment-socket`)."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`rate_limited`",
+            "x-fragment-codes": [
+              "rate_limited"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "A socket that says when the signer's list, or the invites waiting on them, change.",
+        "tags": [
+          "fragments"
+        ],
+        "x-fragment-socket": {
+          "receives": {
+            "$ref": "#/components/schemas/ListWatchFrame"
+          },
+          "sends": null
+        }
+      }
+    },
+    "/api/fragments/{name}/archived": {
+      "put": {
+        "operationId": "fragments.archive",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetArchived"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Archived"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Archive or unarchive a fragment in the signer's own list.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments/{name}/dock": {
+      "put": {
+        "operationId": "fragments.dock",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDock"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Docked"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Put a fragment on the signer's dock, or take it off.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments/{name}/pinned": {
+      "put": {
+        "operationId": "fragments.pin",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPinned"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pinned"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Pin or unpin a fragment in the signer's sidebar.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments/{name}/seen": {
+      "put": {
+        "operationId": "fragments.seen",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Seen"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The signer has seen a fragment's messages: its row counts none unread.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/search": {
+      "get": {
+        "operationId": "search.find",
+        "parameters": [
+          {
+            "description": "What to look for, once: words, each in a match as a word or a word's start.",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchAnswer"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Search the signer's own list: titles and names, then messages.",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/f/{name}/__live": {
+      "get": {
+        "operationId": "live.open",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols: a WebSocket of JSON text frames (`x-fragment-socket`)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "site": []
+          },
+          {
+            "frame": []
+          },
+          {
+            "link": []
+          },
+          {}
+        ],
+        "summary": "A fragment's live socket: subscribe to channels, share presence, run queries.",
+        "tags": [
+          "live"
+        ],
+        "x-fragment-socket": {
+          "receives": {
+            "$ref": "#/components/schemas/LiveOut"
+          },
+          "sends": {
+            "$ref": "#/components/schemas/LiveIn"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "A signer's list of the fragments they hold a role on, and their own view of each.",
+      "name": "fragments"
+    },
+    {
+      "description": "A signer's search over their own list.",
+      "name": "search"
+    },
+    {
+      "description": "Who is in a fragment.",
+      "name": "members"
+    },
+    {
+      "description": "A fragment's channels: its records, read, posted and drafted.",
+      "name": "channels"
+    },
+    {
+      "description": "A fragment's live socket: records as they are appended, presence, drafts and queries.",
+      "name": "live"
+    }
+  ]
+}

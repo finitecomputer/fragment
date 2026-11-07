@@ -9,3 +9,10 @@ description = "Wire types shared by the fragment cell, the CLI, and the e2e."
 serde = { version = "1", features = ["derive"] }
 # raw_value: a channel record's body passes through as the text the cell stored.
 serde_json = { version = "1", features = ["raw_value"] }
+# The wire's schema (docs/wire, `cargo xtask wire`): the host's alone. The
+# cell is its own workspace and never turns `schema` on, so none of this
+# reaches its Wasm.
+schemars = { version = "1.2.3", optional = true, default-features = false, features = ["derive", "std", "raw_value"] }
+
+[features]
+schema = ["dep:schemars"]

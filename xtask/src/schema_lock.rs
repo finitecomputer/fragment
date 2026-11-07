@@ -81,6 +81,14 @@ fn unapplied(e: fragment_core::migrate::SchemaError) -> anyhow::Error {
 /// master here (a clone without the remote; CI names one), empty when
 /// master has no lock yet.
 fn master_lock(root: &Path) -> Result<Option<(String, String)>> {
+    master_file(root, host::LOCK_PATH)
+}
+
+/// A file as master holds it (`FRAGMENT_SCHEMA_BASE`, else
+/// `fragment-rs/master` or `origin/master`) and the ref it was read at:
+/// none when no ref names master here, empty when master has no such file.
+/// The wire lock (wire/) holds its files to master's the same way.
+pub(crate) fn master_file(root: &Path, path: &str) -> Result<Option<(String, String)>> {
     let named = std::env::var("FRAGMENT_SCHEMA_BASE").ok().filter(|r| !r.is_empty());
     let refs = match &named {
         Some(r) => vec![r.clone()],
@@ -92,8 +100,8 @@ fn master_lock(root: &Path) -> Result<Option<(String, String)>> {
             anyhow::ensure!(named.is_none(), "FRAGMENT_SCHEMA_BASE names {r}, which git does not know: fetch it");
             continue;
         }
-        let shown = git(&["show", &format!("{r}:{}", host::LOCK_PATH)])?;
-        let base = if shown.status.success() { String::from_utf8(shown.stdout).context("master's lock is UTF-8")? } else { String::new() };
+        let shown = git(&["show", &format!("{r}:{path}")])?;
+        let base = if shown.status.success() { String::from_utf8(shown.stdout).with_context(|| format!("master's {path} is UTF-8"))? } else { String::new() };
         return Ok(Some((base, r)));
     }
     Ok(None)

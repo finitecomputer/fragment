@@ -577,7 +577,13 @@ pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
 }"#;
 
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
+///
+/// Open (`x-fragment-open`, docs/wire): a code this reader does not know
+/// is read by its HTTP status (the CLI's `Resp::refusal`), so one is added
+/// without breaking a shipped client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// 400: the request is malformed or breaks a rule.
@@ -664,6 +670,7 @@ impl ErrorCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ErrorBody {
     pub error: ErrorCode,
     pub message: String,
@@ -673,12 +680,14 @@ pub struct ErrorBody {
     /// a client that knows none ignores it, and one that does not know this
     /// one reads none (`reason_or_none`).
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "reason_or_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub reason: Option<Reason>,
     /// How long to wait before asking again, in ms, where a refusal knows
     /// (a 429 `rate_limited` of an embeddings model's rate limit: its
     /// writer waits exactly this, then writes again). Add-only: absent
     /// from every other refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub retry_after_ms: Option<u64>,
 }
 
@@ -835,9 +844,28 @@ impl Serialize for Reason {
     }
 }
 
+/// Written by hand as its `Serialize` is: its names, open (a reader that
+/// does not know one reads none: `reason_or_none`).
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for Reason {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Reason".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.",
+            "type": "string",
+            "enum": Reason::ALL.map(Reason::as_str),
+            "x-fragment-open": true,
+        })
+    }
+}
+
 /// A member's role in a fragment. `Public` is the floor anyone who can see
 /// the fragment holds; the others are granted. Ordered weakest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Public,
@@ -870,7 +898,12 @@ impl Role {
 /// What a fragment is to the people who use it (`fragment.json`'s `kind`,
 /// decision 6): the shell lists each kind in its own place. An app unless
 /// it says otherwise.
+///
+/// Open (`x-fragment-open`, docs/wire): a kind this build does not know
+/// reads as `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(rename_all = "snake_case")]
 pub enum FragmentKind {
     #[default]
@@ -931,6 +964,7 @@ pub fn valid_template_name(s: &str) -> bool {
 
 /// Who can see a fragment: everyone, holders of its share link, or members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
     Public,
@@ -1022,21 +1056,30 @@ pub struct Created {
     pub canonical: String,
 }
 
+/// Where its refs point (`PINNED_REFS`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Pins {
+    /// The commit `main` points at; none before its first.
     pub main: Option<String>,
+    /// The commit installed as `live`; none before the first deploy.
     pub live: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Counts {
+    /// Files at main.
     pub files: u64,
+    /// Records of its `events` channel.
     pub events: u64,
+    /// Its members.
     pub members: u64,
 }
 
 /// The app code installed from the `live` pin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
     /// The live commit the code was installed from; `None` without app code.
@@ -1051,7 +1094,9 @@ pub struct CodeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Urls {
+    /// Its own origin, where its page is served.
     pub canonical: String,
     /// The platform's own origin, where people open its join links and
     /// send its inbox's webhooks: a client inside a computer reaches the
@@ -1062,6 +1107,7 @@ pub struct Urls {
 
 /// `GET /api/f/<name>/status` (viewer and up).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FragmentStatus {
     pub name: String,
@@ -1070,10 +1116,12 @@ pub struct FragmentStatus {
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// An agent fragment's role, as its face says it (`ListedFragment`'s
     /// `agent_role`): what its runtime tells it it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     pub npub: String,
     pub owner: String,
@@ -1093,7 +1141,8 @@ pub struct FragmentStatus {
     /// It holds a secret or a door, so it is shared with no one but its
     /// owner and their own agents (FIN-352, `Sharing::reach`): the share
     /// sheet says so. Add-only: left out when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
@@ -1101,10 +1150,12 @@ pub struct FragmentStatus {
     /// Files this large or larger are stored as blobs, their pointers in
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub blob_min_bytes: Option<u64>,
     /// What the page reported as its last preview card's shot loaded it
     /// (docs/api.md, Cards); absent before the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub page: Option<PageReport>,
 }
 
@@ -1112,6 +1163,7 @@ pub struct FragmentStatus {
 /// card, as a visitor without an account sees it: as it loaded and in
 /// the second after, with no interaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageReport {
     /// The live commit the shot loaded.
     pub live: String,
@@ -1124,6 +1176,7 @@ pub struct PageReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageError {
     pub kind: PageErrorKind,
     /// What the page or the browser said (cut to
@@ -1131,10 +1184,12 @@ pub struct PageError {
     pub text: String,
     /// The script or resource it names (`url`, or `url:line:column`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PageErrorKind {
     /// An uncaught exception or an unhandled rejection (a syntax error too).
@@ -1148,8 +1203,10 @@ pub enum PageErrorKind {
     Security,
 }
 
-/// A fragment the signer holds a role on.
+/// A fragment the signer holds a role on: a row of `GET /api/fragments`
+/// (and of a search's fragments), with the role they hold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
@@ -1158,77 +1215,93 @@ pub struct ListedFragment {
     #[serde(default)]
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub title: Option<String>,
     /// Its picture, as the address on the platform that serves it: an
     /// agent fragment's `avatar.png` at live (its agent's identity's
     /// `/api/identities/<npub>/picture?v=…`), any other's icon
     /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub picture: Option<String>,
     /// An agent fragment's role (its live `fragment.json`'s `meta.role`,
     /// trimmed; none when it says nothing), as its last install said: the
     /// tag the shell shows beside its name. Never any other fragment's.
     #[serde(default, rename = "agentRole", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub agent_role: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most
     /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub agents: Vec<String>,
-    /// A chat's newest message, its first line, as the signer's search
-    /// holds it (none when it holds none: docs/api.md, Search).
+    /// A chat's newest message, its first line (at most
+    /// `limits::LISTED_PREVIEW_MAX_BYTES`), as the signer's search holds it
+    /// (none when it holds none: docs/api.md, Search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub preview: Option<String>,
     /// With `preview`: when its message was said (ms), so a list can put
     /// its chats newest first.
     #[serde(default, rename = "previewAt", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub preview_at: Option<i64>,
     /// A chat's messages the signer's search holds that came after the
     /// last they saw (`PUT /api/fragments/{name}/seen`), at most
     /// `limits::LISTED_UNREAD_MAX`; left out at 0.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = 0)))]
     pub unread: u32,
     /// Its owner's row only: who else is in it, as the fragment last said
     /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
     /// shell's sidebar leaves it out; search still finds it).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub archived: bool,
     /// On the signer's dock: their own choice, not the fragment's (`PUT
     /// /api/fragments/{name}/dock`), true until they take it off (the
     /// shell's dock shows apps and brains, less these and the archived).
     /// Left out while true, so a row from before the choice, or from an
     /// older platform, reads as on it.
-    #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = true)))]
     pub dock: bool,
     /// The signer pinned it: their own view, not the fragment's (`PUT
     /// /api/fragments/{name}/pinned`; the shell's sidebar shows it first in
     /// its section). Left out while false, so a row from an older platform
     /// reads as not pinned.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub pinned: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub owned: bool,
     /// What its members are doing, as its channels that declare `listed`
     /// last said (each member's newest such record, the newest first, at
     /// most `limits::LISTED_POSTERS_MAX`): only those of channels this
     /// row's role may read; none when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub listed: Vec<ListedRecord>,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
 /// fragment they hold a role on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetArchived {
     pub archived: bool,
 }
 
 /// Its answer: the fragment, and whether it is archived now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Archived {
     pub name: String,
     pub archived: bool,
@@ -1237,6 +1310,7 @@ pub struct Archived {
 /// `PUT /api/fragments/{name}/dock`: the signer's own choice of whether
 /// their dock shows a fragment they hold a role on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetDock {
     pub dock: bool,
 }
@@ -1244,12 +1318,14 @@ pub struct SetDock {
 /// `PUT /api/fragments/{name}/pinned`: the signer's own choice of whether
 /// a fragment they hold a role on is pinned in their sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetPinned {
     pub pinned: bool,
 }
 
 /// Its answer: the fragment, and whether it is pinned now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Pinned {
     pub name: String,
     pub pinned: bool,
@@ -1257,37 +1333,41 @@ pub struct Pinned {
 
 /// Its answer: the fragment, and whether it is on their dock now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Docked {
     pub name: String,
     pub dock: bool,
 }
 
-/// A row's `dock` when it names none: on it.
-fn on_the_dock() -> bool {
+/// A default of `true` (a row's `dock` that names none is on the dock).
+fn default_true() -> bool {
     true
 }
 
-/// A row on the dock leaves `dock` out.
-fn is_on_the_dock(dock: &bool) -> bool {
-    *dock
+/// A `true` is left out, as its default is `true` (`default_true`).
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// `PUT /api/fragments/{name}/seen`'s answer: the signer has seen the
 /// fragment's messages their search holds, so its row counts none unread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Seen {
     pub name: String,
+    /// Always 0: none of its messages is unread now.
     pub unread: u32,
 }
 
-fn is_zero(n: &u32) -> bool {
-    *n == 0
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 /// `GET /api/search?q=` (any signer): the signer's fragments whose title
 /// or name match every word of the query, then the messages that do,
 /// newest first, from the fragments they hold a role on now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SearchAnswer {
     pub fragments: Vec<ListedFragment>,
     pub messages: Vec<MessageHit>,
@@ -1297,10 +1377,13 @@ pub struct SearchAnswer {
 /// a snippet of its text around the match (plain text, at most
 /// `limits::SEARCH_SNIPPET_MAX_BYTES`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MessageHit {
     pub fragment: String,
     pub channel: String,
+    /// The record's place in its channel.
     pub seq: i64,
+    /// When it was written (ms).
     pub at: i64,
     pub snippet: String,
 }
@@ -1310,17 +1393,20 @@ pub struct MessageHit {
 /// (neither the owner nor an agent of theirs), and how many invites wait
 /// on an email (`None` in a row sent before rows counted them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Sharing {
     pub visibility: Visibility,
     pub members: u64,
     pub guests: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub invites: Option<u64>,
     /// It holds a secret or a door, so it is shared with no one but its
     /// owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,
     /// `Reason::UnshareFirst`). Add-only: left out when false, and a row
     /// from before it reads none.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
 }
 
@@ -1421,11 +1507,13 @@ pub struct AccessAgent {
 
 /// `GET /api/fragments` (any signer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FragmentList {
     pub fragments: Vec<ListedFragment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
     /// The member's identity (an npub).
@@ -1436,14 +1524,17 @@ pub struct Member {
     pub added_at: i64,
     /// `person` or `agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub kind: Option<IdentityKind>,
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MemberList {
     pub members: Vec<Member>,
 }
@@ -1487,6 +1578,7 @@ pub const DEFAULT_TIER: Tier = Tier::Cheap;
 /// stays the fragment's and is not registered. An agent has a designated
 /// owner, a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
     Person,
@@ -1814,6 +1906,7 @@ impl StorageAccess {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum OpKind {
     Query,
@@ -1838,21 +1931,25 @@ impl OpKind {
 
 /// An operation as `fragment.json` declares it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpDecl {
     pub kind: OpKind,
     /// The weakest role that may call it.
     pub role: Role,
     /// Its input's JSON Schema (the supported subset); also its tool schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub input: Option<Value>,
     /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
     /// no replay (the same id runs again) and no effects (docs/api.md, Apps).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub ephemeral: bool,
     /// What it does, in plain text, for a person or an agent choosing it
     /// (1 to `limits::OP_DESCRIPTION_MAX_CHARS` characters). None when the
     /// manifest gives none, and then absent from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub description: Option<String>,
 }
 
@@ -1907,6 +2004,7 @@ pub struct ListedDecl {
 /// a member's newest record of a kind its channel lists, sent to the lists
 /// of the members whose role may read that channel, and to no one else's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListedRecord {
     pub channel: String,
     /// Who posted it: a member of the fragment.
@@ -1916,6 +2014,7 @@ pub struct ListedRecord {
     /// Its body's listed fields that are strings, each cut to
     /// `limits::LISTED_VALUE_MAX_CHARS` characters.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = {})))]
     pub fields: std::collections::BTreeMap<String, String>,
     /// When it was posted (ms); a poster who posts the same again moves it
     /// at most `limits::LISTED_FRESH_MS` behind.
@@ -1938,6 +2037,7 @@ pub fn valid_listed_field(field: &str) -> bool {
 /// `ops`, and posts to a channel its fragment.json declares postable) or by
 /// mutations' effects (app channels), never by a client's own hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelRecord {
     pub channel: String,
     pub seq: i64,
@@ -1955,6 +2055,7 @@ pub struct ChannelRecord {
 /// (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the
 /// record it appended and appends nothing; with another body it is 409.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PostRecord {
     pub id: String,
@@ -1968,14 +2069,17 @@ pub struct PostRecord {
 /// `draft` frame on `__live`); `text: null` stops it. The record its poster
 /// then writes with the same `turn` replaces it on a page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PutDraft {
     pub turn: String,
     /// At most `limits::RECORD_BODY_MAX_BYTES`.
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub text: Option<String>,
 }
 
 /// A post's answer: the record, and whether this id had posted it before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Posted {
     pub record: ChannelRecord,
     pub replayed: bool,
@@ -1991,10 +2095,16 @@ pub const POST_KIND: &str = "message";
 /// direction read (added 2026-11; absent from older releases' pages).
 // no PartialEq: a record's body is raw JSON text (compare the JSON instead)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelPage {
     pub channel: String,
     pub records: Vec<ChannelRecord>,
+    /// The next page's cursor: `after` it reading forward, `before` it
+    /// reading back.
     pub next: i64,
+    /// Whether records remain past the page in the direction read: a page
+    /// cut short by its bytes (`limits::CHANNEL_HTTP_PAGE_MAX_BYTES`) says
+    /// so here, so it is not read as the last.
     #[serde(default)]
     pub more: bool,
 }
@@ -2347,6 +2457,8 @@ pub mod export;
 pub mod ledger;
 pub mod live;
 pub mod org;
+#[cfg(feature = "schema")]
+pub mod routes;
 pub mod search;
 pub mod wipe;
 
