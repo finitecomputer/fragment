@@ -54,6 +54,7 @@
 		EBB66B878C4362F14779FB52 /* LaunchScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = A95702BF0C241F4A98C5F812 /* LaunchScope.swift */; };
 		ED598966FDB4DD6D3F4486A1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B6FB1CA5638E3B92C0E2CD /* SettingsView.swift */; };
 		F8EBB41899022F0D4E70C646 /* DraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8B11860501F69BE73ECB3D0 /* DraftTests.swift */; };
+		F8EFE2E398F2B109C9F88F17 /* TimelineLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 775A9644D2F2DD435C582F3B /* TimelineLayoutTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,6 +98,7 @@
 		63AC3B6E5464205E0D215570 /* AuthenticatedImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticatedImage.swift; sourceTree = "<group>"; };
 		652C8765C4EBF27BBAF9D23D /* WebMOpusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebMOpusTests.swift; sourceTree = "<group>"; };
 		74E480260C706AE0F972CA37 /* FragmentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentUITests.swift; sourceTree = "<group>"; };
+		775A9644D2F2DD435C582F3B /* TimelineLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLayoutTests.swift; sourceTree = "<group>"; };
 		7C7F962BA11EC3D0BD85DB75 /* WorkingActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingActivity.swift; sourceTree = "<group>"; };
 		811C73B367475E8B5D4DB77F /* AppIcon.icon */ = {isa = PBXFileReference; path = AppIcon.icon; sourceTree = "<group>"; };
 		8C581195A0FDAC2EA88D081F /* ShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellTests.swift; sourceTree = "<group>"; };
@@ -216,6 +218,7 @@
 				3A2F75C83DE72E8D3B8797E1 /* SearchTests.swift */,
 				8C581195A0FDAC2EA88D081F /* ShellTests.swift */,
 				DC2E702AC579841626A1A67C /* Stub.swift */,
+				775A9644D2F2DD435C582F3B /* TimelineLayoutTests.swift */,
 				2C75B4172B10109A56753F7A /* TimelineTests.swift */,
 				DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */,
 				652C8765C4EBF27BBAF9D23D /* WebMOpusTests.swift */,
@@ -350,6 +353,7 @@
 				7A8D5455AD2EABF343F2905B /* SearchTests.swift in Sources */,
 				4FEE2A2E44CD058FD4666F85 /* ShellTests.swift in Sources */,
 				55978B58D06B7028C7799CB2 /* Stub.swift in Sources */,
+				F8EFE2E398F2B109C9F88F17 /* TimelineLayoutTests.swift in Sources */,
 				A8391B829C662A475899B98C /* TimelineTests.swift in Sources */,
 				9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */,
 				979F9EBFC4F1D8A6DD25DE8A /* WebMOpusTests.swift in Sources */,

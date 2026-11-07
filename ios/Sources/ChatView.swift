@@ -12,7 +12,8 @@ struct ChatView: View {
     /// stops a fling's momentum. Momentum ran on past a jump made while it
     /// lasted, so the tap only hid the button.
     @State private var jumping = false
-    /// The row the chat keeps in place as pages come in above it.
+    /// The row the chat keeps in place as pages come in above it, while it
+    /// is read back from its newest (`heldRow`).
     @State private var anchor: String?
     /// Messages heard (`ChatSession.heard`) when it last left the newest.
     @State private var heardAtLeave = 0
@@ -24,6 +25,14 @@ struct ChatView: View {
         _session = State(initialValue: session)
         self.library = library
         self.open = open
+    }
+
+    /// The timeline's scroll position, by row: `anchor` while the chat is
+    /// read back from its newest; following it, none, and what SwiftUI says
+    /// is on top then is let go, so nothing it writes as the follow scrolls
+    /// redraws the chat.
+    private var heldRow: Binding<String?> {
+        Binding(get: { followsBottom ? nil : anchor }, set: { row in if !followsBottom { anchor = row } })
     }
 
     var body: some View {
@@ -51,8 +60,15 @@ struct ChatView: View {
                 // its backlog is laid out unseen, and shown once read, at its end
                 .opacity(session.read ? 1 : 0)
             }
-            // rows read in above keep the one shown in place
-            .scrollPosition(id: $anchor, anchor: .top)
+            // Rows read in above keep the one shown in place, while the chat
+            // is read back from its newest. Following the newest, no row is
+            // held (`heldRow`): the follow below keeps the end in view, and a
+            // row held as well fought it. In a short chat the lazy stack then
+            // guessed its height two ways in turn and each rise was followed
+            // again, all in one render, until iOS's watchdog ended the app
+            // (FIN-419); and the row, held by its top center, moved the
+            // timeline 20 points sideways.
+            .scrollPosition(id: heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("timeline")
             .defaultScrollAnchor(.bottom, for: .initialOffset)
@@ -93,7 +109,8 @@ struct ChatView: View {
             .scrollDisabled(jumping)
             // once scrolling is held off (the fling stopped), the jump lands
             .onChange(of: followsBottom) { _, following in
-                if !following { heardAtLeave = session.heard }
+                // a row held before is never scrolled back to once let go again
+                if following { anchor = nil } else { heardAtLeave = session.heard }
             }
             .onChange(of: session.detached) { _, detached in
                 if detached { followsBottom = false }
