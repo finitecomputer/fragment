@@ -71,7 +71,8 @@ an image may rely on this:
   `destroying`, stored before the destroy), so an isolate that comes up
   after it knows it as well; one that finds the start's own report gone
   with the isolate before it destroys that container (whatever runs: its
-  host owns no start yet) and counts the start failed, once, or, the
+  host owns no start yet; an event coming meanwhile waits for it) and
+  counts the start failed, once, or, the
   container still running, tells nothing and tries again at the next
   event, an alarm it keeps a minute on at the latest (on its last strike
   nothing else may come).

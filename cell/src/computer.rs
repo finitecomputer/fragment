@@ -332,6 +332,9 @@ enum MetaKey {
     StallFailingStart,
     /// The test lever's starts still to fail (`fail-starts`).
     FailStarts,
+    /// The test lever's wait before a takeover's destroy (`stall-takeover`),
+    /// in ms.
+    StallTakeOver,
     /// The test lever's takeover destroys still to fail
     /// (`fail-takeover-destroys`).
     FailTakeOverDestroys,
@@ -359,6 +362,7 @@ impl MetaKey {
             MetaKey::SlowTell => "slow_tell",
             MetaKey::StallFailingStart => "stall_failing_start",
             MetaKey::FailStarts => "fail_starts",
+            MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
         }
     }
@@ -403,9 +407,16 @@ pub struct ComputerCell {
     raw: JsValue,
     cfg: &'static Config,
     env: Env,
-    /// Whether this isolate has looked for a container an earlier one left
-    /// running (lesson 6: `adopt`).
+    /// Whether this isolate has taken the computer over: looked for a
+    /// container an earlier one left running (lesson 6: `adopt`), and done
+    /// what that look asked. Set only once it has.
     adopted: std::cell::Cell<bool>,
+    /// Held while this isolate takes the computer over (`take_over`): an
+    /// event that comes meanwhile waits for it, never acting on a lifecycle
+    /// whose takeover is still destroying a container (a second review on
+    /// #1079: a deadline's alarm applied during that destroy failed the
+    /// start for good, its container left running).
+    taking_over: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -447,6 +458,7 @@ impl DurableObject for ComputerCell {
             cfg,
             env,
             adopted: std::cell::Cell::new(false),
+            taking_over: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
@@ -1045,12 +1057,20 @@ impl ComputerCell {
     /// this error before it sets any alarm of its own, and nothing else may
     /// come (a start destroying on its last strike: Codex on #1079).
     async fn take_over(&self) -> CellResult<Option<Event>> {
-        if self.adopted.replace(true) {
+        if self.adopted.get() {
+            return Ok(None);
+        }
+        let _taking = self.taking_over.lock().await;
+        if self.adopted.get() {
+            // the event it waited for took it over (what that asked is
+            // stored: nothing awaits between this lock's release and it)
             return Ok(None);
         }
         let found = self.adopt().await;
+        if found.is_ok() {
+            self.adopted.set(true);
+        }
         if let Err(e) = &found {
-            self.adopted.set(false);
             let at = js::now_ms() + TAKE_OVER_RETRY_MS;
             let kept = self.alarm_by(at).await;
             console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "take_over": e.message, "again_by": at, "alarm": kept.err().map(|e| e.message) }));
@@ -1083,7 +1103,9 @@ impl ComputerCell {
             // still running after its destroy is no failure told yet: the
             // next event tries again, the alarm `take_over` keeps at the
             // latest.
-            // (the lever's `fail-takeover-destroys`: one that leaves it running)
+            // (the levers: `stall-takeover` holds it here, an event coming
+            // meanwhile; `fail-takeover-destroys`, one that leaves it running)
+            self.lever_wait(MetaKey::StallTakeOver, STALL_FAILING_START_MAX_MS).await;
             if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
                 return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
             }
@@ -2371,15 +2393,17 @@ impl ComputerCell {
                 self.alarm_at(Some(at)).await?;
                 Ok(json!({ "computer": id, "alarmAt": at }))
             }
-            "stall-failing-start" => {
+            "stall-failing-start" | "stall-takeover" => {
                 // its next start that fails waits `ms` between storing that
-                // it fails and destroying its container (0: none)
-                let ms = b.ms.map(u64::from).filter(|ms| *ms <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid(format!("stall-failing-start names its ms, 0 to {STALL_FAILING_START_MAX_MS}")))?;
+                // it fails and destroying its container, or its next
+                // takeover of a start destroying, before its destroy (0: none)
+                let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
+                let ms = b.ms.map(u64::from).filter(|ms| *ms <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid(format!("{} names its ms, 0 to {STALL_FAILING_START_MAX_MS}", b.op)))?;
                 match ms {
-                    0 => self.delete_meta(MetaKey::StallFailingStart)?,
-                    ms => self.set_meta(MetaKey::StallFailingStart, &ms.to_string())?,
+                    0 => self.delete_meta(key)?,
+                    ms => self.set_meta(key, &ms.to_string())?,
                 }
-                Ok(json!({ "computer": id, "stallFailingStart": ms }))
+                Ok(json!({ "computer": id, "op": b.op, "ms": ms }))
             }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
@@ -2450,7 +2474,7 @@ impl ComputerCell {
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, fail-starts, fail-takeover-destroys, alarm-in or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in or always-on"))),
         }
     }
 
