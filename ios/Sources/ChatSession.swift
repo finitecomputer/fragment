@@ -421,6 +421,21 @@ final class ChatSession {
         await deliver(post)
     }
 
+    /// A new chat's first message from the home screen: its files, held
+    /// there until this chat was made, uploaded here as any attached in its
+    /// composer (`attach`), then sent with its words as one message, as the
+    /// web's launcher sends one (cell/shell/launcher.js `startFromSearch`).
+    /// Files not all taken send nothing: the words and those taken wait in
+    /// the composer, with why.
+    func sendFirst(_ files: [OutgoingFile]) async {
+        if !files.isEmpty {
+            guard beginAttaching(files.count) else { return }
+            await attach { files }
+            guard attachments.count == files.count else { return }
+        }
+        await send()
+    }
+
     func retry(_ post: PendingPost) async {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].failed, pending[index].refused == nil else { return }
         pending[index].failed = false

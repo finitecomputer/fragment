@@ -1,18 +1,28 @@
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct HomeView: View {
     let library: Library
     let api: FragmentAPI
     @Binding var draft: String
     let open: (FragmentSummary) -> Void
-    let start: () async -> Void
+    /// A new chat with its first message: these words and these files,
+    /// uploaded once the chat is made, as the web's launcher sends them.
+    /// Answers whether it was sent (the files go then).
+    let start: ([OutgoingFile]) async -> Bool
     let refresh: () async -> Void
     @State private var results = SearchResults()
     @State private var searching = false
     @State private var searchError: String?
-    @FocusState private var focused: Bool
+    /// The files of the first message, read and held here: a chat's blobs
+    /// are its own, so they are uploaded once its chat is made (launcher.js
+    /// `launchFiles`). Nothing keeps them past this screen, as on the web.
+    @State private var held: [(id: UUID, file: OutgoingFile)] = []
+    @State private var reading = false
+    @State private var fileError: String?
     private var query: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canStart: Bool { !query.isEmpty && query.utf8.count <= 32_768 && library.agent != nil && !library.creating }
+    private var canStart: Bool { (!query.isEmpty || !held.isEmpty) && draft.utf8.count <= 32_768 && library.agent != nil && !library.creating && !reading }
 
     var body: some View {
         ZStack {
@@ -20,21 +30,14 @@ struct HomeView: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 24)
                 VStack(spacing: 0) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Ask anything, or find a chat or app…", text: $draft)
-                            .focused($focused).submitLabel(.go).accessibilityIdentifier("launcherInput")
-                            .disabled(library.creating).onSubmit(launch)
-                        if !draft.isEmpty {
-                            Button("Clear search", systemImage: "xmark.circle.fill") { draft = "" }
-                                .labelStyle(.iconOnly).foregroundStyle(.secondary).disabled(library.creating)
-                        }
-                        Button(action: launch) {
-                            if library.creating { ProgressView().frame(width: 36, height: 36) }
-                            else { Image(systemName: "arrow.up").frame(width: 36, height: 36) }
-                        }.buttonStyle(.glassProminent).buttonBorderShape(.circle)
-                            .disabled(!canStart).accessibilityLabel("Start new chat").accessibilityIdentifier("startChat")
-                    }.padding(16)
+                    // the chat's own composer: Return is a new line, Send starts the chat
+                    ComposerBar(text: $draft, enabled: library.agent != nil, busy: library.creating || reading,
+                                placeholder: "Ask, or find a chat or app",
+                                attached: held.map { ($0.id.uuidString, $0.file.name) },
+                                remove: { id in held.removeAll { $0.id.uuidString == id } },
+                                attach: hold, send: { await launch() }, chrome: false)
+                        .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, 4)
+                    if let fileError { Text(fileError).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
                     if let agent = library.agent {
                         HStack {
                             Menu {
@@ -55,7 +58,7 @@ struct HomeView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 4) {
                                 if library.agent != nil {
-                                    Button(action: launch) {
+                                    Button { Task { await launch() } } label: {
                                         Label {
                                             VStack(alignment: .leading, spacing: 5) {
                                                 Text("Start a new chat with \(library.agent?.displayTitle ?? "your agent")").font(.subheadline.weight(.medium))
@@ -71,7 +74,7 @@ struct HomeView: View {
                                     heading("Messages")
                                     ForEach(results.messages) { hit in
                                         if let fragment = library.fragments.first(where: { $0.name == hit.fragment }) {
-                                            Button { focused = false; open(fragment) } label: {
+                                            Button { dismissKeyboard(); open(fragment) } label: {
                                                 VStack(alignment: .leading, spacing: 5) {
                                                     Text(fragment.displayTitle).font(.subheadline.weight(.medium))
                                                     Text(hit.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(3)
@@ -120,7 +123,7 @@ struct HomeView: View {
         if !found.isEmpty {
             heading(title)
             ForEach(found) { fragment in
-                Button { focused = false; open(fragment) } label: {
+                Button { dismissKeyboard(); open(fragment) } label: {
                     HStack(spacing: 12) {
                         if fragment.kind == "chat" { AgentAvatar(agent: library.agents(in: fragment).first, size: 28) }
                         else { Image(systemName: "app").frame(width: 28) }
@@ -135,7 +138,162 @@ struct HomeView: View {
             }
         }
     }
-    private func launch() { guard canStart else { return }; focused = false; Task { await start() } }
+    private func launch() async {
+        guard canStart else { return }
+        dismissKeyboard()
+        if await start(held.map(\.file)) { held = []; fileError = nil }
+    }
+    private func dismissKeyboard() { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+    /// Files for the first message, read now and held until its chat is made:
+    /// at most what a message carries, one reading at a time.
+    private func hold(_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
+        guard !reading else { fileError = "Wait for the files being attached, then add more."; return false }
+        guard count > 0, count + held.count <= ChatAttachment.countMax else { fileError = "Attach at most eight files per message."; return false }
+        reading = true
+        Task {
+            defer { reading = false }
+            do {
+                let files = try await read()
+                guard !files.isEmpty else { fileError = "This could not be attached."; return }
+                guard files.count + held.count <= ChatAttachment.countMax else { fileError = "Attach at most eight files per message."; return }
+                held += files.map { (UUID(), $0) }
+                fileError = nil
+            } catch { fileError = error.localizedDescription }
+        }
+        return true
+    }
+}
+
+/// The composer with what it attaches, one view for a chat and the home
+/// screen's prompt: words over several lines (Return is a new line, Send
+/// sends), Photos or Files from its +, a pasted picture, and a voice memo.
+/// What is attached is read here, off the main actor, and handed to
+/// `attach`, whose place says where it goes: a chat uploads it at once, the
+/// home screen keeps it until its chat is made (cell/shell/launcher.js).
+struct ComposerBar: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @Binding var text: String
+    var working = false
+    let enabled: Bool
+    var busy = false
+    var placeholder: String
+    /// What is attached now, by id and name: each a chip that removes it.
+    let attached: [(id: String, name: String)]
+    let remove: (String) -> Void
+    /// Takes `count` files that `read` will make, or refuses them (saying
+    /// why itself): the composer is busy from the choosing on.
+    let attach: (_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool
+    let send: () async -> Void
+    var stop: () async -> Void = {}
+    /// Steer, given whether a voice memo is being recorded: none, no Steer.
+    var steer: (_ recording: Bool) -> (() async -> Void)? = { _ in nil }
+    /// Quoted above the words, with its cancel (a chat's reply).
+    var quote: (text: String, cancel: () -> Void)? = nil
+    /// The composer's own glass: none inside a surface that has its own.
+    var chrome = true
+    @State private var importer = false
+    @State private var photos = false
+    @State private var picked: [PhotosPickerItem] = []
+    @State private var voice = VoiceMemo()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let quote {
+                    HStack { Label(quote.text, systemImage: "arrowshape.turn.up.left").font(.caption).lineLimit(2); Spacer(); Button("Cancel reply", systemImage: "xmark", action: quote.cancel).labelStyle(.iconOnly) }
+                }
+                if !attached.isEmpty {
+                    ScrollView(.horizontal) { HStack {
+                        ForEach(attached, id: \.id) { file in
+                            Button { remove(file.id) } label: { Label(file.name, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered)
+                                .accessibilityIdentifier("attached")
+                        }
+                    } }
+                }
+                if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
+                if voice.recording { Label("Recording voice memo…", systemImage: "waveform").foregroundStyle(.red).font(.caption) }
+            }.padding(.horizontal, chrome ? 20 : 12)
+            ComposerView(text: $text, working: working, enabled: enabled, busy: busy, recording: voice.recording, placeholder: placeholder,
+                         attachPhotos: { photos = true }, attachFiles: { importer = true },
+                         pasteImages: { paste($0) }, record: { Task { await recordVoice() } },
+                         send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, chrome: chrome)
+        }
+        .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): _ = attach(urls.count) { try await ComposerFiles.read(urls) }
+            case .failure(let error): voice.error = error.localizedDescription
+            }
+        }
+        // Photos as the system's picker gives them, its most compatible
+        // encoding: a picture the web shows goes as it is, any other as JPEG
+        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - attached.count),
+                      matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
+        .onChange(of: picked) { _, items in
+            guard !items.isEmpty else { return }
+            picked = []
+            // busy from the choosing on, before any photo is read (an iCloud one takes a while)
+            _ = attach(items.count) { try await ComposerFiles.read(items) }
+        }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { voice.cancel() } }
+        .onDisappear { voice.cancel() }
+    }
+
+    /// Pictures pasted: read from the pasteboard here, made off the main actor.
+    private func paste(_ pasteboard: UIPasteboard) {
+        let pictures = AttachmentInput.snapshot(pasteboard)
+        guard !pictures.isEmpty else { voice.error = "This picture could not be attached."; return }
+        _ = attach(pictures.count) { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value }
+    }
+    /// A voice memo, attached as a file once finished; its recording goes
+    /// once read (or refused).
+    private func recordVoice() async {
+        if voice.recording {
+            if let url = voice.stop() { attachMemo(url) }
+        } else {
+            guard attached.count < ChatAttachment.countMax else { voice.error = "Attach at most eight files per message."; return }
+            await voice.start { url in attachMemo(url) }
+        }
+    }
+    private func attachMemo(_ url: URL) {
+        let taken = attach(1) {
+            defer { try? FileManager.default.removeItem(at: url) }
+            return try await ComposerFiles.read([url])
+        }
+        if !taken { try? FileManager.default.removeItem(at: url) }
+    }
+}
+
+/// What the composer attaches, read as the chat's page takes files: each
+/// within the bound a file may be, a picture made one the web shows.
+enum ComposerFiles {
+    /// Files chosen (in Files, or a voice memo just recorded), off the main actor.
+    nonisolated static func read(_ urls: [URL]) async throws -> [OutgoingFile] {
+        try await Task.detached(priority: .userInitiated) {
+            try urls.map { url in
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size > 0, size <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
+                return try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
+            }
+        }.value
+    }
+    /// Photos picked: each read in the picker's most compatible encoding,
+    /// a picture made one the web shows (`AttachmentInput.image`), off the
+    /// main actor.
+    nonisolated static func read(_ items: [PhotosPickerItem]) async throws -> [OutgoingFile] {
+        var files: [OutgoingFile] = []
+        for (index, item) in items.enumerated() {
+            guard let data = try await item.loadTransferable(type: Data.self) else { throw APIError.server("This item could not be read.") }
+            let type = item.supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) } ?? .data
+            files.append(try await Task.detached(priority: .userInitiated) {
+                type.conforms(to: .image)
+                    ? try AttachmentInput.image(data, type: type, name: "photo-\(index + 1)")
+                    : try AttachmentInput.file(data, name: "video-\(index + 1).\(type.preferredFilenameExtension ?? "mov")", type: type)
+            }.value)
+        }
+        return files
+    }
 }
 
 struct ComposerView: View {
@@ -161,6 +319,8 @@ struct ComposerView: View {
     var steer: (() async -> Void)? = nil
     @State private var submitting = false
     var hasAttachments = false
+    /// Its own glass and margins: none inside a surface that has its own.
+    var chrome = true
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
     private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -228,10 +388,20 @@ struct ComposerView: View {
         }
         .buttonStyle(.plain)
         .padding(6)
-        .glassEffect(.regular, in: .rect(cornerRadius: 28))
-        .frame(maxWidth: 660)
-        .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
-        .frame(maxWidth: .infinity)
+        .modifier(ComposerChrome(shown: chrome))
+    }
+}
+
+/// The composer's own glass surface and margins, when it is not inside one.
+private struct ComposerChrome: ViewModifier {
+    let shown: Bool
+    func body(content: Content) -> some View {
+        if shown {
+            content.glassEffect(.regular, in: .rect(cornerRadius: 28))
+                .frame(maxWidth: 660)
+                .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
+                .frame(maxWidth: .infinity)
+        } else { content }
     }
 }
 

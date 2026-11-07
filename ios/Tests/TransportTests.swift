@@ -414,6 +414,40 @@ struct TransportTests {
         #expect(!session.rows.contains { $0.id == "q:npub1agent t1" })
     }
 
+    /// The home screen's first message, as its chat sends one (and the web's
+    /// launcher): its files put in the new chat's blobs, then one post of its
+    /// words with them. A file refused sends nothing: its words wait.
+    @Test func aFirstMessageCarriesItsFilesAsTheChatSendsThem() async throws {
+        let route = posts, blobs = "PUT /api/f/\(chat.name)/blobs/"
+        let stub = Stub { seen, _ in
+            if seen.route == route { return posted(seen, seq: 1, replayed: false) }
+            if seen.route.hasPrefix(blobs) { return seen.body.count > 9 ? (413, #"{"error":"too_large","message":"too big here"}"#) : (200, #"{"ok":true,"stored":true}"#) }
+            return (404, "{}")
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        session.edit("Here is the plan\nand a memo")
+        await session.sendFirst([OutgoingFile(data: Data("plan".utf8), name: "plan.txt", type: "text/plain"),
+                                 OutgoingFile(data: Data("memo".utf8), name: "voice.m4a", type: "audio/mp4")])
+        let puts = stub.seen.filter { $0.method == "PUT" }
+        #expect(puts.map(\.body) == [Data("plan".utf8), Data("memo".utf8)])
+        let sent = try #require(stub.seen.first { $0.route == route })
+        let attachments = sent.json["body"]["attachments"].array
+        #expect(sent.json["body"]["text"] == .string("Here is the plan\nand a memo"))
+        #expect(attachments.map { $0["name"] } == [.string("plan.txt"), .string("voice.m4a")])
+        #expect(attachments.map { $0["type"] } == [.string("text/plain"), .string("audio/mp4")])
+        #expect(attachments.allSatisfy { $0["sha256"].string?.count == 64 && $0["size"] == .number(4) })
+        #expect(session.composer.isEmpty && session.attachments.isEmpty && session.pending.isEmpty)
+
+        // a file the chat refuses: nothing is sent, the words wait with why
+        let other = ChatSession(fragment: chat, api: api)
+        other.edit("Too much")
+        await other.sendFirst([OutgoingFile(data: Data("far too large".utf8), name: "big.bin", type: "application/octet-stream")])
+        #expect(stub.seen.filter { $0.route == route }.count == 1)
+        #expect(other.composer == "Too much" && other.error == "too big here")
+    }
+
     /// A turn begun before the backlog (a start, then more steps than one
     /// page holds) still runs, and Stop stops it, opening the chat and
     /// opening it again: its start is read back from earlier work.

@@ -358,7 +358,7 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, draft: $homeDraft, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) })
+            HomeView(library: library, api: api, draft: $homeDraft, open: { open($0) }, start: { await start(api, files: $0) }, refresh: { await library.load(api) })
         case .chat(let name):
             if let chat = library.fragments.first(where: { $0.name == name }) {
                 if let session = try? library.session(for: chat, api: api) {
@@ -398,13 +398,16 @@ struct FragmentRoot: View {
         else if fragment.kind == "launcher" { page = .launcher }
         else { openedApp = fragment }
     }
-    private func start(_ api: FragmentAPI) async {
-        guard let agent = library.agent, !library.creating else { return }
+    /// A new chat with the home screen's words and files as its first
+    /// message, sent as its chat sends one (`ChatSession.sendFirst`).
+    /// Answers whether the chat took them (its words and files are its now).
+    private func start(_ api: FragmentAPI, files: [OutgoingFile]) async -> Bool {
+        guard let agent = library.agent, !library.creating else { return false }
         library.creating = true
         defer { library.creating = false }
         do {
             if library.unfinishedChat == nil { library.unfinishedChat = try await api.createChat() }
-            guard let chat = library.unfinishedChat else { return }
+            guard let chat = library.unfinishedChat else { return false }
             try await api.join(agent, to: chat)
             library.unfinishedChat = nil
             await library.load(api)
@@ -413,9 +416,10 @@ struct FragmentRoot: View {
             session.edit(homeDraft)
             homeDraft = ""
             page = .chat(chat.name)
-            await session.send()
+            await session.sendFirst(files)
             await library.load(api)
-        } catch { library.error = error.localizedDescription }
+            return true
+        } catch { library.error = error.localizedDescription; return false }
     }
 }
 
