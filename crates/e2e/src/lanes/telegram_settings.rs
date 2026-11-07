@@ -132,7 +132,7 @@ fn paste(b: &mut Browser, token: &str) -> bool {
 
 /// The page as it is, at 1280 wide and at a phone's 390 (`NN-<name>.png`),
 /// `focus` (a selector) in view at each.
-fn shoot(b: &mut Browser, page: &Page, dir: &Path, name: &str, focus: Option<&str>) -> Result<()> {
+pub(super) fn shoot(b: &mut Browser, page: &Page, dir: &Path, name: &str, focus: Option<&str>) -> Result<()> {
     let center = |b: &mut Browser| {
         if let Some(sel) = focus {
             let _ = b.eval(page, &format!("(document.querySelector({sel:?})?.scrollIntoView({{ block: 'center' }}), true)"));

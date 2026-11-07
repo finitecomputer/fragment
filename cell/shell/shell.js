@@ -159,9 +159,9 @@ function nameNode(node, attr, { fragment, make }) {
 function renderNames() {
   for (const node of document.querySelectorAll("[data-named]")) for (const [attr, n] of namers.get(node) ?? []) nameNode(node, attr, n);
   // a pane's title, whatever opened it: an app's (an agent's own page), its
-  // files, an agent's screen or its SimpleX
+  // files or an agent's screen
   for (const pane of document.querySelectorAll("#stack .pane[data-key]")) {
-    const of = pane.dataset.key.match(/^(?:app|tree|screen|simplex):(.+)$/)?.[1];
+    const of = pane.dataset.key.match(/^(?:app|tree|screen):(.+)$/)?.[1];
     const title = of && pane.querySelector(".pane-title");
     if (title && title.textContent !== titleOf(of)) title.textContent = titleOf(of);
   }
@@ -957,7 +957,7 @@ const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, 
 // what each agent's runtime offers beyond its chats (agent-runtimes.js),
 // from its agent.json as Settings reads it
 const { loadRuntimes, offers, markOffer } = createRuntimes({ agentJson: (agent) => agentJson(agent), agents: () => state.agents, own, byName });
-const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
+const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
   agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
   agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
@@ -1382,11 +1382,11 @@ function nameScreen(frame) {
   } catch {}
 }
 
+const { openSetup } = createConnectorSetup({ el, named, frameOf });
 const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
   api, el, section, actionLine, named, seg, computer: () => state.computer, getSeat: () => state.seat,
-  titleOf, frameOf, show, paneIcon, notice, setHome,
+  titleOf, frameOf, openSetup, simplexChatOf, openChat, notice, setHome,
 });
-const { openSetup } = createConnectorSetup({ el, named, frameOf });
 const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
   connectorLabel, markOffer, framed, openSetup, openChat, notice, load,

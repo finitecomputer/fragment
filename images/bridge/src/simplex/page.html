@@ -1,43 +1,67 @@
 <!doctype html>
 <!-- An agent's SimpleX link (images/bridge/src/simplex/http.rs), on its
-     computer's screen port, framed by the platform's page for its owner.
-     It reads and moves the link through `state`, `link` and `unlink`
-     beside it, and shows the one-time invitation as a QR code the bridge
-     draws (`qr.svg`). A link or an unlink takes a ticket, which it asks
-     the platform's page framing it for (which asks the platform, for the
+     computer's screen port, framed by the platform's page for its owner
+     (Settings' connector dialog, cell/shell/connector-setup.js). It reads
+     and moves the link through `state`, `link` and `unlink` beside it, and
+     shows the one-time invitation as a QR code the bridge draws
+     (`qr.svg`). A link or an unlink takes a ticket, which it asks the
+     platform's page framing it for (which asks the platform, for the
      agent's owner alone); the invitation is shown to the page whose link
-     ticket made it (its nonce, `s`). Its words are for someone who has
-     never heard of SimpleX. -->
+     ticket made it (its nonce, `s`). Each step is one line and its
+     controls, as Telegram's setup is (templates/telegram/site/setup.js). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SimpleX</title>
 <style>
-  :root { color-scheme: light dark; --text: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --surface: #ffffff; --accent: #0a66ff; --danger: #c4282d; }
-  @media (prefers-color-scheme: dark) { :root { --text: #f5f5f7; --muted: #a1a1a6; --line: #3a3a3c; --surface: #1c1c1e; --accent: #4c8dff; --danger: #ff6b6b; } }
+  /* The shell's look, as the platform's stylesheet draws it
+     (cell/fragment.css, the theme's variables and its pill buttons): this
+     page is its computer's, of another origin, and comes with its image,
+     so it carries its own copy of what it uses. Framed in the dialog it is
+     the dialog's content, on its surface (transparent), light or dark as
+     the shell says (`theme`), or as the system does until it has. */
+  @import url("https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600&display=swap");
+  :root {
+    color-scheme: light dark;
+    --fg: light-dark(#171717, #ececec);
+    --bg: light-dark(#f7f6f3, #212121);
+    --muted: light-dark(#66615b, #a6a19d);
+    --line-strong: light-dark(rgba(20, 20, 20, .18), rgba(255, 255, 255, .16));
+    --soft: light-dark(#f0eee9, #262625);
+    --accent: light-dark(#315fbd, #8ab4ff);
+    --danger: light-dark(#81112f, #f3b3b3);
+    --font: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    accent-color: var(--accent);
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: var(--surface); }
-  main { max-width: 440px; margin: 0 auto; padding: 28px 22px 40px; }
-  h1 { font-size: 20px; margin: 0 0 10px; }
-  p { margin: 0 0 12px; }
-  .muted { color: var(--muted); }
-  .private { font-size: 13px; color: var(--muted); margin-top: 16px; }
-  ol { padding-left: 20px; margin: 0 0 16px; }
-  ol li { margin-bottom: 6px; }
-  .qr { display: block; width: 240px; height: 240px; margin: 4px auto 14px; background: #fff; padding: 10px; border-radius: 12px; border: 1px solid var(--line); }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
-  button, a.button { font: inherit; font-weight: 600; border-radius: 10px; padding: 9px 16px; border: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; text-decoration: none; }
-  button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { color: var(--danger); }
-  button:disabled { opacity: .55; cursor: default; }
-  .why { margin-top: 12px; font-size: 13px; color: var(--muted); }
-  .choice { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; }
-  .choice input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+  body { margin: 0; background: transparent; color: var(--fg); font: .875rem/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+  /* room for a control's focus ring, inside the frame */
+  main { display: flex; flex-direction: column; padding: 3px; }
+  p { margin: 0; color: var(--muted); }
+  p.now { color: var(--fg); }
+  p + p { margin-top: 4px; }
+  .error { color: var(--danger); }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  .tags { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tag { padding: 0 6px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 0; }
+  .row + p { margin-top: 8px; }
+  button, a.button { display: inline-flex; align-items: center; justify-content: center; min-height: 2.25rem; padding: 0 1rem; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
+  /* a quiet action, as the shell's dialogs draw one: its hairline, its surface */
+  button.quiet { color: var(--fg); background: var(--soft); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  button:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .choice { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--fg); }
+  .choice input { width: 16px; height: 16px; margin: 0; }
+  /* on white, as a phone's camera reads it best */
+  .qr { display: block; width: 200px; height: 200px; margin: 12px 0 0; padding: 8px; background: #fff; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line-strong); }
 </style>
 </head>
 <body>
-<main id="main" aria-live="polite"><p class="muted">Loading…</p></main>
+<main id="main" aria-live="polite"><p>Loading…</p></main>
 <script>
   "use strict";
   const params = new URLSearchParams(location.search);
@@ -68,7 +92,19 @@
     b.onclick = onclick;
     return b;
   }
-  const PRIVATE = "Your messages are encrypted between your SimpleX app and your computer.";
+  const row = (...items) => {
+    const r = el("div", "row");
+    r.append(...items);
+    return r;
+  };
+  // what it is, a word each, as Settings says it (Paul, 2026-10-31)
+  function tags() {
+    const t = el("div", "tags");
+    const secure = el("span", "tag", "Secure");
+    secure.title = "Encrypted between your SimpleX app and your computer";
+    t.append(el("span", "tag", "Experimental"), secure);
+    return t;
+  }
 
   async function ask(method, path, ticket) {
     const sent = ticket ? { body: JSON.stringify(ticket), headers: { "content-type": "application/json" } } : {};
@@ -106,8 +142,10 @@
   // each change of the link moves this on: a poll begun before it is
   // obsolete, success or failure, and changes nothing it shows
   let epoch = 0;
-  async function act(want, confirmWith, extra) {
-    if (confirmWith && !window.confirm(confirmWith)) return;
+  // an unlink asked to be sure of, in its own step (no browser dialog in a frame)
+  let unlinking = false;
+  async function act(want, extra) {
+    unlinking = false;
     epoch++;
     clearTimeout(timer);
     busy = true;
@@ -147,27 +185,20 @@
     timer = setTimeout(refresh, soon ? 2000 : 10000);
   }
 
+  // a step: its tags, its line (or what failed), and its controls
+  function say(line, ...parts) {
+    main.replaceChildren(tags(), line, ...parts);
+  }
   function render() {
-    main.replaceChildren();
-    if (!view) {
-      main.append(el("p", "muted", "Loading…"));
-      return;
-    }
+    if (!view) return say(el("p", null, "Loading…"));
     if (view.error) {
-      main.append(el("h1", null, "SimpleX"), el("p", null, view.error.includes("not on this computer") ? "SimpleX isn't available on this computer." : `SimpleX couldn't be reached: ${view.error}`));
-      return;
+      return say(el("p", "error", view.error.includes("not on this computer") ? "SimpleX isn't on this computer." : `Couldn't reach SimpleX: ${view.error}`));
     }
-    const why = () => [view.why, homeNote].filter(Boolean).map((t) => el("p", "why", t));
-    if (!view.alwaysOn) {
-      main.append(el("h1", null, `Message ${name} from SimpleX`), el("p", null, view.why || "SimpleX works while your computer stays on, which the always-on plan does."));
-      return;
-    }
+    // what went wrong, and where reminders go when that wasn't saved
+    const why = () => [view.why, homeNote].filter(Boolean).map((t) => el("p", "error", t));
+    if (!view.alwaysOn) return say(el("p", null, view.why || "SimpleX works while your computer stays on."));
     switch (view.phase) {
       case "off": {
-        main.append(
-          el("h1", null, `Message ${name} from SimpleX`),
-          el("p", null, `SimpleX Chat is a private messenger for your phone. Link it once, then write to ${name} from it any time. Your SimpleX chat with ${name} shows here too, and what ${name} says there reaches your phone.`),
-        );
         // asked once, as the link starts: yes unless unticked
         const choice = el("label", "choice");
         const box = el("input");
@@ -175,49 +206,28 @@
         box.checked = home;
         box.disabled = busy;
         box.onchange = () => { home = box.checked; };
-        choice.append(box, ` Send ${name}'s reminders here`);
-        const a = el("div", "actions");
-        a.append(button("Link SimpleX", "primary", () => act("link", null, { home })));
-        main.append(choice, a, el("p", "private", PRIVATE), ...why());
-        break;
+        choice.append(box, `Send ${name}'s reminders here`);
+        return say(el("p", "now", `Link ${name} to SimpleX Chat on your phone.`), choice, row(button("Link SimpleX", "", () => act("link", { home }))), ...why());
       }
       case "asking": {
-        main.append(el("h1", null, `Message ${name} from SimpleX`), el("p", "muted", "Making your link…"), ...why());
         // stuck (SimpleX would not start, or stopped too often): its way on
-        if (view.why) {
-          const a = el("div", "actions");
-          a.append(button("Try again", "primary", () => act("link")), button("Cancel", null, () => act("unlink")));
-          main.append(a);
-        }
-        break;
+        const stuck = view.why ? [row(button("Try again", "", () => act("link")), button("Cancel", "quiet", () => act("unlink")))] : [];
+        return say(el("p", "now", "Making your link…"), ...stuck, ...why());
       }
       case "inviting": {
-        main.append(el("h1", null, `Link SimpleX to ${name}`));
         if (view.hidden) {
           // its code is shown only where it was made: made again, here
-          main.append(el("p", null, "Your link's code was made in another window. Show it here to finish linking."));
-          const a = el("div", "actions");
-          a.append(button("Show the code", "primary", () => act("link")), button("Cancel", null, () => act("unlink")));
-          main.append(a, el("p", "private", PRIVATE), ...why());
-          break;
+          return say(el("p", "now", "Your code was made in another window."), row(button("Show it here", "", () => act("link")), button("Cancel", "quiet", () => act("unlink"))), ...why());
         }
-        const steps = el("ol");
-        const get = el("li");
-        const site = el("a", null, "simplex.chat");
-        site.href = "https://simplex.chat/";
-        site.target = "_blank";
-        site.rel = "noopener noreferrer";
-        get.append("Get SimpleX Chat on your phone, from ", site, " or your app store.");
-        steps.append(get, el("li", null, "In it, start a new chat, choose to scan or paste a link, and scan this code."), el("li", null, `Say hi to ${name}.`));
-        const img = el("img", "qr");
-        img.alt = "A QR code that links your SimpleX app to this agent";
-        // the link in its name, so a new invitation is drawn anew
-        img.src = `${q("qr.svg")}&v=${encodeURIComponent((view.short || view.link || "").slice(-16))}`;
-        main.append(steps, img);
-        const a = el("div", "actions");
-        const open = el("a", "button primary", "Open in SimpleX");
+        const line = el("p", "now");
+        const app = el("a", null, "SimpleX Chat");
+        app.href = "https://simplex.chat/";
+        app.target = "_blank";
+        app.rel = "noopener noreferrer";
+        line.append("Scan this in ", app, " on your phone.");
+        const open = el("a", "button", "Open in SimpleX");
         open.href = view.link;
-        const copy = button("Copy link", null, async () => {
+        const copy = button("Copy link", "quiet", async () => {
           try {
             await navigator.clipboard.writeText(view.short || view.link);
             copy.textContent = "Copied";
@@ -225,26 +235,33 @@
             copy.textContent = "Couldn't copy";
           }
         });
-        a.append(open, copy, button("Cancel", null, () => act("unlink")));
-        main.append(a, el("p", "muted", "This code works once, for you: the first app to use it is linked."), el("p", "private", PRIVATE), ...why());
-        break;
+        const img = el("img", "qr");
+        img.alt = "A QR code that links your SimpleX app to this agent";
+        // the link in its name, so a new invitation is drawn anew
+        img.src = `${q("qr.svg")}&v=${encodeURIComponent((view.short || view.link || "").slice(-16))}`;
+        return say(line, row(open, copy, button("Cancel", "quiet", () => act("unlink"))), img, ...why());
       }
       case "linked": {
-        main.append(
-          el("h1", null, `${name} is on your SimpleX`),
-          el("p", null, `Linked to ${view.name || "your SimpleX app"}. Write to ${name} there, voice messages too. Your SimpleX chat with ${name} shows here as well, and what ${name} says in it reaches your phone.`),
-        );
-        if (!view.running) main.append(el("p", "muted", "Starting SimpleX…"));
-        const a = el("div", "actions");
-        a.append(button("Unlink", "danger", () => act("unlink", `Unlink SimpleX? ${name} will stop getting your SimpleX messages, and your SimpleX app will show the chat as deleted.`)));
-        main.append(a, el("p", "private", PRIVATE), ...why());
-        break;
+        if (unlinking) {
+          return say(
+            el("p", "now", `Unlink ${name}? Your SimpleX app will show the chat as deleted.`),
+            row(button("Unlink", "", () => act("unlink")), button("Keep it", "quiet", () => { unlinking = false; render(); })),
+          );
+        }
+        const starting = view.running ? [] : [el("p", null, "Starting SimpleX…")];
+        return say(el("p", "now", `Linked to ${view.name || "your SimpleX app"}.`), ...starting, row(button("Unlink", "quiet", () => { unlinking = true; render(); })), ...why());
       }
       default:
-        main.append(el("p", "muted", "Loading…"));
+        return say(el("p", null, "Loading…"));
     }
   }
 
+  // the shell's light or dark (its `theme`, to every frame), from the page
+  // framing this one: only how this page looks
+  addEventListener("message", (e) => {
+    const m = e.data;
+    if (e.source === window.parent && m?.fragment === "theme" && (m.mode === "light" || m.mode === "dark")) document.documentElement.dataset.theme = m.mode;
+  });
   // the agent's name, from the platform's page framing this one, for its
   // own agent: its first word names the origin tickets are asked of
   addEventListener("message", (e) => {

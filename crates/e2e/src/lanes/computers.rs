@@ -2064,6 +2064,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
         replies_so_far += door_checks(s, api, &doors, &fetched, wake)?;
         if fakes {
+            // SimpleX from Settings (FIN-393), its sidebar clean for its
+            // screenshots: before Telegram's chats are made
+            let sx = super::simplex_settings::Agent { owner: &owner, computer: &id, agent: &agent_name, chat: &chat_name, identity: &identity, wake };
+            replies_so_far += super::simplex_settings::checks(s, api, &sx, &fetched)?;
             replies_so_far += telegram_checks(s, api, &doors, &fetched, wake)?;
         }
         replies_so_far += relay_checks(s, api, &owner, &fetched)?;
