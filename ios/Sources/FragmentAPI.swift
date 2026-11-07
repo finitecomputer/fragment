@@ -111,9 +111,12 @@ struct FragmentAPI: Sendable {
         catch APIError.absent { return nil }
     }
 
+    /// The person's list; its `limits` become what a message carries here
+    /// (`ChatAttachment.limits`), an older platform's its old ones.
     func fragments() async throws -> [FragmentSummary] {
-        struct Response: Decodable { let fragments: [FragmentSummary] }
+        struct Response: Decodable { let fragments: [FragmentSummary]; let limits: UploadLimits? }
         let response: Response = try await request("api/fragments")
+        ChatAttachment.limits = response.limits ?? .olderPlatform
         return response.fragments
     }
 

@@ -327,6 +327,9 @@ pub struct Fleet {
     pub job_retry_delay_s: u32,
     /// How long a blob no branch names is kept (`None`: the cell's 7 days).
     pub blob_grace_s: Option<u32>,
+    /// One file a person may send, at most (`FRAGMENT_UPLOAD_MAX_BYTES`;
+    /// `None`: the cell's default, a zone's).
+    pub upload_max_bytes: Option<u64>,
     /// Where the model route sends its calls, text and images
     /// (`FRAGMENT_AI_URL`: the Workers AI fake in dev and the e2e; `None`:
     /// the AI binding, through `ai_gateway`).
@@ -521,6 +524,10 @@ impl Fleet {
         let grace = self.blob_grace_s.map(|g| g.to_string());
         if let Some(g) = &grace {
             vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
+        }
+        let uploads = self.upload_max_bytes.map(|n| n.to_string());
+        if let Some(n) = &uploads {
+            vars.push(("FRAGMENT_UPLOAD_MAX_BYTES", n.as_str()));
         }
         if let Some(u) = &self.mail_url {
             vars.push(("FRAGMENT_MAIL_URL", u.as_str()));

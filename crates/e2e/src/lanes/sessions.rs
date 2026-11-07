@@ -411,6 +411,18 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         found["name"] == name.as_str() && found["owned"] == true && read.status == 200 && wrote.status == 200,
         json!({ "found": found, "read": read.status, "wrote": wrote.status }),
     );
+    // what its import may send (`limits`, which the CLI reads): an agent's
+    // uploads go from its computer, a blob's at most; its owner's are the
+    // deployment's (this fleet's own, on a hosted run its zone's)
+    let owners = api.signed(&keys, "GET", "/api/fragments", None)?.body["limits"].clone();
+    let blob = fragment_proto::limits::BLOB_MAX_BYTES;
+    s.ok(
+        "an agent's list, acting for its owner, says its files may be a blob's size, past its owner's bound",
+        theirs.body["limits"] == json!({ "uploadMaxBytes": blob, "filesPerMessage": fragment_proto::limits::FILES_PER_MESSAGE })
+            && (s.hosted() || owners["uploadMaxBytes"] == crate::UPLOAD_MAX_BYTES)
+            && owners["uploadMaxBytes"].as_u64().is_some_and(|o| o < blob),
+        json!({ "agent": theirs.body["limits"], "owner": owners }),
+    );
     // and one whose owner has none makes theirs, as the CLI does for them
     let other = api.person()?;
     let other_id = api.identity(&other)?;

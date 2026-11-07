@@ -40,14 +40,14 @@ final class HomeDraft {
     func hold(_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
         guard !launching else { error = "Wait for the message being sent."; return false }
         guard !reading else { error = "Wait for the files being attached, then add more."; return false }
-        guard count > 0, count + files.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return false }
+        guard count > 0, count + files.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return false }
         reading = true
         Task {
             defer { reading = false }
             do {
                 let read = try await read()
                 guard !read.isEmpty else { error = "This could not be attached."; return }
-                guard read.count + files.count <= ChatAttachment.countMax else { error = "Attach at most eight files per message."; return }
+                guard read.count + files.count <= ChatAttachment.countMax else { error = ChatAttachment.limits.countRefusal; return }
                 files += read.map { Held(id: UUID(), file: $0) }
                 error = nil
             } catch { self.error = error.localizedDescription }
@@ -224,6 +224,9 @@ struct ComposerBar: View {
     /// What is attached now, by id and name: each a chip that removes it.
     let attached: [(id: String, name: String)]
     let remove: (String) -> Void
+    /// What is attached, as its owner shows it instead of those chips: a
+    /// chat's tiles (`ComposerAttachments`), each upload's progress and Retry.
+    var files: AnyView? = nil
     /// Takes `count` files that `read` will make, or refuses them (saying
     /// why itself): the composer is busy from the choosing on.
     let attach: (_ count: Int, _ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool
@@ -251,7 +254,8 @@ struct ComposerBar: View {
                 if let quote {
                     HStack { Label(quote.text, systemImage: "arrowshape.turn.up.left").font(.caption).lineLimit(2); Spacer(); Button("Cancel reply", systemImage: "xmark", action: quote.cancel).labelStyle(.iconOnly) }
                 }
-                if !attached.isEmpty {
+                if let files { files }
+                else if !attached.isEmpty {
                     ScrollView(.horizontal) { HStack {
                         ForEach(attached, id: \.id) { file in
                             let shown = ComposerMemos.label(file.name)
@@ -302,7 +306,7 @@ struct ComposerBar: View {
         if voice.recording {
             if let url = voice.stop() { attachMemo(url) }
         } else {
-            guard attached.count < ChatAttachment.countMax else { voice.error = "Attach at most eight files per message."; return }
+            guard attached.count < ChatAttachment.countMax else { voice.error = ChatAttachment.limits.countRefusal; return }
             await voice.start { url in attachMemo(url) }
         }
     }
@@ -354,7 +358,8 @@ enum ComposerFiles {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size > 0, size <= ChatAttachment.bytesMax else { throw APIError.server("Files must be between 1 byte and 25 MB.") }
+                let limits = ChatAttachment.limits
+                guard size > 0, size <= limits.uploadMaxBytes else { throw APIError.server(limits.sizeRefusal) }
                 return try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
             }
         }.value
