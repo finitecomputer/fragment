@@ -209,7 +209,7 @@ impl DurableObject for FragmentCell {
         let WebSocketIncomingMessage::String(s) = message else { return Ok(()) };
         if self.state.get_tags(&ws).iter().any(|t| t == "live") {
             self.live_message(&ws, &s).await;
-        } else if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
+        } else if crate::json_text::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
             ws.send_with_str(r#"{"type":"pong"}"#)?;
         }
         Ok(())
@@ -1578,7 +1578,7 @@ impl FragmentCell {
         let mut events = Vec::with_capacity(records.len());
         for r in &records {
             // the platform's own body, `{summary, data}`, taken apart without building it
-            let body: EventBody = serde_json::from_str(r.body.get()).map_err(|e| CellError::host(format!("event {}: {e}", r.seq)))?;
+            let body: EventBody = crate::json_text(r.body.get()).map_err(|e| CellError::host(format!("event {}: {e}", r.seq)))?;
             events.push(EventView { id: r.seq, at: r.at, kind: &r.kind, summary: body.summary, data: body.data });
         }
         json_response(&Events { events })

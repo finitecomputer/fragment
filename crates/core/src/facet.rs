@@ -219,9 +219,9 @@ struct Refused {
 /// then for half characters (only its raw result can hold one: every
 /// other string in it was read as a string, which refuses them).
 pub fn decode<T: DeserializeOwned>(text: &str) -> Result<Answer<T>, String> {
-    match serde_json::from_str::<Refused>(text) {
+    match serde_json::from_slice::<Refused>(text.as_bytes()) {
         Ok(r) => Ok(Answer::Refused(r.error)),
-        Err(as_refusal) => match serde_json::from_str::<T>(text) {
+        Err(as_refusal) => match serde_json::from_slice::<T>(text.as_bytes()) {
             Ok(_) if has_lone_surrogate(text) => Err("its result holds half of a character (a lone surrogate)".to_string()),
             Ok(ran) => Ok(Answer::Ran(ran)),
             Err(as_answer) => Err(format!("neither a refusal ({as_refusal}) nor an answer ({as_answer})")),
@@ -231,7 +231,7 @@ pub fn decode<T: DeserializeOwned>(text: &str) -> Result<Answer<T>, String> {
 
 /// A ledger lookup's answer, from its JSON text.
 pub fn decode_ledger(text: &str) -> Result<Option<LedgerRow>, String> {
-    serde_json::from_str::<Ledger>(text).map(|l| l.result).map_err(|e| e.to_string())
+    serde_json::from_slice::<Ledger>(text.as_bytes()).map(|l| l.result).map_err(|e| e.to_string())
 }
 
 /// Whether a call into the facet failed at one of the runtime's limits on

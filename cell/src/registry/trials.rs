@@ -127,7 +127,7 @@ struct UseRow {
 
 /// `trial_uses.attempts`, read: the attempt ids holding a place.
 fn attempts_of(text: &str) -> CellResult<Vec<String>> {
-    serde_json::from_str(text).map_err(|e| CellError::host(format!("trial_uses.attempts: {e}")))
+    crate::json_text(text).map_err(|e| CellError::host(format!("trial_uses.attempts: {e}")))
 }
 
 /// `trial_uses.attempts`, as stored.

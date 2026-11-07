@@ -66,6 +66,7 @@ use sha2::{Digest, Sha256};
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
 use worker::*;
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{body_json, json_response};
@@ -471,7 +472,7 @@ impl DurableObject for ComputerCell {
     async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
         // the keepalive says nothing the cell needs; a ping is answered
         if let WebSocketIncomingMessage::String(s) = message {
-            if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
+            if crate::json_text::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
                 ws.send_with_str(r#"{"type":"pong"}"#)?;
             }
         }
@@ -570,7 +571,7 @@ struct SetAccount {
 
 /// What an agent may have swapped in, as `agents.connections` keeps it.
 fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
-    serde_json::from_str(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
+    crate::json_text(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
 }
 
 /// Whether an agent narrowed to `narrowed` may use `provider`.
@@ -763,21 +764,21 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
             None => Ok(Lifecycle::new()),
         }
     }
 
     fn saves(&self) -> CellResult<Saves> {
         match self.meta(MetaKey::Saves)? {
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored saves: {e}"))),
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored saves: {e}"))),
             None => Ok(Saves::default()),
         }
     }
 
     fn images(&self) -> CellResult<Images> {
         match self.meta(MetaKey::Images)? {
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored images: {e}"))),
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored images: {e}"))),
             None => Ok(Images::default()),
         }
     }
@@ -1313,7 +1314,7 @@ impl ComputerCell {
     fn take_alive_check(&self) -> CellResult<Option<(i64, bool)>> {
         let Some(text) = self.meta(MetaKey::AliveCheck)? else { return Ok(None) };
         self.delete_meta(MetaKey::AliveCheck)?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the alive-check lever's record: {e}")))?;
+        let v: Value = crate::json_text(&text).map_err(|e| CellError::host(format!("the alive-check lever's record: {e}")))?;
         let ms = v["ms"].as_i64().filter(|ms| *ms > 0 && *ms <= ALIVE_MS).ok_or_else(|| CellError::host("the alive-check lever's record names no ms"))?;
         Ok(Some((ms, v["freeze"] == true)))
     }
@@ -1888,7 +1889,7 @@ impl ComputerCell {
     /// relinks or forgets a sign-in (registry/signin.rs `person_for`).
     async fn workos_user(&self, owner: &str) -> CellResult<Option<String>> {
         let issuer = crate::keys::workos(&self.env, self.cfg).await?.issuer();
-        let kept: Option<Value> = self.meta(MetaKey::WorkosUser)?.and_then(|t| serde_json::from_str(&t).ok());
+        let kept: Option<Value> = self.meta(MetaKey::WorkosUser)?.and_then(|t| crate::json_text(&t).ok());
         if let Some(subject) = kept.as_ref().filter(|k| k["owner"] == owner && k["issuer"] == issuer.as_str()).and_then(|k| k["subject"].as_str()) {
             return Ok(Some(subject.to_string()));
         }
@@ -3486,7 +3487,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
     let out = Request::new_with_init(&target, &init)?;
     let mut answered = crate::route(out, env, ctx).await?;
     if let Some(api) = fragment_core::codestorage::guest_api(&cfg.codestorage().api).filter(|_| storage_token && answered.status_code() == 200) {
-        let mut token: fragment_proto::StorageToken = answered.json().await?;
+        let mut token: fragment_proto::StorageToken = answered.read_json().await?;
         token.api = api;
         return json_response(&token);
     }
