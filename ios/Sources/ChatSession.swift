@@ -25,6 +25,10 @@ final class ChatSession {
     /// routines' turns are theirs (control.js `controllerOf`).
     var owned: Set<String> = [] { didSet { if owned != oldValue { activityOwned = nil; timelineChanged() } } }
     @ObservationIgnored private var activityOwned: Set<String>?
+    /// The word that @mentions each agent the person's list names, by its
+    /// identity: its fragment's label (chat.js `handleOf`, bridge `answers_to`).
+    var handles: [String: String] = [:] { didSet { if handles != oldValue { activityHandles = nil; timelineChanged() } } }
+    @ObservationIgnored private var activityHandles: [String: String]?
     /// A post awaiting its agent's claim, at the chat's end (the web's
     /// pending line): each running turn's line is in the rows.
     var workingHints: [WorkingHint] {
@@ -105,13 +109,14 @@ final class ChatSession {
         // a reply being written is at the chat's end, which a window paged back does not show
         let drafting = timeline.detached ? [] : Set(timeline.drafts.values.map { TurnKey(agent: $0.principal, id: $0.turn) })
         if rowsRevision != timeline.revision || activityReady != workRead || activityDrafting != drafting
-            || activityPrincipal != principal || activityOwned != owned {
+            || activityPrincipal != principal || activityOwned != owned || activityHandles != handles {
             rowsRevision = timeline.revision
             activityReady = workRead
             activityDrafting = drafting
             activityPrincipal = principal
             activityOwned = owned
-            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: fragment.agents ?? [])
+            activityHandles = handles
+            let next = WorkingActivity(timeline, ready: workRead, drafting: drafting, me: principal, owned: owned, agents: fragment.agents ?? [], handles: handles)
             if next != activity { activity = next }
             if next.rows != rows { rows = next.rows }
             let candidate = WorkingActivity.pending(timeline, principal: principal, lead: fragment.agents?.first)

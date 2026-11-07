@@ -157,6 +157,55 @@ struct WorkingIndicatorTests {
         #expect(WorkingActivity(timeline, me: "npub1me", agents: [agent]).queued.isEmpty)
     }
 
+    /// Whom a message waits for is whom its agents' bridges answer it as:
+    /// its `to`, else the agents it @mentions, else the lead (engine.rs
+    /// `addressed`, chat.js `queued`).
+    @Test func aMessageWaitsForTheAgentItMentions() throws {
+        let juniper = "npub1juniper", rowan = "npub1rowan"
+        let handles = [juniper: "juniper", rowan: "rowan"]
+        func busy(_ agent: String) -> Timeline {
+            var timeline = Timeline()
+            timeline.insert(.init(channel: "work", seq: 1, at: 1000, principal: agent, kind: "message",
+                                  body: .object(["kind": .string("turn.start"), "turn": .string("t"), "asker": .string("npub1other")])))
+            return timeline
+        }
+        func queued(_ text: String, to: [String] = [], in timeline: Timeline) -> Bool {
+            var timeline = timeline
+            var body: [String: JSONValue] = ["text": .string(text)]
+            if !to.isEmpty { body["to"] = .array(to.map(JSONValue.string)) }
+            timeline.insert(.init(channel: "chat", seq: 1, at: 2000, principal: "npub1me", kind: "message", body: .object(body)))
+            return WorkingActivity(timeline, me: "npub1me", agents: [juniper, rowan], handles: handles).queued.contains("chat:1")
+        }
+        // Rowan busy, Juniper the idle lead
+        #expect(queued("@Rowan do this next", in: busy(rowan)), "it is Rowan's, who works")
+        #expect(!queued("do this next", in: busy(rowan)), "no mention: the lead's, who is idle")
+        #expect(queued("@juniper and @ROWAN both", in: busy(rowan)))
+        // the reverse: Juniper busy, Rowan idle
+        #expect(!queued("@Rowan do this next", in: busy(juniper)), "it is Rowan's, who is idle")
+        #expect(queued("do this next", in: busy(juniper)))
+        // `to` first; a word no agent answers to, and an email, name no one
+        #expect(!queued("@Rowan do this", to: [juniper], in: busy(rowan)))
+        #expect(queued("ask @nobody, or mail me@rowan.test", in: busy(juniper)))
+        #expect(WorkingActivity.mentions("hi @Rowan, @a_b-c! me@rowan x@ @") == ["rowan", "a_b-c"])
+    }
+
+    /// Two agents' live calls at the same time and the same `n`: in the
+    /// order their turns were first seen (the web's `state.turns` Map),
+    /// not by their identities.
+    @Test func tiedTurnsKeepTheOrderTheyWereFirstSeen() throws {
+        let zed = "npub1zed", ash = "npub1ash"
+        func record(_ seq: Int64, _ agent: String, _ kind: String) -> ChannelRecord {
+            var body: [String: JSONValue] = ["kind": .string(kind), "turn": .string("t")]
+            if kind == "turn.call" { body["tool"] = .string("terminal"); body["args"] = .string("ls"); body["response"] = .string("r"); body["tool_call_id"] = .string("c") }
+            return .init(channel: "work", seq: seq, at: kind == "turn.start" ? 1000 : 2000, principal: agent, kind: "message", body: .object(body))
+        }
+        // Zed's turn began first; both calls at 2000, each the one live
+        let records = [record(1, zed, "turn.start"), record(2, ash, "turn.start"), record(3, zed, "turn.call"), record(4, ash, "turn.call")]
+        var timeline = Timeline()
+        for record in records.reversed() { timeline.insert(record) }
+        #expect(WorkingActivity(timeline).rows.map(\.id) == ["work:3", "work:4"])
+    }
+
     @Test func resultsConsumeCallsOnceWithIDsBeforeArguments() throws {
         struct Pairing {
             let calls: [(id: String, args: String, response: String)]

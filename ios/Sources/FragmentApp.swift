@@ -66,6 +66,13 @@ final class Library {
     /// The identities of the person's own agents: whose menus they may use
     /// in a chat (chat.js `menuOf`, an agent's owner by `__members`).
     var ownedIdentities: Set<String> { Set(agents.filter { $0.role == "owner" }.compactMap { identities[$0.name] }) }
+    /// The word that @mentions each agent listed, by its identity: its
+    /// fragment's label (chat.js `handleOf`), lowercased.
+    var handles: [String: String] {
+        var words: [String: String] = [:]
+        for agent in agents { if let id = identities[agent.name], let label = agent.name.components(separatedBy: "--").first, !label.isEmpty { words[id] = words[id] ?? label.lowercased() } }
+        return words
+    }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]

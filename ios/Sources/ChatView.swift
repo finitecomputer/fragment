@@ -183,6 +183,8 @@ struct ChatView: View {
         .onDisappear { session.flushDraft() }
         // the person's own agents: whose menus they may use, whose routines are theirs
         .onChange(of: library.ownedIdentities, initial: true) { _, owned in session.owned = owned }
+        // and the words that @mention the agents they know, for whom a message is
+        .onChange(of: library.handles, initial: true) { _, handles in session.handles = handles }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.flushDraft() } }
         .task(id: scenePhase) {
             guard scenePhase == .active else { voice.cancel(); return }
