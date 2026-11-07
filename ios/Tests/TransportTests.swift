@@ -316,8 +316,9 @@ struct TransportTests {
 
     /// Steer, as the web's composer offers it (chat.js `refreshSend`): to
     /// the owner of an agent whose menu has `steer`, while it works, for
-    /// words alone; it sends `/steer <words>` as a command of that menu,
-    /// and the words stay until it is sent.
+    /// words alone; it sends `/steer <words>` as a command of that menu.
+    /// The bridge posts a turn's start before its first menu: a menu that
+    /// comes (or goes) alone redraws the composer.
     @Test func steerIsOfferedByTheAgentsMenuAndSendsItsCommand() async throws {
         let route = posts
         let stub = Stub { seen, _ in seen.route == route ? posted(seen, seq: 9, replayed: false) : (404, "{}") }
@@ -329,30 +330,80 @@ struct TransportTests {
         try await waitUntil("a socket") { stub.sockets.count == 1 }
         let socket = stub.sockets[0]
         socket.push(hello)
-        socket.push(frame("work", 1, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"},{"name":"steer","description":"Tell it","args":"What"}]}"#))
-        socket.push(frame("work", 2, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
-        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me","cause":{"channel":"chat","seq":1}}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
         socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
         try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
         session.composer = "  use the blue one "
-        #expect(!session.steers(recording: false), "an agent not theirs offers them no menu")
         session.owned = ["npub1agent"]
-        #expect(session.myTurn == TurnKey(agent: "npub1agent", id: "t2"))
+        #expect(!session.steers(recording: false), "no menu yet")
+        // the menu comes alone, words already typed: Steer shows
+        let told = Mutex(false)
+        withObservationTracking { _ = session.steers(recording: false) } onChange: { told.withLock { $0 = true } }
+        socket.push(frame("work", 2, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"},{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        try await waitUntil("the composer told of the menu") { told.withLock { $0 } }
         #expect(session.steers(recording: false))
+        #expect(session.myTurn == TurnKey(agent: "npub1agent", id: "t2"))
         #expect(!session.steers(recording: true), "a voice memo being recorded goes with a message alone")
-        #expect(session.placeholder(name: { _ in "Juniper" }) == "A message waits its turn")
         session.attachments = [ChatAttachment(sha256: "x", name: "a.txt", type: "text/plain", size: 1)]
         #expect(!session.steers(recording: false), "files go with a message alone")
         session.attachments = []
         session.composer = "/usage"
         #expect(!session.steers(recording: false), "a command typed is no steer")
         session.composer = "  use the blue one "
+        // withdrawn alone: Steer goes
+        let withdrawn = Mutex(false)
+        withObservationTracking { _ = session.steers(recording: false) } onChange: { withdrawn.withLock { $0 = true } }
+        socket.push(frame("work", 3, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"usage","description":"Say"}]}"#))
+        try await waitUntil("the composer told the menu changed") { withdrawn.withLock { $0 } }
+        #expect(!session.steers(recording: false))
+        socket.push(frame("work", 4, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        try await waitUntil("offered again") { session.steers(recording: false) }
         await session.steer()
         let sent = try #require(stub.seen.first { $0.route == route })
         #expect(sent.json["body"] == .object(["kind": .string("command"), "command": .string("steer"), "args": .string("use the blue one"), "to": .array([.string("npub1agent")])]))
-        #expect(session.composer.isEmpty && session.error == nil)
+        #expect(session.composer.isEmpty && session.pending.isEmpty && session.error == nil)
         // shown as typed, a person's command (chat.js `userMessage`)
         #expect(session.rows.contains { $0.record?.command == "steer" })
+    }
+
+    /// A Steer whose answer was lost after its append committed: saved
+    /// before it was posted, it is there after a relaunch, and sent again
+    /// only by hand, with the same id and body, so it runs once (docs/ios.md).
+    @Test func aSteerWhoseAnswerWasLostIsRetriedWithTheSameIDAfterARelaunch() async throws {
+        let route = posts
+        let stub = Stub { seen, before in
+            guard seen.route == route else { return (404, "{}") }
+            if !before.contains(where: { $0.route == route }) { return (503, #"{"error":"unavailable","message":"Try again shortly."}"#) }
+            return posted(seen, seq: 9, replayed: true)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let fragment = FragmentSummary(name: chat.name, kind: "chat", agents: ["npub1agent"])
+        let session = ChatSession(fragment: fragment, api: api)
+        let run = Task { await session.run() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        socket.push(frame("work", 1, body: #"{"kind":"turn.start","turn":"t2","asker":"npub1me"}"#))
+        socket.push(frame("work", 2, body: #"{"kind":"commands","agent":"npub1agent","commands":[{"name":"steer","description":"Tell it","args":"What"}]}"#))
+        socket.push(#"{"type":"subscribed","channel":"work","next":2,"more":false}"#)
+        try await waitUntil("the turn running") { session.activeTurns == ["t2"] && session.workRead }
+        session.owned = ["npub1agent"]
+        session.composer = "use the blue one"
+        await session.steer()
+        run.cancel()
+        let lost = try #require(session.pending.first)
+        #expect(lost.failed && lost.command == "steer" && session.composer.isEmpty)
+        // relaunched: the same command waits, to be sent again by hand
+        let again = ChatSession(fragment: fragment, api: api)
+        let restored = try #require(again.pending.first)
+        #expect(restored.id == lost.id && restored.command == "steer" && restored.text == "use the blue one" && restored.failed)
+        await again.retry(restored)
+        #expect(again.pending.isEmpty)
+        let sent = stub.seen.filter { $0.route == route }
+        #expect(sent.count == 2 && sent[0].json == sent[1].json && sent[0].json["id"].string == lost.id)
+        #expect(sent[1].json["body"]["kind"] == .string("command") && sent[1].json["body"]["client_id"] == .null)
     }
 
     /// A menu without `steer` (another runtime's) offers none.

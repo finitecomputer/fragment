@@ -139,7 +139,7 @@ struct ChatView: View {
                 }
                 ComposerBar(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
                     // sends go over HTTP: a reconnect never holds the composer
-                    enabled: session.read, busy: session.attaching || session.steering,
+                    enabled: session.read, busy: session.attaching,
                     placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
                     attached: session.attachments.map { ($0.id, $0.name) },
                     remove: { id in session.attachments.removeAll { $0.id == id } },
@@ -301,7 +301,8 @@ private struct PendingRows: View {
     var body: some View {
         ForEach(session.pending) { pending in
             VStack(alignment: .trailing, spacing: 6) {
-                MessageView(text: pending.text, isYou: true)
+                if let command = pending.command { CommandView(command: command, args: pending.text, isYou: true) }
+                else { MessageView(text: pending.text, isYou: true) }
                 if let refused = pending.refused {
                     Button("Not sent: \(refused) Tap to edit", systemImage: "pencil") {
                         session.reopen(pending)

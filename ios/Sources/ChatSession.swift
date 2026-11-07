@@ -34,6 +34,9 @@ final class ChatSession {
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
+    /// Each agent's menu, its commands' names (`Timeline.menus`), as the
+    /// composer observes it: a menu that comes or changes alone redraws Steer.
+    private(set) var menus: [String: [String]] = [:]
     private(set) var chatCursor: Int64 = 0
     /// Whether the chat was ever read to its end here, both its channels
     /// (`chat` and the `work` it shows): before, it is loading, never shown
@@ -120,6 +123,8 @@ final class ChatSession {
         if writing != drafts { drafts = writing }
         let running = workRead ? timeline.activeTurns : []
         if running != activeTurns { activeTurns = running }
+        let offered = timeline.menus.mapValues(\.commands)
+        if offered != menus { menus = offered }
         let cursor = timeline.cursors["chat"] ?? 0
         if cursor != chatCursor { chatCursor = cursor }
         if timeline.detached != detached { detached = timeline.detached }
@@ -160,8 +165,10 @@ final class ChatSession {
         guard let index = pending.firstIndex(where: { $0.id == post.id }), pending[index].refused != nil else { return }
         guard composer.isEmpty && attachments.isEmpty else { error = "Send or clear your draft first, then edit this message."; return }
         let refused = pending.remove(at: index)
-        // its own words, files and addressees: the draft's were kept until now
-        composer = refused.text; attachments = refused.attachments; recipients = refused.recipients
+        // its own words, files and addressees: the draft's were kept until
+        // now (a command's words alone: its agent is no addressee of theirs)
+        composer = refused.text; attachments = refused.attachments
+        if refused.command == nil { recipients = refused.recipients }
         replyTo = timeline.records.first { $0.channel == "chat" && $0.seq == refused.replyTo }
         error = nil
     }
@@ -444,11 +451,7 @@ final class ChatSession {
 
     private func deliver(_ post: PendingPost) async {
         do {
-            var body: [String: JSONValue] = ["text": .string(post.text), "client_id": .string(post.id)]
-            if !post.attachments.isEmpty { body["attachments"] = .array(post.attachments.map(\.json)) }
-            if let replyTo = post.replyTo { body["reply_to"] = .number(Double(replyTo)) }
-            if !post.recipients.isEmpty { body["to"] = .array(post.recipients.map { .string($0) }) }
-            let record = try await api.post(fragment.name, id: post.id, body: .object(body))
+            let record = try await api.post(fragment.name, id: post.id, body: Self.body(of: post))
             timeline.insert(record, advancingCursor: false)
             pending.removeAll { $0.id == post.id }
             error = nil
@@ -490,7 +493,7 @@ final class ChatSession {
     /// menu's, offered to its owner alone (chat.js `menuOf`).
     func offers(_ command: String, _ agent: String?) -> Bool {
         guard let agent, owned.contains(agent) else { return false }
-        return timeline.menus[agent]?.commands.contains(command) == true
+        return menus[agent]?.contains(command) == true
     }
     /// Whether what is typed may Steer the running turn instead of waiting
     /// its turn (chat.js `refreshSend`): words, no command, no files, its
@@ -525,26 +528,32 @@ final class ChatSession {
     }
 
     /// The running turn told what is typed, at once (`/steer <words>`, a
-    /// command of its runtime's menu, as the web's Steer sends it). Its
-    /// words stay until it is sent; one not sent is sent again as the same
-    /// record (`unsentSteer`, the web's `unsent`).
-    @ObservationIgnored private var unsentSteer: (id: String, body: JSONValue)?
-    private(set) var steering = false
+    /// command of its runtime's menu, as the web's Steer sends it). It goes
+    /// as a message goes: saved with its id before any request, shown
+    /// sending, and, its answer lost, retried only by hand with that same
+    /// id and body (docs/ios.md), so it never runs twice.
     func steer(recording: Bool = false) async {
-        guard !steering, steers(recording: recording), let target = commandTarget else { return }
+        guard steers(recording: recording), let target = commandTarget else { return }
+        guard persistence != nil else { error = "The local draft could not be opened. Reopen this chat before sending."; return }
+        guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
         let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)
-        let body = Self.command("steer", args: words, to: target)
-        let id = unsentSteer?.body == body ? unsentSteer!.id : UUID().uuidString
-        unsentSteer = (id, body)
-        steering = true
-        defer { steering = false }
+        let post = PendingPost(id: UUID().uuidString, text: words, recipients: [target], command: "steer")
         do {
-            let record = try await api.post(fragment.name, id: id, body: body)
-            unsentSteer = nil
-            timeline.insert(record, advancingCursor: false)
-            if composer.trimmingCharacters(in: .whitespacesAndNewlines) == words { composer = "" }
-            error = nil
-        } catch { self.error = "Your command was not sent: " + error.localizedDescription }
+            try persistence?.save(SavedChat(composer: "", attachments: attachments, replyTo: replyTo, recipients: recipients, pending: pending + [post]))
+        } catch { self.error = "The command could not be saved on this iPhone: " + error.localizedDescription; return }
+        pending.append(post)
+        composer = ""
+        await deliver(post)
+    }
+    /// What a post sends: a command (docs/chat-records.md, "A command"),
+    /// or a message.
+    static func body(of post: PendingPost) -> JSONValue {
+        if let command = post.command, let target = post.recipients.first { return Self.command(command, args: post.text, to: target) }
+        var body: [String: JSONValue] = ["text": .string(post.text), "client_id": .string(post.id)]
+        if !post.attachments.isEmpty { body["attachments"] = .array(post.attachments.map(\.json)) }
+        if let replyTo = post.replyTo { body["reply_to"] = .number(Double(replyTo)) }
+        if !post.recipients.isEmpty { body["to"] = .array(post.recipients.map { .string($0) }) }
+        return .object(body)
     }
     /// A command's body (docs/chat-records.md, "A command"): its words only if any.
     static func command(_ name: String, args: String, to target: String) -> JSONValue {
