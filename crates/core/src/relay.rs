@@ -62,7 +62,8 @@ pub const HOSTS: [&str; 12] = [
 /// chunks from a few servers at a time.
 pub const OPEN_MAX: usize = 4;
 /// Bytes one relay carries, both ways together, at most: a file is at most
-/// 25 MiB here (the bridge's attachment bound), a voice note about 1.2 MB.
+/// SimpleX's own bound here (the bridge's `simplex/run.rs`), a voice note
+/// about 1.2 MB.
 /// Toward the computer the shim cannot see a slow reader (a Worker's
 /// WebSocket shows no backlog), so this, times `OPEN_MAX`, also bounds what
 /// one computer's relays can hold in the Worker's memory.

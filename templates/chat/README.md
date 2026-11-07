@@ -21,6 +21,8 @@ The page is `site/`: `index.html`,
 and "Notify me"), `control.js` (whose a turn is to stop, command and
 answer: its asker's, or for a routine's or an answer's, its agent's
 owner's), `pages.js` (whether a channel page read is the last),
+`limits.js` (what one message carries, by the platform's latest word,
+which the shell's launcher links to),
 `markdown.js`
 (agents' text as DOM, never as markup: the platform's renderer,
 `./__markdown.js`, with the chat's choices), `media.js` (a message's

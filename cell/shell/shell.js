@@ -84,7 +84,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
 // What a late answer may still do: one latest ask a kind (asks.js)
 const asks = createAsks();
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
+const state = { me: null, guest: false, fragments: [], limits: null, invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -1922,6 +1922,8 @@ async function load(changed = false) {
   const list = listRead.value, computers = computerRead.value;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   if (list) state.fragments = list.fragments ?? [];
+  // what a message of theirs may carry (the launcher's files): the platform's
+  if (list) state.limits = list.limits ?? null;
   // a chat being made, made, opens once the list has it (making.js `listed`)
   if (list && stepMaking({ type: "listed", has: (name) => !!byName(name) })) leaveSidebar();
   // failed, it is not "no computer": what was read before stays, and is said to be old
