@@ -34,6 +34,7 @@
 		8356DCE8D6F00248A2D4A6A9 /* ShellViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E90511DA6D6F765EAF42F51 /* ShellViews.swift */; };
 		879086879C6BDB8600920A9F /* BlobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D05F4AE19FC776EC9D739EAE /* BlobStore.swift */; };
 		92AECFCD69AC9E796A8B58F6 /* MediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CE9A8A7CAB6F35B897F810B /* MediaTests.swift */; };
+		979F9EBFC4F1D8A6DD25DE8A /* WebMOpusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 652C8765C4EBF27BBAF9D23D /* WebMOpusTests.swift */; };
 		9B04659A7CA2A9C6E5F0276A /* FragmentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE5376FE0C2DCB1863EE49C7 /* FragmentApp.swift */; };
 		9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */; };
 		9CE04EDF8132C39D18DF1A9D /* ChatMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8A9F828339CA70751D48F66 /* ChatMedia.swift */; };
@@ -94,6 +95,7 @@
 		58AF75154D6AAD50D0AC1A89 /* AttachmentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentViews.swift; sourceTree = "<group>"; };
 		6126FEDF8DC438F0E3C2A5EC /* ThirdPartyNotices.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = ThirdPartyNotices.txt; sourceTree = "<group>"; };
 		63AC3B6E5464205E0D215570 /* AuthenticatedImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticatedImage.swift; sourceTree = "<group>"; };
+		652C8765C4EBF27BBAF9D23D /* WebMOpusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebMOpusTests.swift; sourceTree = "<group>"; };
 		74E480260C706AE0F972CA37 /* FragmentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FragmentUITests.swift; sourceTree = "<group>"; };
 		7C7F962BA11EC3D0BD85DB75 /* WorkingActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingActivity.swift; sourceTree = "<group>"; };
 		811C73B367475E8B5D4DB77F /* AppIcon.icon */ = {isa = PBXFileReference; path = AppIcon.icon; sourceTree = "<group>"; };
@@ -216,6 +218,7 @@
 				DC2E702AC579841626A1A67C /* Stub.swift */,
 				2C75B4172B10109A56753F7A /* TimelineTests.swift */,
 				DE1E859F65B5B4D304FF0D04 /* TransportTests.swift */,
+				652C8765C4EBF27BBAF9D23D /* WebMOpusTests.swift */,
 				98C64B1BD04CDB37166AD010 /* WorkingIndicatorTests.swift */,
 			);
 			path = Tests;
@@ -349,6 +352,7 @@
 				55978B58D06B7028C7799CB2 /* Stub.swift in Sources */,
 				A8391B829C662A475899B98C /* TimelineTests.swift in Sources */,
 				9B71537B7D2B70A697A383A2 /* TransportTests.swift in Sources */,
+				979F9EBFC4F1D8A6DD25DE8A /* WebMOpusTests.swift in Sources */,
 				0B5597754A0B7033A7BD7FB2 /* WorkingIndicatorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

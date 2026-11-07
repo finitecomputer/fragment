@@ -119,6 +119,7 @@ private struct ComposerSound: View {
             .frame(width: ComposerTile.side, height: ComposerTile.side)
         }
         .buttonStyle(.plain)
+        .disabled(playback.recording)
         .accessibilityLabel(place?.playing == true ? "Pause voice memo" : "Play voice memo")
         .task(id: attachment.sha256) {
             guard let file = BlobStore.shared.cached(key), let url = await BlobStore.shared.playable(attachment, file: file) else { return }

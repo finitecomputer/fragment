@@ -116,59 +116,82 @@ enum AudioContainer: Equatable, Sendable {
 /// segment and clusters of unknown size, no cues), rewrapped as Ogg Opus
 /// (RFC 7845), which iOS plays. Nothing is decoded: each packet is copied
 /// as it is, and its position counted from its own header (RFC 6716, 3.1).
-/// A file of anything else (Vorbis, video, laced blocks) is refused.
+/// The file is another's, so everything is checked before it is used: each
+/// element within the one holding it, the Opus header (RFC 7845, 5.1),
+/// each packet's length and header. Anything else (Vorbis, video, laced
+/// blocks, a header or packet out of bounds) is refused, never guessed.
 enum WebMOpus {
-    enum Refusal: Error, Equatable { case notWebM, noOpusTrack, laced, truncated, tooLarge }
+    enum Refusal: Error, Equatable { case notWebM, malformed, noOpusTrack, badHeader, badPacket, laced, truncated, tooLarge }
 
     /// Elements read at most: a bound on a hostile file's work.
     static let elementsMax = 2_000_000
+    /// An Opus packet's bytes at most: 48 frames of 1,275 (RFC 6716, 3.2.5),
+    /// so its lacing fits one Ogg page.
+    static let packetBytesMax = 48 * 1_275
 
     static func ogg(from webm: Data) throws -> Data {
         let (head, packets) = try demux(webm)
-        return OggWriter.opus(head: head, packets: packets)
+        return try OggWriter.opus(head: head, packets: packets)
     }
 
     /// The Opus track's header (`OpusHead`, its CodecPrivate) and packets.
     static func demux(_ data: Data) throws -> (head: Data, packets: [Data]) {
         let bytes = [UInt8](data)
+        guard bytes.starts(with: [0x1A, 0x45, 0xDF, 0xA3]) else { throw Refusal.notWebM }
         var reader = EBMLReader(bytes: bytes)
-        guard let first = try reader.element(), first.id == 0x1A45DFA3 else { throw Refusal.notWebM }
+        guard let first = try reader.element(within: bytes.count), first.id == 0x1A45DFA3 else { throw Refusal.notWebM }
         try reader.skip(first)
-        struct Track { var number: UInt64 = 0; var type: UInt64 = 0; var codec = ""; var head: Data?; var delay: UInt64 = 0 }
+        struct Track { var number: UInt64 = 0; var codec = ""; var head: Data? }
         var tracks: [Track] = []
         var blocks: [(track: UInt64, frame: Data)] = []
         var count = 0
-        // Read flat: a master element of interest is entered (its size,
-        // which a live recording leaves unknown, is not needed), any other
-        // element skipped by its own size.
-        let masters: Set<UInt64> = [0x18538067, 0x1654AE6B, 0x1F43B675, 0xA0]
-        while let element = try reader.element() {
+        // Read flat: a master element of interest is entered, any other
+        // skipped by its own size. Each open master's end is held, and every
+        // element must end within the innermost one (a live recording's
+        // segment and clusters, of unknown size, end where their parent does).
+        let masters: Set<UInt64> = [0x18538067, 0x1654AE6B, 0xAE, 0x1F43B675, 0xA0]
+        // a segment's own children: one ends a cluster of unknown size (Matroska's rule)
+        let segmentLevel: Set<UInt64> = [0x1F43B675, 0x1C53BB6B, 0x1254C367, 0x1654AE6B, 0x1549A966, 0x114D9B74, 0x1043A770, 0x1941A469]
+        var open: [(id: UInt64, end: Int, unknown: Bool)] = []
+        while true {
+            while let last = open.last, reader.offset >= last.end { open.removeLast() }
+            let at = reader.offset
+            var peek = reader
+            if let id = peek.vint(keepMarker: true, lengthMax: 4), segmentLevel.contains(id) {
+                while let last = open.last, last.unknown, last.id == 0x1F43B675 { open.removeLast() }
+            }
+            reader.offset = at
+            let limit = open.last?.end ?? bytes.count
+            guard let element = try reader.element(within: limit) else { break }
             count += 1
             guard count <= elementsMax else { throw Refusal.tooLarge }
+            if masters.contains(element.id) {
+                open.append((element.id, element.size.map { element.start + Int($0) } ?? limit, element.size == nil))
+                if element.id == 0xAE { tracks.append(Track()) }
+                continue
+            }
+            // a track's fields count only inside its own TrackEntry
+            let inTrack = open.last?.id == 0xAE && !tracks.isEmpty
             switch element.id {
-            case _ where masters.contains(element.id): continue
-            case 0xAE: tracks.append(Track()); continue  // TrackEntry: its fields follow
-            case 0xD7: tracks.indices.last.map { tracks[$0].number = reader.uint(element) }
-            case 0x83: tracks.indices.last.map { tracks[$0].type = reader.uint(element) }
-            case 0x86: tracks.indices.last.map { tracks[$0].codec = String(decoding: reader.body(element), as: UTF8.self) }
-            case 0x63A2: tracks.indices.last.map { tracks[$0].head = Data(reader.body(element)) }
-            case 0x56AA: tracks.indices.last.map { tracks[$0].delay = reader.uint(element) }
-            case 0xA3, 0xA1:  // SimpleBlock, Block
-                let body = Array(reader.body(element))
+            case 0xD7 where inTrack: tracks[tracks.count - 1].number = try reader.uint(element)
+            case 0x86 where inTrack: tracks[tracks.count - 1].codec = String(decoding: try reader.body(element), as: UTF8.self)
+            case 0x63A2 where inTrack: tracks[tracks.count - 1].head = Data(try reader.body(element))
+            case 0xA3, 0xA1:  // SimpleBlock, Block (inside a BlockGroup)
+                let body = Array(try reader.body(element))
                 var inner = EBMLReader(bytes: body)
                 guard let track = inner.vint(keepMarker: false), inner.offset + 3 <= body.count else { throw Refusal.truncated }
-                let flags = body[inner.offset + 2]
-                guard flags & 0x06 == 0 else { throw Refusal.laced }
+                guard body[inner.offset + 2] & 0x06 == 0 else { throw Refusal.laced }
                 blocks.append((track, Data(body[(inner.offset + 3)...])))
             default: break
             }
             try reader.skip(element)
         }
         guard let opus = tracks.first(where: { $0.codec == "A_OPUS" }) else { throw Refusal.noOpusTrack }
+        guard let head = opus.head, OggWriter.validHead(head) else { throw Refusal.badHeader }
+        // an empty packet carries nothing (and is no frame to count)
         let packets = blocks.filter { $0.track == opus.number && !$0.frame.isEmpty }.map(\.frame)
         guard !packets.isEmpty else { throw Refusal.noOpusTrack }
-        let head = opus.head.flatMap { $0.starts(with: Array("OpusHead".utf8)) && $0.count >= 19 ? $0 : nil }
-            ?? OggWriter.opusHead(channels: 1, preSkip: UInt16(min(65_535, opus.delay * 48_000 / 1_000_000_000)))
+        for packet in packets where packet.count > packetBytesMax || OggWriter.samples(packet) == nil { throw Refusal.badPacket }
         return (head, packets)
     }
 }
@@ -181,58 +204,83 @@ struct EBMLReader {
 
     /// A variable-length integer: an element's ID keeps its marker bit, a
     /// size drops it (all ones is unknown).
-    mutating func vint(keepMarker: Bool) -> UInt64? {
+    mutating func vint(keepMarker: Bool, lengthMax: Int = 8) -> UInt64? {
         guard offset < bytes.count else { return nil }
         let first = bytes[offset]
         guard first != 0 else { return nil }
         let length = first.leadingZeroBitCount + 1
-        guard offset + length <= bytes.count, length <= 8 else { return nil }
+        guard offset + length <= bytes.count, length <= lengthMax else { return nil }
         var value = UInt64(keepMarker ? first : first & (0xFF >> length))
         for index in 1..<length { value = value << 8 | UInt64(bytes[offset + index]) }
         offset += length
         return value
     }
 
-    mutating func element() throws -> Element? {
-        guard offset < bytes.count else { return nil }
-        guard let id = vint(keepMarker: true) else { throw WebMOpus.Refusal.truncated }
+    /// The next element, which must end by `limit` (its parent's end): nil
+    /// at `limit`. An ID is at most 4 bytes (EBML's), a size at most 8.
+    mutating func element(within limit: Int) throws -> Element? {
+        guard offset < limit else { return nil }
+        guard let id = vint(keepMarker: true, lengthMax: 4) else { throw WebMOpus.Refusal.malformed }
         let sizeStart = offset
         guard let raw = vint(keepMarker: false) else { throw WebMOpus.Refusal.truncated }
         let length = offset - sizeStart
         let unknown = raw == (UInt64(1) << (7 * length)) - 1
+        guard offset <= limit, unknown || raw <= UInt64(limit - offset) else { throw WebMOpus.Refusal.truncated }
         return Element(id: id, size: unknown ? nil : raw, start: offset)
     }
 
-    /// Past an element's body (it must name its size).
+    /// Past an element's body (a leaf: it must name its size).
     mutating func skip(_ element: Element) throws {
-        guard let size = element.size else { throw WebMOpus.Refusal.truncated }
-        guard size <= UInt64(bytes.count - element.start) else { throw WebMOpus.Refusal.truncated }
+        guard let size = element.size, size <= UInt64(bytes.count - element.start) else { throw WebMOpus.Refusal.malformed }
         offset = element.start + Int(size)
     }
 
-    func body(_ element: Element) -> ArraySlice<UInt8> {
-        guard let size = element.size, size <= UInt64(bytes.count - element.start) else { return [] }
+    func body(_ element: Element) throws -> ArraySlice<UInt8> {
+        guard let size = element.size, size <= UInt64(bytes.count - element.start) else { throw WebMOpus.Refusal.malformed }
         return bytes[element.start..<element.start + Int(size)]
     }
 
-    func uint(_ element: Element) -> UInt64 { body(element).prefix(8).reduce(0) { $0 << 8 | UInt64($1) } }
+    /// An unsigned integer element: at most 8 bytes.
+    func uint(_ element: Element) throws -> UInt64 {
+        let body = try body(element)
+        guard body.count <= 8 else { throw WebMOpus.Refusal.malformed }
+        return body.reduce(0) { $0 << 8 | UInt64($1) }
+    }
 }
 
 /// An Ogg Opus stream (RFC 3533, RFC 7845) from Opus packets.
 enum OggWriter {
     static let serial: UInt32 = 0x46524147
+    /// Lacing values a page holds at most (one byte counts them).
+    static let segmentsMax = 255
 
-    static func opusHead(channels: UInt8, preSkip: UInt16) -> Data {
-        var head = Data("OpusHead".utf8)
-        head.append(contentsOf: [1, channels])
-        head.append(contentsOf: withUnsafeBytes(of: preSkip.littleEndian, Array.init))
-        head.append(contentsOf: withUnsafeBytes(of: UInt32(48_000).littleEndian, Array.init))
-        head.append(contentsOf: [0, 0, 0])  // gain 0, mapping family 0
-        return head
+    /// Whether `head` is an Opus header this writer passes on (RFC 7845,
+    /// 5.1): its magic, a version of major 0, and a channel mapping it
+    /// describes whole. Family 0: one or two channels, 19 bytes. Family 1:
+    /// one to eight channels, its streams (at least one, coupled ones no
+    /// more than them) and a table of one entry per channel, each a stream
+    /// channel or silence (255). Any other family is refused.
+    static func validHead(_ head: Data) -> Bool {
+        let bytes = [UInt8](head)
+        guard bytes.count >= 19, bytes.starts(with: Array("OpusHead".utf8)), bytes[8] >> 4 == 0 else { return false }
+        let channels = Int(bytes[9])
+        switch bytes[18] {
+        case 0: return (1...2).contains(channels) && bytes.count == 19
+        case 1:
+            guard (1...8).contains(channels), bytes.count == 21 + channels else { return false }
+            let streams = Int(bytes[19]), coupled = Int(bytes[20])
+            guard streams >= 1, coupled <= streams, streams + coupled <= 255 else { return false }
+            return bytes[21...].allSatisfy { Int($0) < streams + coupled || $0 == 255 }
+        default: return false
+        }
     }
 
-    static func opus(head: Data, packets: [Data]) -> Data {
-        let preSkip = head.count >= 12 ? UInt64(head[head.startIndex + 10]) | UInt64(head[head.startIndex + 11]) << 8 : 0
+    /// Ogg pages of the header, the tags and the packets, each packet whole
+    /// on one page (none is larger than `WebMOpus.packetBytesMax`). The
+    /// granule of a page is the samples decoded through its last packet,
+    /// counted from the stream's start, pre-skip included (RFC 7845, 4).
+    static func opus(head: Data, packets: [Data]) throws -> Data {
+        guard validHead(head) else { throw WebMOpus.Refusal.badHeader }
         var tags = Data("OpusTags".utf8)
         let vendor = Data("Finite".utf8)
         tags.append(contentsOf: withUnsafeBytes(of: UInt32(vendor.count).littleEndian, Array.init))
@@ -240,12 +288,13 @@ enum OggWriter {
         tags.append(contentsOf: [0, 0, 0, 0])
         var out = Data()
         var sequence: UInt32 = 0
-        func page(_ packets: [Data], granule: UInt64, flags: UInt8) {
+        func page(_ packets: [Data], granule: UInt64, flags: UInt8) throws {
             var lacing: [UInt8] = []
             for packet in packets {
                 lacing.append(contentsOf: Array(repeating: 255, count: packet.count / 255))
                 lacing.append(UInt8(packet.count % 255))
             }
+            guard lacing.count <= segmentsMax else { throw WebMOpus.Refusal.badPacket }
             var page = Data("OggS".utf8)
             page.append(contentsOf: [0, flags])
             page.append(contentsOf: withUnsafeBytes(of: granule.littleEndian, Array.init))
@@ -260,27 +309,29 @@ enum OggWriter {
             out.append(page)
             sequence += 1
         }
-        page([head], granule: 0, flags: 0x02)
-        page([tags], granule: 0, flags: 0)
-        var granule = preSkip
+        try page([head], granule: 0, flags: 0x02)
+        try page([tags], granule: 0, flags: 0)
+        var granule: UInt64 = 0
         var held: [Data] = []
         var segments = 0
         for (index, packet) in packets.enumerated() {
+            guard packet.count <= WebMOpus.packetBytesMax, let count = samples(packet) else { throw WebMOpus.Refusal.badPacket }
             let needs = packet.count / 255 + 1
-            if segments + needs > 255 || held.count >= 50 {
-                page(held, granule: granule, flags: 0)
+            if !held.isEmpty, segments + needs > segmentsMax || held.count >= 50 {
+                try page(held, granule: granule, flags: 0)
                 held = []; segments = 0
             }
             held.append(packet); segments += needs
-            granule += UInt64(samples(packet))
-            if index == packets.count - 1 { page(held, granule: granule, flags: 0x04) }
+            granule += UInt64(count)
+            if index == packets.count - 1 { try page(held, granule: granule, flags: 0x04) }
         }
         return out
     }
 
-    /// An Opus packet's samples at 48 kHz, from its TOC byte (RFC 6716, 3.1).
-    static func samples(_ packet: Data) -> Int {
-        guard let toc = packet.first else { return 0 }
+    /// An Opus packet's samples at 48 kHz, from its TOC byte (RFC 6716,
+    /// 3.1–3.2): nil for a packet that names no frames, or more than 120 ms.
+    static func samples(_ packet: Data) -> Int? {
+        guard let toc = packet.first else { return nil }
         let config = Int(toc >> 3)
         let frame: Int
         switch config {
@@ -292,9 +343,12 @@ enum OggWriter {
         switch toc & 3 {
         case 0: frames = 1
         case 1, 2: frames = 2
-        default: frames = packet.count > 1 ? Int(packet[packet.startIndex + 1] & 0x3F) : 0
+        default:
+            guard packet.count > 1 else { return nil }
+            frames = Int(packet[packet.startIndex + 1] & 0x3F)
         }
-        return frame * frames
+        let total = frame * frames
+        return frames >= 1 && total <= 5_760 ? total : nil
     }
 
     private static let table: [UInt32] = (0..<256).map { index in

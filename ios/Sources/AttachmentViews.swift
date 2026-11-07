@@ -411,6 +411,7 @@ struct SoundPlayer: View {
                             .frame(width: 36, height: 36)
                         }
                         .buttonStyle(.plain)
+                        .disabled(playback.recording)
                         .accessibilityLabel(place?.playing == true ? "Pause" : "Play")
                         .accessibilityIdentifier("play-\(id.prefix(8))")
                         LevelBars(levels: facts?.levels ?? [], fraction: fraction)
@@ -584,11 +585,44 @@ private struct PDFCard: View {
     }
 
     nonisolated static func firstPage(_ file: URL, size: CGSize) -> (UIImage?, Int?) {
-        guard let document = PDFDocument(url: file), let first = document.page(at: 0) else { return (nil, nil) }
-        let bounds = first.bounds(for: .cropBox)
-        // its width fills the card's, at the screen's scale
-        let scale = size.width * 3 / max(1, bounds.width)
-        return (first.thumbnail(of: CGSize(width: bounds.width * scale, height: bounds.height * scale), for: .cropBox), document.pageCount)
+        guard let document = PDFDocument(url: file) else { return (nil, nil) }
+        return (document.page(at: 0).flatMap { PDFFirstPage.image($0, card: size) }, document.pageCount)
+    }
+}
+
+/// A PDF's first page as its card shows it: its width filling the card at
+/// the screen's scale, its top in view. Only the card's pixels are ever
+/// drawn, whatever the page's shape (a receipt a metre long, a page a point
+/// wide): the page is another's, and its geometry chooses no allocation.
+nonisolated enum PDFFirstPage {
+    static let screenScale: CGFloat = 3
+    /// A page side, in points, a page may name at most: PDF's own (14,400).
+    static let sideMax: CGFloat = 14_400
+
+    /// The page's scale into a canvas `pixels` wide, from its size as shown
+    /// (rotated); nil for a size that is no page's.
+    static func scale(page: CGSize, canvasWidth: CGFloat) -> CGFloat? {
+        guard page.width.isFinite, page.height.isFinite, (1...sideMax).contains(page.width), (1...sideMax).contains(page.height) else { return nil }
+        return canvasWidth / page.width
+    }
+
+    static func image(_ page: PDFPage, card: CGSize) -> UIImage? {
+        let box = page.bounds(for: .cropBox)
+        let turned = abs(page.rotation) % 180 == 90
+        let shown = turned ? CGSize(width: box.height, height: box.width) : box.size
+        let canvas = CGSize(width: (card.width * screenScale).rounded(), height: (card.height * screenScale).rounded())
+        guard let scale = scale(page: shown, canvasWidth: canvas.width) else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: canvas, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: canvas))
+            // PDF space is upward: its top at the canvas's top, the rest clipped by the canvas
+            context.cgContext.translateBy(x: 0, y: shown.height * scale)
+            context.cgContext.scaleBy(x: scale, y: -scale)
+            page.draw(with: .cropBox, to: context.cgContext)
+        }
     }
 }
 

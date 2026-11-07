@@ -53,15 +53,29 @@ final class BlobStore {
     /// A preview (a picture, a voice, a PDF's page) up to this size reads by
     /// itself as it comes on screen; a larger one waits for a tap.
     static let previewBytesMax = 20 * 1_024 * 1_024
-    /// What the files kept take on disk at most, past which the least
-    /// recently used go (checked once a launch).
-    nonisolated static let diskMax: Int64 = 1_024 * 1_024 * 1_024
+    /// What the files kept take on disk at most, by default: past it, after
+    /// each file written, the least recently used go (`trim`).
+    nonisolated static let diskMaxDefault: Int64 = 1_024 * 1_024 * 1_024
+    /// Reads held for views at most; past it, the least recently used that
+    /// are not under way are let go (a view keeps its own).
+    static let loadsMax = 512
 
     let root: URL
+    let diskMax: Int64
+    /// The most recently used files a trim never takes, whatever the bound:
+    /// those likely on screen.
+    let keptRecent: Int
     private var loads: [BlobKey: BlobLoad] = [:]
-    private var trimmed = false
+    /// When each file was last asked for, this launch (bounded with `loads`).
+    private var used: [BlobKey: Date] = [:]
+    private var trimming: Task<Void, Never>?
+    private var trimAgain = false
 
-    init(root: URL) { self.root = root }
+    init(root: URL, diskMax: Int64 = BlobStore.diskMaxDefault, keptRecent: Int = 16) {
+        self.root = root
+        self.diskMax = diskMax
+        self.keptRecent = keptRecent
+    }
 
     /// Where a kept file is: named by its hash alone, in its scope's folder.
     nonisolated func path(_ key: BlobKey) -> URL? {
@@ -91,8 +105,9 @@ final class BlobStore {
             load.set(.loading(0))
             Task { await self.read(attachment, key: key, api: api, fragment: fragment, into: load) }
         }
+        used[key] = Date()
         if begin { load.begin() }
-        trimOnce()
+        if loads.count > Self.loadsMax { forgetOldLoads() }
         return load
     }
 
@@ -108,6 +123,8 @@ final class BlobStore {
             if !FileManager.default.fileExists(atPath: url.path) { try data.write(to: url, options: .atomic); Self.seal(url) }
         }.value
         if let held = loads[key] { held.set(.ready(url)) }
+        used[key] = Date()
+        scheduleTrim()
         return url
     }
 
@@ -137,15 +154,18 @@ final class BlobStore {
         case .webm:
             let ogg = file.appendingPathExtension("ogg")
             if FileManager.default.fileExists(atPath: ogg.path) { return ogg }
-            return await Task.detached(priority: .userInitiated) {
-                guard let data = try? Data(contentsOf: file, options: .mappedIfSafe), let rewrapped = try? WebMOpus.ogg(from: data) else { return nil }
-                do { try rewrapped.write(to: ogg, options: .atomic); BlobStore.seal(ogg); return ogg } catch { return nil }
+            let rewrapped = await Task.detached(priority: .userInitiated) { () -> URL? in
+                guard let data = try? Data(contentsOf: file, options: .mappedIfSafe), let wrapped = try? WebMOpus.ogg(from: data) else { return nil }
+                do { try wrapped.write(to: ogg, options: .atomic); BlobStore.seal(ogg); return ogg } catch { return nil }
             }.value
+            await scheduleTrim()
+            return rewrapped
         }
     }
 
     func removeAll() {
         loads.removeAll()
+        used.removeAll()
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -169,6 +189,7 @@ final class BlobStore {
             if FileManager.default.fileExists(atPath: target.path) { try FileManager.default.removeItem(at: temporary) }
             else { try FileManager.default.moveItem(at: temporary, to: target); Self.seal(target) }
             load.set(.ready(target))
+            scheduleTrim()
         } catch is CancellationError {
             load.set(.idle)
         } catch let error as URLError where error.code == .cancelled {
@@ -195,26 +216,94 @@ final class BlobStore {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined() == sha256
     }
 
-    /// Past `diskMax`, the files least recently used go, off the main actor.
-    private func trimOnce() {
-        guard !trimmed else { return }
-        trimmed = true
-        let root = root
-        Task.detached(priority: .background) { Self.trim(root, max: Self.diskMax) }
+    /// A trim, after a file is written: one at a time, and once more if
+    /// another write came meanwhile.
+    private func scheduleTrim() {
+        guard trimming == nil else { trimAgain = true; return }
+        trimming = Task { [weak self] in
+            while let self {
+                self.trimAgain = false
+                await self.trimNow()
+                guard self.trimAgain else { break }
+            }
+            self?.trimming = nil
+        }
     }
-    nonisolated static func trim(_ root: URL, max: Int64) {
-        let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .contentAccessDateKey]
-        guard let walk = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys) else { return }
-        var files: [(url: URL, size: Int64, used: Date)] = []
-        for case let url as URL in walk {
-            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
-            files.append((url, Int64(values.totalFileAllocatedSize ?? 0), values.contentAccessDate ?? .distantPast))
+
+    /// Waits for a trim under way (tests).
+    func settled() async { await trimming?.value }
+
+    /// The files past `diskMax` go, the least recently used first (as asked
+    /// this launch, else as written), never a file being read nor one of the
+    /// `keptRecent` last asked for. A file's group (it, its rewrap, its
+    /// named links) goes whole, and is counted once however many names it has.
+    func trimNow() async {
+        let recent = used.sorted { $0.value > $1.value }
+        let kept = Set(recent.prefix(keptRecent).map { "\($0.key.scope)/\($0.key.sha256)" })
+            .union(loads.filter { if case .loading = $0.value.state { true } else { false } }.map { "\($0.key.scope)/\($0.key.sha256)" })
+        let lastUse = Dictionary(uniqueKeysWithValues: used.map { ("\($0.key.scope)/\($0.key.sha256)", $0.value) })
+        let root = root, max = diskMax
+        let removed = await Task.detached(priority: .background) { Self.trim(root, max: max, lastUse: lastUse, kept: kept) }.value
+        for name in removed {
+            let parts = name.split(separator: "/")
+            guard parts.count == 2 else { continue }
+            let key = loads.keys.first { $0.scope == parts[0] && $0.sha256 == parts[1] }
+            if let key { loads[key]?.set(.idle); loads[key] = nil; used[key] = nil }
         }
-        var total = files.reduce(0) { $0 + $1.size }
-        for file in files.sorted(by: { $0.used < $1.used }) where total > max {
-            try? FileManager.default.removeItem(at: file.url)
-            total -= file.size
+    }
+
+    /// The reads held past `loadsMax`: the least recently used not under way go.
+    private func forgetOldLoads() {
+        let idle = loads.filter { if case .loading = $0.value.state { false } else { true } }.keys
+        let oldest = idle.sorted { (used[$0] ?? .distantPast) < (used[$1] ?? .distantPast) }
+        for key in oldest.prefix(loads.count - Self.loadsMax / 2) { loads[key] = nil; used[key] = nil }
+    }
+
+    /// What `trimNow` removes: the groups (`<scope>/<sha256>`) taken, least
+    /// recently used first, until what is left is within `max`.
+    nonisolated static func trim(_ root: URL, max: Int64, lastUse: [String: Date], kept: Set<String>) -> [String] {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .totalFileAllocatedSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]
+        struct Group { var bytes: Int64 = 0; var written: Date = .distantPast; var paths: [URL] = [] }
+        var groups: [String: Group] = [:]
+        var counted = Set<AnyHashable>()
+        func add(_ file: URL, to name: String, main: Bool) {
+            guard let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true else { return }
+            // a named link is the kept file: its bytes count once
+            if let id = values.fileResourceIdentifier as? NSObject {
+                guard counted.insert(AnyHashable(id)).inserted else { return }
+            }
+            groups[name, default: Group()].bytes += Int64(values.totalFileAllocatedSize ?? 0)
+            if main { groups[name, default: Group()].written = values.contentModificationDate ?? .distantPast }
         }
+        let manager = FileManager.default
+        for scope in (try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            let scopeName = scope.lastPathComponent
+            guard scopeName.utf8.count == 32, SafeFileName.isHash(scopeName + String(repeating: "0", count: 32)) else { continue }
+            for entry in (try? manager.contentsOfDirectory(at: scope, includingPropertiesForKeys: nil)) ?? [] {
+                let name = entry.lastPathComponent
+                let sha = name.hasSuffix(".ogg") ? String(name.dropLast(4)) : name
+                if SafeFileName.isHash(sha) {
+                    add(entry, to: "\(scopeName)/\(sha)", main: sha == name)
+                    groups["\(scopeName)/\(sha)", default: Group()].paths.append(entry)
+                } else if name == "named" {
+                    for folder in (try? manager.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil)) ?? [] where SafeFileName.isHash(folder.lastPathComponent) {
+                        let group = "\(scopeName)/\(folder.lastPathComponent)"
+                        for file in (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] { add(file, to: group, main: false) }
+                        groups[group, default: Group()].paths.append(folder)
+                    }
+                }
+            }
+        }
+        var total = groups.values.reduce(0) { $0 + $1.bytes }
+        guard total > max else { return [] }
+        var removed: [String] = []
+        let order = groups.sorted { (lastUse[$0.key] ?? $0.value.written) < (lastUse[$1.key] ?? $1.value.written) }
+        for (name, group) in order where total > max && !kept.contains(name) {
+            for path in group.paths { try? manager.removeItem(at: path) }
+            total -= group.bytes
+            removed.append(name)
+        }
+        return removed
     }
 }
 

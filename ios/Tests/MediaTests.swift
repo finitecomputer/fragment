@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import PDFKit
+import UIKit
 import Testing
 @testable import Fragment
 
@@ -72,47 +74,6 @@ struct MediaTests {
         let rewrapped = try #require(await SoundFacts.read(folder.appending(path: "chrome-rewrapped.ogg")))
         let loud = rewrapped.levels[2], quiet = rewrapped.levels[7]
         #expect(loud > quiet, "\(rewrapped.levels)")
-    }
-
-    /// A rewrap copies Chrome's packets as they are, positioned by their own
-    /// headers, in pages Ogg checks; anything else is refused, never guessed.
-    @Test func aWebMIsRewrappedOrRefused() throws {
-        let (head, packets) = try WebMOpus.demux(AudioFixtures.chromeWebM)
-        #expect(head.starts(with: Array("OpusHead".utf8)))
-        // three seconds, in Chrome's 60 ms packets, give or take the recorder's start and end
-        let samples = packets.reduce(0) { $0 + OggWriter.samples($1) }
-        #expect(packets.allSatisfy { OggWriter.samples($0) == 2_880 } && (2.7...3.2).contains(Double(samples) / 48_000), "\(packets.count) packets, \(samples) samples")
-        let ogg = try WebMOpus.ogg(from: AudioFixtures.chromeWebM)
-        // each page's checksum is Ogg's, the first begins the stream and the last ends it
-        var offset = 0
-        var flags: [UInt8] = []
-        let bytes = [UInt8](ogg)
-        while offset < bytes.count {
-            #expect(Array(bytes[offset..<offset + 4]) == Array("OggS".utf8))
-            let lacing = Int(bytes[offset + 26])
-            let length = 27 + lacing + bytes[(offset + 27)..<(offset + 27 + lacing)].reduce(0) { $0 + Int($1) }
-            var page = Data(bytes[offset..<offset + length])
-            let stored = page[22..<26].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-            page.replaceSubrange(22..<26, with: [0, 0, 0, 0])
-            #expect(OggWriter.crc32(page) == UInt32(littleEndian: stored))
-            flags.append(bytes[offset + 5])
-            offset += length
-        }
-        #expect(flags.first == 0x02 && flags.last == 0x04 && flags.dropFirst().dropLast().allSatisfy { $0 == 0 })
-        // Ogg's own checksum on ffmpeg's page agrees with ours
-        var first = Data(AudioFixtures.oggOpus.prefix(27 + Int(AudioFixtures.oggOpus[26]) + 19))
-        let theirs = first[22..<26].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-        first.replaceSubrange(22..<26, with: [0, 0, 0, 0])
-        #expect(OggWriter.crc32(first) == UInt32(littleEndian: theirs))
-        // a packet's samples, from its TOC byte (RFC 6716, 3.1)
-        #expect(OggWriter.samples(Data([31 << 3])) == 960)
-        #expect(OggWriter.samples(Data([15 << 3 | 1])) == 1_920)
-        #expect(OggWriter.samples(Data([3 << 3 | 3, 2])) == 5_760)
-        #expect(OggWriter.samples(Data([16 << 3])) == 120)
-        #expect(throws: WebMOpus.Refusal.notWebM) { try WebMOpus.ogg(from: AudioFixtures.oggOpus) }
-        #expect(throws: WebMOpus.Refusal.noOpusTrack) { try WebMOpus.ogg(from: AudioFixtures.webmVorbis) }
-        #expect(throws: WebMOpus.Refusal.truncated) { try WebMOpus.ogg(from: AudioFixtures.chromeWebM.prefix(200)) }
-        #expect(throws: (any Error).self) { try WebMOpus.ogg(from: Data([0x1A, 0x45, 0xDF, 0xA3, 0x80])) }
     }
 
     /// The server's name never chooses a path: a last component, cleaned,
@@ -287,5 +248,123 @@ struct MediaTests {
         #expect(session.uploads.isEmpty && session.attachments.map(\.sha256) == [sha256Hex(data)])
         #expect(stub.seen.filter { $0.method == "PUT" }.map(\.body) == [data, data])
         BlobStore.shared.removeAll()
+    }
+
+    /// A recording owns the audio session: starting one stops what plays,
+    /// and nothing plays until it ends, whichever came first.
+    @Test func aRecordingAndASoundNeverShareTheSession() {
+        final class Engine: PlaybackEngine {
+            var duration: Double = 10, elapsed: Double = 0, ended = false, playing = false
+            func play() { playing = true }
+            func pause() { playing = false }
+            func seek(_ seconds: Double) { elapsed = seconds }
+        }
+        var engines: [Engine] = []
+        var active = 0
+        let playback = AudioPlayback(engine: { _ in let engine = Engine(); engines.append(engine); return engine },
+                                     session: .init(activate: { active += 1 }, deactivate: { active -= 1 }))
+        let a = URL(fileURLWithPath: "/a.m4a")
+        // playing, then a recording starts: the sound stops and lets the session go
+        playback.toggle("a", url: a)
+        #expect(playback.playing && active == 1)
+        playback.recordingBegan()
+        #expect(playback.recording && !playback.playing && playback.current == nil && !engines[0].playing && active == 0)
+        // recording, then Play or a drag: nothing plays, no player is made
+        playback.toggle("a", url: a)
+        playback.seek("a", url: a, to: 0.5, of: 10)
+        #expect(!playback.playing && playback.current == nil && engines.count == 1 && active == 0)
+        // the recording ends: Play plays again
+        playback.recordingEnded()
+        playback.toggle("a", url: a)
+        #expect(playback.playing && engines.count == 2 && active == 1)
+        playback.stop()
+    }
+
+    /// A PDF's first page is drawn into its card's pixels alone, its top in
+    /// view and its width filling them, whatever its shape; a page of no
+    /// real size is not drawn.
+    @Test func aPDFsFirstPageIsDrawnWithinItsCard() throws {
+        let card = CGSize(width: 260, height: 170)
+        #expect(PDFFirstPage.scale(page: CGSize(width: 1, height: 14_400), canvasWidth: 780) == 780)
+        #expect(abs((PDFFirstPage.scale(page: CGSize(width: 612, height: 792), canvasWidth: 780) ?? 0) - 780.0 / 612.0) < 1e-9)
+        for page in [CGSize(width: 0, height: 10), CGSize(width: 10, height: 0), CGSize(width: -5, height: 10), CGSize(width: CGFloat.nan, height: 10),
+                     CGSize(width: 10, height: CGFloat.infinity), CGSize(width: 14_401, height: 10), CGSize(width: 10, height: 1e12)] {
+            #expect(PDFFirstPage.scale(page: page, canvasWidth: 780) == nil, "\(page)")
+        }
+        func pdf(_ size: CGSize) throws -> PDFPage {
+            let data = UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: size)).pdfData { context in
+                context.beginPage()
+                // its top band black, the rest white
+                UIColor.black.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: size.width, height: min(size.height, 40)))
+            }
+            return try #require(PDFDocument(data: data)?.page(at: 0))
+        }
+        func pixel(_ image: UIImage, _ x: Int, _ y: Int) throws -> UInt8 {
+            let cg = try #require(image.cgImage)
+            var value: UInt8 = 0
+            let context = try #require(CGContext(data: &value, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 1, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0))
+            context.draw(cg, in: CGRect(x: -x, y: -(cg.height - 1 - y), width: cg.width, height: cg.height))
+            return value
+        }
+        // a letter page: its top band at the card's top, white below
+        let letter = try #require(PDFFirstPage.image(try pdf(CGSize(width: 612, height: 792)), card: card))
+        #expect(letter.cgImage?.width == 780 && letter.cgImage?.height == 510)
+        #expect(try pixel(letter, 390, 10) < 40 && pixel(letter, 390, 400) > 215)
+        // a receipt a point wide and 14,400 tall: still the card's pixels, not 780 by 11 million
+        let receipt = try #require(PDFFirstPage.image(try pdf(CGSize(width: 1, height: 14_400)), card: card))
+        #expect(receipt.cgImage?.width == 780 && receipt.cgImage?.height == 510)
+        // a page as wide as PDF allows and a point tall: the card's pixels too
+        let strip = try #require(PDFFirstPage.image(try pdf(CGSize(width: 14_400, height: 1)), card: card))
+        #expect(strip.cgImage?.width == 780 && strip.cgImage?.height == 510)
+    }
+
+    /// The disk the files take stays within its bound through one store's
+    /// life: each file written trims the least recently used, a file's named
+    /// links and its rewrap counted with it (a link once), the files asked
+    /// for last kept.
+    @Test func theFilesKeptStayWithinTheirBound() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "blobs-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let api = try Stub { _, _ in (404, "{}") }.api()
+        let block = 64 * 1_024
+        let store = BlobStore(root: root, diskMax: Int64(4 * block), keptRecent: 2)
+        var keys: [BlobKey] = []
+        for index in 0..<10 {
+            let data = Data(repeating: UInt8(index), count: block)
+            let key = BlobKey(api: api, fragment: "talk--c1", sha256: sha256Hex(data))
+            let file = try await store.keep(data, key: key)
+            // a named link is the same bytes, and counts once
+            _ = try store.named(ChatAttachment(sha256: key.sha256, name: "memo-\(index).m4a", type: "audio/mp4", size: block), file: file)
+            keys.append(key)
+            await store.settled()
+            #expect(Self.diskBytes(root) <= Int64(4 * block), "after \(index + 1) files: \(Self.diskBytes(root))")
+        }
+        #expect(store.cached(keys[9]) != nil && store.cached(keys[8]) != nil, "the last asked for are kept")
+        #expect(store.cached(keys[0]) == nil && store.cached(keys[1]) == nil, "the least recently used went")
+        #expect(!FileManager.default.fileExists(atPath: root.appending(path: "\(keys[0].scope)/named/\(keys[0].sha256)").path), "with its named links")
+        // one asked for again stays past newer ones
+        _ = store.load(ChatAttachment(sha256: keys[6].sha256, name: "x", type: "audio/mp4", size: block), api: api, fragment: "talk--c1", begin: false)
+        for index in 10..<13 {
+            let data = Data(repeating: UInt8(index), count: block)
+            _ = try await store.keep(data, key: BlobKey(api: api, fragment: "talk--c1", sha256: sha256Hex(data)))
+            await store.settled()
+        }
+        #expect(Self.diskBytes(root) <= Int64(4 * block))
+        // 7, 8 and 9 went, the least recently used; 6, asked for again, stayed
+        #expect(store.cached(keys[6]) != nil && [7, 8, 9].allSatisfy { store.cached(keys[$0]) == nil })
+    }
+
+    /// Bytes a folder's files take on disk, a file of several names once.
+    private static func diskBytes(_ root: URL) -> Int64 {
+        var seen = Set<AnyHashable>(), total: Int64 = 0
+        let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileResourceIdentifierKey]
+        guard let walk = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys) else { return 0 }
+        for case let url as URL in walk {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
+                  let id = values.fileResourceIdentifier as? NSObject, seen.insert(AnyHashable(id)).inserted else { continue }
+            total += Int64(values.totalFileAllocatedSize ?? 0)
+        }
+        return total
     }
 }

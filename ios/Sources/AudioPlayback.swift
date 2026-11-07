@@ -19,6 +19,9 @@ protocol PlaybackEngine: AnyObject {
 /// player shows its own sound's place from here, and only the one playing
 /// redraws as it plays.
 ///
+/// A voice memo being recorded owns the audio session: it stops whatever
+/// plays as it starts (`recordingBegan`), and nothing plays until it ends.
+///
 /// A sound plays as Messages plays one tapped: aloud on the speaker (never
 /// the earpiece a recording's session would route it to), with the
 /// silent switch on or off, as a tap asked for it; others' audio pauses
@@ -45,6 +48,8 @@ final class AudioPlayback {
     private(set) var playing = false
     private(set) var elapsed: Double = 0
     private(set) var duration: Double = 0
+    /// A voice memo is being recorded: nothing plays.
+    private(set) var recording = false
 
     @ObservationIgnored private let makeEngine: @MainActor (URL) -> PlaybackEngine
     @ObservationIgnored private let session: Session
@@ -67,8 +72,17 @@ final class AudioPlayback {
         })
     }
 
+    /// A voice memo's recording starts: what plays stops, and nothing plays
+    /// until `recordingEnded`.
+    func recordingBegan() {
+        stop()
+        recording = true
+    }
+    func recordingEnded() { recording = false }
+
     /// Plays `id` (from `url`), or pauses it if it is playing; any other stops.
     func toggle(_ id: String, url: URL) {
+        guard !recording else { return }
         if current == id, playing { pause(); return }
         if current != id { load(id, url: url) }
         guard let engine else { return }
@@ -91,6 +105,7 @@ final class AudioPlayback {
     /// before it plays: a player just made knows none yet), loading it
     /// (paused) if it is not the one in the player.
     func seek(_ id: String, url: URL, to fraction: Double, of length: Double) {
+        guard !recording else { return }
         if current != id { load(id, url: url) }
         guard let engine else { return }
         if duration == 0 { duration = length }

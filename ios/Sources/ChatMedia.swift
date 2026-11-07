@@ -168,8 +168,9 @@ final class VoiceMemo {
     var recording = false
     var error: String?
     func start(finished: @escaping @MainActor (URL) -> Void) async {
-        AudioPlayback.shared.stop()
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iOS Settings to record a voice memo."; return }
+        // the session is the recording's from here: what plays stops, and nothing plays until it ends
+        AudioPlayback.shared.recordingBegan()
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
@@ -180,11 +181,12 @@ final class VoiceMemo {
             self.recorder = recorder; self.url = url; recording = true
             // Voice memos share the web's five-minute bound, including an unattended recording.
             deadline = Task { do { try await Task.sleep(for: .seconds(300)); if let url = stop() { finished(url) } } catch {} }
-        } catch { self.error = error.localizedDescription }
+        } catch { AudioPlayback.shared.recordingEnded(); self.error = error.localizedDescription }
     }
     func stop() -> URL? {
         deadline?.cancel(); deadline = nil
         recorder?.stop(); recorder = nil; recording = false
+        AudioPlayback.shared.recordingEnded()
         do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
         catch { self.error = error.localizedDescription }
         defer { url = nil }
