@@ -2572,6 +2572,56 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             && up,
         json!({ "stalled": stalled, "found": found, "first": first, "again": again }),
     );
+    // its last strike, and the first to look after its isolate went is the
+    // alarm: the takeover's destroy fails there (the lever), so it keeps an
+    // alarm a minute on, which destroys the container and counts that
+    // strike, no request between (Codex on #1079: the alarm spent itself
+    // and nothing came again). Two starts fail first (the lever), the
+    // third is the one its isolate leaves destroying.
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let two = lever_with(api, &id, json!({ "op": "fail-starts", "times": 2 }))?;
+    let _ = api.impatient(Duration::from_secs(20)).signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let mut struck = Value::Null;
+    let striking = s.eventually(Duration::from_secs(60), || {
+        struck = saves(api);
+        struck["failures"] == 2 && struck["phase"]["phase"] == "asleep"
+    });
+    let froze = lever_with(api, &id, json!({ "op": "alive-check", "ms": 3_000, "freeze": true }))?;
+    let stall = lever_with(api, &id, json!({ "op": "stall-failing-start", "ms": 600_000 }))?;
+    let flaky = lever_with(api, &id, json!({ "op": "fail-takeover-destroys", "times": 1 }))?;
+    let mut held = Value::Null;
+    let gap = s.eventually(Duration::from_secs(60), || {
+        held = saves(api);
+        held["phase"]["phase"] == "starting" && held["phase"]["destroying"] == true && held["running"] == true && held["failures"] == 2
+    });
+    let soon = lever_with(api, &id, json!({ "op": "alarm-in", "ms": 5_000 }))?;
+    s.crash()?;
+    let fresh_again = s.start(false)?;
+    let api = &fresh_again;
+    let t0 = std::time::Instant::now();
+    let mut last = Value::Null;
+    let cleaned = s.eventually(Duration::from_secs(240), || {
+        last = saves(api);
+        last["phase"]["phase"] == "failed" && last["running"] == false
+    });
+    let took = t0.elapsed();
+    s.ok(
+        "its last strike, the alarm first to look after its isolate went: the takeover's destroy failing there keeps an alarm a minute on, which destroys the container and counts that strike, with no request between",
+        slept.body["phase"] == "asleep"
+            && two.status == 200
+            && striking
+            && froze.status == 200
+            && stall.status == 200
+            && flaky.status == 200
+            && gap
+            && soon.status == 200
+            && cleaned
+            && last["failures"] == 3
+            && last["phase"]["why"].as_str().is_some_and(|w| w.contains("isolate"))
+            && took >= Duration::from_secs(45),
+        json!({ "struck": struck, "held": held, "last": last, "tookS": took.as_secs() }),
+    );
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once; its
     // agent's routine, the platform's own data, is kept, and fires

@@ -73,7 +73,8 @@ an image may rely on this:
   with the isolate before it destroys that container (whatever runs: its
   host owns no start yet) and counts the start failed, once, or, the
   container still running, tells nothing and tries again at the next
-  event.
+  event, an alarm it keeps a minute on at the latest (on its last strike
+  nothing else may come).
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
