@@ -133,3 +133,27 @@ for child, last in [("s-a", False), ("s-b", True)]:
     until(f"{child}'s end said once the bridge is back", lambda: said_end(child))
     assert said_end(child) == [{"working": not last, "child": child, "status": "completed"}], said_end(child)
     until("nothing left to say", lambda: not activity._ends)
+# Alex on #1086, round 2: an end owed is never dropped. The bridge away
+# while one recorded helper runs and many more start and stop: the bound
+# is on recording (running recorded children and ends still to say), so
+# the first helper's end, said last, still has room; helpers past the
+# bound hold the computer and are recorded nowhere. Then the bridge is
+# back, and every end recorded is said, the first's among them.
+activity._turns["hermes-turn-4"] = ["m-4", None]
+activity.child_started(child_session_id="s-first", parent_turn_id="hermes-turn-4", child_goal="first")
+assert any(f.get("child") == "s-first" and f.get("turn") == "m-4" for f in frames()), "its start reached the bridge"
+with activity._condition:
+    refusing[0] = True
+    if activity._socket is not None:
+        activity._socket.close()
+    for n in range(activity._RECORDED_MAX + 40):
+        activity.child_started(child_session_id=f"q-{n}", parent_turn_id="hermes-turn-4", child_goal=f"task {n}")
+        activity.child_stopped(child_session_id=f"q-{n}", child_status="completed")
+    assert sum(activity._children.values()) + len(activity._ends) == activity._RECORDED_MAX, (len(activity._children), len(activity._ends))
+    activity.child_stopped(child_session_id="s-first", child_status="completed")
+    assert "s-first" in activity._ends and len(activity._ends) == activity._RECORDED_MAX
+    refusing[0] = False
+until("every end recorded said", lambda: not activity._ends)
+assert said_end("s-first") == [{"working": False, "child": "s-first", "status": "completed"}], said_end("s-first")
+recorded = {f["child"] for s in sockets for f in s.said if f.get("status") and f.get("child", "").startswith("q-")}
+assert len(recorded) == activity._RECORDED_MAX - 1, len(recorded)

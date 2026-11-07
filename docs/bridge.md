@@ -294,7 +294,9 @@ it, and the hook returns only then:
   nested one's) holds the computer, and is recorded nowhere.
 - **A helper's end, however its process ends.** The plugin keeps each
   end it said until the bridge answers it, and says it again on the
-  socket opened again. The engine keeps an end the platform did not
+  socket opened again. It never drops one: at most 256 recorded helpers
+  run or wait to say their end, and a helper started past that holds the
+  computer and is recorded nowhere. The engine keeps an end the platform did not
   answer within its tries (`driver::Sent::GaveUp`) and posts it again at
   the next tick. A new bridge life ends each helper its state holds still
   running as `lost`, and posts again an end not yet posted (a 409,
