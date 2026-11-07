@@ -44,6 +44,7 @@ use serde_json::{json, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
 
+use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
@@ -184,7 +185,7 @@ fn dumped(v: &Value) -> CellResult<Dumped> {
     struct Envelope {
         result: Dumped,
     }
-    serde_json::from_str::<Envelope>(text).map(|e| e.result).map_err(|e| app_dump(&e.to_string()))
+    crate::json_text::<Envelope>(text).map(|e| e.result).map_err(|e| app_dump(&e.to_string()))
 }
 
 fn app_dump(why: &str) -> CellError {
@@ -700,7 +701,7 @@ impl PrincipalCell {
         for r in self.rows_of::<Row>(ROW, vec![])? {
             match r.state.as_str() {
                 "building" => {
-                    let wait = r.job.as_deref().and_then(|j| serde_json::from_str::<Job>(j).ok()).map_or(0, |j| j.wait_until);
+                    let wait = r.job.as_deref().and_then(|j| crate::json_text::<Job>(j).ok()).map_or(0, |j| j.wait_until);
                     let paced = self.pace()? == Some(0);
                     due.push(wait.max(if paced { now + 1000 } else { now }));
                 }
@@ -789,7 +790,7 @@ impl PrincipalCell {
     /// up, then its place kept (`arm_export` sets when the next is due).
     async fn slice(&self, r: &Row) -> CellResult<()> {
         let now = js::now_ms();
-        let job: Job = serde_json::from_str(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(format!("export {}'s job: {e}", r.id)))?;
+        let job: Job = crate::json_text(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(format!("export {}'s job: {e}", r.id)))?;
         if job.wait_until > now || self.pace()? == Some(0) {
             return Ok(());
         }
@@ -824,7 +825,7 @@ impl PrincipalCell {
             Err(Stop::Fail(e)) => self.end_failed(r, e).await,
             Err(Stop::Retry(why)) => {
                 // the slice is lost: its place is the last one kept
-                let mut kept: Job = serde_json::from_str(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(e.to_string()))?;
+                let mut kept: Job = crate::json_text(r.job.as_deref().unwrap_or("null")).map_err(|e| CellError::host(e.to_string()))?;
                 kept.attempt += 1;
                 console_error!("{}", json!({ "export": r.id, "retry": kept.attempt, "why": why }));
                 if kept.attempt >= limits::ATTEMPTS_MAX {
@@ -842,7 +843,7 @@ impl PrincipalCell {
     async fn end_failed(&self, r: &Row, e: ExportError) -> CellResult<()> {
         console_log!("{}", json!({ "export": r.id, "failed": e.code, "message": e.message }));
         let error = serde_json::to_string(&e).map_err(|e| CellError::host(e.to_string()))?;
-        let requests = r.job.as_deref().and_then(|j| serde_json::from_str::<Job>(j).ok()).map_or(0, |j| j.requests);
+        let requests = r.job.as_deref().and_then(|j| crate::json_text::<Job>(j).ok()).map_or(0, |j| j.requests);
         self.run_sql("UPDATE exports SET state = 'failed', error = ?, job = NULL, requests = ? WHERE id = ?", vec![error.into(), SqlStorageValue::Integer(requests as i64), r.id.as_str().into()])?;
         self.run_sql("DELETE FROM export_tail WHERE export = ?", vec![r.id.as_str().into()])?;
         self.run_sql("DELETE FROM export_parts WHERE export = ?", vec![r.id.as_str().into()])?;
@@ -1257,7 +1258,7 @@ impl PrincipalCell {
         let mut lists: Vec<(String, FragmentList)> = vec![(person.clone(), self.own_list()?)];
         for agent in &me.agents {
             let req = Request::new("https://principal.internal/list", Method::Get)?;
-            let list: FragmentList = crate::routed::send(&self.env, "PRINCIPAL", agent, req).await?.json().await?;
+            let list: FragmentList = crate::routed::send(&self.env, "PRINCIPAL", agent, req).await?.read_json().await?;
             lists.push((agent.clone(), list));
         }
         for (whose, list) in &lists {
@@ -1299,7 +1300,7 @@ impl PrincipalCell {
         let fragments = rows
             .into_iter()
             .filter_map(|r| {
-                let face: Value = r["face"].as_str().and_then(|f| serde_json::from_str(f).ok()).unwrap_or(Value::Null);
+                let face: Value = r["face"].as_str().and_then(|f| crate::json_text(f).ok()).unwrap_or(Value::Null);
                 Some(fragment_proto::ListedFragment {
                     name: r["fragment"].as_str()?.to_string(),
                     role: Role::parse(r["role"].as_str()?)?,
@@ -1532,7 +1533,7 @@ impl PrincipalCell {
                 let (works, work_more) = if work < work_max { self.page(run, &person, &name, "work", work).await? } else { (vec![], false) };
                 let chat_end = !chat_more || chats.last().is_some_and(|r| r.seq >= chat_max);
                 let work_end = !work_more || works.last().is_some_and(|r| r.seq >= work_max);
-                let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Value)> { rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), serde_json::from_str(r.body.get()).unwrap_or(Value::Null))).collect() };
+                let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Value)> { rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), crate::json_text(r.body.get()).unwrap_or(Value::Null))).collect() };
                 let (a, b) = (parse(&chats, chat_max), parse(&works, work_max));
                 let names = core::Names(run.job.frag().names.clone());
                 let (mut ai, mut bi, mut out) = (0, 0, String::new());
@@ -1760,7 +1761,7 @@ impl PrincipalCell {
             #[serde(default)]
             attachments: Vec<Value>,
         }
-        let Ok(b) = serde_json::from_str::<Body>(body) else { return Ok(()) };
+        let Ok(b) = crate::json_text::<Body>(body) else { return Ok(()) };
         for sha in b.attachments.iter().filter_map(|a| a["sha256"].as_str()).filter(|s| fragment_core::blob::valid_sha(s)) {
             let added = self.rows_of::<Value>("INSERT INTO export_blobs (export, fragment, sha) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING sha", vec![run.id.as_str().into(), name.into(), sha.into()])?;
             if !added.is_empty() {
@@ -1878,13 +1879,13 @@ fn view(r: &Row) -> CellResult<ExportView> {
         "expired" => ExportState::Expired,
         other => return Err(CellError::host(format!("export {} is {other:?}", r.id))),
     };
-    let job: Option<Job> = r.job.as_deref().and_then(|j| serde_json::from_str(j).ok());
+    let job: Option<Job> = r.job.as_deref().and_then(|j| crate::json_text(j).ok());
     let progress = match (&job, state) {
         (Some(j), _) => ExportProgress { done: j.done, total: j.total, bytes: j.written },
         (None, ExportState::Ready) => ExportProgress { done: 1, total: 1, bytes: r.size.unwrap_or(0) as u64 },
         (None, _) => ExportProgress::default(),
     };
-    let error = r.error.as_deref().map(serde_json::from_str::<ExportError>).transpose().map_err(|e| CellError::host(format!("export {}'s error: {e}", r.id)))?;
+    let error = r.error.as_deref().map(crate::json_text::<ExportError>).transpose().map_err(|e| CellError::host(format!("export {}'s error: {e}", r.id)))?;
     let ready = state == ExportState::Ready;
     Ok(ExportView {
         id: r.id.clone(),

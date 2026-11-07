@@ -944,3 +944,106 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     w.ok(Op::Sweep);
     assert_eq!(w.store.entry("aig:old"), None, "forgotten as any is");
 }
+
+/// The two bodies the ledger queue carries, as this release and the one
+/// before write them (`serde_json::to_value`, sent as JSON and read back
+/// by the consumer from `JSON.stringify` of what arrives), every kind of
+/// usage among their rows: the outbox's batch, and a paid call's charge.
+fn queued_batches() -> Vec<(MeterBatch, &'static str)> {
+    let usages = [
+        Usage::Tokens { model: "@cf/zai-org/glm-5.3".into(), input: 1200, cached_input: 300, cache_write: 0, output: 450 },
+        Usage::Neurons { milli: 100_000_000 },
+        Usage::Awake { instance: "standard-1".into(), ms: 60_000 },
+        Usage::Storage { class: StorageClass::R2, byte_hours: 9 },
+        Usage::Storage { class: StorageClass::Sqlite, byte_hours: 1 },
+        Usage::Storage { class: StorageClass::Git, byte_hours: 2 },
+        Usage::Requests { count: 3 },
+        Usage::DynamicWorkers { count: 1 },
+        Usage::Browser { ms: 1500 },
+        Usage::Images { count: 4 },
+        Usage::Key { key: "brave".into(), units: 1 },
+    ];
+    let rows: Vec<MeterRow> = usages.into_iter().enumerate().map(|(i, u)| row(&format!("r:{i}"), u, Some("notes--8x7j"), T0 + i as i64)).collect();
+    let outbox = MeterBatch { payer: "npub1owner".into(), source: "notes--8x7j".into(), seq: 7, meter: Meter { batch: "frag:k:7".into(), rows } };
+    let charged = MeterRow { agent: Some("npub1agent".into()), computer: Some("cmp-1".into()), fragment: None, ..row("key:cmp-1:00aa", Usage::Key { key: "brave".into(), units: 1 }, None, T0) };
+    let charge = MeterBatch { payer: "npub1owner".into(), source: String::new(), seq: 0, meter: Meter { batch: "key:cmp-1:00aa".into(), rows: vec![charged] } };
+    vec![(outbox, OUTBOX), (charge, CHARGE)]
+}
+
+const OUTBOX: &str = r#"{"meter":{"batch":"frag:k:7","rows":[{"agent":null,"at_ms":1790812800000,"computer":null,"fragment":"notes--8x7j","ref":"r:0","usage":{"cache_write":0,"cached_input":300,"input":1200,"kind":"tokens","model":"@cf/zai-org/glm-5.3","output":450}},{"agent":null,"at_ms":1790812800001,"computer":null,"fragment":"notes--8x7j","ref":"r:1","usage":{"kind":"neurons","milli":100000000}},{"agent":null,"at_ms":1790812800002,"computer":null,"fragment":"notes--8x7j","ref":"r:2","usage":{"instance":"standard-1","kind":"awake","ms":60000}},{"agent":null,"at_ms":1790812800003,"computer":null,"fragment":"notes--8x7j","ref":"r:3","usage":{"byte_hours":9,"class":"r2","kind":"storage"}},{"agent":null,"at_ms":1790812800004,"computer":null,"fragment":"notes--8x7j","ref":"r:4","usage":{"byte_hours":1,"class":"sqlite","kind":"storage"}},{"agent":null,"at_ms":1790812800005,"computer":null,"fragment":"notes--8x7j","ref":"r:5","usage":{"byte_hours":2,"class":"git","kind":"storage"}},{"agent":null,"at_ms":1790812800006,"computer":null,"fragment":"notes--8x7j","ref":"r:6","usage":{"count":3,"kind":"requests"}},{"agent":null,"at_ms":1790812800007,"computer":null,"fragment":"notes--8x7j","ref":"r:7","usage":{"count":1,"kind":"dynamic_workers"}},{"agent":null,"at_ms":1790812800008,"computer":null,"fragment":"notes--8x7j","ref":"r:8","usage":{"kind":"browser","ms":1500}},{"agent":null,"at_ms":1790812800009,"computer":null,"fragment":"notes--8x7j","ref":"r:9","usage":{"count":4,"kind":"images"}},{"agent":null,"at_ms":1790812800010,"computer":null,"fragment":"notes--8x7j","ref":"r:10","usage":{"key":"brave","kind":"key","units":1}}]},"payer":"npub1owner","seq":7,"source":"notes--8x7j"}"#;
+const CHARGE: &str = r#"{"meter":{"batch":"key:cmp-1:00aa","rows":[{"agent":"npub1agent","at_ms":1790812800000,"computer":"cmp-1","fragment":null,"ref":"key:cmp-1:00aa","usage":{"key":"brave","kind":"key","units":1}}]},"payer":"npub1owner","seq":0,"source":""}"#;
+
+#[test]
+fn a_queued_batch_reads_back_from_its_json_text() {
+    for (batch, text) in queued_batches() {
+        assert_eq!(serde_json::to_value(&batch).unwrap().to_string(), text, "the form this release writes");
+        assert_eq!(MeterBatch::from_queue(text.as_bytes()), Ok(batch), "{text}");
+    }
+}
+
+/// Each queued form with a field a later release might add (to the batch,
+/// its meter, and a row), as a message from it would reach this one, mid-deploy
+/// or after a rollback.
+fn with_added_fields(text: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+    v["region"] = serde_json::json!("weur");
+    v["meter"]["sent_at"] = serde_json::json!(T0);
+    for row in v["meter"]["rows"].as_array_mut().unwrap() {
+        row["model_route"] = serde_json::json!({ "tier": "cheap" });
+        row["note"] = serde_json::Value::Null;
+    }
+    v.to_string()
+}
+
+#[test]
+fn a_queued_batch_with_fields_a_later_release_added_still_reads_and_bills() {
+    for (batch, text) in queued_batches() {
+        let added = with_added_fields(text);
+        assert_ne!(added, text);
+        assert_eq!(MeterBatch::from_queue(added.as_bytes()), Ok(batch.clone()), "{added}");
+        // billed exactly as its own form is, on a seat's ledger
+        let billed = |text: &str| {
+            let mut w = World::seat();
+            let mut priced = book();
+            priced.keys.push(KeyPrice { key: "brave".into(), micros: 5_000_000, per: 1_000 });
+            priced.instances.push(crate::price::InstancePrice { instance: "standard-1".into(), hour: 100_000 });
+            w.ok(Op::Book(priced));
+            let answer = w.ok(Op::Meter(MeterBatch::from_queue(text.as_bytes()).unwrap().meter));
+            (answer, w.balance())
+        };
+        let (answer, balance) = billed(&added);
+        let Outcome::Metered(m) = &answer else { panic!("{added}: {answer:?}") };
+        assert_eq!(m.rows_new as usize, batch.meter.rows.len(), "every row is new: {m:?}");
+        assert!(m.charged > 0 && m.refused.is_empty(), "{m:?}");
+        assert_eq!((answer, balance), billed(text));
+    }
+    // the route's own decoder keeps its contract: no field it does not know
+    let meter = |text: &str| serde_json::to_string(&serde_json::from_str::<serde_json::Value>(text).unwrap()["meter"]).unwrap();
+    assert!(serde_json::from_str::<Meter>(&meter(&with_added_fields(OUTBOX))).unwrap_err().to_string().contains("unknown field"));
+    assert!(serde_json::from_str::<Meter>(&meter(OUTBOX)).is_ok());
+}
+
+#[test]
+fn a_queued_batch_missing_or_malformed_is_still_refused() {
+    let refused = |from: &str, to: &str| {
+        let text = OUTBOX.replacen(from, to, 1);
+        assert_ne!(text, OUTBOX, "{from}");
+        let e = MeterBatch::from_queue(text.as_bytes()).expect_err(&text);
+        (text, e)
+    };
+    for (from, to, says) in [
+        (r#""ref":"r:0","#, "", "missing field `ref`"),
+        (r#""at_ms":1790812800000,"#, r#""at_ms":"soon","#, "invalid type"),
+        (r#""kind":"neurons","#, r#""kind":"neutrinos","#, "unknown variant"),
+        (r#""milli":100000000}"#, r#""milli":100000000,"extra":1}"#, "unknown field `extra`"),
+        (r#""payer":"npub1owner","#, "", "missing field `payer`"),
+        (r#""batch":"frag:k:7","#, "", "missing field `batch`"),
+        (r#""seq":7"#, r#""seq":"7""#, "invalid type"),
+    ] {
+        let (text, e) = refused(from, to);
+        assert!(e.contains(says), "{text}: {e}");
+    }
+    assert!(MeterBatch::from_queue(b"{}").is_err());
+    assert!(MeterBatch::from_queue(br#"{"meter":7,"payer":"p","seq":0,"source":""}"#).is_err());
+    assert!(MeterBatch::from_queue(b"not json").is_err());
+}

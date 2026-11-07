@@ -390,7 +390,7 @@ impl SqlStore {
 
     /// A JSON column as the core's type: one that does not read is corruption.
     fn read<T: DeserializeOwned>(&self, what: &str, text: &str) -> Option<T> {
-        match serde_json::from_str(text) {
+        match crate::json_text(text) {
             Ok(v) => Some(v),
             Err(e) => {
                 self.fail(format!("{what} does not read as the ledger wrote it: {e}"));
@@ -553,7 +553,7 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         _ => None,
     };
     if let Some(row) = rows.into_iter().next() {
-        let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        let mut ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
         if let Some(terms) = org {
             ledger.bind_org(terms);
         }
@@ -872,7 +872,7 @@ impl LedgerCell {
                 let entries: Vec<Value> = rows
                     .into_iter()
                     .map(|r| {
-                        let entry: Value = serde_json::from_str(&r.entry).expect("an entry is JSON the ledger wrote");
+                        let entry: Value = crate::json_text(&r.entry).expect("an entry is JSON the ledger wrote");
                         json!({ "ref": r.r#ref, "entry": entry })
                     })
                     .collect();

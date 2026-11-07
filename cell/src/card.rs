@@ -73,7 +73,7 @@ impl FragmentCell {
     pub(crate) fn cards(&self) -> CellResult<Cards> {
         match self.meta(MetaKey::Cards)? {
             None => Ok(Cards::default()),
-            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the kept cards do not decode: {e}"))),
+            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the kept cards do not decode: {e}"))),
         }
     }
 
@@ -366,7 +366,7 @@ async fn acquire(env: &Env) -> Result<String, Failure> {
         // a 429 or 5xx passes; anything else is the binding's say, tried again all the same
         return Err(Failure::retry(format!("Browser Rendering answered {status} to a new session")));
     }
-    let id = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["sessionId"].as_str().map(str::to_string)).unwrap_or_default();
+    let id = crate::json_text::<Value>(&text).ok().and_then(|v| v["sessionId"].as_str().map(str::to_string)).unwrap_or_default();
     if id.is_empty() || id.len() > SESSION_ID_MAX || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err(Failure::retry("Browser Rendering named no session"));
     }
@@ -506,7 +506,7 @@ impl Cdp<'_> {
         match select(next, timer).await {
             Either::Left((Some(Ok(WebsocketEvent::Message(m))), _)) => {
                 let text = m.text().or_else(|| m.bytes().map(|b| String::from_utf8_lossy(&b).into_owned())).unwrap_or_default();
-                let v: Value = serde_json::from_str(&text).map_err(|_| Failure::retry("CDP said something that is not JSON"))?;
+                let v: Value = crate::json_text(&text).map_err(|_| Failure::retry("CDP said something that is not JSON"))?;
                 if self.target_session.is_some() && v["sessionId"].as_str() == self.target_session.as_deref() {
                     self.loaded |= v["method"] == "Page.loadEventFired";
                     self.heard.hear(&v);

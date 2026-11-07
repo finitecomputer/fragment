@@ -603,7 +603,7 @@ fn extras_of(models: &mut Value) -> Result<Vec<Extra>, String> {
         };
         let images = flag("images", "its model reads images")?;
         let private = flag("private", "its model is private: confidential inference that keeps nothing")?;
-        let upstream: Upstream = serde_json::from_str(&row.to_string()).map_err(|e| format!("models.{name}: {e}"))?;
+        let upstream: Upstream = serde_json::from_slice(row.to_string().as_bytes()).map_err(|e| format!("models.{name}: {e}"))?;
         extra.push(Extra { name, upstream, images, private, fallback, opts });
     }
     Ok(extra)
@@ -726,7 +726,7 @@ impl Models {
     pub fn parse(named: Option<&str>, book: &PriceBook, loopback: bool) -> Result<Models, String> {
         let mut models = Models::defaults();
         if let Some(text) = named {
-            let mut v: Value = serde_json::from_str(text).map_err(|e| format!("models: {e}"))?;
+            let mut v: Value = serde_json::from_slice(text.as_bytes()).map_err(|e| format!("models: {e}"))?;
             models.images = flags_of(&mut v, "images", "its model reads images")?;
             models.private = flags_of(&mut v, "private", "its model is private: confidential inference that keeps nothing")?;
             models.labels = labels_of(&mut v)?;
@@ -735,7 +735,7 @@ impl Models {
             models.opts = opts_of(&mut v)?;
             models.embeddings = crate::embed::slot_of(&mut v)?;
             models.extra = extras_of(&mut v)?;
-            let n: Slots = serde_json::from_str(&v.to_string()).map_err(|e| format!("models: {e}"))?;
+            let n: Slots = serde_json::from_slice(v.to_string().as_bytes()).map_err(|e| format!("models: {e}"))?;
             for (slot, upstream) in [(&mut models.cheap, n.cheap), (&mut models.medium, n.medium), (&mut models.fallback, n.fallback), (&mut models.vision, n.vision)] {
                 if let Some(u) = upstream {
                     *slot = u;
@@ -1829,7 +1829,7 @@ impl Stream {
             self.done = true;
             return Some(format!("data: [DONE]{ending}{ending}").into_bytes());
         }
-        let Ok(Value::Object(mut chunk)) = serde_json::from_str::<Value>(data) else { return None };
+        let Ok(Value::Object(mut chunk)) = serde_json::from_slice::<Value>(data.as_bytes()) else { return None };
         if let Some(id) = chunk.get("id").filter(|id| !id.is_null()) {
             self.id = Some(id.clone());
         }

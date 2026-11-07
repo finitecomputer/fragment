@@ -180,7 +180,7 @@ fn op_decl(row: OpRow) -> CellResult<(String, OpDecl)> {
     let kind = OpKind::parse(&row.kind).ok_or_else(|| stored(&format!("operation {}", row.op), format!("kind {:?}", row.kind)))?;
     let role = Role::parse(&row.role).ok_or_else(|| stored(&format!("operation {}", row.op), format!("role {:?}", row.role)))?;
     let input = match row.input {
-        Some(text) => Some(serde_json::from_str(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
+        Some(text) => Some(crate::json_text(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
         None => None,
     };
     Ok((row.op, OpDecl { kind, role, input, ephemeral: row.ephemeral != 0, description: row.description }))
@@ -215,7 +215,7 @@ fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let listed = match (row.listed_kinds.as_deref(), row.listed_fields.as_deref()) {
         (None, None) => None,
         (Some(kinds), Some(fields)) => {
-            let names = |text: &str| serde_json::from_str::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("listed: {e}")));
+            let names = |text: &str| crate::json_text::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("listed: {e}")));
             let listed = ListedDecl { kinds: names(kinds)?, fields: names(fields)? };
             // written from a checked manifest: anything else is corruption
             let valid = !listed.kinds.is_empty()
@@ -985,7 +985,7 @@ impl FragmentCell {
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         match self.meta(MetaKey::ManifestMain)? {
-            Some(text) => json_response(&serde_json::from_str::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?),
+            Some(text) => json_response(&crate::json_text::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?),
             None => Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
         }
     }

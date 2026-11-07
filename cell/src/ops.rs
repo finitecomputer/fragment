@@ -162,7 +162,7 @@ fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
         return Err(format!("the loader asked for {id}, which is not the installed code any more"));
     }
     assert!(row.cpu_ms > 0 && row.cpu_ms <= limits::APP_CPU_MS, "stored cpu_ms is within the limit");
-    let modules: BTreeMap<String, String> = serde_json::from_str(&row.modules).map_err(|e| format!("the stored applib modules: {e}"))?;
+    let modules: BTreeMap<String, String> = crate::json_text(&row.modules).map_err(|e| format!("the stored applib modules: {e}"))?;
     Ok(AppCode {
         fragment: row.name.ok_or("a created fragment has no name")?,
         platform: PLATFORM_JS,

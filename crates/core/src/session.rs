@@ -610,7 +610,7 @@ pub fn merge<P>(indexed: &BTreeMap<String, Entry>, stored: &std::collections::BT
 /// each image, recording or file it held (`[image]`); anything else as it
 /// is. The old Finite's export copied such values as they were stored.
 pub fn text_of(text: &str) -> String {
-    match text.strip_prefix("\u{0}json:").and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) {
+    match text.strip_prefix("\u{0}json:").and_then(|j| serde_json::from_slice::<serde_json::Value>(j.as_bytes()).ok()) {
         Some(serde_json::Value::String(s)) => s,
         Some(v @ serde_json::Value::Array(_)) => parts_text(&v).unwrap_or_else(|| text.to_string()),
         _ => text.to_string(),
