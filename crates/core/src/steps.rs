@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::de::value::MapDeserializer;
+use serde::de::value::SeqDeserializer;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -209,10 +209,15 @@ pub struct AiVideo {
 
 impl Step {
     /// A step from the kind and args the Workflow carries, decoded without
-    /// rebuilding their JSON; the error says what does not fit.
+    /// rebuilding their JSON; the error says what does not fit. Handed in
+    /// as the sequence `[kind, args]`, which an adjacently tagged enum
+    /// reads in that order, not as the map `{kind, args}`, whose decoder
+    /// also carries a buffered (`Content`) copy of every variant's for
+    /// args that come before their kind: about 46 KB of the cell's Wasm
+    /// for a path these parts never take.
     pub fn from_parts(kind: &str, args: Value) -> Result<Step, String> {
-        let parts = [("kind", Value::String(kind.to_string())), ("args", args)];
-        let step = Step::deserialize(MapDeserializer::<_, serde_json::Error>::new(parts.into_iter())).map_err(|e| e.to_string())?;
+        let parts = [Value::String(kind.to_string()), args];
+        let step = Step::deserialize(SeqDeserializer::<_, serde_json::Error>::new(parts.into_iter())).map_err(|e| e.to_string())?;
         assert_eq!(step.kind(), kind, "a step decodes as the kind it names");
         Ok(step)
     }
@@ -369,6 +374,38 @@ mod tests {
         refused("people", json!({}), "missing field `ids`");
         refused("people", json!({ "ids": "id:x" }), "invalid type");
         refused("people", json!({ "ids": [7] }), "invalid type");
+    }
+
+    /// Every step's decode, ok or refused, as the map `{kind, args}` read it
+    /// before `from_parts` handed in the sequence `[kind, args]`.
+    #[test]
+    fn the_sequence_decodes_as_the_map_did() {
+        let map = |kind: &str, args: Value| {
+            let parts = [("kind", Value::String(kind.to_string())), ("args", args)];
+            Step::deserialize(serde::de::value::MapDeserializer::<_, serde_json::Error>::new(parts.into_iter())).map_err(|e| e.to_string())
+        };
+        let mut cases = every_kind();
+        cases.extend([
+            ("ai.foo", json!({})),
+            ("call", json!({ "input": {} })),
+            ("call", json!({ "op": "save" })),
+            ("call", json!(null)),
+            ("ai.text", json!({ "model": "cheap", "max_tokens": "100" })),
+            ("ai.image", json!({ "prompt": "p", "path": "a.jpg", "model": "x" })),
+            ("ai.image", json!({ "prompt": "p", "path": "a.jpg", "steps": -1 })),
+            ("files.read", json!("log.txt")),
+            ("files.write", json!({ "path": "a" })),
+            ("files.remove", json!({ "path": "a", "expect": 5 })),
+            ("members", json!(null)),
+            ("members", json!({ "extra": 1 })),
+            ("presence", json!([])),
+            ("people", json!({ "ids": [7] })),
+            ("sleep", json!({ "ms": -1 })),
+            ("", json!({})),
+        ]);
+        for (kind, args) in cases {
+            assert_eq!(step(kind, args.clone()), map(kind, args.clone()), "{kind} {args}");
+        }
     }
 
     #[test]

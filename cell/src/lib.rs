@@ -623,7 +623,7 @@ pub(crate) use json_response::json_answer;
 /// An identity's fragments, as its `Principal` cell lists them.
 pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
-    Ok(crate::routed::send(env, "PRINCIPAL", identity, list).await?.json().await?)
+    Ok(crate::routed::send(env, "PRINCIPAL", identity, list).await?.read_json().await?)
 }
 
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
@@ -1070,7 +1070,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     if resp.headers().has(serve::REFUSAL)? {
         resp = match page {
             true => {
-                let e: ErrorBody = resp.json().await?;
+                let e: ErrorBody = resp.read_json().await?;
                 auth::refused(cfg, url, name, rest, fetched.framed, &CellError::new(e.error, e.message))?
             }
             false => unmarked(resp)?,
@@ -1479,5 +1479,25 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             Ok(Response::redirect_with_status(to, 308)?)
         }
         _ => Err(no_route(&path)),
+    }
+}
+
+/// `serde_json::from_str`, read as `serde_json::from_slice` of its bytes: the
+/// same answer for any `&str`, through the one decoder (`SliceRead`) every
+/// type the cell reads from bytes already has, not a second (`StrRead`) copy
+/// of each type's decoder in the Wasm.
+pub(crate) fn json_text<'a, T: serde::Deserialize<'a>>(text: &'a str) -> serde_json::Result<T> {
+    serde_json::from_slice(text.as_bytes())
+}
+
+/// `worker::Response::json`, its text read through `json_text`: the same
+/// answer, without the `StrRead` decoders `json` would add for each type.
+pub(crate) trait ReadJson {
+    async fn read_json<T: serde::de::DeserializeOwned>(&mut self) -> Result<T>;
+}
+
+impl ReadJson for Response {
+    async fn read_json<T: serde::de::DeserializeOwned>(&mut self) -> Result<T> {
+        json_text(&self.text().await?).map_err(Error::from)
     }
 }

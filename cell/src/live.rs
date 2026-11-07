@@ -380,7 +380,7 @@ impl FragmentCell {
         if !self.still_who(ws, &mut st).await {
             return;
         }
-        let answered = match serde_json::from_str::<LiveIn>(text) {
+        let answered = match crate::json_text::<LiveIn>(text) {
             Ok(LiveIn::Query(query)) => {
                 send(ws, &LiveOut::Result(self.live_query(&st, query).await));
                 Ok(())

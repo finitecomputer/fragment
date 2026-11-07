@@ -78,6 +78,7 @@ use fragment_proto::{ErrorCode, Visibility};
 use serde::{Deserialize, Serialize};
 use worker::*;
 
+use crate::ReadJson;
 use crate::ask_registry;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
@@ -965,7 +966,7 @@ async fn anyone_reads(env: &Env, name: &str) -> bool {
     let asked = std::pin::pin!(async {
         let mut resp = crate::routed::send(env, "FRAGMENT", name, crate::routed::internal_request("signin/visibility", "{}")?).await?;
         match resp.status_code() {
-            200 => Ok(resp.json::<SigninVisibility>().await?.visibility),
+            200 => Ok(resp.read_json::<SigninVisibility>().await?.visibility),
             status => Err(CellError::host(format!("its fragment answered {status}"))),
         }
     });
