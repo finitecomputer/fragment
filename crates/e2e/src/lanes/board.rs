@@ -211,6 +211,11 @@ fn shows(id: &str, rev: &Value) -> String {
     format!("(() => {{ const f = document.querySelector('.bd-frame[data-id=\"{id}\"]'); return !!f && f.dataset.rev === '{rev}' && f.dataset.loaded === '{rev}' && !f.dataset.failed && f.querySelectorAll('iframe, img').length === 1; }})()")
 }
 
+/// Whether a rev the page holds as text (`shown`'s) is `rev`.
+fn same_rev(text: &Value, rev: &Value) -> bool {
+    text.as_str().and_then(|t| t.parse::<i64>().ok()).is_some_and(|t| rev.as_i64() == Some(t))
+}
+
 /// Marks every iframe the page shows (`kept` in `shown`).
 const MARK: &str = "document.querySelectorAll('.bd-frame iframe').forEach((i) => { i.dataset.e2e = 'kept'; })";
 
@@ -504,7 +509,7 @@ pub fn board(s: &mut Suite, api: &Api) -> Result<()> {
     let recovered = chrome.until(&a, &shows("home", &rev), WAIT);
     s.ok(
         "a load that fails keeps the page shown, says so on the frame, and is tried again until it loads",
-        held.len() == 1 && waiting["kept"] == true && waiting["rev"] == rev.to_string() && noted && failed["kept"] == true && failed["note"] == "The board couldn't reach it." && recovered,
+        held.len() == 1 && waiting["kept"] == true && same_rev(&waiting["rev"], &rev) && noted && failed["kept"] == true && failed["note"] == "The board couldn't reach it." && recovered,
         json!({ "held": held, "waiting": waiting, "failed": failed, "after": one(&mut chrome, &a, "home") }),
     );
     let later = json!({ "id": "later", "kind": "html", "label": "Later" });
@@ -517,7 +522,7 @@ pub fn board(s: &mut Suite, api: &Api) -> Result<()> {
     let came = chrome.until(&a, &shows("later", &later_rev), WAIT);
     s.ok(
         "a frame put before its file says so, and loads at the same rev once the file is written",
-        waits && before_file["failed"] == later_rev.to_string() && before_file["parts"] == 0 && out.status.success() && came && heard_n(&mut chrome, &a, "later", 1).first().is_some_and(|p| p["text"] == "Written after"),
+        waits && same_rev(&before_file["failed"], &later_rev) && before_file["parts"] == 0 && out.status.success() && came && heard_n(&mut chrome, &a, "later", 1).first().is_some_and(|p| p["text"] == "Written after"),
         json!({ "before": before_file, "after": one(&mut chrome, &a, "later") }),
     );
 
