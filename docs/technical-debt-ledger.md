@@ -327,15 +327,15 @@ unfinished design, not debt.
   the multilingual models' $0.08 per 1,000 whatever the model, so Flash
   and Turbo's $0.04 calls are charged twice their list; fal's
   synchronous Klein runs by the pixels they ask for; xAI's X searches as
-  20 posts and a call's tokens, its images as one grok-imagine-image
-  ($0.02) a call).
+  20 posts and a call's tokens, its synchronous images as one
+  grok-imagine-image ($0.02) a call).
 - **Risk:** calls charged above or below what they cost: every other
   ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
   is charged a minute of music; a queued fal generation (Hermes'
   `image_generate`), an edit and every other fal model are charged
   nothing until a queued job is settled from its result's answer, once
-  per request id; a Grok chat (its tokens not read), a video and
-  server-side tools other than X Search are charged nothing, a
+  per request id; a Grok chat (its tokens not read), a deferred image, a
+  video and server-side tools other than X Search are charged nothing, a
   grok-imagine-image-2.0 image or several images a call under their
   cost, and an X search that fetches fewer than 20 posts over it.
 - **Delete when:** the swap reads each answer's usage and settles the

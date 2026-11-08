@@ -138,14 +138,15 @@ informational. The fee is AI Gateway's on credits, so it applies to
   result, an edit, another model, an upload) is none of the key's,
   charged nothing. On xAI's key, a call whose `tools` name `x_search` is
   one call of the key (an X search, as before), and an image call naming
-  a grok-imagine-image model one `xai:image` ($0.02); any other call (a
-  chat, whose tokens are not read, a video, a model list) none. Only a
-  call so classified is charged, and only on a 2xx: a part's call, or
-  any call on a key priced by its parts, that its vendor refused or
-  redirected, or whose units are not read (no JSON, no `text` or no
-  size, a body past `KEY_PART_BODY_MAX_BYTES`), is charged nothing, and
-  a release whose book has no part's price refuses its rows as unpriced,
-  charging nothing.
+  a grok-imagine-image model and made in its answer (not `deferred`) one
+  `xai:image` ($0.02); any other call (a chat, whose tokens are not
+  read, a deferred image, a video, a model list) none. Only a call so
+  classified is charged, and only on a 2xx: a part's call, or any call
+  on a key priced by its parts, that its vendor refused or redirected,
+  or whose units are not read (no JSON, no `text` or no size, a body
+  past `KEY_PART_BODY_MAX_BYTES`), is charged nothing, and a release
+  whose book has no part's price refuses its rows as unpriced, charging
+  nothing.
 
 - **OpenRouter's price** (decision 61; a decision for Paul): a slot on
   OpenRouter is priced at the ceiling it routes under

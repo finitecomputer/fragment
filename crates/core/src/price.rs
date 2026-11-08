@@ -499,9 +499,11 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 11] = [
     // (`KEY_PARTS`); its images are below, and every other call (a chat,
     // its tokens not read) is free.
     ("xai", 120_000, 1),
-    // A Grok image (`/v1/images/generations`) naming a grok-imagine-image
-    // model (`XAI_IMAGE_MODELS`), one a call whatever its `n`, which is
-    // what it asks for, not what it made: grok-imagine-image's $0.02
+    // A Grok image made synchronously (`/v1/images/generations` naming a
+    // grok-imagine-image model, `XAI_IMAGE_MODELS`, and not `deferred`: its
+    // answer is the image), one a call whatever its `n`, which is what it
+    // asks for, not what it made; a deferred one, only its request id until
+    // it is made or fails, is free here: grok-imagine-image's $0.02
     // ($0.04 on grok-imagine-image-2.0, charged under its list). Source:
     // docs.x.ai/developers/pricing (read 2026-11-07).
     ("xai:image", 20_000, 1),
@@ -640,8 +642,9 @@ fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> 
 ///   it asks for (`fal_pixels`).
 /// - xAI: a `POST` to `/v1/responses` or `/v1/chat/completions` whose
 ///   `tools` name `x_search` is one call of the key (an X search); one to
-///   `/v1/images/generations` naming a grok-imagine-image model one
-///   `xai:image`; any other call (a chat, its tokens not read) none.
+///   `/v1/images/generations` naming a grok-imagine-image model, made in
+///   its answer (not `deferred`), one `xai:image`; any other call (a chat,
+///   its tokens not read; a deferred image) none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -660,7 +663,11 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
             let searches = said.as_ref().and_then(|s| s.get("tools")?.as_array()).is_some_and(|tools| tools.iter().any(|t| t.get("type").and_then(serde_json::Value::as_str) == Some("x_search")));
             match (call.method, call.path) {
                 ("POST", "/v1/responses" | "/v1/chat/completions") if searches => ("xai", Some(1)),
-                ("POST", "/v1/images/generations") if said.as_ref().and_then(|s| s.get("model")?.as_str()).is_some_and(|model| XAI_IMAGE_MODELS.contains(&model)) => {
+                // made in its answer: a known model, not deferred (a request id
+                // alone, the image made later or not)
+                ("POST", "/v1/images/generations")
+                    if said.as_ref().is_some_and(|s| s.get("model").and_then(serde_json::Value::as_str).is_some_and(|model| XAI_IMAGE_MODELS.contains(&model)) && s.get("deferred").is_none_or(|d| *d == serde_json::Value::Bool(false))) =>
+                {
                     ("xai:image", said.and_then(|s| s.get("n").map_or(Some(1), serde_json::Value::as_u64)).map(|n| n.min(1)))
                 }
                 // a chat (its tokens not read), a video, a stored response read, a model list
@@ -1282,6 +1289,13 @@ mod tests {
         let image = Usage::Key { key: "xai:image".into(), units: 1 };
         assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 200), image);
         assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image-2.0","prompt":"a cat","n":4}"#, 200), image, "one a call: its n is asked, not made");
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat","deferred":false}"#, 200), image, "synchronous, said so");
+        // deferred: a request id alone, the image made later or not (FIN-445 review)
+        for deferred in ["true", r#""true""#, "1", "null"] {
+            let body = format!(r#"{{"model":"grok-imagine-image","prompt":"a cat","deferred":{deferred}}}"#);
+            assert_eq!(xai("POST", "/v1/images/generations", body.as_bytes(), 200), Usage::Key { key: "xai".into(), units: 0 }, "{body}");
+        }
+        assert_eq!(xai("GET", "/v1/images/generations/req-1", b"", 200), Usage::Key { key: "xai".into(), units: 0 }, "its result's read");
         assert_eq!(book.price(&image).unwrap().charge, 30_000);
         for body in [&br#"{"model":"grok-imagine-image-mini","prompt":"a cat"}"#[..], br#"{"prompt":"a cat"}"#, br#"{"model":42,"prompt":"a cat"}"#] {
             assert_eq!(xai("POST", "/v1/images/generations", body, 200), free, "a model the book does not price: {}", String::from_utf8_lossy(body));
