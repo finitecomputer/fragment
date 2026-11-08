@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pinnedFirst, rowStatus, sectionShown } from "../shell/chat-list.js";
+import { pinnedAgentsFirst, pinnedFirst, rowStatus, sectionShown } from "../shell/chat-list.js";
 
 const chat = (name, previewAt, pinned = false) => ({ name, previewAt, pinned });
 const names = (list) => list.map((f) => f.name);
@@ -55,4 +55,16 @@ test("five or fewer: all of them, and no More", () => {
   const five = [1, 2, 3, 4, 5].map((n) => chat(`c${n}`, n));
   assert.deepEqual(sectionShown(five), { shown: [...five].reverse(), more: false });
   assert.deepEqual(sectionShown([]), { shown: [], more: false });
+});
+
+test("the sidebar's agents: the pinned ones first, then the rest, each in their computer's order; none left out (FIN-404)", () => {
+  const agent = (fragment) => ({ fragment, identity: `id-${fragment}` });
+  const mine = ["main", "b", "c", "d"].map(agent);
+  const order = (pinned) => pinnedAgentsFirst(mine, (name) => pinned.includes(name)).map((a) => a.fragment);
+  assert.deepEqual(order([]), ["main", "b", "c", "d"], "nothing pinned: their computer's order");
+  assert.deepEqual(order(["c"]), ["c", "main", "b", "d"]);
+  assert.deepEqual(order(["d", "b"]), ["b", "d", "main", "c"], "pinned ones keep their computer's order among them");
+  assert.deepEqual(order(["main", "b", "c", "d"]), ["main", "b", "c", "d"]);
+  assert.deepEqual(order(["gone"]), ["main", "b", "c", "d"], "a pin of an agent no longer theirs moves none");
+  assert.deepEqual(mine.map((a) => a.fragment), ["main", "b", "c", "d"], "their computer's order itself is untouched");
 });
