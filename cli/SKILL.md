@@ -61,7 +61,7 @@ a guest only edits what is shared with them.
 ## Build, deploy, share
 
 ```
-fragment init my-app --template todo --title "My app"   # a folder my-app/, created and live: prints its links
+fragment init my-app --template todo --title "My app"   # a folder, live, prints its links; templates: blank|board|calories|doc|inbox|notes|slides|todo
 fragment deploy my-app --dir my-app              # after an edit: sync the folder, then put it live
 fragment status my-app                           # its links, its live commit, why its code was refused, its page's errors
 fragment events my-app --tail 30                 # what happened there: believe it over your memory
@@ -69,7 +69,7 @@ fragment call my-app add --input '{"text":"hi"}' # one of its operations
 fragment visibility my-app link                  # public | link (anyone with the share link) | members
 fragment members add my-app bea@example.com --role editor   # by email; viewer | editor
 fragment list                                    # your person's fragments
-fragment create <label> --template todo          # one with no folder: blank|todo|inbox|calories|doc
+fragment create <label> --template todo          # no folder: blank|todo|inbox|calories|doc
 fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
@@ -82,7 +82,7 @@ Give every app a useful name (`--title` at creation, or `fragment rename
 (background terminal task after revealing the app), `fragment preview
 <app>`, and `fragment address <app> <label>` (only when requested;
 permanent, changes no permissions). Never delay a working link for an
-icon. See `fragment guide` for details.
+icon.
 
 A fragment is named `<label>--<suffix>` (`todo--k3x9`: the platform adds
 the suffix); a bare label names the one of your person's with it.
