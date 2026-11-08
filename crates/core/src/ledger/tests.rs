@@ -600,7 +600,8 @@ fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
 /// short speech clips cost people 10 to 20 times what they cost. Goal: a
 /// deployment's book (its keys' prices from its catalog) charges a speech
 /// call by its text's characters and a music call by the minute, each
-/// once, across a replay and a restart; a release whose book has no
+/// once, across a replay and a restart, and one ElevenLabs refused
+/// nothing; a release whose book has no
 /// speech price (one rolled back to) charges its rows nothing. Method:
 /// the swap's rows as it meters them (`price::key_usage`), sent again.
 #[test]
@@ -609,15 +610,17 @@ fn a_speech_call_is_charged_by_its_characters_and_once() {
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&eleven.to_string()).unwrap().key_prices());
     let reply = serde_json::to_vec(&serde_json::json!({ "text": "a".repeat(200), "model_id": "eleven_multilingual_v2" })).unwrap();
-    let spoken = crate::price::key_usage("elevenlabs", "/v1/text-to-speech/voice", &reply);
-    let music = crate::price::key_usage("elevenlabs", "/v1/music", br#"{"prompt":"a jingle","music_length_ms":15000}"#);
+    let spoken = crate::price::key_usage("elevenlabs", "/v1/text-to-speech/voice", &reply, 200);
+    let music = crate::price::key_usage("elevenlabs", "/v1/music", br#"{"prompt":"a jingle","music_length_ms":15000}"#, 200);
     assert_eq!((&spoken, &music), (&Usage::Key { key: "elevenlabs:speech".into(), units: 200 }, &Usage::Key { key: "elevenlabs".into(), units: 1 }));
+    // one ElevenLabs refused (a rate limit): its row kept, charged nothing
+    let refused = crate::price::key_usage("elevenlabs", "/v1/text-to-speech/voice", &reply, 429);
     let mut w = World::seat();
     w.ok(Op::Book(configured.clone()));
     let before = w.balance();
-    let batch = meter("key:c-1:a1", vec![row("key:c-1:a1", spoken.clone(), None, T0), row("key:c-1:a2", music, None, T0)]);
-    // 200 characters at $0.08 per 1,000, a minute at $0.15, each with the margin
-    let charged = Outcome::Metered(Metered { charged: 24_000 + 225_000, rows_new: 2, rows_before: 0, refused: vec![] });
+    let batch = meter("key:c-1:a1", vec![row("key:c-1:a1", spoken.clone(), None, T0), row("key:c-1:a2", music, None, T0), row("key:c-1:a3", refused, None, T0)]);
+    // 200 characters at $0.08 per 1,000, a minute at $0.15, each with the margin, and nothing
+    let charged = Outcome::Metered(Metered { charged: 24_000 + 225_000, rows_new: 3, rows_before: 0, refused: vec![] });
     assert_eq!(w.replays(batch.clone()), charged);
     assert_eq!(w.balance(), before - 249_000);
     let mut w = w.restarted();

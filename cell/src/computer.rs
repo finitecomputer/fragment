@@ -3800,13 +3800,13 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
-    let answered = status.is_some_and(|s| s < 500);
     // after the answer, never in its way
-    if let (Some((agent, owner, identity)), true) = (payer, answered) {
+    if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
         let book = &cfg.book;
         // what each key's call used: a call, or the units of a part the
-        // book prices apart (ElevenLabs' speech, by its characters)
-        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, url.path(), &body))).collect();
+        // book prices apart (ElevenLabs' speech, by its characters, when
+        // its answer is a 2xx), the row and the agent's count alike
+        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, url.path(), &body, answered))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
         let uses: Vec<Value> = plan
             .wanted

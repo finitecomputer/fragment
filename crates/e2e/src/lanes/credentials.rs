@@ -65,6 +65,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "its owner picks another account for it: its next request is swapped that account's token",
     "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
     "a key's call the book prices by what it says (ElevenLabs' text to speech) reaches its host as it came, body and all, and is charged its text's characters, not a call",
+    "and one its provider refused (a bad request, a rate limit) made nothing: its row and the agent's count charge nothing, whatever its text",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -238,6 +239,12 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         && spoken_seen["path"] == "/v1/text-to-speech/e2e-voice"
         && spoken_seen["body"] == SPOKEN
         && spoken_seen["auth"]["xi-api-key"] == key_value("elevenlabs");
+    // refused by its provider: answered (under 500), so counted, but nothing made
+    let mut refused_said = vec![];
+    for (n, code) in [(125, 400), (126, 429)] {
+        refused_said.push(say(s, n, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice?e2e_status={code} with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"))?);
+    }
+    let refused_sent = refused_said.iter().zip(["fetched 400", "fetched 429"]).all(|(said, code)| said.starts_with(code));
     let said = say(s, 109, "fetch http://places.googleapis.com/v1/places:searchText?fields=name with $GOOGLE_PLACES_API_KEY in query key")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(
@@ -297,8 +304,9 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 
     // the charges: each operator key's call, at its price; and the month's counts
     let keyed = ["perplexity", "elevenlabs", "google-places", "firecrawl", "fal", "browser-use", "xai", "x"];
-    // each key's call, and the speech call as its part (`price::KEY_PARTS`)
-    let held_rows = keyed.len() + 1;
+    // each key's call, and the speech calls as its part (`price::KEY_PARTS`):
+    // the one made, and the two refused
+    let held_rows = keyed.len() + 3;
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows);
     let rows = held();
@@ -309,7 +317,10 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let speech = charge_for("elevenlabs:speech", SPOKEN_CHARS);
     let spoken_row = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "elevenlabs:speech", "units": SPOKEN_CHARS }) && theirs(r) && charged(r) == Some(speech));
     s.ok(SWAP_CHECKS[31], spoken_sent && spoken_row && speech < charge_of("elevenlabs") / 10, json!({ "seen": spoken_seen, "speech": speech, "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 2, charge_of("elevenlabs") + speech), ("google-places", 1, charge_of("google-places")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 1, charge_of("fal")), ("browser-use", 1, charge_of("browser-use")), ("xai", 1, charge_of("xai")), (SWAP_OWN, 1, 0)];
+    let nothing = rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": "elevenlabs:speech", "units": 0 }) && theirs(r) && charged(r) == Some(0)).count();
+    // the agent's count, below, has its 4 ElevenLabs calls at the made ones' charges alone
+    s.ok(SWAP_CHECKS[32], refused_sent && nothing == 2, json!({ "said": refused_said, "rows": rows }));
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 1, charge_of("google-places")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 1, charge_of("fal")), ("browser-use", 1, charge_of("browser-use")), ("xai", 1, charge_of("xai")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));

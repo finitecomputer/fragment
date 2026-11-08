@@ -128,9 +128,10 @@ informational. The fee is AI Gateway's on credits, so it applies to
   book prices apart (`KEY_PARTS`) is metered in its vendor's own unit
   from the request: ElevenLabs' text to speech
   (`/v1/text-to-speech/…`) is `elevenlabs:speech`, a unit a character of
-  its JSON body's `text`, at $0.08 per 1,000 (FIN-443); its music and
-  every other call on the key is one call, a minute of music. A speech
-  call whose text is not read (no JSON, no `text`, a body past
+  its JSON body's `text`, at most 40,000 (a request's limit), at $0.08
+  per 1,000 (FIN-443); its music and every other call on the key is one
+  call, a minute of music. A speech call ElevenLabs refused (any answer
+  but a 2xx) or whose text is not read (no JSON, no `text`, a body past
   `KEY_PART_BODY_MAX_BYTES`) is charged nothing, and a release whose book
   has no part's price refuses its rows as unpriced, charging nothing.
 
