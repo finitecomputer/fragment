@@ -975,7 +975,7 @@ impl ComputerCell {
     /// one that does not read is none (best effort, as the guard is).
     fn key_pauses(&self) -> CellResult<Vec<KeyPause>> {
         let now = js::now_ms();
-        let all: Vec<KeyPause> = self.meta(MetaKey::KeyPauses)?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        let all: Vec<KeyPause> = self.meta(MetaKey::KeyPauses)?.and_then(|v| crate::json_text(&v).ok()).unwrap_or_default();
         Ok(all.into_iter().filter(|p| p.resumes_at > now).collect())
     }
 
