@@ -135,11 +135,14 @@ one large one.
 
 - Paul reads the evidence and says merge; the coordinating session merges
   directly. There is no merge queue, required check or required approval.
-- `master` runs one CI at a time (`check`, the e2e, and the Docker lanes
-  when images change). Only the newest push waits, so a burst of merges
-  is tested together at the tip. Green deploys preview.
-- If `master` goes red, preview is not deployed. Fix it forward at once
+- `master` runs one CI at a time (`check` and the e2e). Only the newest
+  push waits, so a burst of merges is tested together at the tip. Green
+  deploys preview.
+- If that run goes red, preview is not deployed. Fix it forward at once
   with another small PR, proven the same way.
+- When `images/` changes, the Docker and real-Hermes lanes run in their
+  own workflow (`images.yml`) and don't gate the preview deploy. Check
+  their result before counting on a new image.
 - Paul tries preview, then promotes it to production by pushing
   `production`. That run keeps its own proof before it deploys.
 
