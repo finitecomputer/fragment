@@ -260,10 +260,8 @@ preview proved, promoted by Paul.
   name goes.
 - **Preview follows master.** Each green master push deploys, as
   `hermes`, the image its checkout's inputs make, reused by its input key
-  when it was built before (`xtask/src/image/preview.rs`). The merge
-  queue builds it first (`preview-image.yml`, under queue tags, never
-  deploying and never a required check); master's job alone writes an
-  input tag.
+  when it was built before (`xtask/src/image/preview.rs`), else built
+  beside the push's e2e by master's job, the only writer of an input tag.
 - **What changes a version.** Only the image's inputs (Paul, 2026-10-14:
   a change to the cell or the shell needs no image rollout); a host test
   holds that list to the Dockerfile.

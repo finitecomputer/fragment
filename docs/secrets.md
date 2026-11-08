@@ -104,10 +104,7 @@ finitecomputer/fragment-deploy, whose configs hold names and paths,
 never a value), `CLOUDFLARE_ACCOUNT_ID` (a secret so that logs mask it)
 and the preview's `PREVIEW_TEST_SECRET`; production's also holds
 `PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID` for copying an image
-from the preview's registry. The merge queue's image build has an
-environment of its own, `preview-image`, open only to master's queue
-(`gh-readonly-queue/master/*`), whose token has the preview account's
-Containers permission alone. Paul sets them. Registry credentials the
+from the preview's registry. Paul sets them. Registry credentials the
 image jobs mint are never printed.
 
 ## The test secret
