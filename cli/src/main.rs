@@ -2180,7 +2180,10 @@ fn run(cli: Cli) -> Result<()> {
                 let id = mine["computers"][0]["computer"].as_str().ok_or_else(|| usage("you have no computer yet"))?.to_string();
                 let v = c.call(c.post_json(&format!("/api/computers/{id}/key-caps/{key}"), &json!({ "micros": micros }))?)?;
                 json_exit(j, &v);
-                println!("{key}: {} an hour", micros.map_or_else(|| "the default".to_string(), dollars));
+                match micros {
+                    Some(m) => println!("{key}: {} an hour", dollars(m)),
+                    None => println!("{key}: back to the default"),
+                }
             }
         },
         Cmd::Cap { name, usd } => {

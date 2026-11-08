@@ -78,7 +78,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "as the hour passes, its oldest charges go: the key's calls go again, and its notice with them",
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
     "its owner taps Allow: the computer lifts the cap a step, the notice goes, and the key's next call goes through",
-    "a stale page's tap changes nothing, the computer lifting from the cap it holds; set back to the default, the key pauses again",
+    "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -509,15 +509,40 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
     let lifted = say(s, 160, &speak(SPOKEN))?;
     s.ok(SWAP_CHECKS[44], in_chat.as_ref().is_some_and(|(_, gone)| *gone) && !paused_now() && lifted.starts_with("fetched 200"), json!({ "lifted": lifted, "notices": notices() }));
-    // a page still showing the $5 notice taps again: nothing changes ($20 holds)
+    // a page still showing the $5 notice taps again: nothing changes, so
+    // $20 holds and the next call goes through
     let stale = key_cap(w.owner, "elevenlabs", json!({ "from": cap }))?;
     let kept = say(s, 161, &speak(SPOKEN))?;
-    let back = key_cap(w.owner, "elevenlabs", json!({}))?;
-    let repaused = say(s, 162, &speak(SPOKEN))?;
+    // its person's CLI, as its own: $1, so the key pauses at it; then the default
+    let home = s.dir("key-cap-cli");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": w.owner.secret_hex() }).to_string())?;
+    let cli = |s: &Suite, usd: &str| {
+        let out = s.cli(api, &home, &["ledger", "key-cap", "elevenlabs", usd]);
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).trim().to_string())
+    };
+    let low = cli(s, "1");
+    let held_low = say(s, 162, &speak(SPOKEN))?;
+    let back = cli(s, "default");
+    // a page still showing a $20 notice taps: the $5 the computer holds stays
+    let late = key_cap(w.owner, "elevenlabs", json!({ "from": 4 * cap }))?;
+    let repaused = say(s, 163, &speak(SPOKEN))?;
     s.ok(
         SWAP_CHECKS[45],
-        stale.status == 200 && kept.starts_with("fetched 200") && back.status == 200 && repaused.starts_with("fetched 429") && repaused.contains("its limit $5.00 an hour") && paused_now(),
-        json!({ "stale": stale.status, "kept": kept, "back": back.status, "repaused": repaused }),
+        stale.status == 200
+            && kept.starts_with("fetched 200")
+            && low.0
+            && low.1 == "elevenlabs: $1.00 an hour"
+            && held_low.starts_with("fetched 429")
+            && held_low.contains("its limit $1.00 an hour")
+            && back.0
+            && back.1 == "elevenlabs: back to the default"
+            && late.status == 200
+            && repaused.starts_with("fetched 429")
+            && repaused.contains("its limit $5.00 an hour")
+            && paused_now(),
+        json!({ "stale": stale.status, "kept": kept, "low": low, "heldLow": held_low, "back": back, "late": late.status, "repaused": repaused }),
     );
     // two hours on, by the computer's clock (its uses' month stays)
     let moved = super::computers::lever_with(api, w.id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() + 2 * fragment_core::key_hour::HOUR_MS }))?;
