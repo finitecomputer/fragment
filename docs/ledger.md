@@ -287,15 +287,14 @@ two seconds and spent $300 in about 35 minutes through the shared key.
   this hour", with one button, the platform's next step
   (`guard::next_lift`: four times the cap, at most `KEY_CAP_MAX`, sent as
   the notice's `allowMicros`); at the most, it says so, with no button.
-  It ends only on evidence (`fragment_core::key_pause`): its deadline
-  (the page draws again then, idle or not), its owner changing the cap
-  (the route tells the person's computer, which then refuses a pause
-  heard before it), or a call the ledger was heard letting through after
-  the pause was heard. A call let through before it (in flight as it
-  began, or by another isolate's cached allowance) ends nothing. Each
-  time is when its answer arrived at the gate, so the ledger's order
-  holds across isolates; and only a change of the cap ends the notice,
-  never a replay of one (`SetKeyCap` answers whether it applied).
+  It ends only at its deadline (the ledger's reckoning; the page draws
+  again then, idle or not), as its owner sets the cap, or as a later
+  refusal replaces it (`fragment_core::key_pause`). A call's success ends
+  nothing, so no order of answers across isolates is trusted. The route
+  tells the person's computer the cap they set (only a change of it,
+  never a replay: `SetKeyCap` answers whether it applied), and a pause
+  heard at any other cap (delivered late, or still cached where it was
+  heard) is refused, with no clock compared.
 - **Best effort:** asked through the gate (below), an allowance kept a
   minute in each isolate and a pause five seconds (`KEY_PAUSE_KEEP_MS`),
   so a lift reaches the next call within seconds; a ledger that does not

@@ -74,7 +74,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "x: a search is charged ten posts, as before, and a lookup (its returned resources not counted) nothing",
     "an operator key charged its hourly cap within the hour pauses: its next call is refused 429 key_paused, saying what it spent and when it resumes, reaching no provider and charged nothing",
     "while it is paused, another key's call goes on: the key pauses, not the account",
-    "a ledger that does not answer in time lets a paused key's call go: the guard fails open",
+    "a ledger that does not answer in time lets a paused key's call go: the guard fails open; and that call's success, counted, ends no pause (only its deadline, its person's cap or a later refusal do)",
     "a key's hourly cap is its person's to lift: an agent's key is refused (403), as are no signature (401), a key the deployment does not offer or a connection (404), and a cap out of its bounds (400); the key stays paused",
     "its person is told in the agent's chat, once a pause: the key, what it spent this hour, and one button that allows four times its cap",
     "they tap Allow: the platform takes it, the notice goes, and the agent's next call on that key goes through at once",
@@ -539,13 +539,26 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
     // a ledger slower than the gate waits: the call goes, as decision 62 has
     let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
+    let eleven_calls = || {
+        let u = api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
+        u["uses"].as_array().map_or(0, |l| l.iter().filter(|x| x["provider"] == "elevenlabs").map(|x| x["calls"].as_u64().unwrap_or(0)).sum::<u64>())
+    };
+    let notice_kept = || api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None).is_ok_and(|v| v.body["notices"].as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused")));
+    let (calls_before, told_before) = (eleven_calls(), notice_kept());
     let slowed = slow(3_000)?;
     forget_gate(api, &owner_id)?;
     let open = say(s, 159, &speak_short);
     let unslowed = slow(0)?;
     forget_gate(api, &owner_id)?;
     let open = open?;
-    s.ok(SWAP_CHECKS[41], slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200"), json!({ "open": open, "slowed": slowed.body }));
+    // its use counted (the computer heard it), its pause still told
+    let counted = s.eventually(Duration::from_secs(20), || eleven_calls() > calls_before);
+    let kept = notice_kept();
+    s.ok(
+        SWAP_CHECKS[41],
+        slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200") && told_before && counted && kept,
+        json!({ "open": open, "slowed": slowed.body, "toldBefore": told_before, "counted": counted, "kept": kept }),
+    );
     // the lane goes on unpaused: its person allows the most, and its
     // computer tells no pause (the restarts after count its notices)
     let most = lift(w.owner, "elevenlabs", json!({ "id": "e1", "micros": fragment_core::ledger::guard::KEY_CAP_MAX }))?;

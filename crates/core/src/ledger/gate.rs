@@ -85,15 +85,8 @@ impl Gate {
     /// The answer to `key` heard less than `STANDING_CACHE_MS` before
     /// `now_ms`. A clock that runs backwards makes it stale, never fresher.
     pub fn fresh(&self, key: &str, now_ms: i64) -> Option<Result<(), Refused>> {
-        self.fresh_heard(key, now_ms).map(|(answer, _)| answer)
-    }
-
-    /// `fresh`, with when it was heard (the isolate's clock): a pause's
-    /// notice compares the times its refusal and a later allowance were
-    /// heard (`fragment_core::key_pause`).
-    pub fn fresh_heard(&self, key: &str, now_ms: i64) -> Option<(Result<(), Refused>, i64)> {
         let seen = self.seen.iter().find(|s| s.key == key)?;
-        fresh_at(seen, now_ms).then_some((seen.answer, seen.at_ms))
+        fresh_at(seen, now_ms).then_some(seen.answer)
     }
 
     /// What a model call does about `key` at `now_ms`: only a question
@@ -217,7 +210,6 @@ mod tests {
         assert_eq!(gate.fresh("p key", 1_000 + KEY_PAUSE_KEEP_MS), None, "asked again once its seconds are out");
         assert_eq!(gate.step("p key", 1_000 + KEY_PAUSE_KEEP_MS), Step::AskFirst);
         assert_eq!(gate.fresh("p may", 1_000 + KEY_PAUSE_KEEP_MS), Some(Err(STOPPED)), "a standing's refusal keeps its minute");
-        assert_eq!(gate.fresh_heard("p may", 1_000 + KEY_PAUSE_KEEP_MS), Some((Err(STOPPED), 1_000)), "with when it was heard");
     }
 
     /// Fail open: a ledger that does not answer lets the spend start and is

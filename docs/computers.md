@@ -214,8 +214,9 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   cap (docs/ledger.md, "Shared-key guard"): the swap's, kept in the DO
   (`key_pauses`, `fragment_core::key_pause`) as it refuses, so the one
   notice with a clock: told until its `resumesAt` (the shell draws again
-  then), its owner changing the cap, or a call on the key that the
-  ledger let through after the pause was heard. The shell's one button
+  then), its owner setting the cap (a pause at another cap is refused
+  from then), or a later refusal replacing it; a call's success ends
+  nothing. The shell's one button
   sends the cap the notice offers (`allowMicros`, the platform's next
   step) to `PUT /api/ledger/key-cap/{key}`; at the most, it says so.
 
