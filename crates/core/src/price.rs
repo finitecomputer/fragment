@@ -680,11 +680,11 @@ const FAL_SIZES: [(&str, u64); 6] = [
     ("portrait_16_9", 576 * 1024),
 ];
 
-/// The pixels a fal generation to `path` asks for: `num_images` (absent,
-/// 1) images of its `image_size`, a preset or `{width, height}`, or
-/// absent, Klein's default on Klein's text to image; none for any other
-/// (an absent size elsewhere, an edit's being its input's, an unknown
-/// preset, a size that is no two whole numbers).
+/// The pixels a fal generation to `path` asks for: its `num_images`
+/// (absent, one) images of its `image_size`, a preset or `{width,
+/// height}`, or absent, Klein's default on Klein's text to image; none
+/// for any other (an absent size elsewhere, an edit's being its input's,
+/// an unknown preset, a size that is no two whole numbers).
 fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let each = match said.get("image_size") {
         None if path == FAL_KLEIN => FAL_SIZES[0].1,
