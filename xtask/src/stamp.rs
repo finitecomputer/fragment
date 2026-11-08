@@ -34,8 +34,9 @@
 //! 0.19.0 with only its GHA backend has 292 normal transitive packages and
 //! cannot cache linker-invoking crates (our CLI, e2e and cell cdylib). Using
 //! dependency caches alone is correct, but gives up first-party build reuse:
-//! a shard has already exhausted CI's 20-minute budget (lanes/mod.rs).
-//! Retain this until a simpler cache's PR run proves it fits that budget.
+//! a shard's build and sections once overran CI's 20-minute cap (ci.yml's
+//! e2e-shard, lanes/mod.rs). Retain this until a simpler cache's run
+//! proves a shard stays well inside its timeout.
 //!
 //! Std alone, no crate: CI compiles this file by itself with `rustc`
 //! before its first cargo build, as no cargo build is to be trusted before
