@@ -75,7 +75,11 @@ fn script_element(after: &str) -> bool {
 }
 
 /// The places that must, each `(path, name, why)`.
-pub const ALLOWED: [(&str, &str, &str); 0] = [];
+pub const ALLOWED: [(&str, &str, &str); 1] = [(
+    "templates/board/site/board.js",
+    "srcdoc",
+    "a board's frame: the agent's own page, shown in an iframe sandboxed without allow-same-origin, so an opaque origin and never this fragment's; how the board shows a page of any size with its scripts while the platform serves the file itself inert (FIN-428)",
+)];
 
 /// More inline scripts than this in one page means the scan is reading
 /// something that is not one.

@@ -569,7 +569,8 @@ pub fn chat_history(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("Chrome is installed for the chat-history section (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    polish::history_overlaps(s, api, &owner, &session, &mut chrome)
+    polish::history_overlaps(s, api, &owner, &session, &mut chrome)?;
+    polish::history_cursor(s, api, &owner, &session, &mut chrome)
 }
 
 pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
@@ -811,7 +812,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "[document.getElementById('messages').innerText.slice(-300), document.getElementById('text').placeholder]")?,
     );
     let _ = chrome.screenshot(&page, &shots.join("desktop-asked.png"));
-    say(&mut chrome, "Sprout")?;
+    // what they type is the answer, so no Steer is offered beside Send
+    // while it waits (its menu has `steer`: `commands_queued_and_quotes`)
+    chrome.click(&page, "#text")?;
+    chrome.type_text(&page, "Sprout")?;
+    let unsteered = chrome.eval(&page, &format!("[document.getElementById('steer').hidden, {answer_here}]"))?;
+    s.ok("words typed while it waits for their answer offer no Steer", unsteered == json!([true, true]), &unsteered);
+    chrome.press(&page, "Enter", false)?;
     let answered = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.msg.asked') && !({answer_here})", replied("(told: Sprout)")));
     s.ok("their next message is the answer: the turn goes on with it, and nothing waits", answered, chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?);
 
@@ -1239,6 +1246,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::work_backfill(s, api, &owner, &owner_session, &mut chrome)?;
     polish::history_recovers(s, api, &owner, &owner_session, &mut chrome)?;
+    polish::window(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
     card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;
@@ -1512,7 +1520,22 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     claude_offers(s, chrome, &shell, &name, shots)?;
     claude_settings(s, api, chrome, owner, &shell, &name, shots)?;
     chrome.close(shell)?;
+    claude_telegram(s, api, owner, &name, &identity)?;
     Ok(())
+}
+
+/// A Claude agent's Telegram, from Settings (FIN-393; Paul, 2026-11-07:
+/// "Telegram row for claude yes"): its row is shown (agent-runtimes.js
+/// `doors`), and set up there through the setup page's own calls against
+/// Telegram's fake, its owner's message from Telegram reaches the signed-in
+/// Claude Code, whose answer goes back to Telegram (telegram_settings.rs
+/// `from_settings`, as the computers lane runs it for the stub agent).
+fn claude_telegram(s: &mut Suite, api: &Api, owner: &Keys, agent: &str, identity: &str) -> Result<()> {
+    const TOKEN: &str = "7002000:e2e-telegram-claude-token";
+    let tg = fragment_fakes::telegram::Telegram::start(TOKEN)?;
+    let owner_id = api.identity(owner)?;
+    let c = super::telegram_settings::Connector { owner, owner_id: &owner_id, agent, identity, tg: &tg, token: TOKEN, wake: TURN };
+    super::telegram_settings::from_settings(s, api, &c, "telegram-claude")
 }
 
 /// The shell's Settings, a fresh page of it: the page before marked, then

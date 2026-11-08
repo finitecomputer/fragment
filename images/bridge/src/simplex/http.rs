@@ -164,7 +164,7 @@ mod tests {
         // Paul, 2026-10-26: as a link starts it asks once whether the agent
         // reaches its person here (its home), yes by default, and says so in
         // the link's ask; a link tried again or an unlink says nothing of it
-        assert!(PAGE.contains("let home = true;") && PAGE.contains("act(\"link\", null, { home })") && PAGE.contains("box.checked = home;"));
+        assert!(PAGE.contains("let home = true;") && PAGE.contains("act(\"link\", { home })") && PAGE.contains("box.checked = home;"));
         assert_eq!(PAGE.matches("{ home }").count(), 1, "only the first link's ask says it");
         // Alex's review of #620: the shell's answer kept whole, and a choice
         // it could not save said in one line, the link going ahead
@@ -173,9 +173,11 @@ mod tests {
         let note_then_link = PAGE.find("homeNote = answer.homeError").zip(PAGE.find("view = await ask(\"POST\", want, ticket)"));
         assert!(note_then_link.is_some_and(|(note, link)| note < link), "and the link goes ahead after it");
         assert!(!PAGE.contains("fetch(\"/"), "no absolute path: it runs under /p/6080/");
-        assert!(PAGE.contains("encrypted between your SimpleX app and your computer"));
+        assert!(PAGE.contains("Encrypted between your SimpleX app and your computer"));
         // Alex's review: a stuck link has its way on, and a poll begun before a change shows nothing
-        assert!(PAGE.contains("button(\"Try again\", \"primary\", () => act(\"link\"))"));
+        assert!(PAGE.contains("button(\"Try again\", \"\", () => act(\"link\"))"));
+        // FIN-393: framed in a dialog, an unlink is made sure of in its own step, no browser dialog
+        assert!(!PAGE.contains("window.confirm") && PAGE.contains("button(\"Unlink\", \"\", () => act(\"unlink\"))"));
         assert!(PAGE.contains("if (at !== epoch || busy) return;"));
     }
 }

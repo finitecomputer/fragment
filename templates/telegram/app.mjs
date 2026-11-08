@@ -34,6 +34,9 @@ const TEXT_MAX = 4096;
 const PARTS_MAX = 4;
 // Updates remembered, so a delivery Telegram sends again is taken once.
 const SEEN_MAX = 2000;
+// Connect attempts whose answer is kept, the latest last, so a page sees its
+// own however many answered between its polls.
+const ANSWERED_MAX = 16;
 
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const nameOf = (from) => [from?.first_name, from?.last_name].filter((s) => typeof s === "string" && s).join(" ").slice(0, 64) || (from?.username ? `@${from.username}` : "someone");
@@ -87,29 +90,35 @@ export class App extends DurableObject {
     const paired = this.get("paired");
     const p = this.get("pairing");
     const pairing = p && Date.now() <= p.expires ? { link: p.link, expires: p.expires, candidate: p.candidate ? { user: p.candidate.user, name: p.candidate.name } : null } : null;
-    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing };
+    // `answered`: the attempts `connect` answered lately (each a page's own
+    // word), so a page that asked sees its own answer come, the same bot's
+    // token again included, whatever other connects answered meanwhile
+    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, answered: this.get("answered") ?? [] };
   }
 
-  async connect({ platform, api = TELEGRAM } = {}, job) {
+  async connect({ platform, api = TELEGRAM, attempt } = {}, job) {
     const base = new URL(api).origin;
+    // the attempt its page named, if it named one, with each answer
+    const said = typeof attempt === "string" ? { attempt } : {};
     const inbox = `${new URL(platform).origin}/api/f/${job.fragment}/inbox`;
     const me = await telegram(job, base, "getMe");
     if (!me.ok || typeof me.result?.username !== "string") {
-      await job.call("known", { error: `Telegram didn't take that bot token (${me.description}).` });
+      await job.call("known", { error: `Telegram didn't take that bot token (${me.description}).`, ...said });
       return { connected: false };
     }
     const query = new URLSearchParams({ url: inbox, allowed_updates: JSON.stringify(["message"]) }).toString();
     const hook = await telegram(job, base, "setWebhook", { query: `${query}&secret_token={{TELEGRAM_WEBHOOK_SECRET}}` });
     if (!hook.ok) {
-      await job.call("known", { error: `Telegram didn't take its webhook (${hook.description}).` });
+      await job.call("known", { error: `Telegram didn't take its webhook (${hook.description}).`, ...said });
       return { connected: false };
     }
-    await job.call("known", { bot: { id: me.result.id, username: me.result.username }, api: base });
+    await job.call("known", { bot: { id: me.result.id, username: me.result.username }, api: base, ...said });
     return { connected: true, bot: me.result.username };
   }
 
-  known({ bot, api, error }, call) {
+  known({ bot, api, error, attempt = null }, call) {
     if (call.agent) throw new Error("its owner connects it, in person");
+    if (typeof attempt === "string") this.put("answered", [...(this.get("answered") ?? []), attempt.slice(0, 64)].slice(-ANSWERED_MAX));
     if (error) {
       this.put("error", String(error).slice(0, 300));
       return { ok: false };

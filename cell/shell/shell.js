@@ -28,7 +28,8 @@ import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
-import { createConnections, createAgentHomes, createSimplex } from "./connections.js";
+import { createConnections, createAgentHomes, createSimplex, createTelegram } from "./connections.js";
+import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
 import { createThreads } from "./threads.js";
@@ -103,8 +104,9 @@ const UPDATING = "Updating — back in a moment";
 // this page's writes still going: a reload for a new release waits for them
 let writing = 0;
 // `body`: JSON, or bytes as they are (a File or Blob, an ArrayBuffer or a
-// typed array: an upload), sent as `type`, else as a Blob's own type
-async function api(method, path, body, type) {
+// typed array: an upload), sent as `type`, else as a Blob's own type;
+// `signal`: what may abort it (a read with a deadline)
+async function api(method, path, body, type, signal) {
   const headers = { "x-fragment-shell": "1" };
   const bytes = body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body);
   const kind = bytes ? type || body.type : body !== undefined && "application/json";
@@ -112,7 +114,7 @@ async function api(method, path, body, type) {
   const writes = method !== "GET";
   if (writes) writing++;
   try {
-    const r = await fetch(path, { method, headers, body: body === undefined || bytes ? body : JSON.stringify(body), credentials: "same-origin" });
+    const r = await fetch(path, { method, headers, body: body === undefined || bytes ? body : JSON.stringify(body), credentials: "same-origin", signal });
     heard(r);
     const out = await r.json().catch(() => ({}));
     if (r.status === 503 && out.error === "deploying") {
@@ -158,9 +160,9 @@ function nameNode(node, attr, { fragment, make }) {
 function renderNames() {
   for (const node of document.querySelectorAll("[data-named]")) for (const [attr, n] of namers.get(node) ?? []) nameNode(node, attr, n);
   // a pane's title, whatever opened it: an app's (an agent's own page), its
-  // files, an agent's screen or its SimpleX
+  // files or an agent's screen
   for (const pane of document.querySelectorAll("#stack .pane[data-key]")) {
-    const of = pane.dataset.key.match(/^(?:app|tree|screen|simplex):(.+)$/)?.[1];
+    const of = pane.dataset.key.match(/^(?:app|tree|screen):(.+)$/)?.[1];
     const title = of && pane.querySelector(".pane-title");
     if (title && title.textContent !== titleOf(of)) title.textContent = titleOf(of);
   }
@@ -371,7 +373,9 @@ addEventListener("message", async (event) => {
   const why = refused ? "cookies" : d.why;
   if (!Object.hasOwn(BLOCKED, why)) return;
   const [title, text, go, target] = BLOCKED[why](titleOf(d.name));
-  const href = why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
+  // in a tab, the page the frame was sent to (a connector's setup page), else its front
+  const page = (minted(frame) && new URL(frame.dataset.src, location.href).searchParams.get("return")) || "/";
+  const href = why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=${encodeURIComponent(page)}`;
   frame.dataset.blocked = why;
   // no chat's page is in it: it holds nothing, and is busy with nothing
   refresh.resetFrame(frame);
@@ -954,7 +958,7 @@ const { faceControls, renderAgentFaces, agentSettings, addAgentForm, agentJson, 
 // what each agent's runtime offers beyond its chats (agent-runtimes.js),
 // from its agent.json as Settings reads it
 const { loadRuntimes, offers, markOffer } = createRuntimes({ agentJson: (agent) => agentJson(agent), agents: () => state.agents, own, byName });
-const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome } = createAgentHomes({
+const { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf } = createAgentHomes({
   el, icon, named, actionLine, settingLabel, modelOption, savePick,
   agents: () => state.agents, chats, own, labelOf, byName, titleOf, agentsOwnChat,
   agentJson: (agent) => agentJson(agent), writeAgentJson, renderChats,
@@ -1379,9 +1383,14 @@ function nameScreen(frame) {
   } catch {}
 }
 
+const { pressSetup, openSetup } = createConnectorSetup({ el, named, frameOf });
 const { simplexSection, refreshSimplex, nameSimplex } = createSimplex({
   api, el, section, actionLine, named, seg, computer: () => state.computer, getSeat: () => state.seat,
-  titleOf, frameOf, show, paneIcon, notice, setHome,
+  titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome,
+});
+const { telegramSection, refreshTelegram, readTelegram } = createTelegram({
+  api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
+  connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load,
 });
 // Their seat as an action answered it (Billing's sleep choice, #609's
 // review): what Settings' SimpleX says follows it at once.
@@ -1417,6 +1426,10 @@ const TITLE_MAX_CHARS = 48;
 // add a hash to it: continue.js)
 const chatBase = (agent) => `${labelOf(agent).slice(0, LABEL_ROOM - "-chat-9999".length).replace(/-+$/, "")}-chat`;
 const chatLabel = (agent) => freeLabel(chatBase(agent));
+// A connector's label, its agent's and the door's (`maple-telegram`), free.
+function connectorLabel(agent, door) {
+  return freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - `-${door}-9999`.length).replace(/-+$/, "")}-${door}`);
+}
 // An untitled chat with only this agent that no one has said anything in
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
@@ -1735,6 +1748,7 @@ function computerIs(v) {
   renderChats();
   rosterChanged();
   refreshSimplex();
+  refreshTelegram();
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
@@ -1846,13 +1860,14 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readTelegram },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, markOffer,
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }
+function settingsAgentsChanged() { settings.agentsChanged(); }
 function skillsFragment() { return settings.skillsFragment(); }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
@@ -1946,7 +1961,10 @@ async function load(changed = false) {
   renderHeading();
   renderComputer();
   rosterChanged();
+  // Settings shown: their Agents drawn again in place, an agent come or gone
+  settingsAgentsChanged();
   refreshSimplex();
+  refreshTelegram();
   markSeen();
   launcher.agentsRead();
   renderAgentFaces();

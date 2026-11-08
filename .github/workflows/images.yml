@@ -119,6 +119,7 @@ jobs:
               - crates/proto/**
               - crates/templates/**
               - templates/blank/**
+              - templates/board/**
               - templates/calories/**
               - templates/doc/**
               - templates/inbox/**
