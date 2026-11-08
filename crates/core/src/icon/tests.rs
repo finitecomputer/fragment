@@ -177,6 +177,21 @@ fn the_subject_question_carries_the_app_and_the_hint() {
     assert!(image_input("a brass key", 7)["prompt"].as_str().unwrap().ends_with("The object: a brass key."));
 }
 
+/// A hint's object is the subject: GLM is asked to keep it and what it
+/// says of it, never under its own rules (no screen, no writing), which
+/// swapped a computer asked for with writing on its screen for a cassette
+/// tape. With no hint, GLM chooses under its own.
+#[test]
+fn a_hints_object_is_kept_and_none_is_chosen() {
+    let hinted = subject_input("Chinese practice", None, Some("a beige 1984 computer with 中文 on its screen, no bear"));
+    let system = hinted["messages"][0]["content"].as_str().unwrap();
+    assert!(!system.contains("Never an abstract shape, a logo, a screen"), "{system}");
+    assert!(system.contains("that object is your answer") && system.contains("never swap it"), "{system}");
+    assert!(system.contains("anything they say not to show"), "a negation is left out, never drawn: {system}");
+    assert!(hinted["messages"][1]["content"].as_str().unwrap().ends_with("Its maker asks for: a beige 1984 computer with 中文 on its screen, no bear"));
+    assert_eq!(subject_input("Meal planner", None, None)["messages"][0]["content"], SUBJECT_SYSTEM);
+}
+
 /// Valid and invalid hints, and the hour's makings: the tenth in an hour
 /// starts, the eleventh waits until the first is an hour old.
 #[test]
