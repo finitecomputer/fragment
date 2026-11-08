@@ -903,6 +903,9 @@ export function mount(root) {
   // are the computer's alone (a sign-in's code), which no message carries
   const takesWords = (p) => p.options.some((o) => o.words === true && o.computer !== true);
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
+  // an agent waiting on this person's words, or on their card that takes
+  // words: what they type is the answer
+  const answeringMe = () => [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
   // a card this page's person may answer now: theirs, neither closed nor
   // gone (expired, or its turn stopped); open past its turn's end, as a
   // card outlives its turn (docs/bridge.md)
@@ -1427,9 +1430,7 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      // an agent waiting on this person's words, or on their card that takes
-      // words: what they type is the answer
-      const askedMe = [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
+      const askedMe = answeringMe();
       // one waiting on a card of theirs no message answers (its buttons, or
       // a code only their computer reads): it waits for them, not works
       const waitsOnMe = [...state.turns.values()].find((t) => [...t.prompts.values()].some((p) => mayAnswer(t, p)));
@@ -2320,10 +2321,11 @@ export function mount(root) {
     $("stop").hidden = !stops;
     $("send").hidden = stops;
     // words typed while its agent works: Send queues them, Steer tells the
-    // running turn at once (its owner's `/steer`)
+    // running turn at once (its owner's `/steer`); while an agent waits for
+    // their answer, what they type is that answer, so no Steer
     const words = input.value.trim();
     const target = commandTarget();
-    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer");
+    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer") && !answeringMe();
     $("steer").hidden = !steers;
     $("steer").disabled = sending;
     tellBusy();
