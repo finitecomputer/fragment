@@ -148,7 +148,10 @@ informational. The fee is AI Gateway's on credits, so it applies to
   their credits as `firecrawl:credit` ($0.005 each); a crawl, an
   extract and a status poll none. On Browser Use's key, a session's or
   a task's start is one call of the key (five minutes); its status, its
-  stop and any other call none. A part's call its
+  stop and any other call none. On X's key, a post lookup
+  (`/2/tweets/<id>`, `/2/tweets?ids=…`) is its posts' `x:post` ($0.005
+  each), a user lookup its users' `x:user` ($0.010 each); a search and
+  any other call one call of the key, ten posts. A part's call its
   vendor refused (any answer but a 2xx) or whose units are not read (no
   JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is
   charged nothing, and a release whose book has no part's price refuses

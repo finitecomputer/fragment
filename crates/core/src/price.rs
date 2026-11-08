@@ -341,7 +341,8 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 13 for Firecrawl's credits by the call
+/// raised it, and each still does: 14 for X's post and user lookups by
+/// their count (2026-11-07), after 13 for Firecrawl's credits by the call
 /// (2026-11-07), after 12 for Google Places' details, photos
 /// and autocomplete apart from its searches (2026-11-07), after 11 for
 /// xAI's chat and images apart
@@ -354,7 +355,7 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 13;
+pub const DEFAULT_BOOK_VERSION: u32 = 14;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -445,14 +446,26 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes. A part of a key's calls priced
 /// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
 /// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 16] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 18] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
     // per request, excluding expanded users and vendor deduplication.
     // https://docs.x.com/x-api/getting-started/pricing (2026-10-09).
     // Variable resources per request are recorded in the debt ledger.
+    // Since FIN-445 a post or user lookup is priced by what it names
+    // (`KEY_PARTS`, below); a search and every other call so.
     ("x", 50_000, 1),
+    // An X post lookup (`GET /2/tweets/<id>`, `/2/tweets?ids=…`, the
+    // x-api-finite helper's `lookup`), per post it names: $0.005 per Post
+    // read. Source: docs.x.com/x-api/getting-started/pricing (read
+    // 2026-11-07).
+    ("x:post", 5_000, 1),
+    // An X user lookup (`/2/users/<id>`, `/2/users/me`,
+    // `/2/users/by/username/<name>`, `/2/users?ids=…`,
+    // `/2/users/by?usernames=…`, the helper's `user`), per user it names:
+    // $0.010 per User read. Source as above (read 2026-11-07).
+    ("x:user", 10_000, 1),
     // Firecrawl search: 2 credits per 10 results, Hobby PAYG $5 per
     // 1,000 credits. One search is $0.01; a basic scrape is $0.005.
     // https://www.firecrawl.dev/pricing (2026-10-09). A row an older
@@ -584,7 +597,10 @@ pub struct KeyPart {
 /// - Firecrawl's calls were charged as a search, 2 credits: a scrape, 1,
 ///   twice its list, and each crawl or batch's status poll a search. A
 ///   call is charged at most 1,000 credits ($5 at list).
-pub const KEY_PARTS: [KeyPart; 8] = [
+/// - X's post and user lookups were charged as a 10-post search: one post
+///   10 times its list, one user 5 times. A lookup names at most 100
+///   (X's limit a request).
+pub const KEY_PARTS: [KeyPart; 10] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
     KeyPart { key: "xai", priced_as: "xai:chat", units_max: 1 },
@@ -593,6 +609,8 @@ pub const KEY_PARTS: [KeyPart; 8] = [
     KeyPart { key: "google-places", priced_as: "google-places:photo", units_max: 1 },
     KeyPart { key: "google-places", priced_as: "google-places:autocomplete", units_max: 1 },
     KeyPart { key: "firecrawl", priced_as: "firecrawl:credit", units_max: 1_000 },
+    KeyPart { key: "x", priced_as: "x:post", units_max: 100 },
+    KeyPart { key: "x", priced_as: "x:user", units_max: 100 },
 ];
 
 /// The list price of operator key `name` per call, when the price book
@@ -609,16 +627,26 @@ pub fn default_key_price(name: &str) -> Option<(i64, u64)> {
 pub const KEY_PART_BODY_MAX_BYTES: usize = 1024 * 1024;
 
 /// One call on an operator key as the swap meters it, once answered: its
-/// method, host (lowercase), path and body as the guest sent them, and its
-/// answer's status (under 500: the swap charges no call its provider
-/// failed).
+/// method, host (lowercase), path, query (without its `?`, the key's
+/// placeholder in it) and body as the guest sent them, and its answer's
+/// status (under 500: the swap charges no call its provider failed).
 #[derive(Debug, Clone, Copy)]
 pub struct KeyCall<'a> {
     pub method: &'a str,
     pub host: &'a str,
     pub path: &'a str,
+    pub query: &'a str,
     pub body: &'a [u8],
     pub status: u16,
+}
+
+impl KeyCall<'_> {
+    /// How many values its query's `name` lists, comma-separated (`,` or
+    /// `%2C`, as Python's `urlencode` writes it); none when it has none.
+    fn listed(&self, name: &str) -> Option<u64> {
+        let value = self.query.split('&').find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))?;
+        Some(value.split(',').flat_map(|v| v.split("%2C")).flat_map(|v| v.split("%2c")).filter(|v| !v.is_empty()).count() as u64)
+    }
 }
 
 impl KeyCall<'_> {
@@ -709,6 +737,10 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 ///   a place's details (`/v1/places/<id>`), its photo
 ///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
 ///   other call none.
+/// - X: a `GET` of posts by their ids (`/2/tweets/<id>`,
+///   `/2/tweets?ids=…`) is its posts' `x:post`; of users by their ids or
+///   names its users' `x:user`; a search and any other call one call of
+///   the key, ten posts.
 /// - Browser Use: a `POST` that starts a browser session or a task
 ///   (`/api/v<n>/browsers`, `/sessions`, `/tasks` or `/runs`) is one call
 ///   of the key; its status, its stop and any other call none.
@@ -761,6 +793,22 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
                 _ => return Usage::Key { key: key.to_string(), units: 0 },
             };
             ("firecrawl:credit", credits)
+        }
+        "x" => {
+            fn id(name: &str) -> bool {
+                name.bytes().all(|b| b.is_ascii_digit())
+            }
+            // the one segment after `prefix`, if it is one `is`
+            let one = |prefix: &str, is: fn(&str) -> bool| call.path.strip_prefix(prefix).is_some_and(|name| !name.is_empty() && !name.contains('/') && is(name));
+            match (call.method, call.path) {
+                ("GET", "/2/tweets") => ("x:post", call.listed("ids")),
+                ("GET", "/2/users") => ("x:user", call.listed("ids")),
+                ("GET", "/2/users/by") => ("x:user", call.listed("usernames")),
+                ("GET", _) if one("/2/tweets/", id) => ("x:post", Some(1)),
+                ("GET", _) if one("/2/users/", |name| name == "me" || id(name)) || one("/2/users/by/username/", |_| true) => ("x:user", Some(1)),
+                // a search, a timeline, a write: ten posts, as before
+                _ => ("x", Some(1)),
+            }
         }
         "browser-use" => {
             // `/api/v<n>/<what>`, any version
@@ -997,7 +1045,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 13);
+        assert_eq!(book.version, 14);
         assert_eq!(book.models.len(), 12);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
@@ -1155,6 +1203,8 @@ mod tests {
         assert_eq!(call("google-places:photo"), Priced { list: 7_000, cost: 7_000, charge: 10_500 }, "$7 per 1,000 photos");
         assert_eq!(call("google-places:autocomplete"), Priced { list: 2_830, cost: 2_830, charge: 4_245 }, "$2.83 per 1,000 autocompletes");
         assert_eq!(call("firecrawl:credit"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "a Hobby PAYG credit");
+        assert_eq!(call("x:post"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "a Post read");
+        assert_eq!(call("x:user"), Priced { list: 10_000, cost: 10_000, charge: 15_000 }, "a User read");
         assert_eq!(default_key_price("nonesuch"), None);
     }
 
@@ -1178,7 +1228,7 @@ mod tests {
     /// A JSON `POST` on `key` to `path`, answered `status`, as the swap
     /// meters it.
     fn posted(key: &str, path: &str, body: &[u8], status: u16) -> Usage {
-        key_usage(key, &KeyCall { method: "POST", host: "api.test", path, body, status })
+        key_usage(key, &KeyCall { query: "", method: "POST", host: "api.test", path, body, status })
     }
 
     /// Goal (FIN-443): ElevenLabs' text to speech is metered by its text's
@@ -1273,7 +1323,7 @@ mod tests {
 
     /// A call on fal's key, answered `status`, as the swap meters it.
     fn fal(method: &str, host: &str, path: &str, body: &[u8], status: u16) -> Usage {
-        key_usage("fal", &KeyCall { method, host, path, body, status })
+        key_usage("fal", &KeyCall { query: "", method, host, path, body, status })
     }
 
     /// Goal (FIN-445): a fal generation is charged by the pixels it asks
@@ -1322,7 +1372,7 @@ mod tests {
         assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "the default, landscape_4_3");
         assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", br#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#, 200), units(1024 * 768), "an edit, at the default");
         // only fal's key
-        assert_eq!(key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
+        assert_eq!(key_usage("x", &KeyCall { query: "", method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
     }
 
     /// Goal: a fal generation the meter cannot read, or fal refused, is
@@ -1357,7 +1407,7 @@ mod tests {
 
     /// A call on xAI's key, answered `status`, as the swap meters it.
     fn xai(method: &str, path: &str, body: &[u8], status: u16) -> Usage {
-        key_usage("xai", &KeyCall { method, host: "api.x.ai", path, body, status })
+        key_usage("xai", &KeyCall { query: "", method, host: "api.x.ai", path, body, status })
     }
 
     /// Goal (FIN-445): only an X search on xAI's key is charged as one; a
@@ -1425,7 +1475,7 @@ mod tests {
 
     /// A call on Google Places' key, answered `status`, as the swap meters it.
     fn places(method: &str, path: &str, status: u16) -> Usage {
-        key_usage("google-places", &KeyCall { method, host: "places.googleapis.com", path, body: b"", status })
+        key_usage("google-places", &KeyCall { query: "", method, host: "places.googleapis.com", path, body: b"", status })
     }
 
     /// Goal (FIN-445): a Google Places search is charged an Enterprise
@@ -1471,7 +1521,7 @@ mod tests {
 
     /// A JSON `POST` on Firecrawl's key, answered `status`, in credits.
     fn firecrawl(method: &str, path: &str, body: &[u8], status: u16) -> Usage {
-        key_usage("firecrawl", &KeyCall { method, host: "api.firecrawl.dev", path, body, status })
+        key_usage("firecrawl", &KeyCall { query: "", method, host: "api.firecrawl.dev", path, body, status })
     }
 
     /// Goal (FIN-445): a Firecrawl call is charged the credits it costs,
@@ -1534,7 +1584,7 @@ mod tests {
     /// calls (API v3) and an agent's SDK calls (v2, v4).
     #[test]
     fn a_browser_use_session_is_charged_at_its_start_only() {
-        let used = |method: &str, path: &str, status| key_usage("browser-use", &KeyCall { method, host: "api.browser-use.com", path, body: br#"{"timeout":15}"#, status });
+        let used = |method: &str, path: &str, status| key_usage("browser-use", &KeyCall { query: "", method, host: "api.browser-use.com", path, body: br#"{"timeout":15}"#, status });
         let start = Usage::Key { key: "browser-use".into(), units: 1 };
         for path in ["/api/v3/browsers", "/api/v2/browsers", "/api/v4/browsers", "/api/v2/sessions", "/api/v2/tasks", "/api/v4/runs"] {
             assert_eq!(used("POST", path, 200), start, "{path}");
@@ -1550,6 +1600,60 @@ mod tests {
         for refused in [400, 401, 402, 404, 422, 429, 302, 0] {
             assert_eq!(used("POST", "/api/v3/browsers", refused), free, "{refused}");
         }
+    }
+
+    /// A `GET` on X's key with `query`, answered `status`.
+    fn x(path: &str, query: &str, status: u16) -> Usage {
+        key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path, query, body: b"", status })
+    }
+
+    /// Goal (FIN-445): an X lookup is charged the posts or users it names,
+    /// a search ten posts as before. Method: the x-api-finite helper's
+    /// calls (its query as Python's `urlencode` writes it), and the API's
+    /// other lookups.
+    #[test]
+    fn an_x_lookup_is_charged_what_it_names() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let posts = |units| Usage::Key { key: "x:post".into(), units };
+        let users = |units| Usage::Key { key: "x:user".into(), units };
+        let fields = "expansions=author_id%2Cattachments.media_keys&tweet.fields=created_at%2Cpublic_metrics";
+        assert_eq!(x("/2/tweets", &format!("ids=1460323737035677698&{fields}"), 200), posts(1), "the helper's lookup of one");
+        assert_eq!(x("/2/tweets", &format!("ids=1%2C2%2C3&{fields}"), 200), posts(3), "of three, its commas encoded");
+        assert_eq!(x("/2/tweets", "ids=1,2", 200), posts(2));
+        assert_eq!(x("/2/tweets/1460323737035677698", "tweet.fields=conversation_id", 200), posts(1), "the helper's conversation's first read");
+        assert_eq!(book.price(&posts(1)).unwrap().charge, 7_500, "$0.0075, not ten posts' $0.075");
+        assert_eq!(x("/2/users/by/username/jack", "user.fields=created_at", 200), users(1), "the helper's user");
+        assert_eq!(x("/2/users/12", "", 200), users(1));
+        assert_eq!(x("/2/users/me", "", 200), users(1));
+        assert_eq!(x("/2/users", "ids=12%2C13", 200), users(2));
+        assert_eq!(x("/2/users/by", "usernames=jack,x", 200), users(2));
+        assert_eq!(x("/2/tweets", &format!("ids={}", vec!["1"; 150].join(",")), 200), posts(100), "at most a request's 100");
+        // a search, a timeline, a user search, any other: ten posts, as before
+        let call = Usage::Key { key: "x".into(), units: 1 };
+        for path in ["/2/tweets/search/recent", "/2/tweets/search/all", "/2/users/12/tweets", "/2/users/search", "/2/tweets/counts/recent", "/2/tweets/abc", "/2/users/by/username/", "/2/lists/1/tweets"] {
+            assert_eq!(x(path, "query=fragment&max_results=10", 200), call, "{path}");
+        }
+        assert_eq!(key_usage("x", &KeyCall { query: "", method: "POST", host: "api.x.com", path: "/2/tweets", body: b"{}", status: 201 }), call, "a write");
+        assert_eq!(book.price(&call).unwrap().charge, 75_000);
+    }
+
+    /// Goal: an X lookup X refused, or one naming nothing, is charged
+    /// nothing; a release whose book has no post price refuses its rows.
+    #[test]
+    fn an_x_lookup_refused_or_naming_nothing_is_charged_nothing() {
+        for refused in [400, 401, 403, 404, 429, 302, 0] {
+            assert_eq!(x("/2/tweets", "ids=1", refused), Usage::Key { key: "x:post".into(), units: 0 }, "{refused}");
+            assert_eq!(x("/2/tweets/search/recent", "query=q", refused), Usage::Key { key: "x".into(), units: 0 }, "{refused}");
+        }
+        for query in ["", "ids=", "ids=%2C", "id=1", "expansions=ids", "xids=1"] {
+            assert_eq!(x("/2/tweets", query, 200), Usage::Key { key: "x:post".into(), units: 0 }, "{query}");
+        }
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("x:")).cloned().collect(), ..book.clone() };
+        assert_eq!(older.price(&Usage::Key { key: "x:post".into(), units: 1 }), Err(PriceError::NoPrice));
+        assert_eq!(older.price(&Usage::Key { key: "x".into(), units: 1 }).unwrap().charge, 75_000, "a search, as before");
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

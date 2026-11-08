@@ -734,6 +734,9 @@ mod tests {
         // Firecrawl's credits
         let firecrawl = parse(json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }])).unwrap();
         assert_eq!(priced(&firecrawl), vec![("firecrawl".to_string(), 10_000, 1), ("firecrawl:credit".to_string(), 5_000, 1)]);
+        // X's post and user lookups
+        let x = parse(json!([{ "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["X_API_BEARER_TOKEN"] }])).unwrap();
+        assert_eq!(priced(&x), vec![("x".to_string(), 50_000, 1), ("x:post".to_string(), 5_000, 1), ("x:user".to_string(), 10_000, 1)]);
     }
 
     /// Invalid: every rule, each a typed refusal.

@@ -348,7 +348,10 @@ unfinished design, not debt.
   PDF pages and other add-ons are charged nothing, and a search that
   returns fewer results than it asks for is charged for its `limit`; a
   Browser Use session is charged five minutes at its start, whatever it
-  ran, and a task its session alone, not its model's tokens.
+  ran, and a task its session alone, not its model's tokens; an X
+  lookup's expanded users (`expansions=author_id`) and X's 24-hour
+  deduplication are not counted, and a search, a timeline or a write
+  is still ten posts, whatever it read or wrote.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.

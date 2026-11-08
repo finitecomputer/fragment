@@ -610,7 +610,7 @@ fn a_speech_call_is_charged_by_its_characters_and_once() {
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&eleven.to_string()).unwrap().key_prices());
     let reply = serde_json::to_vec(&serde_json::json!({ "text": "a".repeat(200), "model_id": "eleven_multilingual_v2" })).unwrap();
-    let eleven_call = |path, body, status| crate::price::key_usage("elevenlabs", &KeyCall { method: "POST", host: "api.elevenlabs.io", path, body, status });
+    let eleven_call = |path, body, status| crate::price::key_usage("elevenlabs", &KeyCall { query: "", method: "POST", host: "api.elevenlabs.io", path, body, status });
     let spoken = eleven_call("/v1/text-to-speech/voice", &reply, 200);
     let music = eleven_call("/v1/music", br#"{"prompt":"a jingle","music_length_ms":15000}"#, 200);
     assert_eq!((&spoken, &music), (&Usage::Key { key: "elevenlabs:speech".into(), units: 200 }, &Usage::Key { key: "elevenlabs".into(), units: 1 }));
@@ -650,7 +650,7 @@ fn a_fal_image_is_charged_by_its_pixels_and_once() {
     let fal = serde_json::json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&fal.to_string()).unwrap().key_prices());
-    let call = |method, path, body, status| crate::price::key_usage("fal", &KeyCall { method, host: "queue.fal.run", path, body, status });
+    let call = |method, path, body, status| crate::price::key_usage("fal", &KeyCall { query: "", method, host: "queue.fal.run", path, body, status });
     let ask = br#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
     let made = call("POST", "/fal-ai/flux-2/klein/9b", ask, 200);
     let polled = call("GET", "/fal-ai/flux-2/requests/0b1e/status", b"", 200);
@@ -695,7 +695,7 @@ fn an_xai_call_is_charged_as_what_it_is_and_once() {
     let xai = serde_json::json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&xai.to_string()).unwrap().key_prices());
-    let call = |path, body, status| crate::price::key_usage("xai", &KeyCall { method: "POST", host: "api.x.ai", path, body, status });
+    let call = |path, body, status| crate::price::key_usage("xai", &KeyCall { query: "", method: "POST", host: "api.x.ai", path, body, status });
     let searched = call("/v1/responses", br#"{"model":"grok-4.3","input":"news","tools":[{"type":"x_search"}]}"#, 200);
     let chatted = call("/v1/chat/completions", br#"{"model":"grok-4.3","messages":[{"role":"user","content":"hi"}]}"#, 200);
     let drawn = call("/v1/images/generations", br#"{"prompt":"a cat","n":2}"#, 200);
@@ -734,7 +734,7 @@ fn a_places_detail_is_charged_its_own_price_and_once() {
     let places = serde_json::json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&places.to_string()).unwrap().key_prices());
-    let call = |method, path, status| crate::price::key_usage("google-places", &KeyCall { method, host: "places.googleapis.com", path, body: b"", status });
+    let call = |method, path, status| crate::price::key_usage("google-places", &KeyCall { query: "", method, host: "places.googleapis.com", path, body: b"", status });
     let searched = call("POST", "/v1/places:searchText", 200);
     let detailed = call("GET", "/v1/places/ChIJ", 200);
     let refused = call("GET", "/v1/places/ChIJ", 403);
@@ -762,7 +762,7 @@ fn a_firecrawl_call_is_charged_its_credits_and_once() {
     let firecrawl = serde_json::json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&firecrawl.to_string()).unwrap().key_prices());
-    let call = |method, path, body, status| crate::price::key_usage("firecrawl", &KeyCall { method, host: "api.firecrawl.dev", path, body, status });
+    let call = |method, path, body, status| crate::price::key_usage("firecrawl", &KeyCall { query: "", method, host: "api.firecrawl.dev", path, body, status });
     let scraped = call("POST", "/v2/scrape", br#"{"url":"https://example.com/","formats":["markdown","html"]}"#, 200);
     let searched = call("POST", "/v2/search", br#"{"query":"q","limit":5}"#, 200);
     let polled = call("GET", "/v2/crawl/0b1e", b"", 200);
@@ -790,7 +790,7 @@ fn a_browser_session_is_charged_once_at_its_start() {
     let browser = serde_json::json!([{ "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"], "placements": [{ "header": "x-browser-use-api-key" }], "env": ["BROWSER_USE_API_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&browser.to_string()).unwrap().key_prices());
-    let call = |method, path, status| crate::price::key_usage("browser-use", &KeyCall { method, host: "api.browser-use.com", path, body: b"{}", status });
+    let call = |method, path, status| crate::price::key_usage("browser-use", &KeyCall { query: "", method, host: "api.browser-use.com", path, body: b"{}", status });
     let started = call("POST", "/api/v3/browsers", 201);
     let read = call("GET", "/api/v3/browsers/b-1", 200);
     let stopped = call("PATCH", "/api/v3/browsers/b-1", 200);
@@ -807,6 +807,34 @@ fn a_browser_session_is_charged_once_at_its_start() {
     let again = w.ok(meter("key:c-1:b1-again", vec![row("key:c-1:b1", started, None, T0)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
     assert_eq!(w.balance(), before - 2_500);
+}
+
+/// FIN-445: X's key charged every call as a 10-post search. Goal: a
+/// deployment's book charges a lookup the posts or users it names and a
+/// search as before, each once across a replay and a restart. Method: the
+/// x-api-finite helper's calls as the swap meters them, sent again.
+#[test]
+fn an_x_lookup_is_charged_what_it_names_and_once() {
+    let x = serde_json::json!([{ "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["X_API_BEARER_TOKEN"] }]);
+    let mut configured = book();
+    configured.keys.extend(crate::catalog::Catalog::parse(&x.to_string()).unwrap().key_prices());
+    let call = |path, query| crate::price::key_usage("x", &KeyCall { query, method: "GET", host: "api.x.com", path, body: b"", status: 200 });
+    let looked = call("/2/tweets", "ids=1%2C2");
+    let user = call("/2/users/by/username/jack", "");
+    let searched = call("/2/tweets/search/recent", "query=fragment&max_results=10");
+    let mut w = World::seat();
+    w.ok(Op::Book(configured.clone()));
+    let before = w.balance();
+    let batch = meter("key:c-1:t1", vec![row("key:c-1:t1", looked.clone(), None, T0), row("key:c-1:t2", user, None, T0), row("key:c-1:t3", searched, None, T0)]);
+    // two posts, a user and a search of ten posts, each with the margin
+    let charged = Outcome::Metered(Metered { charged: 15_000 + 15_000 + 75_000, rows_new: 3, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(batch.clone()), charged);
+    let mut w = w.restarted();
+    w.replays(Op::Book(configured));
+    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
+    let again = w.ok(meter("key:c-1:t1-again", vec![row("key:c-1:t1", looked, None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
+    assert_eq!(w.balance(), before - 105_000);
 }
 
 /// Bug 2: a step's charge is its row under the step's key, whatever
