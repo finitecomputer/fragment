@@ -126,39 +126,37 @@ informational. The fee is AI Gateway's on credits, so it applies to
   price, else the book's (`DEFAULT_KEYS`), an estimate of a typical call
   where its vendor bills something else. A part of a key's calls the
   book prices apart (`KEY_PARTS`) is metered in its vendor's own unit
-  from the request: ElevenLabs' text to speech
-  (`/v1/text-to-speech/…`) is `elevenlabs:speech`, a unit a character of
-  its JSON body's `text`, at most 40,000 (a request's limit), at $0.08
-  per 1,000 (FIN-443); its music and every other call on the key is one
-  call, a minute of music. A fal generation (a `POST` to a model at
-  `queue.fal.run` or `fal.run`) is `fal:image`, a unit a pixel its JSON
-  body asks for (`num_images` of its `image_size`; absent, Klein's
-  default on Klein's text to image, else none, as an edit's is its
-  input's), at most 16
-  megapixels, at $0.006 per 1,048,576 (FIN-445); every other call on
-  fal's key (its queue's polls, statuses, results and cancels, its
-  uploads) is none of the key's, charged nothing. On xAI's key, a call
-  whose `tools` name `x_search` is one call of the key (an X search, as
-  before); a chat call without (`/v1/chat/completions`, `/v1/responses`,
-  `/v1/messages`) is one `xai:chat`, a typical chat's tokens; an image
-  call (`/v1/images/generations`) its `n` `xai:image`; any other call
-  (a video, a model list) none (FIN-445). On Google Places' key, a
-  text or nearby search is one call of the key; a place's details, its
-  photo (made by its default redirect to the image too) and an
-  autocomplete are one `google-places:details`, `:photo` and
-  `:autocomplete`, each at its own list; any other call none. On
-  Firecrawl's key, a scrape, a search and a map are their credits as
-  `firecrawl:credit` ($0.005 each); a crawl, a batch scrape (billed as
-  each page completes), an extract and a status poll none. On Browser
-  Use's key, a session's or a task's start is one call of the key (five
-  minutes); its status, its stop and any other call none. On X's key, a
-  post lookup (`/2/tweets/<id>`, `/2/tweets?ids=…`) is its posts'
-  `x:post` ($0.005 each), a user lookup its users' `x:user` ($0.010
-  each); a search and any other call one call of the key, ten posts. A
-  part's call its vendor refused (any answer but a 2xx) or whose units
+  from the request: ElevenLabs' text to speech (`/v1/text-to-speech/…`)
+  is `elevenlabs:speech`, a unit a character of its JSON body's `text`,
+  at most 40,000 (a request's limit), at $0.08 per 1,000 (FIN-443); its
+  music and every other call on the key is one call, a minute of music.
+  On fal's key (FIN-445), only FLUX.2 Klein 9B's synchronous run (`POST
+  fal.run/fal-ai/flux-2/klein/9b`) is charged, as `fal:image`, a unit a
+  pixel its JSON body asks for (`num_images` of its `image_size`,
+  Klein's default when absent), at most 16 megapixels, at $0.006 per
+  1,048,576; every other call (a queued generation, its polls and
+  result, an edit, another model, an upload) is none of the key's,
+  charged nothing. On xAI's key, a call whose `tools` name `x_search` is
+  one call of the key (an X search, as before), and an image call naming
+  a grok-imagine-image model one `xai:image` ($0.02); any other call (a
+  chat, whose tokens are not read, a video, a model list) none. On
+  Google Places' key, a place's photo and an autocomplete are one
+  `google-places:photo` and `:autocomplete`, each at its own list; a
+  search or a place's details, whose tier is its field mask's, and any
+  other call none. On Firecrawl's key, a scrape and a map are their
+  credits as `firecrawl:credit` ($0.005 each); a search (its results not
+  counted), a crawl, a batch scrape, an extract and a status poll none.
+  On Browser Use's key, a new session's or task's start is one call of
+  the key (five minutes); a task on a session it has (`sessionId`), its
+  status, its stop and any other call none. On X's key, a search is one
+  call of the key, ten posts, as before; a lookup (its resources not
+  counted) and any other call none. Only a call so classified is
+  charged, and only on a 2xx: a part's call, or any call on a key priced
+  by its parts, that its vendor refused or redirected, or whose units
   are not read (no JSON, no `text` or no size, a body past
-  `KEY_PART_BODY_MAX_BYTES`) is charged nothing, and a release whose book has no part's price refuses
-  its rows as unpriced, charging nothing.
+  `KEY_PART_BODY_MAX_BYTES`), is charged nothing, and a release whose
+  book has no part's price refuses its rows as unpriced, charging
+  nothing.
 
 - **OpenRouter's price** (decision 61; a decision for Paul): a slot on
   OpenRouter is priced at the ceiling it routes under
