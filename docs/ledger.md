@@ -144,8 +144,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   call (`/v1/images/generations`) its `n` `xai:image`; any other call
   (a video, a model list) none (FIN-445). On Google Places' key, a
   text or nearby search is one call of the key; a place's details, its
-  photo and an autocomplete are one `google-places:details`, `:photo`
-  and `:autocomplete`, each at its own list; any other call none. A
+  photo (made by its default redirect to the image too) and an
+  autocomplete are one `google-places:details`, `:photo` and
+  `:autocomplete`, each at its own list; any other call none. A
   part's call its
   vendor refused (any answer but a 2xx) or whose units are not read (no
   JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is

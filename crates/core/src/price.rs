@@ -671,8 +671,8 @@ fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> 
 ///   `/v1/images/generations` its `n` images (absent, 1).
 /// - Google Places (New): a text or nearby search is one call of the key;
 ///   a place's details (`/v1/places/<id>`), its photo
-///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
-///   other call none.
+///   (`…/photos/<photo>/media`, made by its redirect to the image too) or
+///   an autocomplete one of its part; any other call none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -710,7 +710,10 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     };
     // a part's, or one of its key's own (xAI's X search), made by a 2xx
     let most = KEY_PARTS.iter().find(|p| p.priced_as == priced_as).map_or(1, |p| p.units_max);
-    let made = (200..300).contains(&call.status);
+    // a Places photo's answer is a redirect to it unless it asks for JSON
+    // (`skipHttpRedirect`), and the swap never follows one
+    let redirected = priced_as == "google-places:photo" && matches!(call.status, 301 | 302 | 303 | 307 | 308);
+    let made = (200..300).contains(&call.status) || redirected;
     Usage::Key { key: priced_as.to_string(), units: units.filter(|_| made).map_or(0, |u| u.min(most)) }
 }
 
@@ -1386,7 +1389,12 @@ mod tests {
         assert_eq!(charge(&one("google-places")), 52_500, "an Enterprise search, as before");
         assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw", 200), one("google-places:details"));
         assert_eq!(charge(&one("google-places:details")), 30_000, "$0.03, not a search's $0.0525");
-        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"));
+        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"), "skipHttpRedirect: its JSON");
+        // its default answer is a redirect to the image (FIN-445 review)
+        for redirect in [301, 302, 303, 307, 308] {
+            assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", redirect), one("google-places:photo"), "{redirect}");
+        }
+        assert_eq!(charge(&one("google-places:photo")), 10_500);
         assert_eq!(places("POST", "/v1/places:autocomplete", 200), one("google-places:autocomplete"));
         let free = Usage::Key { key: "google-places".into(), units: 0 };
         for path in ["/v1/places/", "/v1/places/ChIJ/photos/AUc7", "/v1/places:searchtext", "/v1/places:searchText/x", "/v2/places:searchText", "/maps/api/place/textsearch/json", "/"] {
@@ -1405,6 +1413,12 @@ mod tests {
             assert_eq!(places("POST", "/v1/places:searchText", refused), Usage::Key { key: "google-places".into(), units: 0 }, "{refused}");
             assert_eq!(places("GET", "/v1/places/ChIJ", refused), Usage::Key { key: "google-places:details".into(), units: 0 }, "{refused}");
         }
+        // a photo refused, or not modified, made nothing; a redirect is a photo's alone
+        for refused in [400, 403, 404, 429, 300, 304, 0] {
+            assert_eq!(places("GET", "/v1/places/ChIJ/photos/AUc7/media", refused), Usage::Key { key: "google-places:photo".into(), units: 0 }, "{refused}");
+        }
+        assert_eq!(places("POST", "/v1/places:searchText", 302), Usage::Key { key: "google-places".into(), units: 0 });
+        assert_eq!(places("GET", "/v1/places/ChIJ", 302), Usage::Key { key: "google-places:details".into(), units: 0 });
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("google-places:")).cloned().collect(), ..book.clone() };
