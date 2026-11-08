@@ -59,7 +59,7 @@ use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -948,12 +948,41 @@ impl ComputerCell {
         let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
         for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
             let provider = row["provider"].as_str().unwrap_or_default();
-            let cap = key_hour::KEY_HOUR_CAP;
+            let cap = self.key_cap(provider)?;
             if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
-                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, resumes_at: real + resumes_in });
+                let allow_micros = key_hour::next_lift(cap);
+                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, allow_micros, resumes_at: real + resumes_in });
             }
         }
         Ok(told)
+    }
+
+    /// A shared key's hourly cap: its owner's, else the default.
+    fn key_cap(&self, provider: &str) -> CellResult<i64> {
+        let rows = self.rows("SELECT micros FROM key_caps WHERE provider = ?", vec![provider.into()])?;
+        Ok(rows.first().and_then(|r| r["micros"].as_i64()).unwrap_or(key_hour::KEY_HOUR_CAP))
+    }
+
+    /// `computer/key-cap`: its owner's cap on a shared key (`KeyCapAsk`),
+    /// `from` lifting it one step from the cap it holds, so a stale page
+    /// changes nothing; its pages told.
+    async fn set_key_cap(&self, provider: &str, ask: KeyCapAsk) -> CellResult<()> {
+        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no shared key {provider:?} here")));
+        }
+        let cap = self.key_cap(provider)?;
+        let to = match (ask.from, ask.micros) {
+            (Some(from), None) => (from == cap).then(|| key_hour::next_lift(cap)).flatten().unwrap_or(cap),
+            (None, Some(m)) if (1..=key_hour::KEY_CAP_MAX).contains(&m) => m,
+            (None, None) => key_hour::KEY_HOUR_CAP,
+            _ => return Err(CellError::invalid(format!("a key's cap is `from` (the cap a notice showed), or `micros` from 1 to {}, or neither (the default)", key_hour::KEY_CAP_MAX))),
+        };
+        match to == key_hour::KEY_HOUR_CAP {
+            true => self.exec("DELETE FROM key_caps WHERE provider = ?", vec![provider.into()])?,
+            false => self.exec("INSERT INTO key_caps (provider, micros) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET micros = excluded.micros", vec![provider.into(), to.into()])?,
+        }
+        self.tell_owner().await;
+        Ok(())
     }
 
     /// A shared key's slots this last hour, oldest first.
@@ -971,11 +1000,11 @@ impl ComputerCell {
             console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
             vec![]
         });
-        let cap = key_hour::KEY_HOUR_CAP;
+        let cap = self.key_cap(provider).unwrap_or(key_hour::KEY_HOUR_CAP);
         let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
         let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
         let (spent, cap) = (fragment_core::price::dollars(spent), fragment_core::price::dollars(cap));
-        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes");
+        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes, or ask your person to allow more (they'll see a button in this chat)");
         Err(CellError::new(ErrorCode::RateLimited, said).because(Reason::KeyPaused).retry_after(resumes_in.unsigned_abs()))
     }
 
@@ -2192,8 +2221,8 @@ impl ComputerCell {
             };
             // a shared key's charge counts in its hour (fragment_core::key_hour)
             if provider.kind == Kind::Operator && u.micros > 0 {
-                let before = key_hour::spent(&self.key_slots(&u.provider)?, now);
-                capped |= before < key_hour::KEY_HOUR_CAP && before + u.micros >= key_hour::KEY_HOUR_CAP;
+                let (before, cap) = (key_hour::spent(&self.key_slots(&u.provider)?, now), self.key_cap(&u.provider)?);
+                capped |= before < cap && before + u.micros >= cap;
                 self.exec(
                     "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
                     vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
@@ -2747,6 +2776,14 @@ impl ComputerCell {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
             }
+            "computer/key-cap" => {
+                // `{provider, from, micros}`: the router's, from a `KeyCapAsk`
+                let b: Value = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                let ask = KeyCapAsk { from: b["from"].as_i64(), micros: b["micros"].as_i64() };
+                self.set_key_cap(b["provider"].as_str().unwrap_or_default(), ask).await?;
+                json_response(&self.view()?)
+            }
             "computer/used" => {
                 let b: UsedAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
@@ -3246,6 +3283,11 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             owned(env, who, id).await?;
             let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_response(&view_of(ask(env, id, "computer/notices-seen", &json!(seen)).await?)?)
+        }
+        (Method::Post, [id, "key-caps", provider]) => {
+            owned(env, who, id).await?;
+            let cap: KeyCapAsk = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_response(&view_of(ask(env, id, "computer/key-cap", &json!({ "provider": provider, "from": cap.from, "micros": cap.micros })).await?)?)
         }
         (Method::Post, [id, "notices", "later"]) => {
             owned(env, who, id).await?;

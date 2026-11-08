@@ -12,11 +12,23 @@
 /// fits under it: about 70 spoken replies of 300 characters, a dozen X
 /// searches or ten songs.
 pub const KEY_HOUR_CAP: i64 = 5 * crate::price::USD;
+/// The most a person may let one key spend an hour: more is no cap at all.
+pub const KEY_CAP_MAX: i64 = 1_000 * crate::price::USD;
+/// How far one tap of a pause's notice lifts its key's cap (`next_lift`).
+pub const LIFT_STEP: i64 = 4;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SLOT_MS: i64 = 5 * 60_000;
 pub const SLOTS: i64 = HOUR_MS / SLOT_MS;
 
 const _: () = assert!(HOUR_MS % SLOT_MS == 0, "the hour is whole slots");
+const _: () = assert!(KEY_HOUR_CAP > 0 && KEY_HOUR_CAP < KEY_CAP_MAX, "the default is a cap a person may lift");
+
+/// The cap one tap of a pause's notice allows after `cap`: `LIFT_STEP`
+/// times it, at most `KEY_CAP_MAX`; none at the most already. The
+/// computer's alone to work out, from the cap it holds.
+pub fn next_lift(cap: i64) -> Option<i64> {
+    (cap < KEY_CAP_MAX).then(|| cap.saturating_mul(LIFT_STEP).clamp(1, KEY_CAP_MAX))
+}
 
 /// The slot a charge at `at_ms` counts in.
 pub fn slot_of(at_ms: i64) -> i64 {
@@ -115,5 +127,17 @@ mod tests {
         assert_eq!(paused(&slots, 4 * call + 1, now), None);
         // more than one slot must go: until the second goes too
         assert_eq!(paused(&slots, call, now), Some((4 * call, (slot_of(now) + SLOTS + 1) * SLOT_MS - now)));
+    }
+
+    /// Goal: a tap never allows more than a person may: the default's
+    /// steps, then the most, then none.
+    #[test]
+    fn a_lift_is_a_step_up_to_the_most() {
+        let usd = crate::price::USD;
+        assert_eq!(next_lift(KEY_HOUR_CAP), Some(20 * usd));
+        assert_eq!(next_lift(20 * usd), Some(80 * usd));
+        assert_eq!(next_lift(320 * usd), Some(KEY_CAP_MAX), "past $250: the most, not four times");
+        assert_eq!(next_lift(KEY_CAP_MAX - 1), Some(KEY_CAP_MAX));
+        assert_eq!(next_lift(KEY_CAP_MAX), None, "at the most: no lift");
     }
 }

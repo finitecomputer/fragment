@@ -9,10 +9,18 @@ import { createExpiry, keyPausedSaid } from "../shell/computer.js";
 
 const paused = (o) => ({ kind: "key_paused", provider: "elevenlabs", spentMicros: 5_030_000, capMicros: 5_000_000, resumesAt: 60_000, ...o });
 
-test("a pause: the key, and what it spent this hour; none past its end", () => {
-  assert.deepEqual(keyPausedSaid(paused(), 0), { title: "ElevenLabs calls paused: $5.03 this hour" });
-  assert.deepEqual(keyPausedSaid(paused({ spentMicros: 20_000_000 }), 59_999), { title: "ElevenLabs calls paused: $20 this hour" });
-  assert.equal(keyPausedSaid(paused(), 60_000), null);
+test("a pause: the key, what it spent this hour, and the computer's one tap; none past its end", () => {
+  assert.deepEqual(keyPausedSaid(paused({ allowMicros: 20_000_000 }), 0), { title: "ElevenLabs calls paused: $5.03 this hour", allow: "Allow up to $20 an hour", most: null });
+  assert.equal(keyPausedSaid(paused({ allowMicros: 20_000_000 }), 60_000), null);
+});
+
+test("above $250 the tap is the most a person may allow; at the most, said so, with no button", () => {
+  assert.equal(keyPausedSaid(paused({ capMicros: 320_000_000, allowMicros: 1_000_000_000 }), 0).allow, "Allow up to $1,000 an hour");
+  assert.deepEqual(keyPausedSaid(paused({ spentMicros: 1_000_400_000, capMicros: 1_000_000_000 }), 0), {
+    title: "ElevenLabs calls paused: $1,000.40 this hour",
+    allow: null,
+    most: "$1,000 an hour is the most allowed.",
+  });
 });
 
 // The page's clock and timers, a test's.

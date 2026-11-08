@@ -28,6 +28,7 @@ step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
 step Computer 3 key_hour 6c22fff2c2414701
+step Computer 4 key_caps 3a6f4f9976a3efe3
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 
@@ -192,6 +193,7 @@ Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 Computer table agent_accounts: CREATE TABLE agent_accounts (agent TEXT NOT NULL, provider TEXT NOT NULL, account TEXT NOT NULL, PRIMARY KEY (agent, provider))
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null')
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
+Computer table key_caps: CREATE TABLE key_caps (provider TEXT PRIMARY KEY, micros INTEGER NOT NULL)
 Computer table key_hour: CREATE TABLE key_hour (provider TEXT NOT NULL, slot INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (provider, slot))
 Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL)

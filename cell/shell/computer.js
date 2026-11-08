@@ -15,11 +15,17 @@ const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Ma
 // dollars as a notice says them: $20, $5.03
 const usd = (micros) => (micros / 1e6).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: micros % 1e6 ? 2 : 0 });
 
-// A paused shared key's notice (`key_paused`, FIN-448) in words at `now`;
-// null once past its end: no pause, though no one told this page yet.
+// A paused shared key's notice (`key_paused`, FIN-448) in words at `now`:
+// its one tap, the computer's next step (`allowMicros`), or at the most,
+// that it is; null once past its end: no pause, though no one told this
+// page yet.
 export function keyPausedSaid(n, now) {
   if (n.resumesAt <= now) return null;
-  return { title: `${providerName(n.provider)} calls paused: ${usd(n.spentMicros)} this hour` };
+  return {
+    title: `${providerName(n.provider)} calls paused: ${usd(n.spentMicros)} this hour`,
+    allow: n.allowMicros ? `Allow up to ${usd(n.allowMicros)} an hour` : null,
+    most: n.allowMicros ? null : `${usd(n.capMicros)} an hour is the most allowed.`,
+  };
 }
 
 // One redraw at the earliest time `notices` change by the clock alone (a
@@ -226,6 +232,14 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       if (!said) return null;
       row.classList.add("warn");
       copy.append(el("strong", null, said.title));
+      if (said.most) copy.append(el("p", null, said.most));
+      if (said.allow) {
+        const allow = el("button", "primary", said.allow);
+        allow.type = "button";
+        allow.dataset.action = "allow-key";
+        allow.onclick = () => allowKey(n, allow);
+        actions.append(allow);
+      }
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
@@ -293,6 +307,18 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     button.disabled = true;
     try {
       computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
+    } catch {
+      computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
+    }
+  }
+  // Allow: the computer lifts the key's cap a step from the one this
+  // notice showed (a stale page changes nothing), and answers its view
+  async function allowKey(n, button) {
+    const c = computer();
+    if (!c) return;
+    button.disabled = true;
+    try {
+      computerIs(await api("POST", `/api/computers/${seg(c.computer)}/key-caps/${seg(n.provider)}`, { from: n.capMicros }));
     } catch {
       computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
     }
