@@ -1424,16 +1424,19 @@ the wire shows of its rules:
   reaches it within a minute; a ledger that does not answer refuses
   nothing.
 - **A shared key's hour** (docs/ledger.md, Shared-key guard): once a
-  person's agents' calls on one operator key were charged
-  `ledger::guard::KEY_HOUR_CAP` within the last hour, that key's calls
-  through their computer's swap are 429 `key_paused`, saying what was
-  spent and about when they resume (`retry_after_ms`, `Retry-After`),
-  reaching no provider and charged nothing. Nothing else pauses.
+  person's agents' calls on one operator key were charged its cap within
+  the last hour (theirs, else `ledger::guard::KEY_HOUR_CAP`), that key's
+  calls through their computer's swap are 429 `key_paused`, saying what
+  was spent and about when they resume (`retry_after_ms`,
+  `Retry-After`), reaching no provider and charged nothing, and their
+  computer's view tells them (`key_paused`, Computers). Nothing else
+  pauses.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus {plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}`: `balanceMicros` negative while they owe; `reservedMicros` always 0 (decision 62); `availableMicros` what may be charged before read-only; `priceBook` the version the answering release charges with |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`; `null` is the default |
+| `PUT /api/ledger/key-cap/{key}` | a person, for their own ledger (an agent 403, unsigned 401) | `{id, micros \| null}` → `{key, capMicros, default}`: the most their agents' calls on operator key `key` may be charged an hour, 1 to `ledger::guard::KEY_CAP_MAX` micros (else 400), `null` the default; a key the deployment does not offer as an operator key 404; the same id again changes nothing, with another body 409. Their computer's `key_paused` notice of it goes at once |
 | `POST /api/ledger/{person}/grant` | operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit; `by` the signing operator |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat holder's next push wins (debt ledger) |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}` |

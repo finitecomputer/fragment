@@ -453,21 +453,6 @@ unfinished design, not debt.
 - **Delete when:** a call with no usage is charged from what it streamed,
   and a failed send is kept and sent again.
 
-## A paused shared key tells its agent, not its person
-
-- **Shortcut:** the shared-key guard (docs/ledger.md, "Shared-key
-  guard"; FIN-448) refuses a paused key's calls with 429 `key_paused`,
-  which the agent or script that made the call reads. Its person is told
-  nothing: no channel shows them a platform fact outside a computer's own
-  state without new UI.
-- **Risk:** a loop no agent watches (a script left running) pauses and
-  resumes each hour, unseen, up to the cap an hour, until someone reads
-  their spend.
-- **Delete when:** the person is told once per pause, for example a
-  computer notice (`ComputerNotice::KeyPaused {provider, spentMicros,
-  resumesAt}`, the swap telling its computer as it refuses) with its few
-  words in the shell's notices, with a test that one pause tells once.
-
 ## The price book is the core's defaults
 
 - **Shortcut:** `configured_book` (cell/src/config.rs) starts from

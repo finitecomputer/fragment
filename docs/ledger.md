@@ -236,11 +236,18 @@ two seconds and spent $300 in about 35 minutes through the shared key.
   is of: a part the book prices apart counts as its key
   (`elevenlabs:speech` as `elevenlabs`). Charged micros, once by the row's
   reference, so a replay adds nothing; what a call costs is the book's.
-- **The cap:** `guard::KEY_HOUR_CAP`, $5.00 an hour, one for every key: a
-  ledger constant, as `CAP_DEFAULT` and `OVERDRAFT_DEFAULT` are, not a
-  price (the book prices usage) nor the deployment's (the platform
-  decides it once). The reasons for its size are beside it; a decision
-  for Paul.
+- **The cap:** its person's own for that key, else `guard::KEY_HOUR_CAP`,
+  $5.00 an hour: a ledger constant, as `CAP_DEFAULT` and
+  `OVERDRAFT_DEFAULT` are, not a price (the book prices usage) nor the
+  deployment's (the platform decides it once). The reasons for its size
+  are beside it; a decision for Paul.
+- **The person's lift** (Paul: "the user has a way to approve and lift
+  the cap"): `SetKeyCap {id, key, micros | null}`, a key's own name, from
+  1 micro-dollar to `guard::KEY_CAP_MAX` ($1,000) an hour, or `null` for
+  the default; idempotent by id, kept in `meta` (`key_cap:<key>`). Only
+  the person sends it (`PUT /api/ledger/key-cap/{key}`, docs/api.md),
+  never an agent, whose spending it bounds; the CLI's `fragment ledger
+  key-cap <key> <usd|default>`.
 - **The hour:** each key's is a row of the ledger's `meta`
   (`key_hour:<key>`), not a table of its own, since a schema step would
   make every ledger refuse a rollback. It sums five-minute slots, at most
@@ -252,17 +259,23 @@ two seconds and spent $300 in about 35 minutes through the shared key.
   `key_paused`, reaching no provider and charged nothing: "elevenlabs's
   call is not made: this key is paused: $5.03 spent on it in the last
   hour, its limit $5.00 an hour; its calls resume as the hour passes, in
-  about 62 minutes", with `retry_after_ms` and `Retry-After`. Agents'
+  about 62 minutes, or ask your person to allow more (they'll see a
+  button in this chat)", with `retry_after_ms` and `Retry-After`. Agents'
   turns, the payer's other keys and their fragments' writes go on: the
   account is neither stopped nor read-only. When the standing refuses
   too, the standing is what is said.
-- **Best effort:** asked through the gate (below), its answer kept a
-  minute in each isolate; a ledger that does not answer lets the call go
-  (`ledger.gate-unknown`), and a record that does not read counts nothing
-  (`ledger.key-hour-unread`). So a key is charged past its cap by the
-  calls that start within the minute and by rows still on their way.
-- **Not yet:** the person is not told; the agent reads the refusal (the
-  debt ledger). Nor is the cap anyone's to change: a person's own would
-  be a command, `SetKeyCap {id, key, micros | null}`, idempotent by id as
-  a fragment's cap is, kept beside the key's hour and read by `key_open`
-  in place of `KEY_HOUR_CAP`.
+- **The notice:** as it refuses, the swap tells the agent's computer,
+  whose owner is shown `key_paused` over every chat (docs/computers.md,
+  What its owner is told), once a pause: "ElevenLabs calls paused: $5.03
+  this hour", with one button, Allow up to four times its cap an hour.
+  It goes as a call on the key goes through, as its cap changes (the
+  route tells the person's computer), or at the pause's end.
+- **Best effort:** asked through the gate (below), an allowance kept a
+  minute in each isolate and a pause five seconds (`KEY_PAUSE_KEEP_MS`),
+  so a lift reaches the next call within seconds; a ledger that does not
+  answer lets the call go (`ledger.gate-unknown`), and a record that does
+  not read counts nothing (`ledger.key-hour-unread`). So a key is charged
+  past its cap by the calls that start within the minute and by rows
+  still on their way.
+- **iOS** shows no computer notices yet: there a pause is the agent's
+  word alone, and the lift is the web's or the CLI's.

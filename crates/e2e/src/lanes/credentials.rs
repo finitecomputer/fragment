@@ -75,6 +75,10 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "an operator key charged its hourly cap within the hour pauses: its next call is refused 429 key_paused, saying what it spent and when it resumes, reaching no provider and charged nothing",
     "while it is paused, another key's call goes on: the key pauses, not the account",
     "a ledger that does not answer in time lets a paused key's call go: the guard fails open",
+    "a key's hourly cap is its person's to lift: an agent's key is refused (403), as are no signature (401), a key the deployment does not offer or a connection (404), and a cap out of its bounds (400); the key stays paused",
+    "its person is told in the agent's chat, once a pause: the key, what it spent this hour, and one button that allows four times its cap",
+    "they tap Allow: the platform takes it, the notice goes, and the agent's next call on that key goes through at once",
+    "set back to the default (again the same; another body under its id refused), the key pauses again at its next call",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -459,7 +463,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let reached = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == made);
     forget_gate(api, &owner_id)?;
     let seen_before = s.upstream.seen().len();
-    let paused = say(s, 157, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"))?;
+    let speak_short = format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}");
+    let paused = say(s, 157, &speak_short)?;
     let unreached = s.upstream.seen().len() == seen_before;
     let other = say(s, 158, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let went = other.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|l| l["host"] == "api.perplexity.ai");
@@ -475,23 +480,103 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             && paused.contains("key_paused")
             && paused.contains("elevenlabs's call is not made: this key is paused")
             && paused.contains("its calls resume as the hour passes")
-            && paused.contains("retry_after_ms")
+            && paused.contains("or ask your person to allow more (they'll see a button in this chat)")
+            && paused.contains("retry_after")
             && unreached
             && settled
             && charged_once,
         json!({ "spoke": spoke.iter().map(|x| x.chars().take(80).collect::<String>()).collect::<Vec<_>>(), "spent": spent, "calls": calls, "paused": paused, "rows": rows.len() }),
     );
     s.ok(SWAP_CHECKS[40], went, &other);
+
+    // its person lifts it (Paul, 2026-11-08: "the user has a way to approve
+    // and lift the cap"): theirs alone, then one tap in the agent's chat
+    let lift = |who: &crate::Keys, key: &str, body: Value| api.signed(who, "PUT", &format!("/api/ledger/key-cap/{key}"), Some(&body));
+    let (agent_keys, _) = api.own_agent(w.stranger)?;
+    let by_agent = lift(&agent_keys, "elevenlabs", json!({ "id": "a1", "micros": 4 * cap }))?;
+    let unsigned = api.unsigned("PUT", "/api/ledger/key-cap/elevenlabs", Some(&json!({ "id": "u1", "micros": 4 * cap })))?;
+    let unknown = lift(w.owner, "nonesuch", json!({ "id": "n1", "micros": 4 * cap }))?;
+    let connection = lift(w.owner, SWAP_CONNECTION, json!({ "id": "c1", "micros": 4 * cap }))?;
+    let zero = lift(w.owner, "elevenlabs", json!({ "id": "z1", "micros": 0 }))?;
+    forget_gate(api, &owner_id)?;
+    let still = say(s, 160, &speak_short)?;
+    s.ok(
+        SWAP_CHECKS[42],
+        by_agent.status == 403 && unsigned.status == 401 && unknown.status == 404 && connection.status == 404 && zero.status == 400 && still.starts_with("fetched 429"),
+        json!({ "agent": by_agent.body, "unsigned": unsigned.status, "unknown": unknown.status, "connection": connection.status, "zero": zero.body, "still": still }),
+    );
+    let hour: i64 = rows.iter().filter(|r| of_elevenlabs(r)).filter_map(charged).sum();
+    let told = json!({ "said": format!("ElevenLabs calls paused: ${:.2} this hour", hour as f64 / 1e6), "buttons": [format!("Allow up to ${} an hour", 4 * cap / 1_000_000)], "detail": null });
+    let tapped = allow_in_chat(s, api, w.owner)?;
+    forget_gate(api, &owner_id)?;
+    let lifted = say(s, 161, &speak_short)?;
+    match &tapped {
+        Some((shown, gone, after)) => {
+            s.ok(SWAP_CHECKS[43], *shown == told, json!({ "shown": shown, "told": told }));
+            s.ok(SWAP_CHECKS[44], *gone && after.is_null() && lifted.starts_with("fetched 200"), json!({ "after": after, "lifted": lifted }));
+        }
+        None => {
+            for check in [SWAP_CHECKS[43], SWAP_CHECKS[44]] {
+                s.ok(check, false, "no Chrome found (set CHROME_BIN)");
+            }
+        }
+    }
+    let default = json!({ "id": "d1", "micros": null });
+    let (back, again) = (lift(w.owner, "elevenlabs", default.clone())?, lift(w.owner, "elevenlabs", default)?);
+    let conflict = lift(w.owner, "elevenlabs", json!({ "id": "d1", "micros": 7 * cap }))?;
+    forget_gate(api, &owner_id)?;
+    let repaused = say(s, 162, &speak_short)?;
+    s.ok(
+        SWAP_CHECKS[45],
+        back.status == 200
+            && back.body == json!({ "key": "elevenlabs", "capMicros": cap, "default": true })
+            && again.status == 200
+            && again.body == back.body
+            && conflict.status == 409
+            && repaused.starts_with("fetched 429")
+            && repaused.contains("its limit $5.00 an hour"),
+        json!({ "back": back.body, "again": again.body, "conflict": conflict.status, "repaused": repaused }),
+    );
     // a ledger slower than the gate waits: the call goes, as decision 62 has
     let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
     let slowed = slow(3_000)?;
     forget_gate(api, &owner_id)?;
-    let open = say(s, 159, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"));
+    let open = say(s, 159, &speak_short);
     let unslowed = slow(0)?;
     forget_gate(api, &owner_id)?;
     let open = open?;
     s.ok(SWAP_CHECKS[41], slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200"), json!({ "open": open, "slowed": slowed.body }));
     Ok(turns)
+}
+
+/// A paused key's notice over the agent's chat, as the shell shows it: its
+/// words, its buttons and its detail line; null while it is not shown.
+const KEY_NOTICE: &str = "(() => { const box = document.getElementById('computer-notices'); const r = box?.querySelector('.computer-notice[data-kind=\"key_paused\"]'); if (!r || box.hidden) return null; return { said: r.querySelector('strong')?.textContent ?? null, buttons: [...r.querySelectorAll('button')].map((x) => x.textContent), detail: r.querySelector('.notice-detail')?.textContent ?? null }; })()";
+
+/// The person's chat page in Chrome (the shell, signed in as `owner`): the
+/// paused key's notice as it shows, shot at 1280 and 390 wide, light, in
+/// the run's `key-guard/`; its button tapped; whether the notice went, and
+/// what shows after. None without Chrome.
+fn allow_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<(Value, bool, Value)>> {
+    let wait = Duration::from_secs(30);
+    let Some(mut b) = s.browser()? else { return Ok(None) };
+    let shots = s.dir("key-guard");
+    let session = api.sign_in(&Api::email_of(owner))?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let page = b.open(&format!("{}/", api.base))?;
+    b.viewport(&page, 1280, 900, false)?;
+    let mut shown = Value::Null;
+    s.eventually(wait, || {
+        shown = b.eval(&page, KEY_NOTICE).unwrap_or(Value::Null);
+        !shown.is_null()
+    });
+    super::telegram_settings::shoot(&mut b, &page, &shots, "k1-paused", Some("#computer-notices"))?;
+    let tapped = b.eval(&page, "(() => { const x = document.querySelector('#computer-notices [data-action=\"allow-key\"]'); if (!x || x.disabled) return false; x.click(); return true; })()")? == true;
+    let gone = tapped && b.until(&page, &format!("{KEY_NOTICE} === null"), wait);
+    let after = b.eval(&page, KEY_NOTICE).unwrap_or(Value::Null);
+    super::telegram_settings::shoot(&mut b, &page, &shots, "k2-allowed", None)?;
+    b.close(page)?;
+    Ok(Some((shown, gone, after)))
 }
 
 /// The checks `model_checks` makes, as a run without the stub or the fakes

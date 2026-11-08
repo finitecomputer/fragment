@@ -19,11 +19,16 @@
 //! slots a key, and one record a key, the book's keys at most (a row the
 //! book cannot price is refused before it is charged).
 //!
+//! The cap is the person's to lift (`SetKeyCap`, their route alone, never
+//! an agent's; Paul: "the user has a way to approve and lift the cap"),
+//! in one tap of the notice its computer shows them as it pauses.
+//!
 //! Best effort, never in an agent's way (decision 62): the cell asks it in
-//! the gate's one question (`key_open`), cached a minute in each isolate,
-//! and a ledger that does not answer lets the call go. So a key that
-//! reaches its cap may be charged past it by the calls that start within
-//! the minute, and by those whose rows are still on their way.
+//! the gate's one question (`key_open`), an allowance cached a minute in
+//! each isolate and a pause five seconds (`gate::KEY_PAUSE_KEEP_MS`), and a
+//! ledger that does not answer lets the call go. So a key that reaches its
+//! cap may be charged past it by the calls that start within the minute,
+//! and by those whose rows are still on their way.
 
 use fragment_proto::ledger::SetKeyCap;
 use serde::{Deserialize, Serialize};

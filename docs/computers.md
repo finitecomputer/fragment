@@ -210,6 +210,12 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   done on the lost life after that save (Paul, 2026-10-23).
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
+- `key_paused`: an operator key its agents call is paused at its hourly
+  cap (docs/ledger.md, "Shared-key guard"): the swap's, kept in the DO
+  (`key_pauses`) as it refuses, so the one notice with a clock: told
+  until its `resumesAt`, a call on the key going through, or its owner
+  changing the cap. The shell's one button, Allow up to four times the
+  cap an hour, is `PUT /api/ledger/key-cap/{key}`.
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). The shell shows them over
