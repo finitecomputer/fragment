@@ -4894,7 +4894,10 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
     b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
-    b.eval(&p, "(window.__refuse = false, true)")?;
+    // reads answer from the press of Try again on, so the read it starts is
+    // the one that answers; any before it, a list's refresh's, still fail
+    // (and the line waits under the hand through them)
+    b.eval(&p, &format!("(document.addEventListener('click', (e) => {{ if (e.target.closest?.({})) window.__refuse = false; }}, true), true)", js(&format!("[data-home-unread={agent:?}] button"))))?;
     if said {
         b.click(&p, &format!("[data-home-unread={agent:?}] button"))?;
     }
