@@ -61,6 +61,63 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Home after Your Apps")
     }
 
+    /// Words that wrap take the composer's whole width, its buttons a row
+    /// beneath them; back on one line, they sit between the buttons again.
+    /// Right at the wrap point it changes once each way, and the keyboard
+    /// stays up throughout: every word typed lands in the field.
+    func testComposerWordsTakeTheFullWidthOnceTheyWrap() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", "http://127.0.0.1:9"]
+        app.launch()
+        let composer = app.textViews["composer"], attach = app.buttons["attach"], send = app.buttons["send"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "Home, its saved account approved")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "Home opens with the keyboard")
+
+        var typed = "Hello"
+        composer.typeText(typed)
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        expect(app, oneRow: true, composer, attach, send, "one line")
+        screenshot(app, "Composer one line")
+        // a word at a time to the wrap point: the first that wraps stacks it
+        while beside(composer, attach), typed.count < 200 { composer.typeText(" wrap"); typed += " wrap" }
+        expect(app, oneRow: false, composer, attach, send, "wrapped onto a second line")
+        composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5))
+        typed.removeLast(5)
+        expect(app, oneRow: true, composer, attach, send, "the wrapping word deleted")
+        composer.typeText(" wrap"); typed += " wrap"
+        expect(app, oneRow: false, composer, attach, send, "the wrapping word typed again")
+
+        for line in 2...6 { composer.typeText("\nLine \(line)"); typed += "\nLine \(line)" }
+        expect(app, oneRow: false, composer, attach, send, "six lines")
+        aboveTheKeyboard(composer, keyboard, "six lines")
+        screenshot(app, "Composer six lines")
+        XCTAssertEqual(composer.value as? String, typed, "every key reached the field: it kept the keyboard")
+
+        composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count - 5))
+        expect(app, oneRow: true, composer, attach, send, "back to one line")
+        XCTAssertEqual(composer.value as? String, "Hello")
+        aboveTheKeyboard(composer, keyboard, "back to one line")
+    }
+
+    /// Whether the field sits to the right of the + (one row), not above it.
+    private func beside(_ field: XCUIElement, _ attach: XCUIElement) -> Bool { field.frame.minX >= attach.frame.maxX - 0.5 }
+
+    /// Waits for the composer's one row (the field between its buttons), or
+    /// its two (the field across the buttons' full span, the buttons under it).
+    private func expect(_ app: XCUIApplication, oneRow: Bool, _ field: XCUIElement, _ attach: XCUIElement, _ send: XCUIElement, _ when: String) {
+        let laidOut = NSPredicate { _, _ in
+            let f = field.frame, a = attach.frame, s = send.frame
+            if oneRow { return self.beside(field, attach) && f.maxX <= s.minX + 0.5 && abs(f.maxY - a.maxY) < 1 }
+            // the full span less the field's margin either side (`ComposerLayout.inset`)
+            return f.maxY <= a.minY + 0.5 && f.maxY <= s.minY + 0.5 && f.width >= s.maxX - a.minX - 2 * 8 - 1
+        }
+        let settled = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: laidOut, object: nil)], timeout: 5)
+        XCTAssertEqual(settled, .completed, "\(when): field \(field.frame), + \(attach.frame), send \(send.frame)")
+        if settled != .completed { screenshot(app, "Composer \(when)") }
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "\(when): the keyboard stays up")
+    }
+
     /// Waits for `field` to rest wholly above `keyboard`, as the keyboard
     /// and the layout around it settle.
     private func aboveTheKeyboard(_ field: XCUIElement, _ keyboard: XCUIElement, _ when: String) {
