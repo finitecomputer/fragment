@@ -25,9 +25,10 @@
 //! reaches its cap may be charged past it by the calls that start within
 //! the minute, and by those whose rows are still on their way.
 
+use fragment_proto::ledger::SetKeyCap;
 use serde::{Deserialize, Serialize};
 
-use super::{invalid, valid_id, Invalid, Ledger, Refused, Spend, Store};
+use super::{invalid, valid_id, Command, Invalid, Ledger, Refused, Spend, Store};
 use crate::price::USD;
 
 /// What one operator key may be charged a payer in a rolling hour before
@@ -37,9 +38,12 @@ use crate::price::USD;
 /// minutes, while an hour of normal use fits under it: about 70 spoken
 /// replies of 300 characters, a dozen X searches, ten songs or 45 place
 /// searches. $2 would stop the loop a minute sooner but pause a voice
-/// chat of 28 replies. One for every key, defined here alone: an override
-/// would be a command on the ledger (docs/ledger.md, "Shared-key guard").
+/// chat of 28 replies. The default for every key, defined here alone; its
+/// person raises their own (`SetKeyCap`), in one tap of its notice.
 pub const KEY_HOUR_CAP: i64 = 5 * USD;
+/// The most a person may let one key spend an hour: more is no cap at all,
+/// and a typo.
+pub const KEY_CAP_MAX: i64 = 1_000 * USD;
 /// The hour, and its slots: each a sum, so a key's record stays small
 /// however fast its calls come.
 pub const HOUR_MS: i64 = 3_600_000;
@@ -47,7 +51,7 @@ pub const SLOT_MS: i64 = 5 * 60_000;
 pub const SLOTS: i64 = HOUR_MS / SLOT_MS;
 
 const _: () = assert!(HOUR_MS % SLOT_MS == 0, "the hour is whole slots");
-const _: () = assert!(KEY_HOUR_CAP > 0 && KEY_HOUR_CAP <= super::CAP_MAX, "the guard's cap is a cap");
+const _: () = assert!(KEY_HOUR_CAP > 0 && KEY_HOUR_CAP <= KEY_CAP_MAX, "the guard's default is a cap a person may set");
 
 /// The shared key a key row's usage names: a part's name (`price::KeyPart`,
 /// `<key>:<part>`) is its key's, so a key's guard sums all its parts. A
@@ -141,26 +145,48 @@ pub(super) fn charged(store: &mut impl Store, name: &str, at_ms: i64, micros: i6
 impl Ledger {
     /// May an agent of this payer's call operator key `key` now? Its
     /// standing lets an agent's turn spend (`may_spend`, as every key's
-    /// call asked before the guard), and the key's last hour is under
-    /// `KEY_HOUR_CAP`: at it, the key pauses (`KeyPaused`, saying for how
-    /// long), and nothing else does.
+    /// call asked before the guard), and the key's last hour is under its
+    /// cap, its person's own or `KEY_HOUR_CAP`: at it, the key pauses
+    /// (`KeyPaused`, saying for how long), and nothing else does.
     pub fn key_open(&self, store: &impl Store, key: &str, now_ms: i64) -> Result<(), Refused> {
         if !valid_id(key) {
             return Err(invalid(Invalid::Id));
         }
         self.may_spend(store, Spend::AgentTurn, None, true, now_ms)?;
+        let cap = store.key_cap(key).unwrap_or(KEY_HOUR_CAP);
         let hour = store.key_hour(key);
         let spent = hour.spent(now_ms);
-        if spent < KEY_HOUR_CAP {
+        if spent < cap {
             return Ok(());
         }
-        Err(Refused::KeyPaused { cap: KEY_HOUR_CAP, spent, resumes_in_ms: hour.resumes_in_ms(now_ms, KEY_HOUR_CAP) })
+        Err(Refused::KeyPaused { cap, spent, resumes_in_ms: hour.resumes_in_ms(now_ms, cap) })
+    }
+
+    /// A key's hourly cap, set by its person (their route, never an
+    /// agent's: cell/src/lib.rs): from 1 micro-dollar to `KEY_CAP_MAX`, or
+    /// `None` for the default. A key's own name, never a part's.
+    pub fn set_key_cap(&mut self, store: &mut impl Store, c: &SetKeyCap, now_ms: i64) -> Result<(), Refused> {
+        self.persons_only()?;
+        self.roll(now_ms);
+        let command = Command::SetKeyCap(c.clone());
+        if !Self::admit(store, &c.id, &command)? {
+            return Ok(());
+        }
+        if !valid_id(&c.key) || guarded_key(&c.key) != c.key {
+            return Err(invalid(Invalid::Id));
+        }
+        if c.micros.is_some_and(|m| !(1..=KEY_CAP_MAX).contains(&m)) {
+            return Err(invalid(Invalid::Amount));
+        }
+        store.set_key_cap(&c.key, c.micros);
+        self.done(store, &c.id, command, now_ms);
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use fragment_proto::ledger::{GrantCredit, Plan, SetPlan, Why};
+    use fragment_proto::ledger::{GrantCredit, Plan, SetKeyCap, SetPlan, Why};
     use fragment_proto::ErrorCode;
 
     use super::super::sim::{apply, Op, Outcome, T0};
@@ -218,6 +244,13 @@ mod tests {
             self.ledger.status(&self.store, self.now, &self.book).balance_micros
         }
 
+        /// Its person sets `key`'s cap (`None`: the default), as their
+        /// route sends it.
+        fn cap(&mut self, id: &str, key: &str, micros: Option<i64>) -> Result<(), Refused> {
+            let c = SetKeyCap { id: id.into(), key: key.into(), micros };
+            self.ledger.set_key_cap(&mut self.store, &c, self.now)
+        }
+
         /// The state written and read back, as the Durable Object's is.
         fn restarted(&self) -> World {
             let ledger: Ledger = serde_json::from_str(&serde_json::to_string(&self.ledger).unwrap()).unwrap();
@@ -249,7 +282,7 @@ mod tests {
         assert_eq!(paused, Err(Refused::KeyPaused { cap: KEY_HOUR_CAP, spent: 4 * CALL, resumes_in_ms: resumes }));
         let why = paused.unwrap_err();
         assert_eq!((why.code(), why.code().status()), (ErrorCode::KeyPaused, 429));
-        assert_eq!(why.message(), "this key is paused: $6.00 spent on it in the last hour, its limit $5.00 an hour; its calls resume as the hour passes, in about 62 minutes");
+        assert_eq!(why.message(), "this key is paused: $6.00 spent on it in the last hour, its limit $5.00 an hour; its calls resume as the hour passes, in about 62 minutes, or ask your person to allow more (they'll see a button in this chat)");
         assert_eq!(w.open("search"), Ok(()), "another key goes on");
         for spend in [Spend::AgentTurn, Spend::AiStep, Spend::Write, Spend::Create, Spend::Wake] {
             assert_eq!(w.ledger.may_spend(&w.store, spend, None, true, w.now), Ok(()), "{spend:?} goes on");
@@ -383,5 +416,54 @@ mod tests {
         let mut ahead = KeyHour::default();
         ahead.add(T0, 7, T0);
         assert_eq!((ahead.spent(T0), ahead.spent(T0 - SLOT_MS)), (7, 0));
+    }
+
+    /// Goal: the person lifts a paused key's cap and its calls go at once;
+    /// back to the default, it is paused again; the command is idempotent
+    /// by its id, refused out of its bounds or for a part's name or an
+    /// org, and kept across a restart. Method: $6.00 on `voice`, then the
+    /// person's $20, then the default.
+    #[test]
+    fn a_person_lifts_a_keys_cap_in_one_command() {
+        let mut w = World::funded();
+        for n in 1..=4 {
+            w.call(&format!("key:c1:{n}"), "voice");
+        }
+        assert!(matches!(w.open("voice"), Err(Refused::KeyPaused { cap: KEY_HOUR_CAP, .. })));
+        assert_eq!(w.cap("keycap:voice:a1", "voice", Some(4 * KEY_HOUR_CAP)), Ok(()));
+        assert_eq!(w.open("voice"), Ok(()), "open at once, nothing waited for");
+        // a replay changes nothing; another body under its id is refused
+        let (ledger, store) = (w.ledger.clone(), w.store.clone());
+        assert_eq!(w.cap("keycap:voice:a1", "voice", Some(4 * KEY_HOUR_CAP)), Ok(()));
+        assert_eq!((&w.ledger, &w.store), (&ledger, &store), "a replay changes nothing");
+        assert_eq!(w.cap("keycap:voice:a1", "voice", Some(KEY_HOUR_CAP)), Err(Refused::ConflictingBody));
+        // the raised cap counts as any: at it, paused again, saying it
+        let mut w = w.restarted();
+        assert_eq!(w.store.key_cap("voice"), Some(4 * KEY_HOUR_CAP), "kept across a restart");
+        for n in 5..=14 {
+            w.call(&format!("key:c1:{n}"), "voice");
+        }
+        assert!(matches!(w.open("voice"), Err(Refused::KeyPaused { cap, spent, .. }) if cap == 4 * KEY_HOUR_CAP && spent == 14 * CALL));
+        assert_eq!(w.open("search"), Ok(()), "another key keeps the default");
+        // back to the default: paused at $5.00 again
+        assert_eq!(w.cap("keycap:voice:d1", "voice", None), Ok(()));
+        assert_eq!(w.store.key_cap("voice"), None);
+        assert!(matches!(w.open("voice"), Err(Refused::KeyPaused { cap: KEY_HOUR_CAP, .. })));
+        // out of bounds, or not a key's own name: refused, changing nothing
+        for (id, key, micros, why) in [
+            ("keycap:voice:z", "voice", Some(0), Invalid::Amount),
+            ("keycap:voice:n", "voice", Some(-1), Invalid::Amount),
+            ("keycap:voice:x", "voice", Some(KEY_CAP_MAX + 1), Invalid::Amount),
+            ("keycap:voice:p", "voice:speech", Some(KEY_HOUR_CAP), Invalid::Id),
+            ("keycap:bad:1", "two words", Some(KEY_HOUR_CAP), Invalid::Id),
+        ] {
+            let (ledger, store) = (w.ledger.clone(), w.store.clone());
+            assert_eq!(w.cap(id, key, micros), Err(Refused::Invalid { what: why }), "{key} {micros:?}");
+            assert_eq!((&w.ledger, &w.store), (&ledger, &store), "a refusal changes nothing");
+        }
+        assert_eq!(w.cap("keycap:voice:max", "voice", Some(KEY_CAP_MAX)), Ok(()), "the most a person may allow");
+        // an org has no keys
+        let mut org = World { ledger: Ledger::new_org(T0), store: Memory::default(), now: T0, book: book() };
+        assert_eq!(org.cap("keycap:voice:o", "voice", Some(KEY_HOUR_CAP)), Err(Refused::PersonsOnly));
     }
 }

@@ -173,6 +173,14 @@ impl Store for Audited {
         self.inner.put_key_hour(key, hour);
     }
 
+    fn key_cap(&self, key: &str) -> Option<i64> {
+        self.inner.key_cap(key)
+    }
+
+    fn set_key_cap(&mut self, key: &str, micros: Option<i64>) {
+        self.inner.set_key_cap(key, micros);
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         self.inner.prune(before_ms, before_month)
     }

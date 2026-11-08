@@ -697,6 +697,14 @@ enum LedgerCmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// The most your agents' calls on one of the platform's shared keys
+    /// (an operator key, by its provider's name: `elevenlabs`) may spend
+    /// an hour before that key pauses (default $5)
+    KeyCap {
+        key: String,
+        /// Dollars an hour, or `default`
+        usd: String,
+    },
 }
 
 /// Dollars, as the ledger's micro-dollars: positive, at most a cent's
@@ -2148,6 +2156,16 @@ fn run(cli: Cli) -> Result<()> {
                 c.call(c.post_json(&format!("/api/ledger/{who}/grant"), &body)?)?;
                 json_exit(j, &json!({ "granted": body }));
                 println!("granted {who} {} ({id})", dollars(micros_of(usd)?));
+            }
+            Some(LedgerCmd::KeyCap { key, usd }) => {
+                let micros = match usd.as_str() {
+                    "default" => None,
+                    n => Some(micros_of(n.parse::<f64>().map_err(|_| usage("a key's cap is dollars an hour, or `default`"))?)?),
+                };
+                let id = format!("cli-{:016x}", rand::random::<u64>());
+                let v = c.call(c.put_json(&format!("/api/ledger/key-cap/{key}"), &json!({ "id": id, "micros": micros }))?)?;
+                json_exit(j, &v);
+                println!("{key}: {} an hour{}", dollars(v["capMicros"].as_i64().unwrap_or(0)), if v["default"] == true { " (the default)" } else { "" });
             }
         },
         Cmd::Cap { name, usd } => {

@@ -688,6 +688,9 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         let who = signer(env, &req, url, &body).await?;
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
     }
+    if let (Method::Put, ["key-cap", key]) = (req.method(), rest) {
+        return key_cap(env, cfg, &req, url, &body, key).await;
+    }
     let (Method::Post, [person, command]) = (req.method(), rest) else {
         return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), url.path())));
     };
@@ -766,6 +769,31 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         // a seat is the registry's alone: an operator comps or ends one there (`/api/admin/seats`)
         other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, overdraft, or an org's budget (a seat is comped or ended at /api/admin/seats)"))),
     }
+}
+
+/// `PUT /api/ledger/key-cap/{key}` `{id, micros | null}` (docs/ledger.md,
+/// "Shared-key guard"): a person lifts, or puts back, the hourly cap on an
+/// operator key their agents call: theirs alone, never an agent's, whose
+/// spending it bounds. The ledger keeps it under `keycap:<key>:<id>`, once
+/// by its id. Its notice goes from the person's computer at once (one not
+/// made has none); a key still past the cap is told again at its next call.
+async fn key_cap(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8], key: &str) -> CellResult<Response> {
+    let who = signer(env, req, url, body).await?;
+    if who.kind != IdentityKind::Person {
+        return Err(CellError::new(ErrorCode::Forbidden, "a key's hourly cap is its person's to lift, never an agent's"));
+    }
+    if cfg.providers.get(key).is_none_or(|p| p.kind != fragment_core::catalog::Kind::Operator) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no operator key {key:?} here")));
+    }
+    let put: fragment_proto::ledger::PutCap = command_body(body, "a key's cap")?;
+    let set = fragment_proto::ledger::SetKeyCap { id: commanded(&format!("keycap:{key}"), &put.id)?, key: key.to_string(), micros: put.micros };
+    ledger::ask(env, &who.id, &set).await?;
+    let computer = fragment_core::computer::default_computer_of(&who.id);
+    match computer::ask(env, &computer, "computer/key-pause", &json!({ "provider": key, "pause": null })).await {
+        Err(e) if e.code != ErrorCode::NotFound => console_error!("{}", json!({ "keyCap": key, "computer": computer, "untold": e.message })),
+        _ => {}
+    }
+    json_answer(&json!({ "key": key, "capMicros": put.micros.unwrap_or(fragment_core::ledger::guard::KEY_HOUR_CAP), "default": put.micros.is_none() }))
 }
 
 /// `/api/identities…`: the registry's public face. The signer's key is

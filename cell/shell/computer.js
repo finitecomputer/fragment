@@ -1,3 +1,4 @@
+import { providerName } from "./connections.js";
 import { icon } from "./icons.js";
 import { active, createRestartFollow, FAILED, READ_FAILED } from "./restart-follow.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
@@ -54,6 +55,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
   };
+  // dollars as a notice says them: $20, $5.03
+  const usd = (micros) => (micros / 1e6).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: micros % 1e6 ? 2 : 0 });
   // why a computer won't start, in plain words (the platform's own words
   // stay beside them, for whoever helps); no time it may not keep: a big
   // restore takes a start up to 15 minutes (#1001)
@@ -197,6 +200,16 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     } else if (n.kind === "disk_filling") {
       row.classList.add("warn");
       copy.append(el("strong", null, diskSaid(n)));
+    } else if (n.kind === "key_paused") {
+      // an operator key at its hourly cap (docs/ledger.md, "Shared-key
+      // guard"): the person's one tap lifts it four times, never an agent's
+      row.classList.add("warn");
+      copy.append(el("strong", null, `${providerName(n.provider)} calls paused: ${usd(n.spentMicros)} this hour`));
+      const allow = el("button", "primary", `Allow up to ${usd(n.capMicros * 4)} an hour`);
+      allow.type = "button";
+      allow.dataset.action = "allow-key";
+      allow.onclick = () => allowKey(n, allow, copy);
+      actions.append(allow);
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
@@ -265,6 +278,22 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     } catch {
       computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
     }
+  }
+  // Allow: the key's hourly cap, four times what paused it; its notice goes
+  // as the platform takes it (the computer read again), or says why not
+  async function allowKey(n, button, copy) {
+    const c = computer();
+    if (!c) return;
+    button.disabled = true;
+    try {
+      await api("PUT", `/api/ledger/key-cap/${seg(n.provider)}`, { id: `allow-${crypto.randomUUID()}`, micros: n.capMicros * 4 });
+    } catch (e) {
+      copy.querySelector(".notice-detail")?.remove();
+      copy.append(el("p", "notice-detail", e.message));
+      button.disabled = false;
+      return;
+    }
+    computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
   // Later: this update is told no more, anywhere, until another is ready.
   async function updateLater(version, button) {

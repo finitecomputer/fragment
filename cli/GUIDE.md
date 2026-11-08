@@ -883,10 +883,16 @@ why: replay it after a top-up or next month.
   edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
+- Each of the platform's shared keys (ElevenLabs, xAI, …) pauses once your
+  agents' calls on it spend $5 in an hour (429 `key_paused`); nothing else
+  does. Its calls resume as the hour passes, or at once when you allow
+  more: the notice in your agent's chat has a button, or `fragment ledger
+  key-cap`. Only you can, never your agents.
 
 ```
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
+fragment ledger key-cap elevenlabs 20   # its shared key's cap: $20 an hour (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
@@ -1081,7 +1087,7 @@ it gets no share link, no one else, and no invite (403
 fragment login [--force] [--no-wait] [--no-browser]
 fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W [--id ID]]
+fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
@@ -1166,7 +1172,8 @@ its wording:
 - `conflicting_body`: that operation id already ran with another input (409)
 - `too_large`: over a limit the message names (413)
 - `app_failed`: the app's code refused or threw (422)
-- `rate_limited`: too many calls; back off (429)
+- `rate_limited`: too many calls; back off (429). A paused shared key's
+  `key_paused` reads as it: its message says when it resumes
 - `budget_used_up`: your ledger refused it: no credit, a fragment's cap, or read-only past the overdraft (402); `fragment ledger` says which
 
 - `storage_full`: the app's database is at its cap; the change rolled back (507)

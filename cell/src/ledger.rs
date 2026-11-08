@@ -44,7 +44,7 @@ use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::guard::KeyHour;
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetKeyCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -71,9 +71,10 @@ const TEST_SLOW_MAX_MS: u64 = 30_000;
 const TEST_FAIL_GRANTS_MAX: u32 = 10;
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
-/// The meta keys of each operator key's last hour (`Store::key_hour`), the
-/// key's name after it.
+/// The meta keys of each operator key's last hour (`Store::key_hour`) and
+/// its person's cap (`Store::key_cap`), the key's name after each.
 const KEY_HOUR_META: &str = "key_hour:";
+const KEY_CAP_META: &str = "key_cap:";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
 /// times a Durable Object call's usual round trip (tens of ms within a
 /// location, a few hundred across the world, and a cold start), so a slow
@@ -320,6 +321,11 @@ impl Route for SetOverdraft {
     type Answer = Done;
 }
 
+impl Route for SetKeyCap {
+    const PATH: &'static str = "/key-cap";
+    type Answer = Done;
+}
+
 impl Route for SetFragmentCap {
     const PATH: &'static str = "/cap";
     type Answer = Done;
@@ -559,6 +565,21 @@ impl Store for SqlStore {
         );
     }
 
+    fn key_cap(&self, key: &str) -> Option<i64> {
+        let rows: Vec<Json> = self.rows("SELECT value FROM meta WHERE key = ?", vec![format!("{KEY_CAP_META}{key}").into()]);
+        let row = rows.into_iter().next()?;
+        // written by `set_key_cap` alone: one that does not read is corruption
+        row.value.parse().map_err(|e| self.fail(format!("a key's cap row: {e}"))).ok()
+    }
+
+    fn set_key_cap(&mut self, key: &str, micros: Option<i64>) {
+        let at = format!("{KEY_CAP_META}{key}");
+        match micros {
+            Some(m) => self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![at.into(), m.to_string().into()]),
+            None => self.exec("DELETE FROM meta WHERE key = ?", vec![at.into()]),
+        }
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let before = SqlStorageValue::Integer(before_ms);
         let forgotten = self.count(
@@ -782,6 +803,10 @@ impl LedgerCell {
             <SetOverdraft as Route>::PATH => {
                 let c: SetOverdraft = decode(&body)?;
                 reply(done(self.mutate(move |l, s, now| l.set_overdraft(s, &c, now)).await?))
+            }
+            <SetKeyCap as Route>::PATH => {
+                let c: SetKeyCap = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.set_key_cap(s, &c, now)).await?))
             }
             <SetFragmentCap as Route>::PATH => {
                 let c: SetFragmentCap = decode(&body)?;

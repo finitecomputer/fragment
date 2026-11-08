@@ -56,7 +56,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::ledger::{FragmentSpend, GrantCredit, LedgerStatus, OrgBudget, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
+use fragment_proto::ledger::{FragmentSpend, GrantCredit, LedgerStatus, OrgBudget, Plan, SeatState, SetFragmentCap, SetKeyCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
 use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -283,6 +283,7 @@ pub enum Command {
     SetCap(SetFragmentCap),
     SetBook(SetPriceBook),
     OrgBudget(OrgBudget),
+    SetKeyCap(SetKeyCap),
 }
 
 /// A batch's answer, kept with the batch so a replay answers the same.
@@ -445,7 +446,7 @@ impl Refused {
                 format!("this org's fragments spent {} of its {} budget this month: AI steps wait until its billing admins raise it, or next month", dollars(spent), dollars(budget))
             }
             Refused::KeyPaused { cap, spent, resumes_in_ms } => format!(
-                "this key is paused: {} spent on it in the last hour, its limit {} an hour; its calls resume as the hour passes, in about {} minutes",
+                "this key is paused: {} spent on it in the last hour, its limit {} an hour; its calls resume as the hour passes, in about {} minutes, or ask your person to allow more (they'll see a button in this chat)",
                 dollars(spent),
                 dollars(cap),
                 resumes_in_ms.div_euclid(60_000) + i64::from(resumes_in_ms.rem_euclid(60_000) > 0),
@@ -594,6 +595,9 @@ pub trait Store {
     /// best effort, never a fault).
     fn key_hour(&self, key: &str) -> KeyHour;
     fn put_key_hour(&mut self, key: &str, hour: &KeyHour);
+    /// An operator key's hourly cap as its person set it (`SetKeyCap`).
+    fn key_cap(&self, key: &str) -> Option<i64>;
+    fn set_key_cap(&mut self, key: &str, micros: Option<i64>);
     /// Forgets the entries and batches from before `before_ms` and the
     /// months of spend before `before_month`; answers how many entries and
     /// batches it forgot.
@@ -610,6 +614,8 @@ pub struct Memory {
     caps: BTreeMap<String, i64>,
     #[serde(default)]
     key_hours: BTreeMap<String, KeyHour>,
+    #[serde(default)]
+    key_caps: BTreeMap<String, i64>,
 }
 
 impl Store for Memory {
@@ -673,6 +679,17 @@ impl Store for Memory {
 
     fn put_key_hour(&mut self, key: &str, hour: &KeyHour) {
         self.key_hours.insert(key.to_string(), hour.clone());
+    }
+
+    fn key_cap(&self, key: &str) -> Option<i64> {
+        self.key_caps.get(key).copied()
+    }
+
+    fn set_key_cap(&mut self, key: &str, micros: Option<i64>) {
+        match micros {
+            Some(m) => self.key_caps.insert(key.to_string(), m),
+            None => self.key_caps.remove(key),
+        };
     }
 
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {

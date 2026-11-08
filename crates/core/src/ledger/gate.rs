@@ -19,8 +19,11 @@
 //! always record), and one who topped up waits up to a minute for their
 //! agents (Paul, 2026-10-21: "'overspend by whatever is in flight during
 //! the cache window' is a small price to pay"). A refusal is kept as an
-//! answer is. A ledger that does not answer is no answer: the spend goes
-//! on, and nothing is kept, so the next one asks again.
+//! answer is, but a paused key's (`Refused::KeyPaused`) only for
+//! `KEY_PAUSE_KEEP_MS`: its person's lift (one tap) reaches the next call
+//! within seconds, and a loop's refused calls ask its ledger at most that
+//! often. A ledger that does not answer is no answer: the spend goes on,
+//! and nothing is kept, so the next one asks again.
 
 use std::future::Future;
 
@@ -28,11 +31,14 @@ use super::Refused;
 
 /// How long an isolate trusts what a ledger answered its gate.
 pub const STANDING_CACHE_MS: i64 = 60_000;
+/// How long it trusts that a key is paused (`Refused::KeyPaused`).
+pub const KEY_PAUSE_KEEP_MS: i64 = 5_000;
 /// Answers an isolate keeps at once: one per person and question it asked
 /// within the window. Past it, the stale go first, then the oldest.
 pub const GATE_ENTRIES_MAX: usize = 1_024;
 
 const _: () = assert!(STANDING_CACHE_MS <= 60_000, "a spend learns its payer's standing within a minute");
+const _: () = assert!(KEY_PAUSE_KEEP_MS <= STANDING_CACHE_MS, "a lifted key is heard no later than a top-up");
 
 /// What a model call does about one gate question (`Gate::step`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +71,10 @@ pub struct Gate {
     seen: Vec<Seen>,
 }
 
-fn fresh_at(at_ms: i64, now_ms: i64) -> bool {
-    (0..STANDING_CACHE_MS).contains(&(now_ms - at_ms))
+/// Whether `seen` is still trusted at `now_ms`: for its answer's window.
+fn fresh_at(seen: &Seen, now_ms: i64) -> bool {
+    let keep = if matches!(seen.answer, Err(Refused::KeyPaused { .. })) { KEY_PAUSE_KEEP_MS } else { STANDING_CACHE_MS };
+    (0..keep).contains(&(now_ms - seen.at_ms))
 }
 
 impl Gate {
@@ -78,7 +86,7 @@ impl Gate {
     /// `now_ms`. A clock that runs backwards makes it stale, never fresher.
     pub fn fresh(&self, key: &str, now_ms: i64) -> Option<Result<(), Refused>> {
         let seen = self.seen.iter().find(|s| s.key == key)?;
-        fresh_at(seen.at_ms, now_ms).then_some(seen.answer)
+        fresh_at(seen, now_ms).then_some(seen.answer)
     }
 
     /// What a model call does about `key` at `now_ms`: only a question
@@ -86,7 +94,7 @@ impl Gate {
     /// until the bound needs its room (`heard`), so it is read here.
     pub fn step(&self, key: &str, now_ms: i64) -> Step {
         match self.seen.iter().find(|s| s.key == key) {
-            Some(seen) if fresh_at(seen.at_ms, now_ms) => match seen.answer {
+            Some(seen) if fresh_at(seen, now_ms) => match seen.answer {
                 Ok(()) => Step::Go,
                 Err(why) => Step::Refuse(why),
             },
@@ -100,7 +108,7 @@ impl Gate {
     /// one heard beside a call.
     pub fn heard_for(&self, person: &str, now_ms: i64) -> Vec<Result<(), Refused>> {
         let prefix = format!("{person} ");
-        self.seen.iter().filter(|s| s.key.starts_with(&prefix) && fresh_at(s.at_ms, now_ms)).map(|s| s.answer).collect()
+        self.seen.iter().filter(|s| s.key.starts_with(&prefix) && fresh_at(s, now_ms)).map(|s| s.answer).collect()
     }
 
     /// What the ledger said to `key`, asked at `now_ms` (`None`: it did not
@@ -114,7 +122,7 @@ impl Gate {
             return answer;
         }
         if self.seen.len() >= GATE_ENTRIES_MAX {
-            self.seen.retain(|s| fresh_at(s.at_ms, now_ms));
+            self.seen.retain(|s| fresh_at(s, now_ms));
         }
         if self.seen.len() >= GATE_ENTRIES_MAX {
             let oldest = self.seen.iter().enumerate().min_by_key(|(_, s)| s.at_ms).map(|(i, _)| i).expect("a full gate holds an answer");
@@ -187,6 +195,21 @@ mod tests {
         assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 1_000 + STANDING_CACHE_MS), Err(STOPPED));
         assert_eq!(gate.fresh("p may", 1_000 + 2 * STANDING_CACHE_MS - 1), Some(Err(STOPPED)));
         assert_eq!(gate.fresh("p may", 1_000 + 2 * STANDING_CACHE_MS), None);
+    }
+
+    /// A paused key's refusal is kept only `KEY_PAUSE_KEEP_MS`: its person's
+    /// lift reaches the next call within seconds, while a standing's
+    /// refusal is kept its minute. Method: both heard at once.
+    #[test]
+    fn a_paused_key_is_asked_again_within_seconds() {
+        let mut gate = Gate::new();
+        let paused = Refused::KeyPaused { cap: 5_000_000, spent: 6_000_000, resumes_in_ms: 3_000_000 };
+        assert_eq!(gate.heard("p key", Some(Err(paused)), 1_000), Err(paused));
+        assert_eq!(gate.heard("p may", Some(Err(STOPPED)), 1_000), Err(STOPPED));
+        assert_eq!(gate.step("p key", 1_000 + KEY_PAUSE_KEEP_MS - 1), Step::Refuse(paused));
+        assert_eq!(gate.fresh("p key", 1_000 + KEY_PAUSE_KEEP_MS), None, "asked again once its seconds are out");
+        assert_eq!(gate.step("p key", 1_000 + KEY_PAUSE_KEEP_MS), Step::AskFirst);
+        assert_eq!(gate.fresh("p may", 1_000 + KEY_PAUSE_KEEP_MS), Some(Err(STOPPED)), "a standing's refusal keeps its minute");
     }
 
     /// Fail open: a ledger that does not answer lets the spend start and is

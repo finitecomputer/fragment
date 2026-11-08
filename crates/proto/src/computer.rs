@@ -607,6 +607,14 @@ pub enum ComputerNotice {
     /// that fills stops its agents from saving their work, so its owner is
     /// told well before.
     DiskFilling { total: u64, free: u64 },
+    /// An operator key its agents call is paused (docs/ledger.md,
+    /// "Shared-key guard"): its owner's calls on `provider` were charged
+    /// `spent_micros` this last hour, at its cap `cap_micros`, and resume
+    /// by `resumes_at` as the hour passes, or at once when its owner raises
+    /// the cap (`PUT /api/ledger/key-cap/{key}`). Told once a pause: gone
+    /// as a call on it goes through, or its cap changes.
+    #[serde(rename_all = "camelCase")]
+    KeyPaused { provider: String, spent_micros: i64, cap_micros: i64, resumes_at: i64 },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as

@@ -60,7 +60,7 @@ use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
@@ -339,6 +339,9 @@ enum MetaKey {
     /// The test lever's takeover destroys still to fail
     /// (`fail-takeover-destroys`).
     FailTakeOverDestroys,
+    /// Its owner's operator keys paused as the swap last heard
+    /// (`KeyPause`s, at most one a catalog row): told until each resumes.
+    KeyPauses,
 }
 
 impl MetaKey {
@@ -365,6 +368,7 @@ impl MetaKey {
             MetaKey::FailStarts => "fail_starts",
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
+            MetaKey::KeyPauses => "key_pauses",
         }
     }
 }
@@ -632,6 +636,26 @@ struct UsedAsk {
 struct Used {
     provider: String,
     micros: i64,
+}
+
+/// An operator key paused for its owner (docs/ledger.md, "Shared-key
+/// guard"), as the swap heard the ledger refuse it: its notice
+/// (`ComputerNotice::KeyPaused`) until `resumes_at`, a call on it going
+/// through, or its owner changing its cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyPause {
+    provider: String,
+    spent_micros: i64,
+    cap_micros: i64,
+    resumes_at: i64,
+}
+
+/// `computer/key-pause`'s body: `provider` paused, or no longer (`null`).
+#[derive(Deserialize)]
+struct KeyPauseAsk {
+    provider: String,
+    pause: Option<KeyPause>,
 }
 
 /// `computer/uses`' body: a month (`YYYY-MM`), or this one.
@@ -935,9 +959,51 @@ impl ComputerCell {
         Delay::from(std::time::Duration::from_millis(ms)).await;
     }
 
-    /// What its owner is told of it now (`fragment_core::computer::notices`).
+    /// What its owner is told of it now (`fragment_core::computer::notices`),
+    /// and its paused keys (`with_pauses`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        self.with_pauses(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// `told` and a notice of each key still paused, after them.
+    fn with_pauses(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
+        told.extend(self.key_pauses()?.into_iter().map(|p| ComputerNotice::KeyPaused { provider: p.provider, spent_micros: p.spent_micros, cap_micros: p.cap_micros, resumes_at: p.resumes_at }));
+        Ok(told)
+    }
+
+    /// The keys paused now: a record past its `resumes_at` is let go, and
+    /// one that does not read is none (best effort, as the guard is).
+    fn key_pauses(&self) -> CellResult<Vec<KeyPause>> {
+        let now = js::now_ms();
+        let all: Vec<KeyPause> = self.meta(MetaKey::KeyPauses)?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+        Ok(all.into_iter().filter(|p| p.resumes_at > now).collect())
+    }
+
+    /// `provider`'s pause as `pause` says (none: it resumed), its owner's
+    /// pages told when that changes whether it is told: once a pause.
+    async fn key_paused(&self, provider: &str, pause: Option<KeyPause>) -> CellResult<()> {
+        let mut all = self.key_pauses()?;
+        let held = all.iter().find(|p| p.provider == provider);
+        let was = held.is_some();
+        // each refused call tells it again: written only as it says more
+        // (another cap, or a resume a minute or more later)
+        if let (Some(h), Some(p)) = (held, &pause) {
+            if h.cap_micros == p.cap_micros && p.resumes_at < h.resumes_at + 60_000 {
+                return Ok(());
+            }
+        }
+        all.retain(|p| p.provider != provider);
+        let is = pause.is_some();
+        all.extend(pause);
+        assert!(all.len() <= self.cfg.providers.providers().len(), "a pause a catalog row at most");
+        match all.is_empty() {
+            true => self.delete_meta(MetaKey::KeyPauses)?,
+            false => self.set_meta(MetaKey::KeyPauses, &serde_json::to_string(&all).expect("pauses serialize"))?,
+        }
+        if was != is {
+            self.tell_owner().await;
+        }
+        Ok(())
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -2196,7 +2262,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: notices(&life, &saves, &images, &self.rules()),
+            notices: self.with_pauses(notices(&life, &saves, &images, &self.rules()))?,
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -2697,6 +2763,20 @@ impl ComputerCell {
                 let b: UsedAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
                 self.count_uses(&b)?;
+                // a call that went through: its key is paused no more
+                let paused = self.key_pauses()?;
+                for u in b.uses.iter().filter(|u| paused.iter().any(|p| p.provider == u.provider)) {
+                    self.key_paused(&u.provider, None).await?;
+                }
+                json_response(&json!({ "ok": true }))
+            }
+            "computer/key-pause" => {
+                let b: KeyPauseAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Operator) || b.pause.as_ref().is_some_and(|p| p.provider != b.provider || p.spent_micros < 0 || p.cap_micros <= 0) {
+                    return Err(CellError::invalid(format!("a pause names one of its operator keys, {:?}, and what it spent of its cap", b.provider)));
+                }
+                self.key_paused(&b.provider, b.pause).await?;
                 json_response(&json!({ "ok": true }))
             }
             "computer/uses" => {
@@ -3803,13 +3883,20 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
                 continue;
             }
             let open = crate::ledger::KeyOpen { key: p.provider.clone() };
-            crate::ledger::may(env, owner, &open).await.map_err(|e| {
+            if let Err(e) = crate::ledger::may(env, owner, &open).await {
                 let refused = CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message));
-                match e.refused {
-                    Some(Refused::KeyPaused { resumes_in_ms, .. }) => refused.retry_after(resumes_in_ms.max(1_000).unsigned_abs()),
-                    _ => refused,
-                }
-            })?;
+                let Some(Refused::KeyPaused { cap, spent, resumes_in_ms }) = e.refused else { return Err(refused) };
+                // its owner is told, once a pause: the computer's notice,
+                // with the one tap that lifts its cap
+                let pause = json!({ "provider": p.provider, "pause": { "provider": p.provider, "spentMicros": spent, "capMicros": cap, "resumesAt": js::now_ms() + resumes_in_ms } });
+                let (env, computer) = (env.clone(), computer.to_string());
+                ctx.wait_until(async move {
+                    if let Err(e) = ask(&env, &computer, "computer/key-pause", &pause).await {
+                        console_error!("{}", json!({ "egress": "swap", "keyPause": e.message }));
+                    }
+                });
+                return Err(refused.retry_after(resumes_in_ms.max(1_000).unsigned_abs()));
+            }
         }
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));

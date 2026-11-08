@@ -155,6 +155,17 @@ pub struct SetFragmentCap {
     pub micros: Option<i64>,
 }
 
+/// An operator key's hourly cap on its person's ledger (docs/ledger.md,
+/// "Shared-key guard"), set by that person alone. `None` goes back to the
+/// default (`ledger::guard::KEY_HOUR_CAP`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetKeyCap {
+    pub id: String,
+    pub key: String,
+    pub micros: Option<i64>,
+}
+
 /// `PUT /api/f/<name>/cap` (the fragment's owner): its monthly cap, in
 /// micro-dollars, or `None` for the default. The path names the fragment;
 /// `id` makes the change once (the same id again changes nothing).
