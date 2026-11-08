@@ -512,6 +512,7 @@ struct ComposerView: View {
     var recordFirst = false
     var canRecord = true
     var focused: Binding<Bool>? = nil
+    @Environment(\.dynamicTypeSize) private var type
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
     private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -519,69 +520,76 @@ struct ComposerView: View {
     var body: some View {
         // A single glass surface, with equal hit targets and no nested glass
         // button padding, keeps the single-line and growing field aligned.
-        HStack(alignment: .bottom, spacing: 0) {
-            Menu {
-                Button("Photos", systemImage: "photo.on.rectangle", action: attachPhotos)
-                Button("Files", systemImage: "folder", action: attachFiles)
-            } label: {
-                Image(systemName: "plus").font(.system(size: 20))
-                    .frame(width: 44, height: 44).contentShape(Rectangle())
-            }
-            .accessibilityLabel("Attach").accessibilityIdentifier("attach").disabled(busy || recording || !editable)
-            if !recordFirst {
-                Button(action: record) {
-                    Image(systemName: recording ? "stop.circle.fill" : "mic")
-                        .font(.system(size: 20))
-                        .foregroundStyle(recording ? Color.red : Color.primary)
-                        .frame(width: 44, height: 44).contentShape(Rectangle())
-                }
-                .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
-                .disabled(busy)
-            }
+        // Its buttons sit beside the words on one line, beneath them once they wrap.
+        ComposerLayout(wrapsAbove: ComposerField.wrapsAbove(type)) {
+            HStack(spacing: 0) { leading }
             ComposerField(text: $text, placeholder: placeholder, pasteImages: pasteImages, focused: focused)
                 .frame(minHeight: 44).disabled(!editable)
-            if let steer, !stops {
-                // Send queues the words for the turn after; Steer tells this one now
-                Button {
-                    submitting = true
-                    Task { await steer(); submitting = false }
-                } label: {
-                    Text("Steer").font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 12).frame(height: 34)
-                        .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
-                        .frame(height: 44).contentShape(Capsule())
-                }
-                .disabled(submitting || busy || !enabled)
-                .accessibilityLabel("Steer it now")
-                .accessibilityIdentifier("steer")
-            }
-            if recordFirst { launcherAction } else { Button {
-                submitting = true
-                Task { await (stops ? stop() : send()); submitting = false }
-            } label: {
-                ZStack {
-                    // The adaptive label color keeps the filled control high-contrast;
-                    // the glass foreground style is softened by vibrancy.
-                    Circle().fill(canSend ? Color(uiColor: .label) : Color(uiColor: .tertiarySystemFill))
-                    if busy || submitting {
-                        ProgressView().tint(.secondary)
-                    } else {
-                        Image(systemName: stops ? "stop.fill" : "arrow.up")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(canSend ? Color(uiColor: .systemBackground) : Color.secondary)
-                    }
-                }
-                .frame(width: 34, height: 34)
-                .frame(width: 44, height: 44)
-                .contentShape(Circle())
-            }
-            .disabled(!canSend)
-            .accessibilityLabel(stops ? "Stop response" : "Send message")
-            .accessibilityIdentifier(stops ? "stop" : "send") }
+            HStack(spacing: 0) { trailing }
         }
         .buttonStyle(.plain)
         .padding(6)
         .modifier(ComposerChrome(shown: chrome))
+    }
+    @ViewBuilder private var leading: some View {
+        Menu {
+            Button("Photos", systemImage: "photo.on.rectangle", action: attachPhotos)
+            Button("Files", systemImage: "folder", action: attachFiles)
+        } label: {
+            Image(systemName: "plus").font(.system(size: 20))
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .accessibilityLabel("Attach").accessibilityIdentifier("attach").disabled(busy || recording || !editable)
+        if !recordFirst {
+            Button(action: record) {
+                Image(systemName: recording ? "stop.circle.fill" : "mic")
+                    .font(.system(size: 20))
+                    .foregroundStyle(recording ? Color.red : Color.primary)
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
+            .disabled(busy)
+        }
+    }
+    @ViewBuilder private var trailing: some View {
+        if let steer, !stops {
+            // Send queues the words for the turn after; Steer tells this one now
+            Button {
+                submitting = true
+                Task { await steer(); submitting = false }
+            } label: {
+                Text("Steer").font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 12).frame(height: 34)
+                    .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
+                    .frame(height: 44).contentShape(Capsule())
+            }
+            .disabled(submitting || busy || !enabled)
+            .accessibilityLabel("Steer it now")
+            .accessibilityIdentifier("steer")
+        }
+        if recordFirst { launcherAction } else { Button {
+            submitting = true
+            Task { await (stops ? stop() : send()); submitting = false }
+        } label: {
+            ZStack {
+                // The adaptive label color keeps the filled control high-contrast;
+                // the glass foreground style is softened by vibrancy.
+                Circle().fill(canSend ? Color(uiColor: .label) : Color(uiColor: .tertiarySystemFill))
+                if busy || submitting {
+                    ProgressView().tint(.secondary)
+                } else {
+                    Image(systemName: stops ? "stop.fill" : "arrow.up")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(canSend ? Color(uiColor: .systemBackground) : Color.secondary)
+                }
+            }
+            .frame(width: 34, height: 34)
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
+        }
+        .disabled(!canSend)
+        .accessibilityLabel(stops ? "Stop response" : "Send message")
+        .accessibilityIdentifier(stops ? "stop" : "send") }
     }
     @ViewBuilder private var launcherAction: some View {
         if recording {
@@ -601,6 +609,59 @@ struct ComposerView: View {
             .disabled(!canSend).opacity(canSend || busy || submitting ? 1 : 0.4)
             .accessibilityLabel("Send message").accessibilityIdentifier("send")
         }
+    }
+}
+
+/// The composer's buttons and words: its leading buttons, the field, its
+/// trailing buttons. While the words fit on one line they sit in one row,
+/// the buttons either side; once they wrap, the words take the full width
+/// and the buttons a row beneath them, leading left and trailing right, as
+/// Messages has it. Which is decided by the field's height at the one-row
+/// width alone, never by the arrangement shown, so words right at the wrap
+/// point never flip it back and forth; and the field stays one view either
+/// way, so its keyboard, cursor and scrolling stay as they are.
+struct ComposerLayout: Layout {
+    /// A field taller than this wraps: half a line past one line's height.
+    let wrapsAbove: CGFloat
+    /// The stacked words' margin either side, their edge near the + glyph's.
+    static let inset: CGFloat = 8
+
+    private struct Arrangement {
+        var stacked: Bool
+        var size: CGSize
+        var lead: CGSize
+        var field: CGSize
+        var trail: CGSize
+    }
+    private func arrange(_ proposal: ProposedViewSize, _ subviews: Subviews) -> Arrangement {
+        precondition(subviews.count == 3, "leading, field, trailing")
+        let lead = subviews[0].sizeThatFits(.unspecified), trail = subviews[2].sizeThatFits(.unspecified)
+        let width = proposal.width ?? lead.width + subviews[1].sizeThatFits(.unspecified).width + trail.width
+        let row = max(lead.height, trail.height)
+        let narrow = max(0, width - lead.width - trail.width)
+        // measured at the one-row width first, always: a narrower probe can
+        // only leave the field scrollable, never clip it (`ComposerField`)
+        let inRow = subviews[1].sizeThatFits(ProposedViewSize(width: narrow, height: nil))
+        guard inRow.height > wrapsAbove else {
+            return Arrangement(stacked: false, size: CGSize(width: width, height: max(row, inRow.height)),
+                               lead: lead, field: CGSize(width: narrow, height: inRow.height), trail: trail)
+        }
+        let wide = max(0, width - 2 * Self.inset)
+        let field = subviews[1].sizeThatFits(ProposedViewSize(width: wide, height: nil))
+        return Arrangement(stacked: true, size: CGSize(width: width, height: field.height + row),
+                           lead: lead, field: CGSize(width: wide, height: field.height), trail: trail)
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(proposal, subviews).size
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let at = arrange(ProposedViewSize(width: bounds.width, height: bounds.height), subviews)
+        // the buttons at the bottom either way, as a bottom-aligned row has them
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.maxY - at.lead.height), proposal: ProposedViewSize(at.lead))
+        subviews[2].place(at: CGPoint(x: bounds.maxX - at.trail.width, y: bounds.maxY - at.trail.height), proposal: ProposedViewSize(at.trail))
+        let origin = at.stacked ? CGPoint(x: bounds.minX + Self.inset, y: bounds.minY)
+            : CGPoint(x: bounds.minX + at.lead.width, y: bounds.maxY - at.field.height)
+        subviews[1].place(at: origin, proposal: ProposedViewSize(at.field))
     }
 }
 
@@ -629,6 +690,14 @@ struct ComposerField: UIViewRepresentable {
     let pasteImages: (UIPasteboard) -> Void
     var focused: Binding<Bool>? = nil
     static let linesMax = 6
+    /// The words' margin above and below.
+    static let insetY: CGFloat = 11
+    /// The field's height past which its words have wrapped, at this text
+    /// size: half a line more than one line (`ComposerLayout`).
+    static func wrapsAbove(_ type: DynamicTypeSize) -> CGFloat {
+        let font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(type)))
+        return font.lineHeight * 1.5 + 2 * insetY
+    }
 
     func makeUIView(context: Context) -> PastingTextView {
         let view = PastingTextView()
@@ -638,7 +707,7 @@ struct ComposerField: UIViewRepresentable {
         view.backgroundColor = .clear
         view.tintColor = .label
         view.isScrollEnabled = false
-        view.textContainerInset = UIEdgeInsets(top: 11, left: 2, bottom: 11, right: 2)
+        view.textContainerInset = UIEdgeInsets(top: Self.insetY, left: 2, bottom: Self.insetY, right: 2)
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.accessibilityIdentifier = "composer"
         view.placeholder.isAccessibilityElement = false
