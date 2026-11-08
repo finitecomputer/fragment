@@ -147,9 +147,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   photo (made by its default redirect to the image too) and an
   autocomplete are one `google-places:details`, `:photo` and
   `:autocomplete`, each at its own list; any other call none. On
-  Firecrawl's key, a scrape, a search, a map and a batch scrape are
-  their credits as `firecrawl:credit` ($0.005 each); a crawl, an
-  extract and a status poll none. A part's call its
+  Firecrawl's key, a scrape, a search and a map are their credits as
+  `firecrawl:credit` ($0.005 each); a crawl, a batch scrape (billed as
+  each page completes), an extract and a status poll none. A part's call its
   vendor refused (any answer but a 2xx) or whose units are not read (no
   JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is
   charged nothing, and a release whose book has no part's price refuses

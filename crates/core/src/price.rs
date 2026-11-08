@@ -462,7 +462,8 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 16] = [
     // $5: a scrape (Hermes' `web_extract`) 1 a page, 4 more for each LLM
     // format (JSON, a question, highlights, audio, video); a search
     // (Hermes' `web_search`) 2 per 10 results it asks for, and a scrape
-    // each if it scrapes them; a map 1; a batch scrape a scrape a URL.
+    // each if it scrapes them; a map 1. A crawl or a batch scrape is
+    // billed as each page completes, so is charged nothing here.
     // Sources: docs.firecrawl.dev/billing, firecrawl.dev/pricing and
     // docs.firecrawl.dev/api-reference/endpoint/search (read 2026-11-07).
     ("firecrawl:credit", 5_000, 1),
@@ -681,17 +682,25 @@ fn firecrawl_page(formats: Option<&serde_json::Value>) -> u64 {
 }
 
 /// The credits a Firecrawl search asks for: 2 per 10 results (`limit`,
-/// absent 10, a source each of its `sources` but `alexandria`, which is
-/// free), and a page each when `scrapeOptions` names `formats`. None for
-/// a `limit` or `sources` that is no count or list.
-fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    let limit = said.get("limit").map_or(Some(10), serde_json::Value::as_u64)?;
+/// absent `limit_default`, a source each of the kinds its `sources` name
+/// but `alexandria`, which is free), and a page each when `scrapeOptions`
+/// names some `formats` (none, it scrapes nothing). None for a `limit` or
+/// `sources` that is no count or list of kinds.
+fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>, limit_default: u64) -> Option<u64> {
+    let limit = said.get("limit").map_or(Some(limit_default), serde_json::Value::as_u64)?;
     let sources = match said.get("sources") {
         None => 1,
-        Some(all) => all.as_array()?.iter().filter(|s| s.as_str().or_else(|| s.get("type")?.as_str()) != Some("alexandria")).count() as u64,
+        Some(all) => {
+            let mut kinds: Vec<&str> = all.as_array()?.iter().map(|s| s.as_str().or_else(|| s.get("type")?.as_str())).collect::<Option<_>>()?;
+            kinds.retain(|kind| *kind != "alexandria");
+            kinds.sort_unstable();
+            kinds.dedup();
+            kinds.len() as u64
+        }
     };
     let results = limit.checked_mul(sources)?;
-    let scraped = said.get("scrapeOptions").and_then(|o| o.get("formats")).map_or(0, |formats| firecrawl_page(Some(formats)));
+    let formats = said.get("scrapeOptions").and_then(|o| o.get("formats")).filter(|f| f.as_array().is_some_and(|all| !all.is_empty()));
+    let scraped = formats.map_or(0, |formats| firecrawl_page(Some(formats)));
     Some((2 * results.div_ceil(10)).saturating_add(results.saturating_mul(scraped)))
 }
 
@@ -715,10 +724,10 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 ///   a place's details (`/v1/places/<id>`), its photo
 ///   (`…/photos/<photo>/media`, made by its redirect to the image too) or
 ///   an autocomplete one of its part; any other call none.
-/// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`), a
-///   map and a batch scrape their credits, as `firecrawl:credit`; any
-///   other call (a crawl or an extract, billed as they run, a status
-///   poll, free) none.
+/// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`, its
+///   `limit` 5 on v1 and 10 on v2 when absent) and a map their credits,
+///   as `firecrawl:credit`; any other call (a crawl, a batch scrape or an
+///   extract, billed as each page completes, a status poll, free) none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -758,9 +767,8 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
             let credits = match (call.method, what) {
                 // a page a call, read or not
                 ("POST", Some("scrape")) => Some(said.as_ref().map_or(1, |s| firecrawl_page(s.get("formats")))),
-                ("POST", Some("search")) => said.as_ref().and_then(firecrawl_search),
+                ("POST", Some("search")) => said.as_ref().and_then(|s| firecrawl_search(s, if call.path.starts_with("/v1/") { 5 } else { 10 })),
                 ("POST", Some("map")) => Some(1),
-                ("POST", Some("batch/scrape")) => said.as_ref().and_then(|s| Some(s.get("urls")?.as_array()?.len() as u64 * firecrawl_page(s.get("formats")))),
                 _ => return Usage::Key { key: key.to_string(), units: 0 },
             };
             ("firecrawl:credit", credits)
@@ -1513,11 +1521,22 @@ mod tests {
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":11}"#, 200), credits(4), "rounded up per 10");
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["web","news",{"type":"alexandria"}]}"#, 200), credits(4), "per source, alexandria free");
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5,"scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 5), "and a page each scraped");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5,"scrapeOptions":{"formats":[{"type":"json"}]}}"#, 200), credits(2 + 5 * 5));
+        // FIN-445 review: scraping only with some formats, v1's own limit, each source kind once
+        for scrape_options in [r#""#, r#","scrapeOptions":{}"#, r#","scrapeOptions":{"formats":[]}"#] {
+            let body = format!(r#"{{"query":"rust","limit":10{scrape_options}}}"#);
+            assert_eq!(firecrawl("POST", "/v2/search", body.as_bytes(), 200), credits(2), "{body}");
+            assert_eq!(firecrawl("POST", "/v1/search", body.as_bytes(), 200), credits(2), "{body}");
+        }
+        assert_eq!(firecrawl("POST", "/v1/search", br#"{"query":"q"}"#, 200), credits(2), "v1's 5 results");
+        assert_eq!(firecrawl("POST", "/v1/search", br#"{"query":"q","scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 5));
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 10), "v2's 10");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["web","web",{"type":"web"}]}"#, 200), credits(2), "web once");
         assert_eq!(firecrawl("POST", "/v2/map", br#"{"url":"u"}"#, 200), credits(1));
-        assert_eq!(firecrawl("POST", "/v2/batch/scrape", br#"{"urls":["a","b","c"],"formats":[{"type":"json"}]}"#, 200), credits(15));
         let free = Usage::Key { key: "firecrawl".into(), units: 0 };
-        for (method, path) in [("GET", "/v2/crawl/0b1e"), ("GET", "/v2/batch/scrape/0b1e"), ("GET", "/v2/extract/0b1e"), ("POST", "/v2/crawl"), ("POST", "/v2/extract"), ("POST", "/v2/agent"), ("GET", "/v2/team/credit-usage"), ("GET", "/v2/scrape"), ("POST", "/v3/scrape")] {
-            assert_eq!(firecrawl(method, path, br#"{"url":"u","limit":10}"#, 200), free, "{method} {path}");
+        // a batch is billed as each page completes, as a crawl is: its submit is no page (FIN-445 review)
+        for (method, path) in [("GET", "/v2/crawl/0b1e"), ("GET", "/v2/batch/scrape/0b1e"), ("GET", "/v2/extract/0b1e"), ("POST", "/v2/crawl"), ("POST", "/v2/batch/scrape"), ("POST", "/v1/batch/scrape"), ("DELETE", "/v2/batch/scrape/0b1e"), ("POST", "/v2/extract"), ("POST", "/v2/agent"), ("GET", "/v2/team/credit-usage"), ("GET", "/v2/scrape"), ("POST", "/v3/scrape")] {
+            assert_eq!(firecrawl(method, path, br#"{"url":"u","urls":["a","b"],"limit":10}"#, 200), free, "{method} {path}");
         }
     }
 
@@ -1531,10 +1550,9 @@ mod tests {
             assert_eq!(firecrawl("POST", "/v2/scrape", br#"{"url":"u"}"#, refused), none, "{refused}");
             assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q"}"#, refused), none, "{refused}");
         }
-        for body in [&b""[..], b"query=q", br#"{"query":"q","limit":"5"}"#, br#"{"query":"q","limit":-1}"#, br#"{"query":"q","sources":"web"}"#, br#"{"query":"q","limit":0}"#] {
+        for body in [&b""[..], b"query=q", br#"{"query":"q","limit":"5"}"#, br#"{"query":"q","limit":-1}"#, br#"{"query":"q","sources":"web"}"#, br#"{"query":"q","sources":[42]}"#, br#"{"query":"q","limit":0}"#] {
             assert_eq!(firecrawl("POST", "/v2/search", body, 200), none, "{}", String::from_utf8_lossy(body));
         }
-        assert_eq!(firecrawl("POST", "/v2/batch/scrape", br#"{"urls":"a"}"#, 200), none);
         let most = Usage::Key { key: "firecrawl:credit".into(), units: 1_000 };
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":100,"sources":["web","news","images"],"scrapeOptions":{"formats":["json"]}}"#, 200), most);
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":18446744073709551615,"sources":["web","news"]}"#, 200), none, "an overflow is no count");
