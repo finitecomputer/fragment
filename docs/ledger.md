@@ -156,6 +156,23 @@ A model call that fell back is charged once, at the fallback's usage and
 prices. Usage a release's book cannot price is charged nothing and
 logged `ledger.unpriced` (#509).
 
+## A quote
+
+`POST /api/ledger/quote` (FIN-448; docs/api.md, Ledger) prices a planned
+job before it starts, so an agent can say what it will cost and what is
+left (Paul, 2026-11-08: "it will probably cost about $3 and you have $40
+left this month, okay to proceed?"), and reads the balance rather than
+guessing after a refusal. Each item is a row's usage times its calls,
+charged by `ledger::row_charge`, the function a ledger's own rows are
+charged by, with the book the answering release charges with: so it
+prices every key and part the book has (`KEY_PARTS`), the always-on
+seat's awake time at nothing, and a name the book does not price is
+unknown, never guessed. Its payer is the one a charge resolves to (an
+agent's owner). It is as accurate as the units it is given: a part's
+(speech's characters) must be said, a model's tokens are an estimate,
+and a call that falls back is quoted on its own model. It holds and
+keeps nothing: the job is still charged after, never held (decision 62).
+
 ## The gate
 
 Before a spend starts, its payer's ledger is asked `may_spend` (an
