@@ -79,6 +79,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "its person is told in the agent's chat, once a pause: the key, what it spent this hour, and one button that allows four times its cap",
     "they tap Allow: the platform takes it, the notice goes, and the agent's next call on that key goes through at once",
     "set back to the default (again the same; another body under its id refused), the key pauses again at its next call",
+    "a stale notice's button raises to at least its offer: on a higher cap it lowers nothing, the answer saying the cap in force",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -561,10 +562,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
     // the lane goes on unpaused: its person allows the most, and its
     // computer tells no pause (the restarts after count its notices)
-    let most = lift(w.owner, "elevenlabs", json!({ "id": "e1", "micros": fragment_core::ledger::guard::KEY_CAP_MAX }))?;
+    let max = fragment_core::ledger::guard::KEY_CAP_MAX;
+    let most = lift(w.owner, "elevenlabs", json!({ "id": "e1", "micros": max }))?;
     let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
     let paused = view.body["notices"].as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused"));
     anyhow::ensure!(most.status == 200 && view.status == 200 && !paused, "the guard's checks leave no pause: {most} {view}");
+    // a notice heard before that lift, its button pressed after it
+    let stale = lift(w.owner, "elevenlabs", json!({ "id": "s1", "micros": 4 * cap, "atLeast": true }))?;
+    s.ok(SWAP_CHECKS[46], stale.status == 200 && stale.body == json!({ "key": "elevenlabs", "capMicros": max, "default": false }), &stale);
     forget_gate(api, &owner_id)?;
     Ok(turns)
 }

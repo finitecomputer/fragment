@@ -2733,19 +2733,19 @@ impl ComputerCell {
                 json_response(&json!({ "ok": true }))
             }
             "computer/key-pause" => {
-                // `{provider, pause}`: a refusal heard (its line,
-                // `KeyPause::line`); or `{provider, cap}`: its owner set
-                // its cap (a pause ends only so, by its deadline, or as a
-                // later refusal replaces it: `fragment_core::key_pause`)
+                // `{provider, pause}`: a refusal the swap heard (its line,
+                // `KeyPause::line`), the latest replacing the notice; or
+                // null: its owner's cap change, applied, ending it
+                // (`fragment_core::key_pause`)
                 let b: Value = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
                 let provider = b["provider"].as_str().unwrap_or_default();
                 let operator = self.cfg.providers.get(provider).is_some_and(|p| p.kind == Kind::Operator);
                 let now = js::now_ms();
-                match (b["pause"].as_str().map(KeyPause::of_line), b["cap"].as_i64().filter(|c| *c > 0)) {
-                    (Some(Some(p)), None) if operator && p.provider == provider => self.key_pauses_changed(|k| k.paused(p, now)).await?,
-                    (None, Some(cap)) if operator => self.key_pauses_changed(|k| Some(k.capped(provider, cap, now))).await?,
-                    _ => return Err(CellError::invalid(format!("a pause names one of its operator keys, {provider:?}, and its line, or the cap its owner set"))),
+                match (&b["pause"], b["pause"].as_str().map(KeyPause::of_line)) {
+                    (_, Some(Some(p))) if operator && p.provider == provider => self.key_pauses_changed(|k| k.paused(p, now)).await?,
+                    (Value::Null, _) if operator => self.key_pauses_changed(|k| k.lifted(provider, now)).await?,
+                    _ => return Err(CellError::invalid(format!("a pause names one of its operator keys, {provider:?}, and its line, or null"))),
                 }
                 json_response(&json!({ "ok": true }))
             }

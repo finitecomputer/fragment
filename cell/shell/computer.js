@@ -321,7 +321,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (!c) return;
     button.disabled = true;
     try {
-      await api("PUT", `/api/ledger/key-cap/${seg(n.provider)}`, { id: `allow-${crypto.randomUUID()}`, micros: n.allowMicros });
+      // at least: a notice heard before a lift elsewhere never lowers it
+      await api("PUT", `/api/ledger/key-cap/${seg(n.provider)}`, { id: `allow-${crypto.randomUUID()}`, micros: n.allowMicros, atLeast: true });
     } catch (e) {
       copy.querySelector(".notice-detail")?.remove();
       copy.append(el("p", "notice-detail", e.message));

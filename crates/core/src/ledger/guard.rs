@@ -189,25 +189,32 @@ impl Ledger {
 
     /// A key's hourly cap, set by its person (their route, never an
     /// agent's: cell/src/lib.rs): from 1 micro-dollar to `KEY_CAP_MAX`, or
-    /// `None` for the default. A key's own name, never a part's. Answers
-    /// whether it changed the cap now (`false`: a replay of one taken
-    /// before, which changes nothing, and must end no newer pause).
-    pub fn set_key_cap(&mut self, store: &mut impl Store, c: &SetKeyCap, now_ms: i64) -> Result<bool, Refused> {
+    /// `None` for the default; `at_least`, raised to at least it, a higher
+    /// cap left as it is (a pause notice's button: never lowers one). A
+    /// key's own name, never a part's. Answers whether it was applied now
+    /// (`false`: a replay of one taken before, which changes nothing, and
+    /// must end no newer pause), and the person's cap in force after it
+    /// (`None`: the default).
+    pub fn set_key_cap(&mut self, store: &mut impl Store, c: &SetKeyCap, now_ms: i64) -> Result<(bool, Option<i64>), Refused> {
         self.persons_only()?;
         self.roll(now_ms);
         let command = Command::SetKeyCap(c.clone());
         if !Self::admit(store, &c.id, &command)? {
-            return Ok(false);
+            return Ok((false, store.key_cap(&c.key)));
         }
         if !valid_id(&c.key) || guarded_key(&c.key) != c.key {
             return Err(invalid(Invalid::Id));
         }
-        if c.micros.is_some_and(|m| !(1..=KEY_CAP_MAX).contains(&m)) {
+        if c.micros.is_some_and(|m| !(1..=KEY_CAP_MAX).contains(&m)) || (c.at_least && c.micros.is_none()) {
             return Err(invalid(Invalid::Amount));
         }
-        store.set_key_cap(&c.key, c.micros);
+        let micros = match (c.at_least, c.micros) {
+            (true, Some(m)) => Some(m.max(store.key_cap(&c.key).unwrap_or(KEY_HOUR_CAP))),
+            (_, micros) => micros,
+        };
+        store.set_key_cap(&c.key, micros);
         self.done(store, &c.id, command, now_ms);
-        Ok(true)
+        Ok((true, micros))
     }
 }
 
@@ -279,7 +286,13 @@ mod tests {
 
         /// `cap`, answering whether it changed the cap now.
         fn cap_applied(&mut self, id: &str, key: &str, micros: Option<i64>) -> Result<bool, Refused> {
-            let c = SetKeyCap { id: id.into(), key: key.into(), micros };
+            let c = SetKeyCap { id: id.into(), key: key.into(), micros, at_least: false };
+            self.ledger.set_key_cap(&mut self.store, &c, self.now).map(|(applied, _)| applied)
+        }
+
+        /// A notice's button: raised to at least `micros`; the cap after.
+        fn press(&mut self, id: &str, micros: i64) -> Result<(bool, Option<i64>), Refused> {
+            let c = SetKeyCap { id: id.into(), key: "voice".into(), micros: Some(micros), at_least: true };
             self.ledger.set_key_cap(&mut self.store, &c, self.now)
         }
 
@@ -522,5 +535,25 @@ mod tests {
             let offer = next_lift(cap).expect("an offer under the most");
             assert_eq!(w.cap(&format!("keycap:voice:o{n}"), "voice", Some(offer)), Ok(()), "{offer} is a cap a person may set");
         }
+    }
+
+    /// Goal (Alex's review 5819600199): a stale notice's button, pressed
+    /// after its person raised the cap, never lowers it: "at least" leaves
+    /// a higher cap as it is, and is applied (its notice then ends);
+    /// below or at the default it raises as any lift does. Method: a cap of
+    /// $80, then a stale press offering $20; a press on the default; a
+    /// replay; "at least" with no amount.
+    #[test]
+    fn a_stale_press_never_lowers_a_cap() {
+        let mut w = World::funded();
+        assert_eq!(w.cap("keycap:voice:p1", "voice", Some(80 * USD)), Ok(()));
+        assert_eq!(w.press("keycap:voice:s1", 20 * USD), Ok((true, Some(80 * USD))), "applied, the $80 kept");
+        assert_eq!(w.store.key_cap("voice"), Some(80 * USD));
+        assert_eq!(w.press("keycap:voice:s1", 20 * USD), Ok((false, Some(80 * USD))), "a replay: not applied now, the cap as it is");
+        let mut d = World::funded();
+        assert_eq!(d.press("keycap:voice:d1", 20 * USD), Ok((true, Some(20 * USD))), "from the default: raised");
+        assert_eq!(d.press("keycap:voice:d2", 1), Ok((true, Some(20 * USD))), "lower: kept");
+        let none = SetKeyCap { id: "keycap:voice:n".into(), key: "voice".into(), micros: None, at_least: true };
+        assert_eq!(d.ledger.set_key_cap(&mut d.store, &none, d.now), Err(Refused::Invalid { what: Invalid::Amount }), "at least nothing: refused");
     }
 }

@@ -782,11 +782,12 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     }
 }
 
-/// `PUT /api/ledger/key-cap/{key}` `{id, micros | null}` (docs/ledger.md,
-/// "Shared-key guard"): a person lifts, or puts back, the hourly cap on an
-/// operator key their agents call: theirs alone, never an agent's, whose
-/// spending it bounds. The ledger keeps it under `keycap:<key>:<id>`, once
-/// by its id. Its notice goes from the person's computer at once (one not
+/// `PUT /api/ledger/key-cap/{key}` `{id, micros | null, atLeast?}`
+/// (docs/ledger.md, "Shared-key guard"): a person lifts, or puts back, the
+/// hourly cap on an operator key their agents call: theirs alone, never an
+/// agent's, whose spending it bounds; `atLeast` (a notice's button) never
+/// lowers it. The ledger keeps it under `keycap:<key>:<id>`, once by its
+/// id. Applied, its notice goes from the person's computer at once (one not
 /// made has none); a key still past the cap is told again at its next call.
 async fn key_cap(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8], key: &str) -> CellResult<Response> {
     let who = signer(env, req, url, body).await?;
@@ -796,19 +797,19 @@ async fn key_cap(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8],
     if cfg.providers.get(key).is_none_or(|p| p.kind != fragment_core::catalog::Kind::Operator) {
         return Err(CellError::new(ErrorCode::NotFound, format!("no operator key {key:?} here")));
     }
-    let put: fragment_proto::ledger::PutCap = command_body(body, "a key's cap")?;
-    let set = fragment_proto::ledger::SetKeyCap { id: commanded(&format!("keycap:{key}"), &put.id)?, key: key.to_string(), micros: put.micros };
-    // only a change ends the notice: a replay (a late retry) would end a
-    // newer pause, and the cap is as it was
-    if ledger::ask(env, &who.id, &set).await?.applied {
+    let put: fragment_proto::ledger::PutKeyCap = command_body(body, "a key's cap")?;
+    let set = fragment_proto::ledger::SetKeyCap { id: commanded(&format!("keycap:{key}"), &put.id)?, key: key.to_string(), micros: put.micros, at_least: put.at_least };
+    let set = ledger::ask(env, &who.id, &set).await?;
+    // only an applied change ends the notice: a replay (a late retry)
+    // would end a newer pause
+    if set.applied {
         let computer = fragment_core::computer::default_computer_of(&who.id);
-        let cap = put.micros.unwrap_or(fragment_core::ledger::guard::KEY_HOUR_CAP);
-        match computer::ask(env, &computer, "computer/key-pause", &json!({ "provider": key, "cap": cap })).await {
+        match computer::ask(env, &computer, "computer/key-pause", &json!({ "provider": key, "pause": null })).await {
             Err(e) if e.code != ErrorCode::NotFound => console_error!("{}", json!({ "keyCap": key, "computer": computer, "untold": e.message })),
             _ => {}
         }
     }
-    json_answer(&json!({ "key": key, "capMicros": put.micros.unwrap_or(fragment_core::ledger::guard::KEY_HOUR_CAP), "default": put.micros.is_none() }))
+    json_answer(&json!({ "key": key, "capMicros": set.cap_micros.unwrap_or(fragment_core::ledger::guard::KEY_HOUR_CAP), "default": set.cap_micros.is_none() }))
 }
 
 /// `/api/identities…`: the registry's public face. The signer's key is

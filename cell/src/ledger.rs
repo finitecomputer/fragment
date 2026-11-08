@@ -326,13 +326,15 @@ impl Route for SetKeyCap {
     type Answer = KeyCapSet;
 }
 
-/// `SetKeyCap`'s answer: whether it changed the cap now, rather than
-/// replayed one taken before. Only a change ends its key's pause notice
-/// (a late retry would end a newer pause: Codex on #1117).
+/// `SetKeyCap`'s answer: whether it was applied now, rather than a replay
+/// of one taken before (only an applied one ends its key's pause notice: a
+/// late retry would end a newer pause), and the person's cap in force
+/// after it (none: the default).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyCapSet {
     pub applied: bool,
+    pub cap_micros: Option<i64>,
 }
 
 impl Route for SetFragmentCap {
@@ -815,7 +817,7 @@ impl LedgerCell {
             }
             <SetKeyCap as Route>::PATH => {
                 let c: SetKeyCap = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.set_key_cap(s, &c, now).map(|applied| KeyCapSet { applied })).await?)
+                reply(self.mutate(move |l, s, now| l.set_key_cap(s, &c, now).map(|(applied, cap_micros)| KeyCapSet { applied, cap_micros })).await?)
             }
             <SetFragmentCap as Route>::PATH => {
                 let c: SetFragmentCap = decode(&body)?;

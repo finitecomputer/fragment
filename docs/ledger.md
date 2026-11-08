@@ -261,7 +261,8 @@ two seconds and spent $300 in about 35 minutes through the shared key.
 - **The person's lift** (Paul: "the user has a way to approve and lift
   the cap"): `SetKeyCap {id, key, micros | null}`, a key's own name, from
   1 micro-dollar to `guard::KEY_CAP_MAX` ($1,000) an hour, or `null` for
-  the default; idempotent by id, kept in `meta` (`key_cap:<key>`). Only
+  the default; `at_least` raises it to at least that, a higher cap kept;
+  idempotent by id, kept in `meta` (`key_cap:<key>`). Only
   the person sends it (`PUT /api/ledger/key-cap/{key}`, docs/api.md),
   never an agent, whose spending it bounds; the CLI's `fragment ledger
   key-cap <key> <usd|default>`.
@@ -287,14 +288,16 @@ two seconds and spent $300 in about 35 minutes through the shared key.
   this hour", with one button, the platform's next step
   (`guard::next_lift`: four times the cap, at most `KEY_CAP_MAX`, sent as
   the notice's `allowMicros`); at the most, it says so, with no button.
-  It ends only at its deadline (the ledger's reckoning; the page draws
-  again then, idle or not), as its owner sets the cap, or as a later
-  refusal replaces it (`fragment_core::key_pause`). A call's success ends
-  nothing, so no order of answers across isolates is trusted. The route
-  tells the person's computer the cap they set (only a change of it,
-  never a replay: `SetKeyCap` answers whether it applied), and a pause
-  heard at any other cap (delivered late, or still cached where it was
-  heard) is refused, with no clock compared.
+  Each refusal carries the ledger's cap, offer and deadline, and the
+  latest replaces the notice; a cap change the ledger applied ends it
+  (only an applied one: `SetKeyCap` answers whether it was, so a late
+  retry ends no newer pause); otherwise it ends at its deadline (the page
+  draws again then, idle or not). A call's success ends nothing, and the
+  computer keeps no copy of any cap (`fragment_core::key_pause`). A
+  refusal heard before a lift may arrive after it and tell a pause again:
+  its button asks the ledger to raise the cap to at least its offer
+  (`atLeast`), which leaves a higher cap as it is, so pressing a stale
+  notice never lowers a cap, and its applied change ends the notice.
 - **Best effort:** asked through the gate (below), an allowance kept a
   minute in each isolate and a pause five seconds (`KEY_PAUSE_KEEP_MS`),
   so a lift reaches the next call within seconds; a ledger that does not
