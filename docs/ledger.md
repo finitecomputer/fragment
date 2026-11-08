@@ -132,7 +132,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   per 1,000 (FIN-443); its music and every other call on the key is one
   call, a minute of music. A fal generation (a `POST` to a model at
   `queue.fal.run` or `fal.run`) is `fal:image`, a unit a pixel its JSON
-  body asks for (`num_images` of its `image_size`), at most 16
+  body asks for (`num_images` of its `image_size`; absent, Klein's
+  default on Klein's text to image, else none, as an edit's is its
+  input's), at most 16
   megapixels, at $0.006 per 1,048,576 (FIN-445); every other call on
   fal's key (its queue's polls, statuses, results and cancels, its
   uploads) is none of the key's, charged nothing. On xAI's key, a call
@@ -142,8 +144,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   call (`/v1/images/generations`) its `n` `xai:image`; any other call
   (a video, a model list) none (FIN-445). On Google Places' key, a
   text or nearby search is one call of the key; a place's details, its
-  photo and an autocomplete are one `google-places:details`, `:photo`
-  and `:autocomplete`, each at its own list; any other call none. On
+  photo (made by its default redirect to the image too) and an
+  autocomplete are one `google-places:details`, `:photo` and
+  `:autocomplete`, each at its own list; any other call none. On
   Firecrawl's key, a scrape, a search, a map and a batch scrape are
   their credits as `firecrawl:credit` ($0.005 each); a crawl, an
   extract and a status poll none. A part's call its

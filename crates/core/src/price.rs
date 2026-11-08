@@ -634,8 +634,13 @@ impl KeyCall<'_> {
 /// synchronous runs); its others (`rest.fal.ai`'s uploads) make nothing.
 const FAL_RUNS: [&str; 2] = ["queue.fal.run", "fal.run"];
 
+/// FLUX.2 Klein 9B's text to image (Hermes' `image_generate`), whose
+/// `image_size` absent is its default, `landscape_4_3` (an edit's is its
+/// input image's, which the meter does not see).
+const FAL_KLEIN: &str = "/fal-ai/flux-2/klein/9b";
+
 /// fal's `image_size` presets in pixels (FLUX.2 Klein's, and its other
-/// image models'), the first its default.
+/// image models'), the first Klein's default.
 const FAL_SIZES: [(&str, u64); 6] = [
     ("landscape_4_3", 1024 * 768),
     ("landscape_16_9", 1024 * 576),
@@ -645,13 +650,15 @@ const FAL_SIZES: [(&str, u64); 6] = [
     ("portrait_16_9", 576 * 1024),
 ];
 
-/// The pixels a fal generation asks for: `num_images` (absent, 1) images
-/// of its `image_size`, a preset, `{width, height}`, or absent, the
-/// default preset; none for any other (an unknown preset, a size that is
-/// no two whole numbers).
-fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+/// The pixels a fal generation to `path` asks for: `num_images` (absent,
+/// 1) images of its `image_size`, a preset or `{width, height}`, or
+/// absent, Klein's default on Klein's text to image; none for any other
+/// (an absent size elsewhere, an edit's being its input's, an unknown
+/// preset, a size that is no two whole numbers).
+fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let each = match said.get("image_size") {
-        None => FAL_SIZES[0].1,
+        None if path == FAL_KLEIN => FAL_SIZES[0].1,
+        None => return None,
         Some(serde_json::Value::String(preset)) => FAL_SIZES.iter().find(|(name, _)| name == preset)?.1,
         Some(size) => size.get("width")?.as_u64()?.checked_mul(size.get("height")?.as_u64()?)?,
     };
@@ -706,8 +713,8 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 ///   `/v1/images/generations` its `n` images (absent, 1).
 /// - Google Places (New): a text or nearby search is one call of the key;
 ///   a place's details (`/v1/places/<id>`), its photo
-///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
-///   other call none.
+///   (`…/photos/<photo>/media`, made by its redirect to the image too) or
+///   an autocomplete one of its part; any other call none.
 /// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`), a
 ///   map and a batch scrape their credits, as `firecrawl:credit`; any
 ///   other call (a crawl or an extract, billed as they run, a status
@@ -723,7 +730,7 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     let (priced_as, units) = match key {
         "elevenlabs" if call.path.starts_with("/v1/text-to-speech/") => ("elevenlabs:speech", call.said().and_then(|said| Some(said.get("text")?.as_str()?.chars().count() as u64))),
-        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().as_ref().and_then(fal_pixels)),
+        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().and_then(|said| fal_pixels(call.path, &said))),
         "fal" => return Usage::Key { key: key.to_string(), units: 0 },
         "xai" => {
             let said = call.said();
@@ -762,7 +769,10 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     };
     // a part's, or one of its key's own (xAI's X search), made by a 2xx
     let most = KEY_PARTS.iter().find(|p| p.priced_as == priced_as).map_or(1, |p| p.units_max);
-    let made = (200..300).contains(&call.status);
+    // a Places photo's answer is a redirect to it unless it asks for JSON
+    // (`skipHttpRedirect`), and the swap never follows one
+    let redirected = priced_as == "google-places:photo" && matches!(call.status, 301 | 302 | 303 | 307 | 308);
+    let made = (200..300).contains(&call.status) || redirected;
     Usage::Key { key: priced_as.to_string(), units: units.filter(|_| made).map_or(0, |u| u.min(most)) }
 }
 
@@ -1307,8 +1317,16 @@ mod tests {
         }
         assert_eq!(sized(r#"{"prompt":"p","image_size":{"width":1920,"height":1080}}"#), units(1920 * 1080));
         assert_eq!(sized(r#"{"prompt":"p","image_size":"square_hd","num_images":4}"#), units(4 * 1_048_576));
-        assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "the default, landscape_4_3");
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", br#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#, 200), units(1024 * 768), "an edit, at the default");
+        assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "Klein's default, landscape_4_3");
+        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", br#"{"prompt":"p","num_images":2}"#, 200), units(2 * 1024 * 768));
+        // an edit's size is its input's unless it names one (FIN-445 review)
+        let edit = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", body.as_bytes(), 200);
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#), units(0), "an edit of an input the meter does not see");
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":"square"}"#), units(512 * 512));
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":{"width":2048,"height":2048}}"#), units(4 * 1_048_576));
+        // another model's default is its own: unread
+        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p"}"#, 200), units(0));
+        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p","image_size":"square_hd"}"#, 200), units(1_048_576));
         // only fal's key
         assert_eq!(key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
     }
@@ -1431,7 +1449,12 @@ mod tests {
         assert_eq!(charge(&one("google-places")), 52_500, "an Enterprise search, as before");
         assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw", 200), one("google-places:details"));
         assert_eq!(charge(&one("google-places:details")), 30_000, "$0.03, not a search's $0.0525");
-        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"));
+        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"), "skipHttpRedirect: its JSON");
+        // its default answer is a redirect to the image (FIN-445 review)
+        for redirect in [301, 302, 303, 307, 308] {
+            assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", redirect), one("google-places:photo"), "{redirect}");
+        }
+        assert_eq!(charge(&one("google-places:photo")), 10_500);
         assert_eq!(places("POST", "/v1/places:autocomplete", 200), one("google-places:autocomplete"));
         let free = Usage::Key { key: "google-places".into(), units: 0 };
         for path in ["/v1/places/", "/v1/places/ChIJ/photos/AUc7", "/v1/places:searchtext", "/v1/places:searchText/x", "/v2/places:searchText", "/maps/api/place/textsearch/json", "/"] {
@@ -1450,6 +1473,12 @@ mod tests {
             assert_eq!(places("POST", "/v1/places:searchText", refused), Usage::Key { key: "google-places".into(), units: 0 }, "{refused}");
             assert_eq!(places("GET", "/v1/places/ChIJ", refused), Usage::Key { key: "google-places:details".into(), units: 0 }, "{refused}");
         }
+        // a photo refused, or not modified, made nothing; a redirect is a photo's alone
+        for refused in [400, 403, 404, 429, 300, 304, 0] {
+            assert_eq!(places("GET", "/v1/places/ChIJ/photos/AUc7/media", refused), Usage::Key { key: "google-places:photo".into(), units: 0 }, "{refused}");
+        }
+        assert_eq!(places("POST", "/v1/places:searchText", 302), Usage::Key { key: "google-places".into(), units: 0 });
+        assert_eq!(places("GET", "/v1/places/ChIJ", 302), Usage::Key { key: "google-places:details".into(), units: 0 });
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("google-places:")).cloned().collect(), ..book.clone() };
