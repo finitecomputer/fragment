@@ -910,24 +910,28 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap_or_else(|_| json!({ "not JSON-RPC": l }))).collect())
     };
     let tools = |list: &Value| list["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
-    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" }))])?;
+    let quote = json!({ "items": [{ "model": "cheap", "input": 1_000, "output": 100, "calls": 4 }] });
+    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" })), ("fragment-quote", quote)])?;
     let wrote = mcp(true, &[("say", json!({ "text": "from mcp" }))])?;
     let said = api.signed(&keys, "GET", &format!("/api/f/{name}/channels/room"), None)?;
     s.ok(
-        "fragment mcp serves the described queries over stdio, and a reader's search, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
-        read.len() == 5
+        "fragment mcp serves the described queries over stdio, a reader's search and a quote, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
+        read.len() == 6
             && read[0]["result"]["serverInfo"]["title"] == name.as_str()
-            && tools(&read[1]) == ["count", "measure", "fragment-search"]
+            && tools(&read[1]) == ["count", "measure", "fragment-search", "fragment-quote"]
             && read[2]["result"]["structuredContent"]["n"].is_u64()
             && read[3]["result"]["isError"] == true
             && read[3]["result"]["structuredContent"]["error"]["code"] == "invalid_request"
             && read[3]["result"]["structuredContent"]["error"]["message"].as_str().is_some_and(|m| m.contains("/text: is required"))
-            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write")),
+            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write"))
+            && read[5]["result"]["structuredContent"]["items"][0]["calls"] == 4
+            && read[5]["result"]["structuredContent"]["totalMicros"].as_i64().is_some_and(|t| t > 0 && Some(t) == read[5]["result"]["structuredContent"]["items"][0]["chargeMicros"].as_i64())
+            && read[5]["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("about $")),
         json!(read),
     );
     s.ok(
         "with --write it serves the described mutation too, and a call of it runs once",
-        tools(&wrote[1]) == ["count", "measure", "say", "fragment-search"]
+        tools(&wrote[1]) == ["count", "measure", "say", "fragment-search", "fragment-quote"]
             && wrote[2]["result"]["structuredContent"]["id"].is_u64()
             && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
         json!({ "mcp": wrote, "room": said.body }),
