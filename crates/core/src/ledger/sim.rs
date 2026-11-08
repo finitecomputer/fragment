@@ -165,6 +165,14 @@ impl Store for Audited {
         self.inner.set_cap(fragment, micros);
     }
 
+    fn key_hour(&self, key: &str) -> super::KeyHour {
+        self.inner.key_hour(key)
+    }
+
+    fn put_key_hour(&mut self, key: &str, hour: &super::KeyHour) {
+        self.inner.put_key_hour(key, hour);
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         self.inner.prune(before_ms, before_month)
     }

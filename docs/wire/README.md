@@ -229,13 +229,13 @@ out.
 | `error` | [`ErrorCode`](#errorcode) | required |  |
 | `message` | `string` | required |  |
 | `reason` | [`Reason`](#reason) or `null` | optional | Why, where one status means several causes a person acts on differently (billing's, seats' and orgs' refusals): the shell picks its plain words by it. Add-only: absent from every other refusal, and a client that knows none ignores it, and one that does not know this one reads none (`reason_or_none`). |
-| `retry_after_ms` | `integer` or `null` | optional | How long to wait before asking again, in ms, where a refusal knows (a 429 `rate_limited` of an embeddings model's rate limit: its writer waits exactly this, then writes again). Add-only: absent from every other refusal. |
+| `retry_after_ms` | `integer` or `null` | optional | How long to wait before asking again, in ms, where a refusal knows (a 429 `rate_limited` of an embeddings model's rate limit: its writer waits exactly this, then writes again; a 429 `key_paused`: about when that key's calls resume). Add-only: absent from every other refusal. |
 
 ### `ErrorCode`
 
 out, open. Every refusal the platform answers with, as `{"error": code, "message"}`. Open (`x-fragment-open`, docs/wire): a code this reader does not know is read by its HTTP status (the CLI's `Resp::refusal`), so one is added without breaking a shipped client.
 
-Values: `invalid_request`, `unauthenticated`, `forbidden`, `not_found`, `unknown_operation`, `no_code`, `already_exists`, `conflicting_body`, `conflict`, `too_large`, `app_failed`, `rate_limited`, `host_failed`, `upstream_failed`, `registry_unavailable`, `budget_used_up`, `storage_full`, `node_full`, `wont_wake`, `not_connected`, `schema_refused`, `deploying`.
+Values: `invalid_request`, `unauthenticated`, `forbidden`, `not_found`, `unknown_operation`, `no_code`, `already_exists`, `conflicting_body`, `conflict`, `too_large`, `app_failed`, `rate_limited`, `host_failed`, `upstream_failed`, `registry_unavailable`, `budget_used_up`, `storage_full`, `node_full`, `wont_wake`, `not_connected`, `schema_refused`, `deploying`, `key_paused`.
 
 ### `FragmentKind`
 

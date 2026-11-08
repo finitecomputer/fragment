@@ -53,7 +53,7 @@ use fragment_core::computer::{
     alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
-use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::ledger::{Meter, MeterRow, Month, Refused, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
@@ -3733,9 +3733,11 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
 /// go to no provider. An operator key's call asks the gate first
-/// (ledger.rs `may`: the agent's owner's standing as this isolate heard
-/// it within the minute; a person out of credit is refused, and a ledger
-/// that does not answer refuses nothing: decision 62). After the answer is
+/// (ledger.rs `may` of `KeyOpen`: the agent's owner's standing and that
+/// key's last hour, as this isolate heard them within the minute; a person
+/// out of credit is refused, a key at its hourly cap is paused (429
+/// `key_paused`, with `Retry-After`: docs/ledger.md, "Shared-key guard"),
+/// and a ledger that does not answer refuses nothing: decision 62). After the answer is
 /// handed back, each operator key's call the provider answered (under
 /// 500) is charged to the owner (`charge_keys`) and counted as the agent's
 /// (`computer/used`), in `wait_until`, never in the answer's way.
@@ -3792,11 +3794,23 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    // the operator's keys among them, and the gate asked for them last
+    // the operator's keys among them, and the gate asked for them last:
+    // each key its own question, the standing and its guard in one ask
     let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)).collect();
-    if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
-        let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
-        crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
+    if let Some((_, owner, _)) = &payer {
+        for (i, p) in keys.iter().enumerate() {
+            if keys[..i].iter().any(|q| q.provider == p.provider) {
+                continue;
+            }
+            let open = crate::ledger::KeyOpen { key: p.provider.clone() };
+            crate::ledger::may(env, owner, &open).await.map_err(|e| {
+                let refused = CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message));
+                match e.refused {
+                    Some(Refused::KeyPaused { resumes_in_ms, .. }) => refused.retry_after(resumes_in_ms.max(1_000).unsigned_abs()),
+                    _ => refused,
+                }
+            })?;
+        }
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);

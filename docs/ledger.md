@@ -189,7 +189,8 @@ topped up waits up to a minute.
 
 - A model call (an agent's chat, vision, decision, transcription and
   embeddings, and a search's embeddings) asks `agent_turn` of its payer,
-  beside it; an operator key's call through the swap asks it first.
+  beside it; an operator key's call through the swap asks it first, with
+  that key's hour (`key_open`: Shared-key guard).
 - A job's AI step asks `ai_step` of the fragment's owner, capped when
   the run's principal is neither the owner nor an agent of theirs.
 - A fragment's write asks `write` of its owner (402 past the overdraft).
@@ -198,3 +199,46 @@ A paid credit pack becomes `GrantCredit {id: "pack:<Checkout's id>", by:
 "stripe"}` on the ledger of the person its metadata names (decision 55);
 the registry pushes `SetPlan` and `SetSeat` (docs/billing.md, "What a
 seat does").
+
+## Shared-key guard
+
+FIN-448 (Paul, 2026-11-08: "a spending guard on shared keys"): a rolling
+hour of what each payer was charged on each operator key, so one runaway
+key pauses and nothing else does (`crates/core/src/ledger/guard.rs`). On
+2026-11-07 a script left on a person's computer called ElevenLabs every
+two seconds and spent $300 in about 35 minutes through the shared key.
+
+- **What counts:** each charge of a `key` row (the swap's), by the key it
+  is of: a part the book prices apart counts as its key
+  (`elevenlabs:speech` as `elevenlabs`). Charged micros, once by the row's
+  reference, so a replay adds nothing; what a call costs is the book's.
+- **The cap:** `guard::KEY_HOUR_CAP`, $5.00 an hour, one for every key: a
+  ledger constant, as `CAP_DEFAULT` and `OVERDRAFT_DEFAULT` are, not a
+  price (the book prices usage) nor the deployment's (the platform
+  decides it once). The reasons for its size are beside it; a decision
+  for Paul.
+- **The hour:** each key's is a row of the ledger's `meta`
+  (`key_hour:<key>`), not a table of its own, since a schema step would
+  make every ledger refuse a rollback. It sums five-minute slots, at most
+  13, so a charge counts for 60 to 65 minutes; one record a key, the
+  book's keys at most.
+- **At the cap:** a key's call through the swap asks `KeyOpen {key}`, its
+  one question: the payer's standing for an agent's turn, then the key's
+  hour. At the cap it is refused `KeyPaused`, and the call is 429
+  `key_paused`, reaching no provider and charged nothing: "elevenlabs's
+  call is not made: this key is paused: $5.03 spent on it in the last
+  hour, its limit $5.00 an hour; its calls resume as the hour passes, in
+  about 62 minutes", with `retry_after_ms` and `Retry-After`. Agents'
+  turns, the payer's other keys and their fragments' writes go on: the
+  account is neither stopped nor read-only. When the standing refuses
+  too, the standing is what is said.
+- **Best effort:** asked through the gate (below), its answer kept a
+  minute in each isolate; a ledger that does not answer lets the call go
+  (`ledger.gate-unknown`), and a record that does not read counts nothing
+  (`ledger.key-hour-unread`). So a key is charged past its cap by the
+  calls that start within the minute and by rows still on their way.
+- **Not yet:** the person is not told; the agent reads the refusal (the
+  debt ledger). Nor is the cap anyone's to change: a person's own would
+  be a command, `SetKeyCap {id, key, micros | null}`, idempotent by id as
+  a fragment's cap is, kept beside the key's hour and read by `key_open`
+  in place of `KEY_HOUR_CAP`.

@@ -11,7 +11,8 @@ Billing's, seats', orgs' and reach's refusals add `"reason"` (`proto::Reason`)
 where one status has several causes a person acts on differently. It is
 add-only: a reason a client does not know reads as none. A refusal that
 knows how long to wait before asking again adds `"retry_after_ms"` and a
-`Retry-After` header (a search write its embeddings model rate-limits).
+`Retry-After` header (a search write its embeddings model rate-limits, a
+paused operator key).
 
 Any route may answer:
 
@@ -1422,6 +1423,12 @@ the wire shows of its rules:
 - A fragment asks its owner's standing through the gate, so a change
   reaches it within a minute; a ledger that does not answer refuses
   nothing.
+- **A shared key's hour** (docs/ledger.md, Shared-key guard): once a
+  person's agents' calls on one operator key were charged
+  `ledger::guard::KEY_HOUR_CAP` within the last hour, that key's calls
+  through their computer's swap are 429 `key_paused`, saying what was
+  spent and about when they resume (`retry_after_ms`, `Retry-After`),
+  reaching no provider and charged nothing. Nothing else pauses.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -1953,7 +1960,8 @@ platform's, reaching no provider: 400 `invalid_request` (a malformed
 placeholder, a provider not offered or in a place it does not take, more
 than 4, or two agents' in one request), 403 `forbidden` (another host than
 its provider's, a tag naming no agent here, an agent narrowed from it), 403
-`not_connected`, or the ledger's 402 or 403.
+`not_connected`, the ledger's 402 or 403, or an operator key paused for
+the hour, 429 `key_paused` (Ledger).
 
 ### An agent's routines (decision 38)
 

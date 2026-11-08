@@ -628,7 +628,9 @@ provider's own hosts.
   not name, forged or naming an agent not on this computer now, of a
   provider its agent was narrowed from, or of a connection not connected
   or an own key not given (403 `not_connected`); and an operator key's
-  when its owner's gate refuses (402, 403). A body goes as it came, and a
+  when its owner's gate refuses (402, 403), or when that key's calls were
+  charged its hourly cap within the hour (429 `key_paused`:
+  docs/ledger.md, "Shared-key guard"). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
 - **Who may use what.** An agent may use every provider its owner has

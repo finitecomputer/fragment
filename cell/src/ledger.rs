@@ -41,6 +41,7 @@
 use std::cell::{Cell, RefCell};
 
 use fragment_core::ledger::gate::{Gate, Step};
+use fragment_core::ledger::guard::KeyHour;
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
@@ -70,6 +71,9 @@ const TEST_SLOW_MAX_MS: u64 = 30_000;
 const TEST_FAIL_GRANTS_MAX: u32 = 10;
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
+/// The meta keys of each operator key's last hour (`Store::key_hour`), the
+/// key's name after it.
+const KEY_HOUR_META: &str = "key_hour:";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
 /// times a Durable Object call's usual round trip (tens of ms within a
 /// location, a few hundred across the world, and a cold start), so a slow
@@ -207,6 +211,16 @@ pub struct FragmentOpen {
     pub fragment: String,
 }
 
+/// May an agent of this ledger's person call operator key `key` now
+/// (docs/ledger.md, "Shared-key guard")? The whole question a key's call
+/// through the swap asks: its standing for an agent's turn, and the key's
+/// last hour under its cap (`Ledger::key_open`), in one ask.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyOpen {
+    pub key: String,
+}
+
 /// The ledger now.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,6 +292,11 @@ impl Route for MaySpend {
 
 impl Route for FragmentOpen {
     const PATH: &'static str = "/fragment-open";
+    type Answer = Done;
+}
+
+impl Route for KeyOpen {
+    const PATH: &'static str = "/key-open";
     type Answer = Done;
 }
 
@@ -519,6 +538,27 @@ impl Store for SqlStore {
         }
     }
 
+    // A key's hour is a row of `meta` (`key_hour:<key>`), not a table of
+    // its own: a schema step would make every ledger refuse a rollback
+    // (schema.rs), and a release before the guard reads past the row.
+    fn key_hour(&self, key: &str) -> KeyHour {
+        let rows: Vec<Json> = self.rows("SELECT value FROM meta WHERE key = ?", vec![format!("{KEY_HOUR_META}{key}").into()]);
+        let Some(row) = rows.into_iter().next() else { return KeyHour::default() };
+        // best effort (docs/ledger.md, "Shared-key guard"): a record that
+        // does not read counts nothing, and the next charge writes it anew
+        KeyHour::read(&row.value).unwrap_or_else(|e| {
+            console_error!("{}", json!({ "event": "ledger.key-hour-unread", "key": key, "message": e }));
+            KeyHour::default()
+        })
+    }
+
+    fn put_key_hour(&mut self, key: &str, hour: &KeyHour) {
+        self.exec(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            vec![format!("{KEY_HOUR_META}{key}").into(), hour.text().into()],
+        );
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let before = SqlStorageValue::Integer(before_ms);
         let forgotten = self.count(
@@ -711,6 +751,13 @@ impl LedgerCell {
                     self.paid_calls()?;
                 }
                 reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
+            }
+            KeyOpen::PATH => {
+                let q: KeyOpen = decode(&body)?;
+                if self.cfg.test_hooks {
+                    self.paid_calls()?;
+                }
+                reply(done(self.mutate(move |l, s, now| l.key_open(s, &q.key, now)).await?))
             }
             FragmentOpen::PATH => {
                 let q: FragmentOpen = decode(&body)?;

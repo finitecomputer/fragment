@@ -655,6 +655,11 @@ pub enum ErrorCode {
     /// side, which refused it before doing anything (docs/MODEL.md, "Calls
     /// between releases"); try again in a few seconds.
     Deploying,
+    /// 429: a computer's call on a shared operator key was not made: the
+    /// payer's calls on that key were charged its hourly limit within the
+    /// last hour (docs/ledger.md, "Shared-key guard"). That key's calls
+    /// resume as the hour passes (`retry_after_ms`); nothing else pauses.
+    KeyPaused,
 }
 
 impl ErrorCode {
@@ -667,7 +672,7 @@ impl ErrorCode {
             ErrorCode::AlreadyExists | ErrorCode::ConflictingBody | ErrorCode::Conflict => 409,
             ErrorCode::TooLarge => 413,
             ErrorCode::AppFailed => 422,
-            ErrorCode::RateLimited => 429,
+            ErrorCode::RateLimited | ErrorCode::KeyPaused => 429,
             ErrorCode::HostFailed | ErrorCode::SchemaRefused => 500,
             ErrorCode::UpstreamFailed => 502,
             ErrorCode::RegistryUnavailable => 503,
@@ -694,8 +699,9 @@ pub struct ErrorBody {
     pub reason: Option<Reason>,
     /// How long to wait before asking again, in ms, where a refusal knows
     /// (a 429 `rate_limited` of an embeddings model's rate limit: its
-    /// writer waits exactly this, then writes again). Add-only: absent
-    /// from every other refusal.
+    /// writer waits exactly this, then writes again; a 429 `key_paused`:
+    /// about when that key's calls resume). Add-only: absent from every
+    /// other refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub retry_after_ms: Option<u64>,

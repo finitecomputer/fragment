@@ -66,6 +66,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
     "a key's call the book prices by what it says (ElevenLabs' text to speech) reaches its host as it came, body and all, and is charged its text's characters, not a call",
     "and one its provider refused (a bad request, a rate limit) made nothing: its row and the agent's count charge nothing, whatever its text",
+    "an operator key charged its hourly cap within the hour pauses: its next call is refused 429 key_paused, saying what it spent and when it resumes, reaching no provider and charged nothing",
+    "while it is paused, another key's call goes on: the key pauses, not the account",
+    "a ledger that does not answer in time lets a paused key's call go: the guard fails open",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -86,6 +89,8 @@ fn charge_for(key: &str, units: i64) -> i64 {
 /// 20 characters, words no rule of the scripted agent's says.
 const SPOKEN: &str = r#"{"text":"Hello there, friend.","model_id":"eleven_multilingual_v2"}"#;
 const SPOKEN_CHARS: i64 = 20;
+/// A long speech call's characters: a few reach the guard's cap.
+const LONG_CHARS: i64 = 10_000;
 
 /// The placeholder the platform gives `agent` on computer `id` for
 /// `provider`: a local run holds the node's host secret, so it makes one
@@ -351,6 +356,59 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         capped.status == 200 && uncapped.status == 200 && refused.starts_with("fetched 402") && refused.contains("perplexity's call is not made") && s.upstream.seen().len() == seen_before && held().len() == held_rows,
         json!({ "refused": refused, "capped": capped.body }),
     );
+
+    // the shared-key guard (FIN-448; docs/ledger.md, "Shared-key guard"):
+    // long speech calls charge ElevenLabs' key its hourly cap, then its
+    // next call is paused, and perplexity's still goes
+    let cap = fragment_core::ledger::guard::KEY_HOUR_CAP;
+    let of_elevenlabs = |r: &Value| usage(r)["key"].as_str().is_some_and(|k| fragment_core::ledger::guard::guarded_key(k) == "elevenlabs");
+    let spent: i64 = rows.iter().filter(|r| of_elevenlabs(r)).filter_map(charged).sum();
+    let eleven_rows = rows.iter().filter(|r| of_elevenlabs(r)).count();
+    let each = charge_for("elevenlabs:speech", LONG_CHARS);
+    let calls = (cap - spent + each - 1) / each;
+    anyhow::ensure!((1..=6).contains(&calls), "a few long calls reach the cap: {calls}");
+    let long = format!(r#"{{"text":"{}","model_id":"eleven_multilingual_v2"}}"#, "a".repeat(LONG_CHARS as usize));
+    let speak = format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {long}");
+    let mut spoke = vec![];
+    for n in 0..calls as u32 {
+        spoke.push(say(s, 140 + n, &speak)?);
+    }
+    let made = held_rows + calls as usize;
+    let reached = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == made);
+    forget_gate(api, &owner_id)?;
+    let seen_before = s.upstream.seen().len();
+    let paused = say(s, 147, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"))?;
+    let unreached = s.upstream.seen().len() == seen_before;
+    let other = say(s, 148, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let went = other.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|l| l["host"] == "api.perplexity.ai");
+    // the perplexity call's row lands, and the paused call made none
+    let settled = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == made + 1);
+    let rows = held();
+    let charged_once = rows.len() == made + 1 && rows.iter().filter(|r| of_elevenlabs(r)).count() == eleven_rows + calls as usize;
+    s.ok(
+        SWAP_CHECKS[33],
+        spoke.iter().all(|said| said.starts_with("fetched 200"))
+            && reached
+            && paused.starts_with("fetched 429")
+            && paused.contains("key_paused")
+            && paused.contains("elevenlabs's call is not made: this key is paused")
+            && paused.contains("its calls resume as the hour passes")
+            && paused.contains("retry_after_ms")
+            && unreached
+            && settled
+            && charged_once,
+        json!({ "spoke": spoke.iter().map(|x| x.chars().take(80).collect::<String>()).collect::<Vec<_>>(), "spent": spent, "calls": calls, "paused": paused, "rows": rows.len() }),
+    );
+    s.ok(SWAP_CHECKS[34], went, &other);
+    // a ledger slower than the gate waits: the call goes, as decision 62 has
+    let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
+    let slowed = slow(3_000)?;
+    forget_gate(api, &owner_id)?;
+    let open = say(s, 149, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"));
+    let unslowed = slow(0)?;
+    forget_gate(api, &owner_id)?;
+    let open = open?;
+    s.ok(SWAP_CHECKS[35], slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200"), json!({ "open": open, "slowed": slowed.body }));
     Ok(turns)
 }
 

@@ -67,7 +67,7 @@ impl Code {
             ErrorCode::Conflict => Code::Conflict,
             ErrorCode::TooLarge => Code::TooLarge,
             ErrorCode::AppFailed => Code::AppFailed,
-            ErrorCode::RateLimited => Code::RateLimited,
+            ErrorCode::RateLimited | ErrorCode::KeyPaused => Code::RateLimited,
             ErrorCode::BudgetUsedUp => Code::BudgetUsedUp,
             ErrorCode::StorageFull => Code::StorageFull,
             // the platform's own object refuses its schema: nothing an agent can fix
@@ -790,6 +790,7 @@ mod tests {
             (ErrorCode::NotConnected, "forbidden"),
             (ErrorCode::SchemaRefused, "server_error"),
             (ErrorCode::Deploying, "unavailable"),
+            (ErrorCode::KeyPaused, "rate_limited"),
         ];
         for (error, cli) in table {
             let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None, retry_after_ms: None }).unwrap();

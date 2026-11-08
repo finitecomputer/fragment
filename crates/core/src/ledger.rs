@@ -62,8 +62,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFault, USD};
+use guard::KeyHour;
 
 pub mod gate;
+pub mod guard;
 pub mod org;
 #[cfg(test)]
 mod sim;
@@ -349,6 +351,10 @@ pub enum Refused {
     /// The org's fragments spent its budget this month: AI steps wait for
     /// a larger one or the next month (decision 68).
     BudgetReached { budget: i64, spent: i64 },
+    /// An operator key's calls were charged its hourly cap this last hour
+    /// (`guard`): that key pauses, for about `resumes_in_ms`, and nothing
+    /// else does.
+    KeyPaused { cap: i64, spent: i64, resumes_in_ms: i64 },
     /// The person was wiped (docs/api.md, Operators): their ledger keeps
     /// nothing but that, and takes nothing more. Not the core's to decide:
     /// the cell answers it for a ledger it emptied, so a row still on its
@@ -407,6 +413,8 @@ impl Refused {
             // amount of credit is short
             Refused::GuestPayer | Refused::GuestCreates | Refused::PersonsOnly | Refused::OrgsOnly => ErrorCode::Forbidden,
             Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CapReached { .. } | Refused::BudgetReached { .. } => ErrorCode::BudgetUsedUp,
+            // a rate, not the credit: it passes by itself
+            Refused::KeyPaused { .. } => ErrorCode::KeyPaused,
         }
     }
 
@@ -436,6 +444,12 @@ impl Refused {
             Refused::BudgetReached { budget, spent } => {
                 format!("this org's fragments spent {} of its {} budget this month: AI steps wait until its billing admins raise it, or next month", dollars(spent), dollars(budget))
             }
+            Refused::KeyPaused { cap, spent, resumes_in_ms } => format!(
+                "this key is paused: {} spent on it in the last hour, its limit {} an hour; its calls resume as the hour passes, in about {} minutes",
+                dollars(spent),
+                dollars(cap),
+                resumes_in_ms.div_euclid(60_000) + i64::from(resumes_in_ms.rem_euclid(60_000) > 0),
+            ),
             Refused::Wiped => "this person was wiped: their ledger takes nothing more".into(),
         }
     }
@@ -575,6 +589,11 @@ pub trait Store {
     fn month_spent(&self, month: Month) -> i64;
     fn cap(&self, fragment: &str) -> Option<i64>;
     fn set_cap(&mut self, fragment: &str, micros: Option<i64>);
+    /// An operator key's charges this last hour (`guard`): empty for a key
+    /// never charged, and for one whose record does not read (the guard is
+    /// best effort, never a fault).
+    fn key_hour(&self, key: &str) -> KeyHour;
+    fn put_key_hour(&mut self, key: &str, hour: &KeyHour);
     /// Forgets the entries and batches from before `before_ms` and the
     /// months of spend before `before_month`; answers how many entries and
     /// batches it forgot.
@@ -589,6 +608,8 @@ pub struct Memory {
     commands: BTreeMap<String, CommandRecord>,
     spent: BTreeMap<Month, BTreeMap<String, i64>>,
     caps: BTreeMap<String, i64>,
+    #[serde(default)]
+    key_hours: BTreeMap<String, KeyHour>,
 }
 
 impl Store for Memory {
@@ -644,6 +665,14 @@ impl Store for Memory {
             Some(m) => self.caps.insert(fragment.to_string(), m),
             None => self.caps.remove(fragment),
         };
+    }
+
+    fn key_hour(&self, key: &str) -> KeyHour {
+        self.key_hours.get(key).cloned().unwrap_or_default()
+    }
+
+    fn put_key_hour(&mut self, key: &str, hour: &KeyHour) {
+        self.key_hours.insert(key.to_string(), hour.clone());
     }
 
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
@@ -1174,6 +1203,10 @@ impl Ledger {
         // a row counts in its own month: a late one from last month does
         // not spend this month's cap
         self.charge(store, charge, row.fragment.as_deref(), Month::of(row.at_ms));
+        // an operator key's charge counts in its key's hour (the guard)
+        if let (Usage::Key { key, .. }, true) = (&row.usage, charge > 0) {
+            guard::charged(store, key, row.at_ms, charge, now_ms);
+        }
         store.put_entry(&row.reference, Entry::Row { row: row.clone(), priced, charge, book: book.version });
         Ok(Some(charge))
     }

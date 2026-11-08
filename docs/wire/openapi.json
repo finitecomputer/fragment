@@ -207,7 +207,7 @@
           },
           "retry_after_ms": {
             "default": null,
-            "description": "How long to wait before asking again, in ms, where a refusal knows\n(a 429 `rate_limited` of an embeddings model's rate limit: its\nwriter waits exactly this, then writes again). Add-only: absent\nfrom every other refusal.",
+            "description": "How long to wait before asking again, in ms, where a refusal knows\n(a 429 `rate_limited` of an embeddings model's rate limit: its\nwriter waits exactly this, then writes again; a 429 `key_paused`:\nabout when that key's calls resume). Add-only: absent from every\nother refusal.",
             "format": "uint64",
             "minimum": 0,
             "type": [
@@ -334,6 +334,11 @@
           {
             "const": "deploying",
             "description": "503: a deploy is going out, and a call between the platform's own\nWorker and one of its objects met another release on the other\nside, which refused it before doing anything (docs/MODEL.md, \"Calls\nbetween releases\"); try again in a few seconds.",
+            "type": "string"
+          },
+          {
+            "const": "key_paused",
+            "description": "429: a computer's call on a shared operator key was not made: the\npayer's calls on that key were charged its hourly limit within the\nlast hour (docs/ledger.md, \"Shared-key guard\"). That key's calls\nresume as the hour passes (`retry_after_ms`); nothing else pauses.",
             "type": "string"
           }
         ],
@@ -1172,7 +1177,8 @@
                     "properties": {
                       "error": {
                         "enum": [
-                          "rate_limited"
+                          "rate_limited",
+                          "key_paused"
                         ],
                         "x-fragment-open": true
                       },

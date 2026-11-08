@@ -522,6 +522,7 @@ value ErrorCode deploying
 value ErrorCode forbidden
 value ErrorCode host_failed
 value ErrorCode invalid_request
+value ErrorCode key_paused
 value ErrorCode no_code
 value ErrorCode node_full
 value ErrorCode not_connected
@@ -591,6 +592,7 @@ value LiveOut.result.#1.409.error conflict
 value LiveOut.result.#1.409.error conflicting_body
 value LiveOut.result.#1.413.error too_large
 value LiveOut.result.#1.422.error app_failed
+value LiveOut.result.#1.429.error key_paused
 value LiveOut.result.#1.429.error rate_limited
 value LiveOut.result.#1.500.error host_failed
 value LiveOut.result.#1.500.error schema_refused
