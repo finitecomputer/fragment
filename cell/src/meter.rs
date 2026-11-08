@@ -451,3 +451,4 @@ async fn consume_one(raw: RawMessage, env: &Env) {
         _ => raw.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(RETRY_DELAY_S).build()),
     }
 }
+// throwaway: shows a pull request's CI is `check` alone (#1118); never merged

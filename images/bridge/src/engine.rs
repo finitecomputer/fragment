@@ -2579,3 +2579,4 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod tests;
+// throwaway: shows a pull request's CI is `check` alone (#1118); never merged
