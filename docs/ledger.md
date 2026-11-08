@@ -132,7 +132,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   per 1,000 (FIN-443); its music and every other call on the key is one
   call, a minute of music. A fal generation (a `POST` to a model at
   `queue.fal.run` or `fal.run`) is `fal:image`, a unit a pixel its JSON
-  body asks for (`num_images` of its `image_size`), at most 16
+  body asks for (`num_images` of its `image_size`; absent, Klein's
+  default on Klein's text to image, else none, as an edit's is its
+  input's), at most 16
   megapixels, at $0.006 per 1,048,576 (FIN-445); every other call on
   fal's key (its queue's polls, statuses, results and cancels, its
   uploads) is none of the key's, charged nothing. On xAI's key, a call

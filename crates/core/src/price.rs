@@ -621,8 +621,13 @@ impl KeyCall<'_> {
 /// synchronous runs); its others (`rest.fal.ai`'s uploads) make nothing.
 const FAL_RUNS: [&str; 2] = ["queue.fal.run", "fal.run"];
 
+/// FLUX.2 Klein 9B's text to image (Hermes' `image_generate`), whose
+/// `image_size` absent is its default, `landscape_4_3` (an edit's is its
+/// input image's, which the meter does not see).
+const FAL_KLEIN: &str = "/fal-ai/flux-2/klein/9b";
+
 /// fal's `image_size` presets in pixels (FLUX.2 Klein's, and its other
-/// image models'), the first its default.
+/// image models'), the first Klein's default.
 const FAL_SIZES: [(&str, u64); 6] = [
     ("landscape_4_3", 1024 * 768),
     ("landscape_16_9", 1024 * 576),
@@ -632,13 +637,15 @@ const FAL_SIZES: [(&str, u64); 6] = [
     ("portrait_16_9", 576 * 1024),
 ];
 
-/// The pixels a fal generation asks for: `num_images` (absent, 1) images
-/// of its `image_size`, a preset, `{width, height}`, or absent, the
-/// default preset; none for any other (an unknown preset, a size that is
-/// no two whole numbers).
-fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+/// The pixels a fal generation to `path` asks for: `num_images` (absent,
+/// 1) images of its `image_size`, a preset or `{width, height}`, or
+/// absent, Klein's default on Klein's text to image; none for any other
+/// (an absent size elsewhere, an edit's being its input's, an unknown
+/// preset, a size that is no two whole numbers).
+fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let each = match said.get("image_size") {
-        None => FAL_SIZES[0].1,
+        None if path == FAL_KLEIN => FAL_SIZES[0].1,
+        None => return None,
         Some(serde_json::Value::String(preset)) => FAL_SIZES.iter().find(|(name, _)| name == preset)?.1,
         Some(size) => size.get("width")?.as_u64()?.checked_mul(size.get("height")?.as_u64()?)?,
     };
@@ -677,7 +684,7 @@ fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> 
 pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     let (priced_as, units) = match key {
         "elevenlabs" if call.path.starts_with("/v1/text-to-speech/") => ("elevenlabs:speech", call.said().and_then(|said| Some(said.get("text")?.as_str()?.chars().count() as u64))),
-        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().as_ref().and_then(fal_pixels)),
+        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().and_then(|said| fal_pixels(call.path, &said))),
         "fal" => return Usage::Key { key: key.to_string(), units: 0 },
         "xai" => {
             let said = call.said();
@@ -1247,8 +1254,16 @@ mod tests {
         }
         assert_eq!(sized(r#"{"prompt":"p","image_size":{"width":1920,"height":1080}}"#), units(1920 * 1080));
         assert_eq!(sized(r#"{"prompt":"p","image_size":"square_hd","num_images":4}"#), units(4 * 1_048_576));
-        assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "the default, landscape_4_3");
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", br#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#, 200), units(1024 * 768), "an edit, at the default");
+        assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "Klein's default, landscape_4_3");
+        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", br#"{"prompt":"p","num_images":2}"#, 200), units(2 * 1024 * 768));
+        // an edit's size is its input's unless it names one (FIN-445 review)
+        let edit = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", body.as_bytes(), 200);
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#), units(0), "an edit of an input the meter does not see");
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":"square"}"#), units(512 * 512));
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":{"width":2048,"height":2048}}"#), units(4 * 1_048_576));
+        // another model's default is its own: unread
+        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p"}"#, 200), units(0));
+        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p","image_size":"square_hd"}"#, 200), units(1_048_576));
         // only fal's key
         assert_eq!(key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
     }
