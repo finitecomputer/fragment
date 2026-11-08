@@ -102,8 +102,11 @@ Dev and e2e use separate state; failed e2e logs remain in `target/e2e/`.
   as a branch and PR against `master`; names under `ci/` are refused.
   The coordinating session reviews PRs once CI is green.
 - Only Paul updates `production`: his push or merge approves production
-  deployment. Green master pushes deploy preview automatically. CI and
-  rollout code define proof, preparation and rollback checks; preserve them.
+  deployment. Master's run is the gate: a green master push deploys
+  preview, a red one deploys nothing and is fixed forward. A PR's CI is
+  `check` alone, required by nothing, with no merge queue: validate on
+  this machine and show the evidence. CI and rollout code define proof,
+  preparation and rollback checks; preserve them.
 - Production deploys by hand, other hosted fleet deploys, DNS changes,
   adding remotes, deleting Sprites, teardown and other irreversible
   actions need Paul's approval. Live Stripe setup is Paul's to run;
