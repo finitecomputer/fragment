@@ -812,7 +812,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "[document.getElementById('messages').innerText.slice(-300), document.getElementById('text').placeholder]")?,
     );
     let _ = chrome.screenshot(&page, &shots.join("desktop-asked.png"));
-    say(&mut chrome, "Sprout")?;
+    // what they type is the answer, so no Steer is offered beside Send
+    // while it waits (its menu has `steer`: `commands_queued_and_quotes`)
+    chrome.click(&page, "#text")?;
+    chrome.type_text(&page, "Sprout")?;
+    let unsteered = chrome.eval(&page, &format!("[document.getElementById('steer').hidden, {answer_here}]"))?;
+    s.ok("words typed while it waits for their answer offer no Steer", unsteered == json!([true, true]), &unsteered);
+    chrome.press(&page, "Enter", false)?;
     let answered = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.msg.asked') && !({answer_here})", replied("(told: Sprout)")));
     s.ok("their next message is the answer: the turn goes on with it, and nothing waits", answered, chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?);
 
