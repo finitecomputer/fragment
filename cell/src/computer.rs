@@ -946,13 +946,10 @@ impl ComputerCell {
     /// worked out from its hour (`fragment_core::key_hour`).
     fn with_keys(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
         let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
-        let rows = self.rows("SELECT provider, slot, micros FROM key_hour ORDER BY provider, slot", vec![])?;
-        let mut providers: Vec<&str> = rows.iter().filter_map(|r| r["provider"].as_str()).collect();
-        providers.dedup();
-        for provider in providers {
-            let slots: Vec<(i64, i64)> = rows.iter().filter(|r| r["provider"] == provider).map(|r| (r["slot"].as_i64().unwrap_or(0), r["micros"].as_i64().unwrap_or(0))).collect();
+        for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
+            let provider = row["provider"].as_str().unwrap_or_default();
             let cap = key_hour::KEY_HOUR_CAP;
-            if let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) {
+            if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
                 told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, resumes_at: real + resumes_in });
             }
         }
@@ -969,14 +966,11 @@ impl ComputerCell {
     /// it resumes. A read that fails lets the call go (a preference never
     /// breaks an agent).
     fn key_open(&self, provider: &str) -> CellResult<()> {
-        let read = self.offset_ms().and_then(|offset| Ok((self.key_slots(provider)?, js::now_ms() + offset)));
-        let (slots, now) = match read {
-            Ok(read) => read,
-            Err(e) => {
-                console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
-                return Ok(());
-            }
-        };
+        let now = js::now_ms() + self.offset_ms().unwrap_or(0);
+        let slots = self.key_slots(provider).unwrap_or_else(|e| {
+            console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
+            vec![]
+        });
         let cap = key_hour::KEY_HOUR_CAP;
         let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
         let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
@@ -2182,9 +2176,8 @@ impl ComputerCell {
 
     /// Counts an agent's calls a provider answered, in `at`'s month, and
     /// forgets months past `USES_MONTHS_KEPT`. A month already holding
-    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged).
-    /// Counts each use, and a shared key's charge in its hour: whether one
-    /// reached its cap.
+    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged). A
+    /// shared key's charge counts in its hour too: whether one reached its cap.
     fn count_uses(&self, b: &UsedAsk) -> CellResult<bool> {
         if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
