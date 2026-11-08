@@ -3803,10 +3803,12 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // after the answer, never in its way
     if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
         let book = &cfg.book;
-        // what each key's call used: a call, or the units of a part the
-        // book prices apart (ElevenLabs' speech, by its characters, when
-        // its answer is a 2xx), the row and the agent's count alike
-        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, url.path(), &body, answered))).collect();
+        // what each key's call used: a call, the units of a part the book
+        // prices apart (ElevenLabs' speech by its characters, fal's images
+        // by their pixels, when its answer is a 2xx), or none (fal's
+        // polls), the row and the agent's count alike
+        let call = fragment_core::price::KeyCall { method: method.as_ref(), host: &host, path: url.path(), body: &body, status: answered };
+        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
         let uses: Vec<Value> = plan
             .wanted
