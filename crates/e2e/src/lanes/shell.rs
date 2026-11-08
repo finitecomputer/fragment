@@ -2905,16 +2905,20 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 
 /// The shell on a phone, as an app (Paul, 2026-10-13: "staying strictly in
 /// the viewport (shouldn't feel overflow scrolly, shouldn't zoom on text
-/// input, should feel like a native app)"), at 320, 375, 390 and 430 px in
-/// Chrome's phone emulation: the page never wider than the screen nor
-/// scrolling, with its sidebar open and closed, a chat holding a long
-/// word, code and a wide table (the table scrolls in its own box), its
-/// stand-in's composer the chat's own box (nothing jumps as it loads), the
-/// launcher, settings (its Your data with an export ready, its widest
+/// input, should feel like a native app)"), at 320, 390 and 430 px in
+/// Chrome's phone emulation: a width each side of each rule that takes
+/// effect in a phone's widths (shell.css's `pane` container at 340 px, its
+/// `settings` container at 420 px: settings and the Apps page; sheet.css's
+/// 420 px media query is the share sheet's page, whose frame is narrower
+/// still at 430; FIN-452 dropped 375, between them): the page never wider
+/// than the screen nor scrolling, with its sidebar open and closed, a chat
+/// holding a long word, code and a wide table (the table scrolls in its
+/// own box), its stand-in's composer the chat's own box (nothing jumps as
+/// it loads), the launcher, settings (its Your data with an export ready, its widest
 /// rows), the share sheet, an app's window and the ways to ask for one
 /// (three, then three more from its die, a target of 44 px or more that a
 /// press reaches); no field a phone zooms into on focus (16px or more), in
-/// the shell, the chat, the launcher, settings and the sheet; and, at 375,
+/// the shell, the chat, the launcher, settings and the sheet; and, at 390,
 /// a way to ask the die dealt, pressed, goes into the chat's composer, the
 /// desktop's sheet closed.
 /// Safari's keyboard, bounce and zoom are not Chrome's: a phone tests those.
@@ -3069,7 +3073,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     let mut small: Vec<Value> = Vec::new();
     let mut phone_prompt: Option<(bool, Value)> = None;
     let mut phone_loading: Option<Value> = None;
-    for w in [320u32, 375, 390, 430] {
+    for w in [320u32, 390, 430] {
         b.viewport(page, w, 812, true)?;
         b.reload(page)?;
         b.until(page, home, wait);
@@ -3124,9 +3128,9 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         }
         b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
         b.until(page, "!document.getElementById('search-dialog').open", wait);
-        // settings (at 375 px, held loading a moment: where the loaded page's content goes)
+        // settings (at 390 px, held loading a moment: where the loaded page's content goes)
         let open = "document.getElementById('scrim').click(), document.getElementById('settings').click()";
-        if w == 375 {
+        if w == 390 {
             phone_loading = Some(settings_loading(b, page, open, wait)?);
         } else {
             b.eval(page, &format!("({open}, true)"))?;
@@ -3193,7 +3197,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         )?;
         let fits = b.eval(page, PAGE_FITS)?;
         places.push(("ways to ask, dealt by its die", json!({ "ok": dealt && target["ok"] == true && fits["ok"] == true, "first": first, "target": target, "page": fits })));
-        if w == 375 {
+        if w == 390 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-prompts.png")));
             let text = b.eval(page, &format!("document.querySelector('{prompts}')?.textContent ?? ''"))?.as_str().unwrap_or("").to_string();
             let before = chat_count(api, session, &chat);
@@ -3223,7 +3227,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     s.ok("on a phone, a way to ask from the dock's Add goes into the chat's composer: the desktop's sheet closes, the composer shows, focused, and nothing is sent", composed, seen);
     let loading = phone_loading.unwrap_or(Value::Null);
     s.ok(
-        "settings load in the loaded page's own box: its layout, padding, content and heading where they stay once loaded (no jump), on a phone (375 px)",
+        "settings load in the loaded page's own box: its layout, padding, content and heading where they stay once loaded (no jump), on a phone (390 px)",
         loading["ok"] == true,
         &loading,
     );

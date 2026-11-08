@@ -18,8 +18,12 @@
 //!   bound as its door, and its setup in the dialog, step by step: the
 //!   token, connected, the pairing link, the account that answered it
 //!   confirmed, done; its row then Open; its owner's message from Telegram
-//!   reaches the agent. The chat lane runs it again for a Claude Code agent
-//!   (`chat::claude_telegram`): a door is any runtime's.
+//!   reaches the agent.
+//! - `set_up_offered`: the chat lane's Claude Code agent, its row and its
+//!   Set up alone (`chat::claude_install`): a door is any runtime's, and a
+//!   relayed record is its owner's message before the bridge picks the
+//!   agent's runtime (images/bridge/src/engine.rs `record`), so the rest of
+//!   `from_settings` runs once, for the stub agent (FIN-452).
 //!
 //! The setup page's calls are its own but for where Telegram is: the fake's
 //! address in place of api.telegram.org (its secrets' host, `connect`'s
@@ -290,6 +294,60 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
     Ok(())
 }
 
+/// An agent of `owner`'s with no Telegram chat, in Settings signed in as
+/// them: its row is Set up alone, and its Set up makes one Telegram chat,
+/// bound as its door, and opens its setup page in the dialog, asking for the
+/// bot's token. `who` names the agent in the first check; `shots`, where
+/// each step's screenshots go (none: none taken). Answers the page and the
+/// chat Set up made.
+fn first_set_up(s: &mut Suite, b: &mut Browser, api: &Api, owner: &Keys, agent: &str, who: &str, shots: Option<&Path>) -> Result<(Page, String)> {
+    let session = api.sign_in(&Api::email_of(owner))?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let (page, seen) = settings(s, b, api, agent, &["Set up"])?;
+    // no Telegram chat of its at all (the lane's earlier one deleted), so
+    // the sidebar shows what Set up makes, and only that
+    let telegrams = || -> usize {
+        api.signed(owner, "GET", "/api/fragments", None).ok().and_then(|r| r.body["fragments"].as_array().map(|l| l.iter().filter(|f| f["title"] == "Telegram").count())).unwrap_or(usize::MAX)
+    };
+    let none = telegrams();
+    s.ok(&format!("{who} with no Telegram chat has Set up alone in Settings"), seen["buttons"] == json!(["Set up"]) && seen["open"].is_null() && none == 0, json!({ "row": seen, "telegram_chats": none }));
+    if let Some(shots) = shots {
+        shoot(b, &page, shots, "b1-settings-new", Some("#settings-telegram"))?;
+    }
+
+    // Set up: a connector made, bound as its door, its setup in the dialog
+    let dialog = set_up(s, b, &page, agent)?;
+    let name = dialog["fragment"].as_str().unwrap_or("").to_string();
+    let asks = until_line(s, b, "Make a bot with @BotFather, then paste its token.");
+    let bound = api.signed(owner, "GET", &format!("/api/f/{name}/door"), None)?;
+    let listed = api.signed(owner, "GET", "/api/fragments", None)?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
+    let one = telegrams();
+    s.ok(
+        "its Set up makes one Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot's token",
+        !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": agent }) && listed["title"] == "Telegram" && listed["kind"] == "chat" && one == 1,
+        json!({ "dialog": dialog, "bound": bound.body, "listed": listed, "telegram_chats": one }),
+    );
+    if let Some(shots) = shots {
+        shoot(b, &page, shots, "b2-token", None)?;
+    }
+    Ok((page, name))
+}
+
+/// A Claude Code agent's Telegram, from Settings (FIN-393; Paul, 2026-11-07:
+/// "Telegram row for claude yes"): its row is shown (agent-runtimes.js
+/// `doors`), Set up alone, and its Set up works (`first_set_up`). The rest
+/// of the setup, and its owner's message from Telegram reaching the agent,
+/// is the same for every runtime: `from_settings`, for the stub agent.
+pub(super) fn set_up_offered(s: &mut Suite, api: &Api, owner: &Keys, agent: &str) -> Result<()> {
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for Settings' Telegram (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let (page, _) = first_set_up(s, &mut b, api, owner, agent, "a Claude Code agent", None)?;
+    b.close(page)?;
+    Ok(())
+}
+
 /// The checks of an agent with no Telegram chat, set up from Settings: see
 /// the module's. Its screenshots go in `dir`, in the run's scratch.
 pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &str) -> Result<()> {
@@ -299,31 +357,7 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
     };
     let shots = s.scratch.join(dir);
     std::fs::create_dir_all(&shots)?;
-    let session = api.sign_in(&Api::email_of(c.owner))?;
-    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let (page, seen) = settings(s, &mut b, api, c.agent, &["Set up"])?;
-    // no Telegram chat of its at all (the lane's earlier one deleted), so
-    // the sidebar shows what Set up makes, and only that
-    let telegrams = || -> usize {
-        api.signed(c.owner, "GET", "/api/fragments", None).ok().and_then(|r| r.body["fragments"].as_array().map(|l| l.iter().filter(|f| f["title"] == "Telegram").count())).unwrap_or(usize::MAX)
-    };
-    let none = telegrams();
-    s.ok("an agent with no Telegram chat has Set up alone in Settings", seen["buttons"] == json!(["Set up"]) && seen["open"].is_null() && none == 0, json!({ "row": seen, "telegram_chats": none }));
-    shoot(&mut b, &page, &shots, "b1-settings-new", Some("#settings-telegram"))?;
-
-    // Set up: a connector made, bound as its door, its setup in the dialog
-    let dialog = set_up(s, &mut b, &page, c.agent)?;
-    let name = dialog["fragment"].as_str().unwrap_or("").to_string();
-    let asks = until_line(s, &mut b, "Make a bot with @BotFather, then paste its token.");
-    let bound = api.signed(c.owner, "GET", &format!("/api/f/{name}/door"), None)?;
-    let listed = api.signed(c.owner, "GET", "/api/fragments", None)?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
-    let one = telegrams();
-    s.ok(
-        "its Set up makes one Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot's token",
-        !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": c.agent }) && listed["title"] == "Telegram" && listed["kind"] == "chat" && one == 1,
-        json!({ "dialog": dialog, "bound": bound.body, "listed": listed, "telegram_chats": one }),
-    );
-    shoot(&mut b, &page, &shots, "b2-token", None)?;
+    let (page, name) = first_set_up(s, &mut b, api, c.owner, c.agent, "an agent", Some(&shots))?;
 
     // the token: connected
     let pasted = to_fake(&mut b, &c.tg.url) && paste(&mut b, c.token);
