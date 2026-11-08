@@ -971,36 +971,44 @@ impl ComputerCell {
         Ok(told)
     }
 
-    /// The keys paused now: a record past its `resumes_at` is let go, and
-    /// one that does not read is none (best effort, as the guard is).
+    /// The pauses kept, one past its `resumes_at` among them until the next
+    /// write; a record that does not read is none (best effort, as the
+    /// guard is).
+    fn stored_pauses(&self) -> CellResult<Vec<KeyPause>> {
+        Ok(self.meta(MetaKey::KeyPauses)?.and_then(|v| crate::json_text(&v).ok()).unwrap_or_default())
+    }
+
+    /// The keys paused now.
     fn key_pauses(&self) -> CellResult<Vec<KeyPause>> {
         let now = js::now_ms();
-        let all: Vec<KeyPause> = self.meta(MetaKey::KeyPauses)?.and_then(|v| crate::json_text(&v).ok()).unwrap_or_default();
-        Ok(all.into_iter().filter(|p| p.resumes_at > now).collect())
+        Ok(self.stored_pauses()?.into_iter().filter(|p| p.resumes_at > now).collect())
     }
 
     /// `provider`'s pause as `pause` says (none: it resumed), its owner's
-    /// pages told when that changes whether it is told: once a pause.
+    /// pages told as it starts, its cap changes, or it goes (once ended by
+    /// its time too: a page that showed it reads it gone).
     async fn key_paused(&self, provider: &str, pause: Option<KeyPause>) -> CellResult<()> {
-        let mut all = self.key_pauses()?;
-        let held = all.iter().find(|p| p.provider == provider);
-        let was = held.is_some();
-        // each refused call tells it again: written only as it says more
-        // (another cap, or a resume a minute or more later)
-        if let (Some(h), Some(p)) = (held, &pause) {
-            if h.cap_micros == p.cap_micros && p.resumes_at < h.resumes_at + 60_000 {
-                return Ok(());
-            }
-        }
-        all.retain(|p| p.provider != provider);
-        let is = pause.is_some();
+        let now = js::now_ms();
+        let mut all = self.stored_pauses()?;
+        let held = all.iter().find(|p| p.provider == provider).cloned();
+        let live = held.as_ref().filter(|h| h.resumes_at > now);
+        let tell = match (live, &pause) {
+            // each refused call tells it again: written only as it says
+            // more (another cap, or a resume a minute or more later)
+            (Some(h), Some(p)) if h.cap_micros == p.cap_micros && p.resumes_at < h.resumes_at + 60_000 => return Ok(()),
+            (Some(h), Some(p)) => h.cap_micros != p.cap_micros,
+            (None, Some(_)) => true,
+            (_, None) if held.is_none() => return Ok(()),
+            (_, None) => true,
+        };
+        all.retain(|p| p.provider != provider && p.resumes_at > now);
         all.extend(pause);
         assert!(all.len() <= self.cfg.providers.providers().len(), "a pause a catalog row at most");
         match all.is_empty() {
             true => self.delete_meta(MetaKey::KeyPauses)?,
             false => self.set_meta(MetaKey::KeyPauses, &serde_json::to_string(&all).expect("pauses serialize"))?,
         }
-        if was != is {
+        if tell {
             self.tell_owner().await;
         }
         Ok(())
@@ -2764,7 +2772,7 @@ impl ComputerCell {
                 self.must(MetaKey::Id)?;
                 self.count_uses(&b)?;
                 // a call that went through: its key is paused no more
-                let paused = self.key_pauses()?;
+                let paused = self.stored_pauses()?;
                 for u in b.uses.iter().filter(|u| paused.iter().any(|p| p.provider == u.provider)) {
                     self.key_paused(&u.provider, None).await?;
                 }

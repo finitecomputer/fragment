@@ -201,6 +201,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       row.classList.add("warn");
       copy.append(el("strong", null, diskSaid(n)));
     } else if (n.kind === "key_paused") {
+      // one past its end is no pause, though no one told this page yet
+      if (n.resumesAt <= Date.now()) return null;
       // an operator key at its hourly cap (docs/ledger.md, "Shared-key
       // guard"): the person's one tap lifts it four times, never an agent's
       row.classList.add("warn");
