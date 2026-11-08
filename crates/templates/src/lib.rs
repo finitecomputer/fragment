@@ -460,10 +460,31 @@ pub(crate) mod tests {
         let (guide, skill, api) = (flat("cli/GUIDE.md"), flat("cli/SKILL.md"), flat("docs/api.md"));
         assert!(guide.contains(&format!("one of {} is copied in", ticked(&catalog))), "cli/GUIDE.md names the catalog");
         assert!(guide.contains(&format!("a blessed one, {}, runs", ticked(&blessed::BLESSED))), "cli/GUIDE.md names the blessed templates");
-        assert!(skill.contains(&format!("one with no folder: {}", catalog.join("|"))), "cli/SKILL.md names the catalog");
+        assert!(skill.contains(&format!("# no folder: {}", catalog.join("|"))), "cli/SKILL.md names the catalog");
         assert!(api.contains(&format!("With `template` ({}; any other is 400", ticked(&catalog))), "docs/api.md names the catalog");
         assert!(api.contains(&format!("{} are blessed", ticked(&blessed::BLESSED))), "docs/api.md names the blessed templates");
         assert!(!catalog.contains(&"notes") && NOTES.name == "notes", "notes is the CLI's alone");
+    }
+
+    /// Goal: an agent asked for one of the templates `fragment new`
+    /// scaffolds finds it by name in the docs it reads, and learns whether
+    /// `fragment create` takes it. Method: every template that is not
+    /// blessed (the CLI's `ALL`) has its own line in cli/GUIDE.md's list,
+    /// is in cli/SKILL.md's, and those outside `CATALOG` are named as the
+    /// CLI's alone in the guide and in docs/api.md. Invalid: a template
+    /// added under templates/ and to no doc (board and slides were).
+    #[test]
+    fn the_docs_name_every_template_new_scaffolds() {
+        let ticked = |names: &[&str]| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        let scaffolded: Vec<&str> = ALL.iter().map(|t| t.name).filter(|n| !blessed::BLESSED.contains(n)).collect();
+        let cli_only: Vec<&str> = scaffolded.iter().copied().filter(|n| !CATALOG.iter().any(|t| t.name == *n)).collect();
+        let (guide, skill, api) = (flat("cli/GUIDE.md"), flat("cli/SKILL.md"), flat("docs/api.md"));
+        for name in &scaffolded {
+            assert!(guide.contains(&format!("- `{name}`: ")), "cli/GUIDE.md's list after `fragment new --list` has no line for {name}");
+        }
+        assert!(skill.contains(&format!("templates: {}", scaffolded.join("|"))), "cli/SKILL.md names the templates {scaffolded:?}");
+        assert!(guide.contains(&format!("({} are `new`'s and `init`'s alone)", ticked(&cli_only))), "cli/GUIDE.md names {cli_only:?} as the CLI's alone");
+        assert!(api.contains(&format!("{} are the CLI's only", ticked(&cli_only))), "docs/api.md names {cli_only:?} as the CLI's only");
     }
 
     /// Goal: the chat template's README names every file of its page.

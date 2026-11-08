@@ -123,11 +123,48 @@ struct AccountConnectionView: View {
         self.close = close
         _server = State(initialValue: Self.pairServer ?? connection.account?.origin.absoluteString ?? "https://finite.chat")
     }
+    @State private var editingServer = false
+    @State private var logoY: CGFloat?
     @State private var replaceKey = false
     @State private var forgetConnection = false
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
+        if connection.account == nil { intro } else { pairing }
+    }
+    /// The first screen of an iPhone with no key yet: Connect takes the
+    /// address as it stands, Finite's own unless changed here.
+    private var intro: some View {
+        ZStack {
+            DesktopWallpaper().glassLogo(size: 162, y: logoY)
+                .accessibilityElement().accessibilityLabel("Finite.Computer").accessibilityAddTraits(.isImage)
+            VStack(spacing: 12) {
+                // The logo sits midway down the room the controls leave.
+                Spacer().onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midY } action: { logoY = $0 }
+                if let error = connection.error {
+                    Text(error).font(.footnote).multilineTextAlignment(.center).padding(.horizontal, 20).padding(.vertical, 12)
+                        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                }
+                if editingServer {
+                    TextField("https://finite.chat", text: $server).textContentType(.URL).keyboardType(.URL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("accountServer")
+                        .padding(.horizontal, 24).frame(height: 56).glassEffect(.regular, in: .capsule)
+                } else {
+                    Button("Use a different server") { editingServer = true }
+                        .buttonStyle(.glass).accessibilityIdentifier("changeServer")
+                }
+                Button { Task { await connection.begin(server) } } label: {
+                    Text("Connect").font(.title3.weight(.semibold)).foregroundStyle(Color(.systemBackground))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                }
+                .buttonStyle(.glassProminent).buttonBorderShape(.capsule).controlSize(.extraLarge)
+                .accessibilityIdentifier("pairAccount")
+            }
+            .padding(.horizontal, 20).padding(.bottom, 12)
+        }
+        .disabled(connection.busy)
+    }
+    private var pairing: some View {
         NavigationStack {
             Form {
                 Section {
@@ -157,17 +194,15 @@ struct AccountConnectionView: View {
                             ProgressView("Waiting for approval…")
                         }
                     }
-                    if connection.account != nil && connection.code == nil {
+                    if connection.code == nil {
                         Section { Button("Create a new device key") { replaceKey = true } }
                     }
                 }
-                if connection.account != nil {
-                    Section {
-                        Button("Remove from this iPhone", role: .destructive) { forgetConnection = true }
-                            .accessibilityIdentifier("forgetAccount")
-                    } footer: {
-                        Text("Use this if the server is unreachable. This removes the saved key and drafts from this iPhone; revoke its approved key from the website when you can.")
-                    }
+                Section {
+                    Button("Remove from this iPhone", role: .destructive) { forgetConnection = true }
+                        .accessibilityIdentifier("forgetAccount")
+                } footer: {
+                    Text("Use this if the server is unreachable. This removes the saved key and drafts from this iPhone; revoke its approved key from the website when you can.")
                 }
                 if connection.busy { ProgressView() }
                 if let error = connection.error { Section { Text(error).foregroundStyle(.secondary) } }

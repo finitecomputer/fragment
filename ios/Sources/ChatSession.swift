@@ -43,6 +43,8 @@ final class ChatSession {
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
+    /// The helpers working now (`turn.child`), once this connection read its `work`.
+    private(set) var helpers: [Helpers.Helper] = []
     /// Each agent's menu, its commands' names (`Timeline.menus`), as the
     /// composer observes it: a menu that comes or changes alone redraws Steer.
     private(set) var menus: [String: [String]] = [:]
@@ -86,9 +88,10 @@ final class ChatSession {
     /// composer is busy, and one attaching goes at a time (`beginAttaching`).
     private(set) var attaching = false
     /// A first message from Home being sent here (`sendFirst`), from its
-    /// uploads to its post: until then nothing else sends, so it goes first.
-    /// Typing and attaching stay the person's.
-    private(set) var sendingFirst = false
+    /// uploads to its post, shown as sending (its words, else its first
+    /// file's) before it is a post: until then nothing else sends, so it
+    /// goes first. Typing and attaching stay the person's.
+    private(set) var sendingFirst: String?
     static let waitForFirst = "Wait for the message being sent."
     /// Files being put, or that failed to be: each shown in the composer
     /// from its own bytes on this iPhone (`BlobStore.keep`) as it goes, then
@@ -145,6 +148,8 @@ final class ChatSession {
         if writing != drafts { drafts = writing }
         let running = workRead ? timeline.activeTurns : []
         if running != activeTurns { activeTurns = running }
+        let working = workRead ? timeline.helpers.running : []
+        if working != helpers { helpers = working }
         let offered = timeline.menus.mapValues(\.commands)
         if offered != menus { menus = offered }
         let cursor = timeline.cursors["chat"] ?? 0
@@ -286,6 +291,7 @@ final class ChatSession {
                                 if !workRead { workRead = true; timelineChanged() }
                                 if chatReadNow && !read { read = true }
                                 await earlierWork()
+                                await recentHelpers()
                                 // drafts kept across the reconnect go once their turn is read to have ended
                                 timeline.settleDrafts()
                             }
@@ -355,6 +361,9 @@ final class ChatSession {
     static let workBatch = 50
     /// Earlier `work` read back at most, a visit.
     static let earlierWorkMax = 1_000
+    /// `work` read back for the helpers working at most, a visit, past
+    /// what the backlog and `earlierWork` read (chat.js's four pages).
+    static let helpersReadMax = 4_000
 
     /// The next batch, sized by what the last one's records took: as many
     /// as half the answer's bound holds at twice their mean, between
@@ -397,6 +406,35 @@ final class ChatSession {
             for record in page.records {
                 if let shownFrom, record.at >= shownFrom { timeline.insert(record, advancingCursor: false) } else { timeline.learn(record) }
             }
+            read += page.records.count
+            if page.records.count < limit { return }
+            batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)
+        }
+    }
+
+    /// The helpers working as the chat opens, whatever it shows: `work`
+    /// read back to `Helpers.readBack` ago, past what the backlog and
+    /// `earlierWork` read, for helpers' records alone (chat.js
+    /// `recentHelpers`). A running helper is noted more often than that
+    /// (docs/chat-records.md, `turn.child`), so this finds each one however
+    /// old its start. Its own cursor: the window, the turns and where
+    /// earlier work goes on from stay as they were. Bounded by
+    /// `helpersReadMax`; a failure, or a helper past it, shows at its next
+    /// note.
+    private func recentHelpers() async {
+        let since = Int64(Date().timeIntervalSince1970 * 1000) - Helpers.readBack
+        guard var oldest = timeline.oldestWork else { return }
+        var read = 0
+        var batch = Self.workBatch
+        while read < Self.helpersReadMax, oldest.at >= since, oldest.seq > 1 {
+            let limit = min(batch, Self.helpersReadMax - read)
+            let page: (records: [ChannelRecord], bytes: Int)
+            do { page = try await api.historyPage(fragment.name, channel: "work", before: oldest.seq, limit: limit) }
+            catch APIError.limitExceeded where limit > Self.workBatch { batch = Self.workBatch; continue }
+            catch { return }
+            for record in page.records { timeline.learnHelper(record) }
+            guard let first = page.records.first else { return }
+            oldest = (first.seq, first.at)
             read += page.records.count
             if page.records.count < limit { return }
             batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)
@@ -493,9 +531,26 @@ final class ChatSession {
         }
     }
 
+    /// A voice memo, its place reserved before it records
+    /// (`beginAttaching(1)`), sent as soon as it is put, with any words in
+    /// the composer. One that can't be put stays with its Retry and nothing
+    /// goes: words never go without the memo they were written beside. Nor
+    /// does it overtake a first message from Home still being sent
+    /// (`sendingFirst`): it stays attached, to be sent.
+    func sendMemo(_ prepare: @escaping @Sendable () async throws -> [OutgoingFile]) async {
+        let before = Set(attachments.map(\.id))
+        await attach(prepare)
+        guard attachments.contains(where: { !before.contains($0.id) }) else { return }
+        await send()
+    }
+
+    /// A chat just made holds nothing to wait for: it shows at once, its
+    /// first message with it, while its connection opens.
+    func beginEmpty() { read = true }
+
     func send() async {
         // nothing overtakes a first message from Home being sent (`sendFirst`)
-        guard !sendingFirst else { error = Self.waitForFirst; return }
+        guard sendingFirst == nil else { error = Self.waitForFirst; return }
         // what is being attached goes with it, or the message waits
         guard !attaching else { error = "Wait for the files being attached."; return }
         guard !uploads.contains(where: { $0.failed != nil }) else { error = "A file did not upload. Retry it or remove it."; return }
@@ -534,9 +589,10 @@ final class ChatSession {
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty || !files.isEmpty else { return }
         guard persistence != nil else { throw APIError.server("The local draft could not be opened. Reopen this chat before sending.") }
-        guard !sendingFirst else { throw APIError.server(Self.waitForFirst) }
-        sendingFirst = true
-        defer { sendingFirst = false }
+        guard sendingFirst == nil else { throw APIError.server(Self.waitForFirst) }
+        // the guard above: words, else a file
+        sendingFirst = words.isEmpty ? ComposerMemos.label(files[0].name) : words
+        defer { sendingFirst = nil }
         var uploaded: [ChatAttachment] = []
         for file in files {
             let put = try await api.upload(file.data, name: file.name, type: file.type, to: fragment.name)
@@ -644,7 +700,7 @@ final class ChatSession {
     /// id and body (docs/ios.md), so it never runs twice.
     func steer(recording: Bool = false) async {
         guard steers(recording: recording), let target = commandTarget else { return }
-        guard !sendingFirst else { error = Self.waitForFirst; return }
+        guard sendingFirst == nil else { error = Self.waitForFirst; return }
         guard persistence != nil else { error = "The local draft could not be opened. Reopen this chat before sending."; return }
         guard pending.count < SavedChat.pendingMax else { error = "Wait for the messages still sending, or edit the ones not sent."; return }
         let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)

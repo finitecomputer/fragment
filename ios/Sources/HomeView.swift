@@ -25,6 +25,8 @@ final class HomeDraft {
     private var typed = ""
     private(set) var files: [Held] = []
     private(set) var reading = false
+    /// The reading under way, to wait for.
+    @ObservationIgnored private(set) var holding: Task<Void, Never>?
     /// A voice memo being recorded in the prompt (`ComposerBar`): nothing
     /// launches until it is finished and attached.
     var recording = false
@@ -32,7 +34,7 @@ final class HomeDraft {
     private(set) var launching = false
     var words: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
     /// Whether what is held may start a chat now: one rule for every way to
-    /// start one (Send, the Start a new chat row).
+    /// start one (Send, a finished memo).
     var ready: Bool { (!words.isEmpty || !files.isEmpty) && text.utf8.count <= 32_768 && !launching && !reading && !recording }
 
     /// Places the first message has left for files, of what a message carries.
@@ -45,7 +47,7 @@ final class HomeDraft {
         guard !reading else { error = "Wait for the files being attached, then add more."; return false }
         guard count > 0, count <= room else { error = ChatAttachment.limits.countRefusal; return false }
         reading = true
-        Task {
+        holding = Task {
             defer { reading = false }
             do {
                 let read = try await read()
@@ -76,6 +78,73 @@ final class HomeDraft {
     }
 }
 
+private extension View {
+    /// The launcher's primary action, the top bar's size. Glass doesn't refract
+    /// glass, so on the card the system's goes flat: this one draws what light
+    /// does in a glass bead, a tight gloss above and light pooled at the foot
+    /// behind the icon, and a rim and shadow around it.
+    func launcherGlass(tint: Color = Color(uiColor: .label)) -> some View {
+        foregroundStyle(Color(uiColor: .systemBackground)).fontWeight(.semibold)
+            .frame(width: 44, height: 44).contentShape(.circle)
+            .background {
+                ZStack {
+                    Circle().fill(RadialGradient(colors: [.white.opacity(0.42), .clear], center: .bottom, startRadius: 0, endRadius: 26))
+                    Ellipse().fill(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.03)], startPoint: .top, endPoint: .bottom))
+                        .frame(width: 30, height: 15).offset(y: -12.5)
+                }.clipShape(.circle)
+            }
+            .glassEffect(.regular.tint(tint.opacity(0.85)).interactive(), in: .circle)
+            .overlay {
+                Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.05), .white.opacity(0.5)],
+                                                     startPoint: .top, endPoint: .bottom), lineWidth: 0.75)
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: .black.opacity(0.28), radius: 8, y: 4)
+    }
+}
+
+/// The launcher's agents in a row: the selected one on a tile with its name,
+/// the others their avatars. A long list scrolls rather than squeezes.
+private struct AgentSegments: View {
+    let library: Library
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var pill
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 2) {
+                ForEach(library.agents) { agent in
+                    let selected = agent.name == library.agent?.name
+                    Button {
+                        withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { library.selectedAgent = agent.name }
+                    } label: {
+                        HStack(spacing: 7) {
+                            AgentAvatar(agent: agent, size: 26)
+                            if selected { Text(agent.displayTitle).font(.subheadline.weight(.medium)).lineLimit(1).padding(.trailing, 7) }
+                        }
+                        .padding(5)
+                        .background {
+                            if selected {
+                                // concentric with the avatar's corners, 5 inside it
+                                RoundedRectangle(cornerRadius: 12).fill(Color(uiColor: .systemBackground).opacity(0.8))
+                                    .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+                                    .matchedGeometryEffect(id: "pill", in: pill)
+                            }
+                        }
+                        .contentShape(.rect(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(agent.displayTitle)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityIdentifier("launcherAgent-\(agent.name)")
+                }
+            }
+            // room for the tile's shadow inside the scroll view's clip
+            .padding(.vertical, 3).padding(.horizontal, 16)
+        }
+        .scrollIndicators(.hidden).scrollBounceBehavior(.basedOnSize)
+    }
+}
+
 struct HomeView: View {
     let library: Library
     let api: FragmentAPI
@@ -83,18 +152,28 @@ struct HomeView: View {
     /// A new chat with what Home holds as its first message (`Library.launch`).
     let start: () async -> Void
     let refresh: () async -> Void
+    /// Something stands over the launcher, so the keyboard waits for it to go.
+    let covered: Bool
     @State private var results = SearchResults()
     @State private var searching = false
     @State private var searchError: String?
+    @State private var focused = false
+    @State private var logoY: CGFloat?
+    @State private var cardY: CGFloat?
     private var home: HomeDraft { library.home }
     private var query: String { home.words }
     private var canStart: Bool { library.canLaunch }
+    /// Searching, the card takes all the room there is, the logo behind it.
+    private var expanded: Bool { !query.isEmpty }
 
     var body: some View {
         ZStack {
-            DesktopWallpaper()
+            DesktopWallpaper().glassLogo(size: 136, y: expanded ? cardY : logoY)
             VStack(spacing: 0) {
-                Spacer(minLength: 24)
+                // The logo sits midway between the top bar and the card.
+                // 7 past the bar's own 9 under its buttons: the sides' 16 by eye.
+                if expanded { Color.clear.frame(height: 7) }
+                else { Spacer(minLength: 16).onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midY } action: { logoY = $0 } }
                 VStack(spacing: 0) {
                     // the chat's own composer: Return is a new line, Send starts the chat
                     ComposerBar(text: Binding(get: { home.text }, set: { home.text = $0 }), enabled: canStart,
@@ -102,40 +181,18 @@ struct HomeView: View {
                                 placeholder: "Ask, or find a chat or app",
                                 attached: home.files.map { ($0.id.uuidString, $0.file.name) },
                                 remove: { id in if let id = UUID(uuidString: id) { home.remove(id) } },
-                                attach: { home.hold($0, $1) }, room: home.room, send: { await launch() },
-                                editable: !home.launching, recordingChanged: { home.recording = $0 }, chrome: false)
-                        .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, 4)
+                                attach: { home.hold($0, $1) }, room: home.room, memo: { launchMemo($0) },
+                                send: { await launch() }, editable: !home.launching, recordingChanged: recordingChanged,
+                                chrome: false, recordFirst: true, canRecord: library.agent != nil, focused: $focused)
+                        .padding(.horizontal, 4).padding(.top, 10).padding(.bottom, library.agent == nil ? 4 : -1) // 8 with the agents' own 3
                     if let error = home.error { Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 6) }
-                    if let agent = library.agent {
-                        HStack {
-                            Menu {
-                                ForEach(library.agents) { agent in
-                                    Button { library.selectedAgent = agent.name } label: {
-                                        Label(agent.displayTitle, systemImage: agent.name == library.agent?.name ? "checkmark" : "person")
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 8) { AgentAvatar(agent: agent, size: 22); Text(agent.displayTitle); Image(systemName: "chevron.down").font(.caption2) }
-                                    .font(.caption.weight(.medium))
-                            }.accessibilityIdentifier("launcherAgent")
-                            Spacer()
-                        }.padding(.horizontal, 18).padding(.bottom, 14)
+                    if library.agent != nil {
+                        AgentSegments(library: library).padding(.bottom, 13)
                     }
                     if !query.isEmpty {
                         Divider()
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 4) {
-                                if library.agent != nil {
-                                    Button { Task { await launch() } } label: {
-                                        Label {
-                                            VStack(alignment: .leading, spacing: 5) {
-                                                Text("Start a new chat with \(library.agent?.displayTitle ?? "your agent")").font(.subheadline.weight(.medium))
-                                                Text(query).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                            }
-                                        } icon: { Image(systemName: "square.and.pencil").frame(width: 30) }
-                                            .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                                    }.disabled(!canStart).accessibilityIdentifier("newChatResult")
-                                }
                                 foundFragments("Chats", kinds: ["chat"])
                                 foundFragments("Apps", kinds: ["app", "brain"])
                                 if !results.messages.isEmpty {
@@ -151,10 +208,11 @@ struct HomeView: View {
                                         }
                                     }
                                 }
-                                if searching { ProgressView("Searching…").padding() }
                                 if let searchError { Text(searchError).font(.footnote).foregroundStyle(.secondary).padding() }
                             }.padding(6).buttonStyle(.plain)
-                        }.frame(maxHeight: 330).scrollDismissesKeyboard(.interactively)
+                        }
+                        .scrollDismissesKeyboard(.interactively)
+                        .overlay { if searching { ProgressView("Searching…").font(.subheadline).foregroundStyle(.secondary) } }
                     }
                     if library.agent == nil && !library.loading {
                         VStack(spacing: 8) {
@@ -169,9 +227,14 @@ struct HomeView: View {
                 }
                 .glassEffect(.regular, in: .rect(cornerRadius: 26))
                 .frame(maxWidth: 620).padding(.horizontal, 16)
-                Spacer(minLength: 24)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midY } action: { cardY = $0 }
+                // Centered until the keyboard rises, then resting just above it.
+                if focused || expanded { Color.clear.frame(height: 16) } else { Spacer(minLength: 16) }
             }
+            .animation(.snappy(duration: 0.25), value: expanded)
         }
+        .onAppear { focused = !covered }
+        .onChange(of: covered) { _, covered in focused = !covered }
         .task(id: query) {
             results = SearchResults(); searchError = nil; searching = false
             guard !query.isEmpty else { return }
@@ -211,6 +274,28 @@ struct HomeView: View {
         dismissKeyboard()
         await start()
     }
+    /// Recording, its chat is made: a finished memo need not wait for one.
+    private func recordingChanged(_ recording: Bool) {
+        home.recording = recording
+        if recording, let agent = library.agent { library.readyChat(with: agent, api: api) }
+    }
+    /// A voice memo, held as any file is, its place taken before it records
+    /// (`HomeDraft.hold`), and launched once recorded, with anything typed
+    /// meanwhile. One not held (cancelled, unreadable) launches nothing:
+    /// words never go without the memo they were written beside. Not sent,
+    /// Home keeps it with why.
+    private func launchMemo(_ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool {
+        let before = Set(home.files.map(\.id))
+        guard home.hold(1, read), let holding = home.holding else { return false }
+        Task {
+            await holding.value
+            // its recording is over: the launch needn't wait for the view to say so
+            home.recording = false
+            guard home.files.contains(where: { !before.contains($0.id) }) else { return }
+            await launch()
+        }
+        return true
+    }
     private func dismissKeyboard() { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
 }
 
@@ -239,6 +324,10 @@ struct ComposerBar: View {
     /// Places the message has left for files, as its owner counts them (a
     /// chat's uploads, failed ones too, `ChatSession.fileRoom`).
     let room: Int
+    /// A voice memo, its place taken before it records as `attach(1)`
+    /// takes one, and sent once recorded (its owner's to send), refused
+    /// as `attach` refuses: `read` ends with the recording.
+    let memo: (_ read: @escaping @Sendable () async throws -> [OutgoingFile]) -> Bool
     let send: () async -> Void
     var stop: () async -> Void = {}
     /// Steer, given whether a voice memo is being recorded: none, no Steer.
@@ -252,6 +341,11 @@ struct ComposerBar: View {
     var recordingChanged: (Bool) -> Void = { _ in }
     /// The composer's own glass: none inside a surface that has its own.
     var chrome = true
+    /// One action, the launcher's: record until something is typed, then Send.
+    var recordFirst = false
+    var canRecord = true
+    /// Whether its field has the keyboard, read and set: none, its own affair.
+    var focused: Binding<Bool>? = nil
     @State private var importer = false
     @State private var photos = false
     @State private var picked: [PhotosPickerItem] = []
@@ -275,13 +369,14 @@ struct ComposerBar: View {
                     } }
                 }
                 if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-                if voice.recording { Label("Recording voice memo…", systemImage: "waveform").foregroundStyle(.red).font(.caption) }
+                if let since = voice.startedAt { RecordingLabel(since: since) }
             }.padding(.horizontal, chrome ? 20 : 12)
             // a memo being recorded holds its place as attaching, and its Finish stays
             ComposerView(text: $text, working: working, enabled: enabled, busy: busy && !voice.recording, recording: voice.recording, placeholder: placeholder,
                          attachPhotos: { if roomy() { photos = true } }, attachFiles: { if roomy() { importer = true } },
                          pasteImages: { paste($0) }, record: { recordVoice() },
-                         send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, editable: editable, chrome: chrome)
+                         send: send, stop: stop, steer: steer(voice.recording), hasAttachments: !attached.isEmpty, editable: editable, chrome: chrome,
+                         recordFirst: recordFirst, canRecord: canRecord, focused: focused)
         }
         .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             switch result {
@@ -315,12 +410,13 @@ struct ComposerBar: View {
         guard room > 0 else { voice.error = ChatAttachment.limits.countRefusal; return false }
         return true
     }
-    /// A voice memo: its place taken before it records (`attach(1)`), so a
+    /// A voice memo: its place taken before it records (`memo`), so a
     /// message with no room refuses it before it starts, never once it is
-    /// recorded; attached once finished, by hand or at its deadline.
+    /// recorded; handed on once finished, by hand or at its deadline,
+    /// which sends it.
     private func recordVoice() {
         if voice.recording { voice.finish(); return }
-        _ = attach(1) { [voice] in try await voice.file() }
+        _ = memo { [voice] in try await voice.file() }
     }
 }
 
@@ -412,6 +508,10 @@ struct ComposerView: View {
     var editable = true
     /// Its own glass and margins: none inside a surface that has its own.
     var chrome = true
+    /// One action in its circle's place (`ComposerBar`), in the launcher's glass.
+    var recordFirst = false
+    var canRecord = true
+    var focused: Binding<Bool>? = nil
     private var typed: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments || recording }
     private var stops: Bool { working && !typed }
     private var valid: Bool { (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments) && text.utf8.count <= 32_768 }
@@ -428,15 +528,17 @@ struct ComposerView: View {
                     .frame(width: 44, height: 44).contentShape(Rectangle())
             }
             .accessibilityLabel("Attach").accessibilityIdentifier("attach").disabled(busy || recording || !editable)
-            Button(action: record) {
-                Image(systemName: recording ? "stop.circle.fill" : "mic")
-                    .font(.system(size: 20))
-                    .foregroundStyle(recording ? Color.red : Color.primary)
-                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            if !recordFirst {
+                Button(action: record) {
+                    Image(systemName: recording ? "stop.circle.fill" : "mic")
+                        .font(.system(size: 20))
+                        .foregroundStyle(recording ? Color.red : Color.primary)
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
+                .disabled(busy)
             }
-            .accessibilityLabel(recording ? "Finish voice memo" : "Record a voice memo")
-            .disabled(busy)
-            ComposerField(text: $text, placeholder: placeholder, pasteImages: pasteImages)
+            ComposerField(text: $text, placeholder: placeholder, pasteImages: pasteImages, focused: focused)
                 .frame(minHeight: 44).disabled(!editable)
             if let steer, !stops {
                 // Send queues the words for the turn after; Steer tells this one now
@@ -453,7 +555,7 @@ struct ComposerView: View {
                 .accessibilityLabel("Steer it now")
                 .accessibilityIdentifier("steer")
             }
-            Button {
+            if recordFirst { launcherAction } else { Button {
                 submitting = true
                 Task { await (stops ? stop() : send()); submitting = false }
             } label: {
@@ -475,11 +577,30 @@ struct ComposerView: View {
             }
             .disabled(!canSend)
             .accessibilityLabel(stops ? "Stop response" : "Send message")
-            .accessibilityIdentifier(stops ? "stop" : "send")
+            .accessibilityIdentifier(stops ? "stop" : "send") }
         }
         .buttonStyle(.plain)
         .padding(6)
         .modifier(ComposerChrome(shown: chrome))
+    }
+    @ViewBuilder private var launcherAction: some View {
+        if recording {
+            Button(action: record) { Image(systemName: "stop.fill").foregroundStyle(.white).launcherGlass(tint: .red) }
+                .accessibilityLabel("Finish voice memo").accessibilityIdentifier("finishMemo")
+        } else if !typed && !busy && !submitting {
+            // not `disabled`: never dimmed while the list loads
+            Button(action: record) { Image(systemName: "mic").launcherGlass() }.allowsHitTesting(canRecord)
+                .accessibilityLabel("Record a voice memo").accessibilityIdentifier("recordMemo")
+        } else {
+            Button {
+                submitting = true
+                Task { await send(); submitting = false }
+            } label: {
+                if busy || submitting { ProgressView().launcherGlass() } else { Image(systemName: "arrow.up").launcherGlass() }
+            }
+            .disabled(!canSend).opacity(canSend || busy || submitting ? 1 : 0.4)
+            .accessibilityLabel("Send message").accessibilityIdentifier("send")
+        }
     }
 }
 
@@ -506,6 +627,7 @@ struct ComposerField: UIViewRepresentable {
     @Binding var text: String
     let placeholder: String
     let pasteImages: (UIPasteboard) -> Void
+    var focused: Binding<Bool>? = nil
     static let linesMax = 6
 
     func makeUIView(context: Context) -> PastingTextView {
@@ -524,7 +646,13 @@ struct ComposerField: UIViewRepresentable {
     }
     func updateUIView(_ view: PastingTextView, context: Context) {
         context.coordinator.text = $text
+        context.coordinator.focused = focused
         view.pasteImages = pasteImages
+        if let focused, focused.wrappedValue != view.isFirstResponder {
+            // after this update: a view just made has no window to focus in yet
+            let wanted = focused.wrappedValue, coordinator = context.coordinator
+            DispatchQueue.main.async { coordinator.focus(view, wanted) }
+        }
         // disabled (what was submitted being sent): no typing, no pasting
         view.isEditable = context.environment.isEnabled
         // it says what sending does now (an answer, a message that waits its turn)
@@ -544,11 +672,40 @@ struct ComposerField: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var text: Binding<String>
+        var focused: Binding<Bool>?
         init(text: Binding<String>) { self.text = text }
+        /// Takes the keyboard, or gives it up. Taken as its page arrives
+        /// (Home on Back from Your Apps, whose `onAppear` asks for it), it
+        /// waits for that transition to end: a keyboard raised during it
+        /// never reaches the arriving page's layout, which leaves the
+        /// composer under the keyboard. A transition cancelled (a swipe
+        /// back let go) takes nothing, and asking again takes it.
+        func focus(_ view: UITextView, _ wanted: Bool) {
+            guard wanted else { view.resignFirstResponder(); return }
+            guard let transition = view.owningController?.transitionCoordinator else { view.becomeFirstResponder(); return }
+            transition.animate(alongsideTransition: nil) { [weak self, weak view] context in
+                guard let self, let view, self.focused?.wrappedValue == true else { return }
+                if context.isCancelled { self.focused?.wrappedValue = false } else { view.becomeFirstResponder() }
+            }
+        }
+        func textViewDidBeginEditing(_ view: UITextView) { focused?.wrappedValue = true }
+        func textViewDidEndEditing(_ view: UITextView) { focused?.wrappedValue = false }
         func textViewDidChange(_ view: UITextView) {
             text.wrappedValue = view.text
             (view as? PastingTextView)?.placeholder.isHidden = !view.text.isEmpty
         }
+    }
+}
+
+private extension UIView {
+    /// The view controller this view is in: the one whose transitions move it.
+    var owningController: UIViewController? {
+        var next = self.next
+        while let responder = next {
+            if let controller = responder as? UIViewController { return controller }
+            next = responder.next
+        }
+        return nil
     }
 }
 

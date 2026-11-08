@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::jobs::{events, records};
-use super::ledger::{charged, entries, quiet};
+use super::ledger::{charged, entries, quiet, usage};
 use crate::api::{Api, Call, Socket};
 use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
@@ -1666,6 +1666,42 @@ const ROUTINE_AGENT_CHECKS: [&str; 4] = [
     "the agent removes its own schedule",
 ];
 
+/// The characters of the speech call the swap's checks make
+/// (credentials.rs `SPOKEN`'s text, "Hello there, friend.").
+const SPOKEN_CHARS: u64 = 20;
+
+/// The quote's checks beside the swap's (FIN-448), skipped as they are.
+const QUOTE_CHECKS: [&str; 2] = [
+    "its owner quotes a speech job through the CLI (`fragment quote elevenlabs:speech 20chars`): one line, about what it costs and what is left, and the quote with --json",
+    "the speech its owner quoted, made through the swap, is charged what the quote said",
+];
+
+/// Its owner's quote, through the CLI, of the speech call the swap's
+/// checks are about to make (FIN-448): `fragment quote`'s line, and its
+/// `--json` answer, which this answers.
+fn quote_speech(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Value> {
+    let home = s.dir("computers-quote");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": owner.secret_hex() }).to_string())?;
+    let chars = format!("{SPOKEN_CHARS}chars");
+    let said = s.cli(api, &home, &["quote", "elevenlabs:speech", &chars]);
+    let line = String::from_utf8_lossy(&said.stdout).into_owned();
+    let quoted = s.cli_json(api, &home, &["quote", "elevenlabs:speech", &chars, "--json"])?;
+    let total = quoted["totalMicros"].as_i64().unwrap_or(-1);
+    s.ok(
+        QUOTE_CHECKS[0],
+        said.status.success()
+            && line.lines().count() == 1
+            && line.starts_with(&format!("about {}; you ", fragment_core::price::dollars(total)))
+            && quoted["items"][0]["pricedAs"] == "elevenlabs:speech"
+            && quoted["items"][0]["calls"] == 1
+            && total > 0,
+        json!({ "said": line, "stderr": String::from_utf8_lossy(&said.stderr), "quoted": quoted }),
+    );
+    Ok(quoted)
+}
+
 /// An agent's routines (decision 38): scheduled records on its own agent
 /// fragment's `tasks` (docs/api.md, "Scheduled records"), which its owner
 /// adds with the CLI's `--routine` and the agent adds to itself through its
@@ -2062,12 +2098,22 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
         let swapping = Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity, month: &month };
+        // a quote (FIN-448): its owner quotes the speech the swap's checks
+        // are about to make, through the CLI; once made, it is charged that
+        let quoted = quote_speech(s, api, &owner)?;
         replies_so_far += swap_checks(s, api, &swapping, &fetched)?;
+        let rows = entries(api, &owner_id, &format!("key:{id}:"));
+        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:speech" && usage(r)["units"].as_u64().is_some_and(|u| u > 0)).collect();
+        s.ok(
+            QUOTE_CHECKS[1],
+            spoken.len() == 1 && usage(spoken[0])["units"] == SPOKEN_CHARS && charged(spoken[0]).is_some_and(|c| Some(c) == quoted["totalMicros"].as_i64()),
+            json!({ "quoted": quoted, "rows": spoken }),
+        );
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;
         let r = allow(&stranger, json!([]))?;
         s.ok("no one else narrows its agents' providers", r.status == 404, &r);

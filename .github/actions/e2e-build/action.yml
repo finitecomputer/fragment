@@ -4,8 +4,8 @@
 # builds), with this commit's builds saved for the runs after it when
 # `save` says so.
 # ci.yml's shards run it before their sections, and on a master push whose
-# shards skip (`proven`), `e2e-build` runs it alone, so every pull request
-# and merge group still starts from master's newest build and layers.
+# shards skip (`proven`), `e2e-build` runs it alone, so every later run
+# still starts from master's newest build and layers.
 name: e2e build
 description: the e2e's caches, its stub image and its build, saved when asked
 inputs:
@@ -109,8 +109,8 @@ runs:
     # given none of it, and only a JavaScript action's process holds it.
     # The token reaches xtask's image builds, whose stub's layers it reads
     # (and on master's pushes writes); the tests run in later steps without
-    # it. The e2e runs only on trees a review let through (merge groups and
-    # master's pushes, or a pull request its label opts in), with locked
+    # it. The e2e runs only on merged trees (master's and production's
+    # pushes) and runs by hand, never a pull request's, with locked
     # dependencies. It replaces a build of the stub here that read the
     # cache for itself and warmed nothing: BuildKit takes a remote cache's
     # hits without fetching them, and that build exported nothing, so

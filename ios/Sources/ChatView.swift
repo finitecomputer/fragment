@@ -154,10 +154,12 @@ struct ChatView: View {
                 if let error = session.error {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
+                HelpersBar(helpers: session.helpers, library: library, several: session.agents.count > 1)
+                    .padding(.horizontal, 20)
                 ComposerBar(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
                     // sends go over HTTP: a reconnect never holds the composer;
                     // a first message from Home being sent here does, so it goes first
-                    enabled: session.read && !session.sendingFirst, busy: session.attaching,
+                    enabled: session.read && session.sendingFirst == nil, busy: session.attaching,
                     placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
                     attached: session.attachments.map { ($0.id, $0.name) },
                     remove: { id in session.attachments.removeAll { $0.id == id } },
@@ -170,6 +172,12 @@ struct ChatView: View {
                         return true
                     },
                     room: session.fileRoom,
+                    // a memo sends itself once recorded and put (`sendMemo`)
+                    memo: { read in
+                        guard session.beginAttaching(1) else { return false }
+                        Task { await session.sendMemo(read) }
+                        return true
+                    },
                     send: { await session.send() }, stop: { await session.stop() },
                     steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
                     quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
@@ -334,6 +342,12 @@ struct ChatRow: View, Equatable {
 private struct PendingRows: View {
     let session: ChatSession
     var body: some View {
+        if let first = session.sendingFirst, session.pending.isEmpty {
+            VStack(alignment: .trailing, spacing: 6) {
+                MessageView(text: first, isYou: true)
+                Text("Sending…").font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .trailing)
+        }
         ForEach(session.pending) { pending in
             VStack(alignment: .trailing, spacing: 6) {
                 if let command = pending.command { CommandView(command: command, args: pending.text, isYou: true) }
@@ -365,6 +379,9 @@ private struct DraftRow: View {
     var body: some View {
         if let draft = session.drafts.first(where: { $0.turn == key.id && $0.principal == key.agent }) {
             MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
+                // A tap as words arrive, paced by the bridge's draft interval;
+                // a draft read already written, or cut back, stays quiet.
+                .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.4), trigger: draft.text.utf8.count) { old, new in new > old }
         }
     }
 }
@@ -412,6 +429,7 @@ private struct ChatEmptyState: View {
     let session: ChatSession
     var body: some View {
         let empty = session.rows.isEmpty && session.pending.isEmpty && session.drafts.isEmpty && session.activeTurns.isEmpty
+            && session.sendingFirst == nil && !session.attaching
         Group {
             if !session.read { ChatLoadingView() }
             else if empty {

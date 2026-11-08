@@ -124,6 +124,12 @@ struct WorkingActivity: Equatable {
     var rows: [ChatItem] = []
     var cards: [String: ToolCard] = [:]
     var hints: [WorkingHint] = []
+    /// The `work` kinds of a turn this reads (docs/chat-records.md); any
+    /// other (a helper's `turn.child`, a later bridge's) changes nothing.
+    static let turnKinds: Set<String> = ["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]
+    /// Those that say a turn went on past its question in words
+    /// (`turn.asked`); its asker's answer is read from the chat.
+    static let wentOn: Set<String> = ["turn.step", "turn.call", "turn.end"]
     /// Person's messages that wait for their agent's running turn (chat.js
     /// `queued`), by record id.
     var queued: Set<String> = []
@@ -141,7 +147,7 @@ struct WorkingActivity: Equatable {
         let messages = records.filter { $0.isMessage }
         let commands = records.filter { $0.command != nil }
         let replies = Dictionary(grouping: messages.filter { $0.turn != nil }) { TurnKey(agent: $0.principal, id: $0.turn!) }
-        let work = Dictionary(grouping: records.filter { $0.channel == "work" && $0.turn != nil }) {
+        let work = Dictionary(grouping: records.filter { $0.channel == "work" && $0.turn != nil && Self.turnKinds.contains($0.body["kind"].string ?? "") }) {
             TurnKey(agent: $0.principal, id: $0.turn!)
         }
         enum Place: Int { case message, turn, draft, hint }
@@ -198,7 +204,8 @@ struct WorkingActivity: Equatable {
             let steps = own.filter { $0.body["kind"].string == "turn.step" }
             let calls = own.filter { $0.body["kind"].string == "turn.call" }
             let latestResponse = calls.last?.body["response"].string
-            let lastWork = own.last
+            // the question, or what says the turn went on past it, whichever came last
+            let lastWork = own.last { $0.body["kind"].string == "turn.asked" || Self.wentOn.contains($0.body["kind"].string ?? "") }
             let closed = Dictionary(own.filter { $0.body["kind"].string == "turn.prompt.closed" }.compactMap { r in r.body["prompt"].string.map { ($0, r) } }, uniquingKeysWith: { first, _ in first })
             let stopped = own.contains { $0.body["kind"].string == "turn.end" && ($0.body["outcome"].string == "stopped" || $0.body["status"].string == "stopped") }
             for prompt in own where prompt.body["kind"].string == "turn.prompt" {

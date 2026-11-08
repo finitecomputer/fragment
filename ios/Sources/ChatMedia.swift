@@ -212,6 +212,17 @@ final class UploadProgress: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
+/// A recording under way and how long it has run; the time keeps itself
+/// current, so nothing redraws around it.
+struct RecordingLabel: View {
+    let since: Date
+    var body: some View {
+        let time = Text(timerInterval: since...since.addingTimeInterval(TimeInterval(VoiceMemo.longest.components.seconds)), countsDown: false).monospacedDigit()
+        Label { Text("Recording voice memo… \(time)") } icon: { Image(systemName: "waveform") }
+            .foregroundStyle(.red).font(.caption)
+    }
+}
+
 /// A voice memo: recorded from `record` until `finish` or its deadline,
 /// then its file is the caller's. `cancel` stops and removes it.
 @MainActor @Observable
@@ -227,6 +238,8 @@ final class VoiceMemo {
     /// a cancel meanwhile keeps it from starting.
     @ObservationIgnored private var starting = false
     private(set) var recording = false
+    /// When this recording began, for its running time.
+    private(set) var startedAt: Date?
     var error: String?
 
     init(microphone: any Microphone = DeviceMicrophone(), longest: Duration = VoiceMemo.longest) {
@@ -245,7 +258,7 @@ final class VoiceMemo {
         starting = false
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
         do { try microphone.start(into: url) } catch { self.error = error.localizedDescription; return nil }
-        self.url = url; recording = true
+        self.url = url; recording = true; startedAt = .now
         let longest = longest
         deadline = Task { [weak self] in
             do { try await Task.sleep(for: longest) } catch { return }
@@ -261,7 +274,7 @@ final class VoiceMemo {
     private func end(keeping: Bool) {
         guard recording, let url else { return }
         deadline?.cancel(); deadline = nil
-        recording = false; self.url = nil
+        recording = false; startedAt = nil; self.url = nil
         do { try microphone.stop() } catch { self.error = error.localizedDescription }
         if !keeping { do { try FileManager.default.removeItem(at: url) } catch { self.error = error.localizedDescription } }
         ended?.resume(returning: keeping ? url : nil); ended = nil

@@ -67,6 +67,7 @@ use guard::KeyHour;
 pub mod gate;
 pub mod guard;
 pub mod org;
+pub mod quote;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
@@ -712,6 +713,16 @@ pub fn included(plan: Plan, seat: SeatState) -> i64 {
     }
 }
 
+/// What a row of `usage` is charged on a ledger of `plan`, priced with
+/// `book`: its price, and the charge it draws. A $200 seat's awake time is
+/// not metered (decision 25; one computer per person, decision 13). A
+/// ledger's rows and a quote's items (`quote`) are charged by this alone.
+pub fn row_charge(usage: &Usage, book: &PriceBook, plan: Plan) -> Result<(Priced, i64), PriceError> {
+    let priced = book.price(usage)?;
+    let waived = matches!(usage, Usage::Awake { .. }) && plan == Plan::SeatAlwaysOn;
+    Ok((priced, if waived { 0 } else { priced.charge }))
+}
+
 /// A person's standing, from their plan, seat, balance, and whether the
 /// overdraft made their fragments read-only (decision 27).
 pub fn standing_of(plan: Plan, seat: SeatState, balance: i64, read_only: bool) -> Standing {
@@ -1008,12 +1019,9 @@ impl Ledger {
         self.money.roll(Month::of(now_ms));
     }
 
-    /// A usage's price, and its charge here: a $200 seat's awake time is
-    /// not metered (decision 25; one computer per person, decision 13).
+    /// A usage's price, and its charge here (`row_charge`).
     fn charge_for(&self, usage: &Usage, book: &PriceBook) -> Result<(Priced, i64), PriceError> {
-        let priced = book.price(usage)?;
-        let waived = matches!(usage, Usage::Awake { .. }) && self.money.plan == Plan::SeatAlwaysOn;
-        Ok((priced, if waived { 0 } else { priced.charge }))
+        row_charge(usage, book, self.money.plan)
     }
 
     /// A charge to the balance, counted in its fragment's month.
