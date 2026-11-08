@@ -606,10 +606,12 @@ final class ChatSession {
     /// its turn (chat.js `refreshSend`): words, no command, no files, its
     /// target working, and its runtime offering `steer`. A file still
     /// uploading, or failed, is one of the composer's files too (#1088).
+    /// While an agent waits for this person's answer, what is typed is
+    /// that answer: no Steer.
     func steers(recording: Bool) -> Bool {
         let words = composer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty, !words.hasPrefix("/"), attachments.isEmpty, uploads.isEmpty, !recording, workRead, let target = commandTarget,
-              timeline.turns.contains(where: { $0.key.agent == target && $0.value.running }) else { return false }
+              timeline.turns.contains(where: { $0.key.agent == target && $0.value.running }), answering() == nil else { return false }
         return offers("steer", target)
     }
     /// A running turn waiting on this person's words: its question
