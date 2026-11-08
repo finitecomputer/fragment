@@ -493,7 +493,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     // two hours on, by the computer's clock (its uses' month stays)
     let moved = super::computers::lever_with(api, w.id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() + 2 * fragment_core::key_hour::HOUR_MS }))?;
     let again = say(s, 159, &speak(SPOKEN))?;
-    let gone = notices().as_array().is_some_and(|l| l.iter().all(|n| n["kind"] != "key_paused"));
+    // a view with no notices leaves them out
+    let gone = notices().as_array().is_none_or(|l| l.iter().all(|n| n["kind"] != "key_paused"));
     s.ok(SWAP_CHECKS[42], moved.status == 200 && again.starts_with("fetched 200") && gone, json!({ "again": again, "notices": notices() }));
     Ok(turns)
 }
