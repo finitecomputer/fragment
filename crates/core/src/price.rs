@@ -341,7 +341,9 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 11 for xAI's chat and images apart
+/// raised it, and each still does: 12 for Google Places' details, photos
+/// and autocomplete apart from its searches (2026-11-07), after 11 for
+/// xAI's chat and images apart
 /// from its X searches (2026-11-07), after 10 for fal's images by their
 /// pixels (2026-11-07), after 9 for ElevenLabs' speech by its characters
 /// (2026-11-07), after 8 for HappyHorse's videos (2026-10-31),
@@ -351,7 +353,7 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 11;
+pub const DEFAULT_BOOK_VERSION: u32 = 12;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -442,7 +444,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes. A part of a key's calls priced
 /// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
 /// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 12] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
@@ -486,8 +488,22 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 12] = [
     // and regularOpeningHours, Enterprise fields; Place Details Enterprise
     // is $20.00, so a call is priced at the dearer of its two. Source:
     // developers.google.com/maps/billing-and-pricing/pricing (last updated
-    // 2026-09-28), the free monthly caps not counted.
+    // 2026-09-28), the free monthly caps not counted. Since FIN-445 only a
+    // text or nearby search (`places:searchText`, `places:searchNearby`,
+    // Enterprise $35.00 too) is priced so (`KEY_PARTS`); the key's other
+    // calls are below, or free.
     ("google-places", 35_000_000, 1_000),
+    // Place Details Enterprise (`GET /v1/places/<id>`, the goplaces
+    // skill's field mask): $20.00 per 1,000. Source as above (read
+    // 2026-11-07).
+    ("google-places:details", 20_000_000, 1_000),
+    // Place Photos (`GET /v1/places/<id>/photos/<photo>/media`): $7.00 per
+    // 1,000. Source as above (read 2026-11-07).
+    ("google-places:photo", 7_000_000, 1_000),
+    // Autocomplete Requests (`POST /v1/places:autocomplete`): $2.83 per
+    // 1,000 (a session's usage is free). Source as above (read
+    // 2026-11-07).
+    ("google-places:autocomplete", 2_830_000, 1_000),
     // xAI's X Search (Hermes' native `x_search`: `/v1/responses` with the
     // `x_search` tool): $5 per 1,000 posts fetched and $10 per 1,000 user
     // profiles, plus tokens. Source: docs.x.ai/developers/tools/x-search
@@ -552,11 +568,17 @@ pub struct KeyPart {
 /// - xAI's chat and image calls were charged as an X search, $0.18 a call:
 ///   a plain Grok chat call about twelve times its typical cost. A call
 ///   is charged at most 10 images (`n`, xAI's most a request).
-pub const KEY_PARTS: [KeyPart; 4] = [
+/// - Google Places' details, photos and autocomplete were charged as an
+///   Enterprise text search, $35.00 per 1,000: a detail 1.75 times its
+///   list, a photo 5 times and an autocomplete 12 times.
+pub const KEY_PARTS: [KeyPart; 7] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
     KeyPart { key: "xai", priced_as: "xai:chat", units_max: 1 },
     KeyPart { key: "xai", priced_as: "xai:image", units_max: 10 },
+    KeyPart { key: "google-places", priced_as: "google-places:details", units_max: 1 },
+    KeyPart { key: "google-places", priced_as: "google-places:photo", units_max: 1 },
+    KeyPart { key: "google-places", priced_as: "google-places:autocomplete", units_max: 1 },
 ];
 
 /// The list price of operator key `name` per call, when the price book
@@ -640,6 +662,10 @@ fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> 
 ///   `tools` name `x_search` is one call of the key (an X search); one
 ///   without, or to `/v1/messages`, one `xai:chat`; one to
 ///   `/v1/images/generations` its `n` images (absent, 1).
+/// - Google Places (New): a text or nearby search is one call of the key;
+///   a place's details (`/v1/places/<id>`), its photo
+///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
+///   other call none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -665,6 +691,14 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
                 _ => return Usage::Key { key: key.to_string(), units: 0 },
             }
         }
+        // the method is the path's (Google refuses any other), so not read
+        "google-places" => match (call.path, call.path.strip_prefix("/v1/places/")) {
+            ("/v1/places:searchText" | "/v1/places:searchNearby", _) => ("google-places", Some(1)),
+            ("/v1/places:autocomplete", _) => ("google-places:autocomplete", Some(1)),
+            (_, Some(place)) if !place.is_empty() && !place.contains('/') => ("google-places:details", Some(1)),
+            (_, Some(photo)) if photo.contains("/photos/") && photo.ends_with("/media") => ("google-places:photo", Some(1)),
+            _ => return Usage::Key { key: key.to_string(), units: 0 },
+        },
         _ => return Usage::Key { key: key.to_string(), units: 1 },
     };
     // a part's, or one of its key's own (xAI's X search), made by a 2xx
@@ -892,7 +926,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 11);
+        assert_eq!(book.version, 12);
         assert_eq!(book.models.len(), 12);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
@@ -1046,6 +1080,9 @@ mod tests {
         assert_eq!(default_key_price("fal:image"), Some((6_000, 1_048_576)));
         assert_eq!(call("xai:chat"), Priced { list: 15_000, cost: 15_000, charge: 22_500 }, "a Grok chat call's tokens");
         assert_eq!(call("xai:image"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "a grok-imagine-image");
+        assert_eq!(call("google-places:details"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "$20 per 1,000 Enterprise details");
+        assert_eq!(call("google-places:photo"), Priced { list: 7_000, cost: 7_000, charge: 10_500 }, "$7 per 1,000 photos");
+        assert_eq!(call("google-places:autocomplete"), Priced { list: 2_830, cost: 2_830, charge: 4_245 }, "$2.83 per 1,000 autocompletes");
         assert_eq!(default_key_price("nonesuch"), None);
     }
 
@@ -1312,6 +1349,52 @@ mod tests {
         assert_eq!(older.price(&Usage::Key { key: "xai:chat".into(), units: 1 }), Err(PriceError::NoPrice));
         assert_eq!(older.price(&Usage::Key { key: "xai:image".into(), units: 1 }), Err(PriceError::NoPrice));
         assert_eq!(older.price(&Usage::Key { key: "xai".into(), units: 1 }).unwrap().charge, 180_000, "an X search, as before");
+    }
+
+    /// A call on Google Places' key, answered `status`, as the swap meters it.
+    fn places(method: &str, path: &str, status: u16) -> Usage {
+        key_usage("google-places", &KeyCall { method, host: "places.googleapis.com", path, body: b"", status })
+    }
+
+    /// Goal (FIN-445): a Google Places search is charged an Enterprise
+    /// search as before, a place's details, its photo and an autocomplete
+    /// each its own list, and any other call nothing. Method: the goplaces
+    /// skill's calls (Places API (New)), and the others the API takes.
+    #[test]
+    fn a_places_call_is_charged_as_what_it_is() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let charge = |u: &Usage| book.price(u).unwrap().charge;
+        let one = |key: &str| Usage::Key { key: key.into(), units: 1 };
+        assert_eq!(places("POST", "/v1/places:searchText", 200), one("google-places"));
+        assert_eq!(places("POST", "/v1/places:searchNearby", 200), one("google-places"));
+        assert_eq!(charge(&one("google-places")), 52_500, "an Enterprise search, as before");
+        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw", 200), one("google-places:details"));
+        assert_eq!(charge(&one("google-places:details")), 30_000, "$0.03, not a search's $0.0525");
+        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"));
+        assert_eq!(places("POST", "/v1/places:autocomplete", 200), one("google-places:autocomplete"));
+        let free = Usage::Key { key: "google-places".into(), units: 0 };
+        for path in ["/v1/places/", "/v1/places/ChIJ/photos/AUc7", "/v1/places:searchtext", "/v1/places:searchText/x", "/v2/places:searchText", "/maps/api/place/textsearch/json", "/"] {
+            assert_eq!(places("GET", path, 200), free, "{path}");
+        }
+        assert_eq!(charge(&free), 0);
+    }
+
+    /// Goal: a Places call Google refused (a bad field mask, a key over
+    /// its quota) is charged nothing, a search too; a release whose book
+    /// has no details price refuses those rows, and prices a search as
+    /// before.
+    #[test]
+    fn a_places_call_google_refused_is_charged_nothing() {
+        for refused in [400, 401, 403, 404, 429, 302, 0] {
+            assert_eq!(places("POST", "/v1/places:searchText", refused), Usage::Key { key: "google-places".into(), units: 0 }, "{refused}");
+            assert_eq!(places("GET", "/v1/places/ChIJ", refused), Usage::Key { key: "google-places:details".into(), units: 0 }, "{refused}");
+        }
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("google-places:")).cloned().collect(), ..book.clone() };
+        assert_eq!(older.price(&Usage::Key { key: "google-places:details".into(), units: 1 }), Err(PriceError::NoPrice));
+        assert_eq!(older.price(&Usage::Key { key: "google-places".into(), units: 1 }).unwrap().charge, 52_500);
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

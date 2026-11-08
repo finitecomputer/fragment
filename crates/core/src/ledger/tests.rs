@@ -724,6 +724,35 @@ fn an_xai_call_is_charged_as_what_it_is_and_once() {
     assert_eq!(w.balance(), before - 262_500);
 }
 
+/// FIN-445: Google Places' key charged every call as an Enterprise text
+/// search. Goal: a deployment's book charges a search as before and a
+/// place's details at its own list, each once across a replay and a
+/// restart; one Google refused nothing. Method: the swap's rows as it
+/// meters them (`price::key_usage`), sent again.
+#[test]
+fn a_places_detail_is_charged_its_own_price_and_once() {
+    let places = serde_json::json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }]);
+    let mut configured = book();
+    configured.keys.extend(crate::catalog::Catalog::parse(&places.to_string()).unwrap().key_prices());
+    let call = |method, path, status| crate::price::key_usage("google-places", &KeyCall { method, host: "places.googleapis.com", path, body: b"", status });
+    let searched = call("POST", "/v1/places:searchText", 200);
+    let detailed = call("GET", "/v1/places/ChIJ", 200);
+    let refused = call("GET", "/v1/places/ChIJ", 403);
+    let mut w = World::seat();
+    w.ok(Op::Book(configured.clone()));
+    let before = w.balance();
+    let batch = meter("key:c-1:p1", vec![row("key:c-1:p1", searched, None, T0), row("key:c-1:p2", detailed.clone(), None, T0), row("key:c-1:p3", refused, None, T0)]);
+    // a search at $0.035 and a detail at $0.02, each with the margin
+    let charged = Outcome::Metered(Metered { charged: 52_500 + 30_000, rows_new: 3, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(batch.clone()), charged);
+    let mut w = w.restarted();
+    w.replays(Op::Book(configured));
+    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
+    let again = w.ok(meter("key:c-1:p2-again", vec![row("key:c-1:p2", detailed, None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
+    assert_eq!(w.balance(), before - 82_500);
+}
+
 /// Bug 2: a step's charge is its row under the step's key, whatever
 /// attempt made the call (decision 62): a retry or a replay that sends it
 /// again, in a batch of its own, is charged nothing more.

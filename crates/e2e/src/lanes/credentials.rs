@@ -68,6 +68,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "and one its provider refused (a bad request, a rate limit) made nothing: its row and the agent's count charge nothing, whatever its text",
     "fal: an image's submit reaches its host as it came and is charged the pixels it asks for, and a call around it (its queue's poll) nothing",
     "xai: a call with the x_search tool is charged an X search, a plain chat call a chat's, and any other call (a model list's) nothing",
+    "google-places: a place's details are charged its own price, under a search's",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -264,6 +265,10 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         said.starts_with("fetched 200") && seen["host"] == "places.googleapis.com" && seen["query"] == json!([["fields", "name"], ["key", key_value("google-places")]]),
         json!({ "said": said, "seen": seen }),
     );
+    // a place's details (FIN-445): charged below at its own price
+    let said = say(s, 138, "fetch http://places.googleapis.com/v1/places/ChIJe2e?fields=rating with $GOOGLE_PLACES_API_KEY in query key")?;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    let detail_sent = said.starts_with("fetched 200") && seen["host"] == "places.googleapis.com" && seen["path"] == "/v1/places/ChIJe2e";
 
     // Hermes' tool vendors share the existing upstream fake: each real
     // host and SDK header, with no vendor-specific response simulation.
@@ -335,8 +340,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let keyed = ["perplexity", "elevenlabs", "google-places", "firecrawl", "browser-use", "x"];
     // each key's call, the speech calls as its part (`price::KEY_PARTS`):
     // the one made, and the two refused; fal's image and its poll; and
-    // xAI's X search, chat and model list
-    let held_rows = keyed.len() + 3 + 2 + 3;
+    // xAI's X search, chat and model list; and a place's details
+    let held_rows = keyed.len() + 3 + 2 + 3 + 1;
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows);
     let rows = held();
@@ -354,10 +359,12 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let fal_made = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "fal:image", "units": FAL_PIXELS }) && theirs(r) && charged(r) == Some(image));
     let fal_polled = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "fal", "units": 0 }) && theirs(r) && charged(r) == Some(0));
     s.ok(SWAP_CHECKS[33], fal_sent && fal_made && fal_polled && image < charge_of("fal"), json!({ "seen": fal_seen, "image": image, "rows": rows }));
-    let xai_row = |key: &str, units: i64, micros: i64| rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(micros));
-    let xai_charged = xai_row("xai", 1, charge_of("xai")) && xai_row("xai:chat", 1, charge_of("xai:chat")) && xai_row("xai", 0, 0);
+    let held_row = |key: &str, units: i64, micros: i64| rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(micros));
+    let xai_charged = held_row("xai", 1, charge_of("xai")) && held_row("xai:chat", 1, charge_of("xai:chat")) && held_row("xai", 0, 0);
     s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && xai_charged && charge_of("xai:chat") < charge_of("xai") / 5, json!({ "seen": xai_seen, "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 1, charge_of("google-places")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 2, image), ("browser-use", 1, charge_of("browser-use")), ("xai", 3, charge_of("xai") + charge_of("xai:chat")), (SWAP_OWN, 1, 0)];
+    let detail = charge_of("google-places:details");
+    s.ok(SWAP_CHECKS[35], detail_sent && held_row("google-places:details", 1, detail) && detail < charge_of("google-places"), json!({ "detail": detail, "rows": rows }));
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 2, charge_of("google-places") + charge_of("google-places:details")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 2, image), ("browser-use", 1, charge_of("browser-use")), ("xai", 3, charge_of("xai") + charge_of("xai:chat")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
