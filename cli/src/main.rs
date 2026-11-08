@@ -241,9 +241,9 @@ enum Cmd {
     /// charges with, and what you have left this month (an agent: its
     /// owner's). Items one after another, each a name (an operator key, a
     /// part of one, or a model) and its amounts: `fragment quote
-    /// elevenlabs:speech 60000chars`, `fragment quote fal 40`, `fragment
-    /// quote cheap 2000in 500out 40x`. Spends nothing; with no items, what
-    /// is left
+    /// elevenlabs:speech 60000chars`, `fragment quote fal:image 40x
+    /// 1048576px`, `fragment quote cheap 2000in 500out 40x`. Spends
+    /// nothing; with no items, what is left
     Quote {
         /// Each item's name, then its amounts: `<n>` or `<n>x` its calls,
         /// `<n>in` `<n>cached` `<n>write` `<n>out` a model's tokens a call,

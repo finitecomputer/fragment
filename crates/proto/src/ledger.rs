@@ -260,9 +260,10 @@ impl TryFrom<PlannedFields> for Planned {
 /// apart (`elevenlabs:speech`), by the book's name for it
 /// (`fragment_core::price::KEY_PARTS`). `units` are each call's, in the
 /// key's own unit: a part's what its vendor counts (ElevenLabs' speech, its
-/// text's characters), which a part's item must say; any other key's a
-/// call (absent, one). A part's are not cut to one call's most, so a job's
-/// whole count may be one item.
+/// text's characters; fal's image, its pixels), which its item must say,
+/// unless the part counts at most one a call (xAI's image, a Places
+/// photo); any other key's a call (absent, one). A part's are not cut to
+/// one call's most, so a job's whole count may be one item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlannedKey {
@@ -346,7 +347,8 @@ pub enum Unquoted {
     /// The book prices nothing of its name here (a key the deployment does
     /// not offer, a model no slot runs), or the route refuses it (`high`).
     NoPrice,
-    /// A part's calls, whose units its item does not say.
+    /// A part's calls, whose units (more than one a call) its item does
+    /// not say.
     NoUnits,
     /// No usage a meter counts (a misspelt kind, a name not printable, a
     /// count past any one row's).

@@ -95,8 +95,11 @@ fn quote_one(item: &Planned, book: &PriceBook, models: &Models, plan: Plan) -> Q
 fn usage_of(item: &Planned, models: &Models) -> Result<Usage, (Option<String>, Unquoted)> {
     match item {
         Planned::Key(k) => {
-            let part = KEY_PARTS.iter().any(|p| p.priced_as == k.key);
-            match (k.units, part) {
+            // a part that counts what its vendor does (characters, pixels,
+            // credits) is quoted at the units said; one that counts at most
+            // one a call (an image, a photo), as any key, a call's one
+            let counted = KEY_PARTS.iter().any(|p| p.priced_as == k.key && p.units_max > 1);
+            match (k.units, counted) {
                 (None, true) => Err((Some(k.key.clone()), Unquoted::NoUnits)),
                 (units, _) => Ok(Usage::Key { key: k.key.clone(), units: units.unwrap_or(1) }),
             }
@@ -132,11 +135,13 @@ mod tests {
     use fragment_proto::ledger::{PlannedKey, PlannedModel, PlannedUsage, SetPlan};
     use serde_json::json;
 
-    /// The default book with ElevenLabs' key and its speech part, as a
-    /// deployment offering it prices them (`Catalog::key_prices`).
+    /// The default book with operator keys and every part of theirs
+    /// (`KEY_PARTS`), as a deployment offering them prices them
+    /// (`Catalog::key_prices`).
     fn book() -> PriceBook {
         let mut book = PriceBook::defaults();
-        for name in ["elevenlabs", "elevenlabs:speech", "perplexity"] {
+        let parts = KEY_PARTS.iter().map(|p| p.priced_as);
+        for name in ["elevenlabs", "perplexity", "fal", "xai", "google-places", "firecrawl"].into_iter().chain(parts) {
             let (micros, per) = crate::price::default_key_price(name).unwrap();
             book.keys.push(KeyPrice { key: name.into(), micros, per });
         }
@@ -202,6 +207,13 @@ mod tests {
             // the key's other calls (a minute of music), and a search
             key("elevenlabs", None, Some(3)),
             key("perplexity", None, Some(7)),
+            // FIN-445's parts: fal's megapixel image, xAI's X search and its
+            // image (one a call, so none said), a Places photo, Firecrawl's credits
+            key("fal:image", Some(1_048_576), Some(40)),
+            key("xai", None, Some(5)),
+            key("xai:image", None, Some(4)),
+            key("google-places:photo", None, Some(10)),
+            key("firecrawl:credit", Some(5), Some(20)),
             // 40 turns on the cheap tier, by its name and by its id
             model("cheap", 2_000, 300, 500, Some(40)),
             model(&cheap, 2_000, 300, 500, Some(40)),
@@ -218,6 +230,11 @@ mod tests {
             (Usage::Key { key: "elevenlabs:speech".into(), units: 60_000 }, 1),
             (Usage::Key { key: "elevenlabs".into(), units: 1 }, 3),
             (Usage::Key { key: "perplexity".into(), units: 1 }, 7),
+            (Usage::Key { key: "fal:image".into(), units: 1_048_576 }, 40),
+            (Usage::Key { key: "xai".into(), units: 1 }, 5),
+            (Usage::Key { key: "xai:image".into(), units: 1 }, 4),
+            (Usage::Key { key: "google-places:photo".into(), units: 1 }, 10),
+            (Usage::Key { key: "firecrawl:credit".into(), units: 5 }, 20),
             (Usage::Tokens { model: cheap.clone(), input: 2_000, cached_input: 300, cache_write: 0, output: 500 }, 40),
             (Usage::Tokens { model: cheap.clone(), input: 2_000, cached_input: 300, cache_write: 0, output: 500 }, 40),
             (Usage::Tokens { model: crate::decide::Model::ClefFlash.id().into(), input: 1_000, cached_input: 0, cache_write: 0, output: 0 }, 2),
@@ -235,10 +252,12 @@ mod tests {
         assert_eq!(total, charged_all, "the total is what the whole job was charged");
         // the names each was priced as: a route's name resolved to its model's id
         let names: Vec<_> = quoted.iter().map(|q| q.priced_as.clone().unwrap()).collect();
-        assert_eq!(names, ["elevenlabs:speech", "elevenlabs:speech", "elevenlabs", "perplexity", cheap.as_str(), cheap.as_str(), crate::decide::Model::ClefFlash.id(), crate::price::INSTANCE, "storage"]);
+        assert_eq!(names, ["elevenlabs:speech", "elevenlabs:speech", "elevenlabs", "perplexity", "fal:image", "xai", "xai:image", "google-places:photo", "firecrawl:credit", cheap.as_str(), cheap.as_str(), crate::decide::Model::ClefFlash.id(), crate::price::INSTANCE, "storage"]);
         // FIN-443's example: 60,000 characters at $0.08 per 1,000 with the 50% margin
         assert_eq!(quoted[1].charge_micros, Some(7_200_000));
         assert_eq!(quoted[0].charge_micros, quoted[1].charge_micros, "300 clips of 200 characters cost what 60,000 do");
+        // a megapixel image at $0.006, an X search at $0.12, each with the margin
+        assert_eq!((quoted[4].each_micros, quoted[5].each_micros), (Some(9_000), Some(180_000)));
     }
 
     /// Goal: the always-on seat's awake time is quoted at nothing, as its
@@ -267,6 +286,8 @@ mod tests {
             key("perplexity", None, None),
             key("nope", None, Some(4)),
             key("elevenlabs:speech", None, Some(4)),
+            key("fal:image", None, None),
+            key("firecrawl:credit", None, None),
             model("gpt-nope", 10, 0, 10, None),
             model("high", 10, 0, 10, None),
             usage(json!({ "kind": "awake", "instance": "16vcpu-64gib", "ms": 1 }), None),
@@ -278,7 +299,7 @@ mod tests {
         let (quoted, total) = quote(&items, &book(), &models, Plan::Seat);
         let why: Vec<_> = quoted.iter().map(|q| q.unknown).collect();
         use Unquoted::*;
-        assert_eq!(why, [None, Some(NoPrice), Some(NoUnits), Some(NoPrice), Some(NoPrice), Some(NoPrice), Some(Invalid), Some(Invalid), Some(Invalid), Some(TooLarge)]);
+        assert_eq!(why, [None, Some(NoPrice), Some(NoUnits), Some(NoUnits), Some(NoUnits), Some(NoPrice), Some(NoPrice), Some(NoPrice), Some(Invalid), Some(Invalid), Some(Invalid), Some(TooLarge)]);
         assert!(quoted[1..].iter().all(|q| q.charge_micros.is_none() && q.each_micros.is_none()), "{quoted:?}");
         assert_eq!(total, quoted[0].charge_micros.unwrap(), "only the priced item counts");
         assert_eq!((quoted[1].calls, quoted[2].priced_as.as_deref()), (4, Some("elevenlabs:speech")), "it says what was asked");

@@ -13,10 +13,11 @@
 //! - `<n>`, `<n>x` or `x<n>`: its calls (absent, one);
 //! - `<n>in`, `<n>cached`, `<n>write`, `<n>out`: a model's tokens a call;
 //! - `<n>` and any other word (`60000chars`, `1048576px`): a key's units a
-//!   call, in its own unit (a part's must be said).
+//!   call, in its own unit (a part that counts more than one a call must
+//!   say them: speech's characters, an image's pixels).
 //!
-//! `fragment quote elevenlabs:speech 60000chars`, `fragment quote fal 40`,
-//! `fragment quote cheap 2000in 500out 40x`.
+//! `fragment quote elevenlabs:speech 60000chars`, `fragment quote fal:image
+//! 40x 1048576px`, `fragment quote cheap 2000in 500out 40x`.
 
 use anyhow::Result;
 use fragment_core::price::dollars;
@@ -185,7 +186,7 @@ pub fn tool() -> Value {
                     "items": { "oneOf": [
                         { "type": "object", "required": ["key"], "additionalProperties": false, "properties": {
                             "key": { "type": "string", "description": "An operator key (`perplexity`, `fal`) or a part of one (`elevenlabs:speech`)" },
-                            "units": { "type": "integer", "minimum": 0, "description": "Each call's units in the key's own unit (a part's must be said: speech's are its text's characters); absent, one call" },
+                            "units": { "type": "integer", "minimum": 0, "description": "Each call's units in the key's own unit: a part counting more than one a call must say them (`elevenlabs:speech` its text's characters, `fal:image` its pixels); absent, one" },
                             "calls": calls,
                         } },
                         { "type": "object", "required": ["model"], "additionalProperties": false, "properties": {
