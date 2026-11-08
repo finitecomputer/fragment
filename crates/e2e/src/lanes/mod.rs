@@ -178,31 +178,33 @@ const LANES: &[Lane] = &[
 /// on a preview, so their shard reports each as the whole run does: one
 /// skip.
 ///
-/// Balanced by each section's 90th-percentile time over 13 green merge
-/// groups on CI's runners (2026-11-02): 38.9 minutes in all. `shell-ui`
-/// (513 s) is one section, so no split runs faster than it: it is a shard
-/// alone, and the other four each take about 455 s (they took 560 to 595
-/// in four shards, with `shell-ui` among them). A fifth shard is one more
-/// runner a run; the day's peak was 20 of the plan's 60.
+/// Balanced by each section's time in the five green or cut-off master
+/// pushes of 2026-11-08 (306700d3b to 962a108bf, the slowest of each
+/// section's runs): 48 minutes in all. `computers` (630 s) and `shell-ui`
+/// (578 s) are one section each, so no split runs faster than the first:
+/// each is a shard nearly alone, and the other three each take about
+/// 620 s at their sections' slowest (590 at their medians). Before, the
+/// first shard held `computers` and 120 s more, and the fourth `chat` and
+/// 390 s more: 760 and 780 s, where the fifth took 460.
 /// Shard 3 holds `triggers` and the sections from the cron
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 5] = [
     &[
-        "keys", "members", "levers", "delegation", "isolation", "blobs", "push", "transcribe", "orgs", "trials", "admin-page", "computers",
-        "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout",
+        "keys", "levers", "delegation", "orgs", "admin-page", "computers", "search-bench", "import-release", "hermes", "agent-smoke", "agent-ask",
+        "agent-app", "agent-restart", "bot-mode", "checkout",
     ],
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
-        "sync", "migrations", "capability-cost",
+        "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
     ],
+    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "auth", "create", "chat-seed", "reach", "share", "effects", "appfiles", "sessions-ui", "ai", "billing", "governance", "billing-page", "admin", "shell",
-        "chat", "chat-history",
+        "identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
+        "members", "billing", "governance", "billing-page",
     ],
-    &["identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart"],
 ];
 
 /// Whether shard `k` (from 1) of the table runs the section `name`.
