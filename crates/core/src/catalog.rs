@@ -702,7 +702,7 @@ mod tests {
     }
 
     /// FIN-443: an operator key whose calls the book prices in part apart
-    /// (ElevenLabs' speech) is priced so too, at the book's price whatever
+    /// (ElevenLabs' speech, fal's images) is priced so too, at the book's price whatever
     /// the row's own; a row of another kind by its name is metered not.
     #[test]
     fn a_keys_parts_are_priced_with_it() {
@@ -721,6 +721,9 @@ mod tests {
         let mut book = crate::price::PriceBook::defaults();
         book.keys = eleven("operator", None).key_prices();
         assert_eq!(book.validate(), Ok(()), "a book the ledger takes");
+        // FIN-445: fal's images by their pixels
+        let fal = parse(json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }])).unwrap();
+        assert_eq!(priced(&fal), vec![("fal".to_string(), 6_000, 1), ("fal:image".to_string(), 6_000, 1_048_576)]);
     }
 
     /// Invalid: every rule, each a typed refusal.
