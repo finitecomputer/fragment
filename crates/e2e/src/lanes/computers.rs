@@ -2108,10 +2108,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let quoted = quote_speech(s, api, &owner)?;
         replies_so_far += swap_checks(s, api, &swapping, &fetched)?;
         let rows = entries(api, &owner_id, &format!("key:{id}:"));
-        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:speech" && usage(r)["units"].as_u64().is_some_and(|u| u > 0)).collect();
+        // each speech call of the quoted size (the guard's checks make
+        // longer ones too, and more of that size)
+        let spoken: Vec<&Value> = rows.iter().filter(|r| usage(r)["key"] == "elevenlabs:speech" && usage(r)["units"] == SPOKEN_CHARS).collect();
         s.ok(
             QUOTE_CHECKS[1],
-            spoken.len() == 1 && usage(spoken[0])["units"] == SPOKEN_CHARS && charged(spoken[0]).is_some_and(|c| Some(c) == quoted["totalMicros"].as_i64()),
+            !spoken.is_empty() && spoken.iter().all(|r| charged(r).is_some_and(|c| Some(c) == quoted["totalMicros"].as_i64())),
             json!({ "quoted": quoted, "rows": spoken }),
         );
         replies_so_far += model_checks(s, api, &swapping, &fetched)?;

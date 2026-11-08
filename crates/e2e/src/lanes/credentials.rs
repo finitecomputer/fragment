@@ -546,6 +546,13 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     forget_gate(api, &owner_id)?;
     let open = open?;
     s.ok(SWAP_CHECKS[41], slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200"), json!({ "open": open, "slowed": slowed.body }));
+    // the lane goes on unpaused: its person allows the most, and its
+    // computer tells no pause (the restarts after count its notices)
+    let most = lift(w.owner, "elevenlabs", json!({ "id": "e1", "micros": fragment_core::ledger::guard::KEY_CAP_MAX }))?;
+    let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
+    let paused = view.body["notices"].as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused"));
+    anyhow::ensure!(most.status == 200 && view.status == 200 && !paused, "the guard's checks leave no pause: {most} {view}");
+    forget_gate(api, &owner_id)?;
     Ok(turns)
 }
 
