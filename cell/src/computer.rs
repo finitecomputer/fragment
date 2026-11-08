@@ -60,7 +60,7 @@ use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
@@ -641,9 +641,10 @@ struct Used {
 /// An operator key paused for its owner (docs/ledger.md, "Shared-key
 /// guard"), as the swap heard the ledger refuse it: its notice
 /// (`ComputerNotice::KeyPaused`) until `resumes_at`, a call on it going
-/// through, or its owner changing its cap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// through, or its owner changing its cap. Kept as a line of text
+/// (`<provider> <spent> <cap> <resumes at>`), as `computer/key-pause`
+/// sends it: the cell's Wasm carries no decoder of its own for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct KeyPause {
     provider: String,
     spent_micros: i64,
@@ -651,11 +652,17 @@ struct KeyPause {
     resumes_at: i64,
 }
 
-/// `computer/key-pause`'s body: `provider` paused, or no longer (`null`).
-#[derive(Deserialize)]
-struct KeyPauseAsk {
-    provider: String,
-    pause: Option<KeyPause>,
+impl KeyPause {
+    fn of_line(line: &str) -> Option<KeyPause> {
+        let mut w = line.split_whitespace();
+        let provider = w.next()?.to_string();
+        let mut n = || w.next()?.parse::<i64>().ok();
+        Some(KeyPause { provider, spent_micros: n()?, cap_micros: n()?, resumes_at: n()? })
+    }
+
+    fn line(&self) -> String {
+        format!("{} {} {} {}", self.provider, self.spent_micros, self.cap_micros, self.resumes_at)
+    }
 }
 
 /// `computer/uses`' body: a month (`YYYY-MM`), or this one.
@@ -975,7 +982,7 @@ impl ComputerCell {
     /// write; a record that does not read is none (best effort, as the
     /// guard is).
     fn stored_pauses(&self) -> CellResult<Vec<KeyPause>> {
-        Ok(self.meta(MetaKey::KeyPauses)?.and_then(|v| crate::json_text(&v).ok()).unwrap_or_default())
+        Ok(self.meta(MetaKey::KeyPauses)?.map(|v| v.lines().filter_map(KeyPause::of_line).collect()).unwrap_or_default())
     }
 
     /// The keys paused now.
@@ -1006,7 +1013,7 @@ impl ComputerCell {
         assert!(all.len() <= self.cfg.providers.providers().len(), "a pause a catalog row at most");
         match all.is_empty() {
             true => self.delete_meta(MetaKey::KeyPauses)?,
-            false => self.set_meta(MetaKey::KeyPauses, &serde_json::to_string(&all).expect("pauses serialize"))?,
+            false => self.set_meta(MetaKey::KeyPauses, &all.iter().map(KeyPause::line).collect::<Vec<_>>().join("\n"))?,
         }
         if tell {
             self.tell_owner().await;
@@ -2779,12 +2786,15 @@ impl ComputerCell {
                 json_response(&json!({ "ok": true }))
             }
             "computer/key-pause" => {
-                let b: KeyPauseAsk = body_json(&mut req).await?;
+                // `{provider, pause}`: its line (`KeyPause`), or null
+                let b: Value = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
-                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Operator) || b.pause.as_ref().is_some_and(|p| p.provider != b.provider || p.spent_micros < 0 || p.cap_micros <= 0) {
-                    return Err(CellError::invalid(format!("a pause names one of its operator keys, {:?}, and what it spent of its cap", b.provider)));
+                let provider = b["provider"].as_str().unwrap_or_default();
+                let pause = b["pause"].as_str().map(KeyPause::of_line);
+                if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) || pause.as_ref().is_some_and(|p| p.as_ref().is_none_or(|p| p.provider != provider || p.spent_micros < 0 || p.cap_micros <= 0)) {
+                    return Err(CellError::invalid(format!("a pause names one of its operator keys, {provider:?}, and what it spent of its cap")));
                 }
-                self.key_paused(&b.provider, b.pause).await?;
+                self.key_paused(provider, pause.flatten()).await?;
                 json_response(&json!({ "ok": true }))
             }
             "computer/uses" => {
@@ -3896,7 +3906,8 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
                 let Some(Refused::KeyPaused { cap, spent, resumes_in_ms }) = e.refused else { return Err(refused) };
                 // its owner is told, once a pause: the computer's notice,
                 // with the one tap that lifts its cap
-                let pause = json!({ "provider": p.provider, "pause": { "provider": p.provider, "spentMicros": spent, "capMicros": cap, "resumesAt": js::now_ms() + resumes_in_ms } });
+                let line = KeyPause { provider: p.provider.clone(), spent_micros: spent, cap_micros: cap, resumes_at: js::now_ms() + resumes_in_ms }.line();
+                let pause = json!({ "provider": p.provider, "pause": line });
                 let (env, computer) = (env.clone(), computer.to_string());
                 ctx.wait_until(async move {
                     if let Err(e) = ask(&env, &computer, "computer/key-pause", &pause).await {

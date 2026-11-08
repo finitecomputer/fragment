@@ -73,9 +73,11 @@ fn counts(slot: i64, now_ms: i64) -> bool {
     (now - SLOTS..=now).contains(&slot)
 }
 
-/// One key's charges this last hour, as the store keeps it. A field a
-/// later release adds is read past, so a record stays readable across
-/// releases.
+/// One key's charges this last hour, as the store keeps it: as text
+/// (`text`, `read`), `<slot>:<micros>` a slot, oldest first, apart by
+/// spaces, the cell's Wasm carrying no decoder of its own for it. A word a
+/// later release adds (one with no `:`) is read past, so a record stays
+/// readable across releases.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyHour {
     /// `(slot, micros)`, oldest first, each sum above zero: slot `n` is
@@ -87,16 +89,23 @@ pub struct KeyHour {
 impl KeyHour {
     /// A record as the store holds it.
     pub fn read(text: &str) -> Result<KeyHour, String> {
-        let hour: KeyHour = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let ordered = hour.slots.windows(2).all(|w| w[0].0 < w[1].0);
-        if !ordered || hour.slots.iter().any(|(_, micros)| *micros <= 0) {
+        let unread = || format!("{text:?} is no key's hour");
+        let mut slots = Vec::new();
+        for (slot, micros) in text.split_whitespace().filter_map(|w| w.split_once(':')) {
+            slots.push((slot.parse::<i64>().map_err(|_| unread())?, micros.parse::<i64>().map_err(|_| unread())?));
+            if slots.len() as i64 > SLOTS + 1 {
+                return Err(unread());
+            }
+        }
+        let ordered = slots.windows(2).all(|w| w[0].0 < w[1].0);
+        if !ordered || slots.iter().any(|(_, micros)| *micros <= 0) {
             return Err("its slots are not in order, or not each above zero".into());
         }
-        Ok(hour)
+        Ok(KeyHour { slots })
     }
 
     pub fn text(&self) -> String {
-        serde_json::to_string(self).expect("a key's hour serializes")
+        self.slots.iter().map(|(slot, micros)| format!("{slot}:{micros}")).collect::<Vec<_>>().join(" ")
     }
 
     /// What counts at `now_ms`, together.
@@ -413,8 +422,10 @@ mod tests {
         assert_eq!(KeyHour::read(&hour.text()), Ok(hour.clone()));
         assert!(hour.spent(now) >= HOUR_MS / 10_000, "at least the hour's calls count");
         assert!(hour.spent(now) <= (HOUR_MS + SLOT_MS) / 10_000, "and at most the hour and a slot's");
-        assert_eq!(KeyHour::read(r#"{"slots":[[5,10]],"later":true}"#).map(|h| h.spent(5 * SLOT_MS)), Ok(10), "a later field is read past");
-        for bad in ["", "null", r#"{"slots":[[6,1],[5,1]]}"#, r#"{"slots":[[5,0]]}"#, r#"{"slots":"x"}"#] {
+        assert_eq!(KeyHour::read("5:10 later").map(|h| h.spent(5 * SLOT_MS)), Ok(10), "a later word is read past");
+        assert_eq!(KeyHour::read(""), Ok(KeyHour::default()), "none: an hour with nothing");
+        let too_many = (0..=SLOTS + 1).map(|n| format!("{n}:1")).collect::<Vec<_>>().join(" ");
+        for bad in ["6:1 5:1", "5:0", "5:-1", "x:1", "5:y", "5:1:2", too_many.as_str()] {
             assert!(KeyHour::read(bad).is_err(), "{bad}");
         }
         // a clock that went back: a slot ahead of now counts not
