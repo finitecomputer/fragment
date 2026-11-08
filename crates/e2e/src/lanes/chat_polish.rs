@@ -1291,10 +1291,14 @@ pub(super) fn history_overlaps(s: &mut Suite, api: &Api, owner: &Keys, session: 
     let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), &hooks(1, true))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let offered = "document.getElementById('history-status').textContent === \"Couldn't load earlier progress.\" && !document.getElementById('earlier-again').hidden";
-    // tried again by itself as the chat is ready, else by Try again
+    // tried again by itself as the chat is ready, else by Try again: its
+    // own action, as a keyboard's or a screen reader's, the history kept
+    // where it is (a mouse must scroll the history's top into view, whose
+    // sentinel reads the older messages, Try again hidden while they load,
+    // and that read tries the work again itself)
     anyhow::ensure!(super::shows(chrome, &page, &format!("{count} === 100 && window.__failWork === 0 && (window.__heldWork === true || ({offered}))")), "the first read of work failed");
     if chrome.eval(&page, "window.__heldWork")? != true {
-        chrome.click(&page, "#earlier-again")?;
+        chrome.eval(&page, "(document.getElementById('earlier-again').click(), true)")?;
     }
     let held = super::shows(chrome, &page, "window.__heldWork === true");
     let started = to_start(chrome, &page)?;

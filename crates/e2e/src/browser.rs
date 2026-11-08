@@ -510,7 +510,11 @@ impl Browser {
             params["browserContextId"] = json!(context);
         }
         let target = self.send("Target.createTarget", params, None)?["targetId"].as_str().unwrap_or("").to_string();
-        self.attach(&target)
+        let page = self.attach(&target)?;
+        // its click guard first on each document's window (`CLICK_GUARD`)
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": format!("({CLICK_GUARD})()") }), Some(&page.session))?;
+        Ok(page)
     }
 
     /// Navigates `page` to `url` and waits for its new document's default
@@ -976,10 +980,90 @@ impl Browser {
         Ok(())
     }
 
-    /// `click_at` the middle of the first element `selector` matches.
+    /// `click_at` the middle of the first element `selector` matches, as a
+    /// hand presses what it sees. Its aim and its press are separate calls,
+    /// and a page draws again between them on its own (the shell's list
+    /// reads itself again a moment after any change, and a row comes or
+    /// folds away), so the page's click guard (`CLICK_GUARD`, its scope and
+    /// limits there) holds each press to the element: one that would start
+    /// on another element of the page is stopped before the page hears it,
+    /// and aimed again where the element is now (Playwright's hit-target
+    /// check, its way). A press that starts on it goes through whole, as any
+    /// press does: a pointer the page captures, a label's click, a disabled
+    /// button's none. One that never reaches it in CLICK_AIMS (the element
+    /// covered) is an error naming what it hit. A frame is pressed with
+    /// `click_at`, or from its own page.
     pub fn click(&mut self, page: &Page, selector: &str) -> Result<()> {
-        let at = self.middle_of(page, selector)?;
-        self.click_at(page, at)
+        self.click_aimed(page, selector, CLICK_AIMS, Self::click_at)
+    }
+
+    /// `click` aimed once: an element that moves on approach (the page
+    /// drawn again between the aim and the press) is an error, for a check
+    /// that says it holds still.
+    pub fn click_strict(&mut self, page: &Page, selector: &str) -> Result<()> {
+        self.click_aimed(page, selector, 1, Self::click_at)
+    }
+
+    /// `click`'s aims, at most `aims`, each pressed by `press`: armed in the
+    /// page (`arm`, the element scrolled into view and its middle the one
+    /// thing at that point), pressed, then settled (`settle`) whatever the
+    /// press came to, so no guard is left armed past it. A settle that finds
+    /// no aim of its own is a document the press replaced, so long as the
+    /// frame's document changed (its loader); anything else is an error.
+    pub(crate) fn click_aimed(&mut self, page: &Page, selector: &str, aims: u32, press: fn(&mut Self, &Page, (f64, f64)) -> Result<()>) -> Result<()> {
+        let sel = serde_json::to_string(selector)?;
+        let mut hit = Vec::new();
+        for _ in 0..aims {
+            let document = self.document_of(page)?;
+            self.next += 1;
+            let token = self.next;
+            let armed = self.eval(page, &format!("({CLICK_GUARD})(), window.__clickGuard.arm({sel}, {token})"))?;
+            let (Some(x), Some(y)) = (armed["at"][0].as_f64(), armed["at"][1].as_f64()) else { bail!("nothing on the page matches {selector}") };
+            let missed = match armed["covered"].as_str() {
+                Some(cover) => format!("found {cover}, and pressed nothing"),
+                None => {
+                    let pressed = press(self, page, (x, y));
+                    let settled = self.eval(page, &format!("window.__clickGuard?.settle({token}) ?? {{ \"replaced\": true }}"));
+                    pressed?;
+                    let replaced = |b: &mut Self| b.document_of(page).is_ok_and(|now| now != document);
+                    let settled = match settled {
+                        Ok(v) => v,
+                        Err(e) if replaced(self) => json!({ "replaced": true, "error": e.to_string() }),
+                        Err(e) => return Err(e),
+                    };
+                    if settled["replaced"] == true {
+                        anyhow::ensure!(replaced(self), "a click aimed at {selector} lost its aim, its document the same: {settled}");
+                        return Ok(());
+                    }
+                    let Some(missed) = settled["missed"].as_str() else { return Ok(()) };
+                    match settled["stopped"] == true {
+                        true => format!("would have pressed {missed}, and was stopped"),
+                        false => format!("pressed {missed}: no listener here heard it (a frame over the point, the guard's limit)"),
+                    }
+                }
+            };
+            println!("      (a click aimed at {selector} {missed})");
+            hit.push(missed);
+        }
+        bail!("a click aimed at {selector} never reached it: {}", hit.join("; then "))
+    }
+
+    /// The page's history entry before this one, as Back takes it: a
+    /// document the back/forward cache kept comes back as it was.
+    pub fn back(&mut self, page: &Page) -> Result<()> {
+        let history = self.send("Page.getNavigationHistory", json!({}), Some(&page.session))?;
+        let at = history["currentIndex"].as_u64().context("a page's history names its entry")?;
+        anyhow::ensure!(at > 0, "no history entry before this one");
+        let entry = history["entries"][at as usize - 1]["id"].clone();
+        self.send("Page.navigateToHistoryEntry", json!({ "entryId": entry }), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// The page's (or frame's) document now, as its loader names it: a new
+    /// one for each document a navigation brings.
+    fn document_of(&mut self, page: &Page) -> Result<String> {
+        let tree = self.send("Page.getFrameTree", json!({}), Some(&page.session))?;
+        tree["frameTree"]["frame"]["loaderId"].as_str().map(str::to_string).context("a frame tree names its document's loader")
     }
 
     /// The mouse moved to the middle of the first element `selector`
@@ -1002,6 +1086,62 @@ impl Browser {
         Ok((x, y))
     }
 }
+
+/// How many presses `click` makes at its element, each stopped that would
+/// have started on another: a page drawn again between an aim and its
+/// press moves once, not on every aim; one that never reaches it is covered.
+const CLICK_AIMS: u32 = 3;
+
+/// A page's click guard (`window.__clickGuard`), for `click`. Its scope:
+/// a press lands on the element it was aimed at, never on another element
+/// of the same document that the page, drawing again between the aim and
+/// the press, moved under the point.
+///
+/// Installed by each page `open` makes before its first document's scripts
+/// (`Page.addScriptToEvaluateOnNewDocument`), so its listeners are the
+/// first of the window's to hear a press. Dormant until `arm(selector,
+/// token)`, which scrolls the element into view and answers its middle
+/// (`at`), or what is there instead (`covered`: another element, or any
+/// frame, the element's own included, or nothing, the element having no
+/// box; no press is made). The first trusted
+/// `pointerdown` decides: inside the element (the same one, or the one
+/// drawn in its place) it is accepted, and the press is the page's, whole;
+/// outside, it and the rest of that press are stopped before any other
+/// listener. `settle(token)` disarms, whatever came, and answers `reached`
+/// (a pointerdown accepted), `missed` (what it pressed instead, `stopped`;
+/// or nothing here, a press no listener of this document heard), or
+/// `replaced` (no aim of its own: another document). An outgoing document
+/// (`pagehide`, into the back/forward cache among them) keeps no aim.
+///
+/// Its limits, which no lane meets: a frame drawn over the point between
+/// the aim and the press takes the press, in a document this guard never
+/// reaches (the click then reports a miss, as any press with no pointerdown
+/// accepted here, and aims again); and a document attached once loaded (a
+/// popup, a frame's own page) gets the guard at its first click, after the
+/// listeners it had already put on its window.
+const CLICK_GUARD: &str = "() => { if (window.__clickGuard) return; \
+    const kinds = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']; \
+    const named = (n) => n?.nodeType === 1 ? `<${n.localName}${n.id ? '#' + n.id : ''}${n.dataset?.key ? ` data-key=\"${n.dataset.key}\"` : ''}>` : String(n); \
+    const frames = /^(iframe|frame|object|embed)$/; \
+    let aim = null; \
+    const check = (ev) => { if (!aim || !ev.isTrusted) return; \
+      if (aim.state === 'armed' && ev.type === 'pointerdown') { \
+        if (document.querySelector(aim.sel)?.contains(ev.target)) { aim.state = 'reached'; return; } \
+        aim.state = 'missed'; aim.missed = named(ev.target); } \
+      if (aim.state === 'missed') { ev.preventDefault(); ev.stopImmediatePropagation(); } }; \
+    for (const k of kinds) addEventListener(k, check, true); \
+    addEventListener('pagehide', () => { aim = null; }); \
+    Object.defineProperty(window, '__clickGuard', { value: Object.freeze({ \
+      arm(sel, token) { aim = null; const e = document.querySelector(sel); if (!e) return null; \
+        e.scrollIntoView({ block: 'nearest' }); const r = e.getBoundingClientRect(); const at = [r.x + r.width / 2, r.y + r.height / 2]; \
+        if (!r.width || !r.height) return { at, covered: 'it with no box (hidden, or not drawn)' }; \
+        const hit = document.elementFromPoint(...at); if (!hit || !e.contains(hit) || frames.test(hit.localName)) return { at, covered: `${named(hit)} over it` }; \
+        aim = { sel, token, state: 'armed', missed: null }; return { at }; }, \
+      settle(token) { const a = aim; aim = null; if (a?.token !== token) return { replaced: true }; \
+        if (a.state === 'reached') return { reached: true }; \
+        return a.state === 'missed' ? { missed: a.missed, stopped: true } : { missed: 'nothing on this page', stopped: false }; }, \
+      armed() { return aim !== null; }, \
+    }) }); }";
 
 impl Drop for Browser {
     fn drop(&mut self) {
