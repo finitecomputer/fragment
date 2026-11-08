@@ -171,9 +171,12 @@ const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::
 /// On a preview, a model call Hermes makes after its reply (a title) can
 /// keep its work open a while, and a save of its `/data` takes seconds more.
 const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
-/// An awake save's disk read follows its `Saved` in the same event: one
-/// exec of `df` in its container, which the cell bounds at a few seconds.
-const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(20);
+/// An awake save's disk read follows its `Saved` in the same event, once
+/// the save is listed: after the pass forgetting older saves, its hold let
+/// go (an exec), and the `df` (an exec), each bounded by the cell at 30 s
+/// at most (cell/src/computer.rs `FORGET_PASS_MS`, `MARK_EXEC_MS`,
+/// `DISK_READ_MS`), and a few seconds more.
+const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(30 + 30 + 5 + 10);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
 const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
