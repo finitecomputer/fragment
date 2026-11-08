@@ -66,6 +66,7 @@ const TEST_SUFFIX: &str = ".test.mjs";
 /// The shell's tests, which a walk must find (each named in its file).
 const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/agent-claude.test.mjs",
+    "cell/shell-tests/agent-home-read.test.mjs",
     "cell/shell-tests/agent-remove.test.mjs",
     "cell/shell-tests/agent-runtimes.test.mjs",
     "cell/shell-tests/agent-settings-read.test.mjs",
