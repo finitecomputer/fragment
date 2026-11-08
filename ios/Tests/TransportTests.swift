@@ -652,6 +652,36 @@ struct TransportTests {
         #expect(session.composer == "Typed in the chat meanwhile" && session.pending.isEmpty)
     }
 
+    /// A memo finished in the chat while Home's first message is still
+    /// being posted there (held open here) is put and attached, but sends
+    /// nothing ahead of it: it waits, said so, and goes after the first.
+    @Test func aMemoFinishedMeanwhileWaitsForTheFirstMessage() async throws {
+        let created = Count(), gate = Gate()
+        let chatRoute = "POST /api/f/mobile-chat--c1/channels/chat"
+        let stub = launchStub(created: created, gate: gate, holdAt: chatRoute)
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let library = Library()
+        await library.load(api)
+        library.home.text = "The original task"
+        let launch = Task { try await library.launch(api) { _ in } }
+        try await waitUntil("posting") { stub.seen.contains { $0.route == chatRoute } }
+        let session = try #require(library.sessions["mobile-chat--c1"])
+        #expect(session.sendingFirst == "The original task")
+        let voice = VoiceMemo(microphone: TestMicrophone(), longest: .milliseconds(50))
+        #expect(session.beginAttaching(1))
+        await session.sendMemo { [voice] in try await voice.file() }
+        #expect(session.attachments.count == 1 && session.error == ChatSession.waitForFirst)
+        #expect(stub.seen.filter { $0.route == chatRoute }.count == 1)
+        gate.open()
+        try await launch.value
+        #expect(session.sendingFirst == nil)
+        await session.send()
+        let posts = stub.seen.filter { $0.route == chatRoute }.map { $0.json["body"] }
+        #expect(posts.count == 2 && posts.first?["text"] == .string("The original task"))
+        #expect(posts.map { $0["attachments"].array.count } == [0, 1] && session.attachments.isEmpty)
+    }
+
     /// While the first message's file uploads (held open here), the chat
     /// sends nothing else: a follow-up waits, said so, its words kept, and
     /// goes once the first is posted, after it.
@@ -667,14 +697,14 @@ struct TransportTests {
         let launch = Task { try await library.launch(api) { _ in } }
         try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
         let session = try #require(library.sessions["mobile-chat--c1"])
-        #expect(session.sendingFirst)
+        #expect(session.sendingFirst != nil)
         session.edit("A follow-up")
         await session.send()
         #expect(session.error == "Wait for the message being sent." && session.composer == "A follow-up" && session.pending.isEmpty)
         #expect(!stub.seen.contains { $0.route.hasSuffix("/channels/chat") })
         gate.open()
         try await launch.value
-        #expect(!session.sendingFirst)
+        #expect(session.sendingFirst == nil)
         await session.send()
         let posts = stub.seen.filter { $0.route.hasSuffix("/channels/chat") }.map { $0.json["body"]["text"] }
         #expect(posts == [.string("The original task"), .string("A follow-up")])
@@ -701,13 +731,13 @@ struct TransportTests {
         try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
         let chat = FragmentSummary(name: "mobile-chat--c1", kind: "chat")
         let session = try #require(library.sessions[chat.name])
-        #expect(library.sessions.count == 32 && session.sendingFirst)
+        #expect(library.sessions.count == 32 && session.sendingFirst != nil)
         // away: to a chat not cached (refused, nothing to make room) and to one that is
         #expect(throws: APIError.self) { try library.session(for: FragmentSummary(name: "one-more", kind: "chat"), api: api) }
         _ = try library.session(for: FragmentSummary(name: "draft-3", kind: "chat"), api: api)
         // and back
         let again = try library.session(for: chat, api: api)
-        #expect(again === session && again.sendingFirst)
+        #expect(again === session && again.sendingFirst != nil)
         again.edit("A follow-up")
         await again.send()
         #expect(again.error == "Wait for the message being sent." && again.composer == "A follow-up" && again.pending.isEmpty)
@@ -715,7 +745,7 @@ struct TransportTests {
         again.flushDraft()
         gate.open()
         try await launch.value
-        #expect(library.sessions[chat.name] === session && !session.sendingFirst)
+        #expect(library.sessions[chat.name] === session && session.sendingFirst == nil)
         #expect(session.composer == "A draft typed meanwhile" && session.pending.isEmpty)
         #expect(ChatSession(fragment: chat, api: api).composer == "A draft typed meanwhile")
         await session.send()
@@ -745,7 +775,7 @@ struct TransportTests {
         try await hold(library, [first3[2]])
         let launch = Task { try await library.launch(api) { _ in } }
         try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
-        #expect(try library.session(for: chat, api: api) === session && session.sendingFirst)
+        #expect(try library.session(for: chat, api: api) === session && session.sendingFirst != nil)
         session.edit("Lost meanwhile")
         await session.send()
         #expect(session.pending.count == SavedChat.pendingMax - 1 && session.composer == "Lost meanwhile")
@@ -783,13 +813,13 @@ struct TransportTests {
         try await hold(library, [first3[2]])
         let launch = Task { try await library.launch(api) { _ in } }
         try await waitUntil("uploading") { stub.seen.contains { $0.route.hasPrefix("PUT /api/f/mobile-chat--c1/blobs/") } }
-        #expect(session.sendingFirst)
+        #expect(session.sendingFirst != nil)
         gate.open()
         await #expect(throws: (any Error).self) { try await launch.value }
         #expect(!stub.seen.contains { $0.route.hasSuffix("/channels/chat") && $0.json["body"]["text"] == .string("The original task") })
         #expect(library.home.text == "The original task" && library.home.files.count == 1)
         #expect(library.home.error == "Your message wasn't sent. Wait for the messages still sending, or edit the ones not sent.")
-        #expect(session.pending.count == SavedChat.pendingMax && !session.sendingFirst)
+        #expect(session.pending.count == SavedChat.pendingMax && session.sendingFirst == nil)
         #expect(ChatSession(fragment: chat, api: api).pending.map(\.text) == session.pending.map(\.text))
     }
 
@@ -936,6 +966,51 @@ struct TransportTests {
         #expect(session.error == nil)
         #expect(session.timeline.records.contains { $0.id == "work:960" }, "its steps in the window are kept")
         #expect(!session.timeline.records.contains { $0.id == "work:500" }, "older work only says which turns run")
+    }
+
+    /// FIN-432, Paul's (b) of 11-07: a helper whose start is long out of
+    /// the backlog, with more than a backlog of other work since its last
+    /// note, is found as the chat opens: `work` read back 15 minutes for
+    /// helpers' records alone, timed from the note's `since`. A malformed
+    /// note is none, and the window, the turns and where earlier work goes
+    /// on from are as the backlog left them.
+    @Test func aLongHelpersNoteIsFoundPastTheBacklog() async throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let since = now - 40 * 60_000
+        // work 1 to 1100, all in the last two minutes: h1's note at 1, a
+        // malformed one at 2, then other work; the backlog is the last 1000
+        let work: @Sendable (Int64) -> String = { seq in
+            let body = seq == 1 ? #"{"kind":"turn.child","parent":"t1","child":"h1","goal":"Read every review","since":\#(since)}"#
+                : seq == 2 ? #"{"kind":"turn.child","parent":"t1","child":"h2","goal":"x","since":"soon"}"#
+                : #"{"kind":"turn.busy","n":\#(seq)}"#
+            return #"{"channel":"work","seq":\#(seq),"at":\#(now - (1100 - seq) * 100),"principal":"npub1agent","kind":"message","body":\#(body)}"#
+        }
+        let stub = Stub { seen, _ in
+            guard seen.route == "GET /api/f/chat--abc123/channels/work" else { return (404, "{}") }
+            let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+            let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
+            return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        for seq: Int64 in 101...1100 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":1100,"more":false}"#)
+        try await waitUntil("the helper found") { session.helpers.map(\.child) == ["h1"] }
+        #expect(session.helpers.first?.at == since && session.helpers.first?.goal == "Read every review")
+        #expect(Helpers.working(session.helpers, at: now).count == 1)
+        let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/work" }.map(\.query)
+        #expect(asked.first == ["before": "101", "limit": "50"] && asked.count <= 3, "\(asked)")
+        #expect(session.timeline.oldestWork?.seq == 101, "where earlier work goes on from, as it was")
+        #expect(!session.timeline.records.contains { $0.id == "work:1" }, "nothing read back for helpers enters the window")
+        #expect(session.error == nil)
     }
 
     /// A completed turn straddling the backlog: its steps and end are held,
