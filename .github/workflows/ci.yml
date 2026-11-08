@@ -49,8 +49,11 @@ on:
 
 # A pull request's newer run cancels its older one: `check` is all it
 # runs, and nothing requires it. A push's run is never cancelled, as it may
-# be deploying: a newer push's waits for it (and replaces one already
-# waiting).
+# be deploying: one master run is under way, and only the newest push
+# waits for it (GitHub replaces a waiting run with a newer one). A burst of
+# merges is tested together at the tip, per merge and never on a timer,
+# none starved by cancelling, and preview deploys within about one run's
+# length of the last merge. Production's pushes are a group of their own.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
