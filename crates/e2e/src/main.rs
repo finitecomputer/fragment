@@ -605,6 +605,8 @@ impl Suite {
     /// (hosted: the preview's).
     pub fn api(&self) -> Api {
         match (&self.preview, self.hosted_rules) {
+            // a dry run's: it sends nothing
+            (Some(preview), _) if self.plan.is_some() => Api::planned(preview, &self.shared),
             (Some(preview), _) => Api::hosted(preview, &self.shared),
             // a rehearsal's node is shaped as a branch deployment
             (None, true) => Api::new(self.port, SUFFIX, &self.shared).branch(REHEARSAL_BRANCH),
