@@ -181,7 +181,12 @@ jobs:
       ${{ !cancelled() && github.event_name != 'pull_request'
       && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # a hang's guard, not a pace: the slowest shard (`computers`'s,
+    # lanes/mod.rs SHARDS) takes about 16 minutes, 4 of them its build
+    # from the last master's cache. A push that rebuilds more takes
+    # longer (cc93c5ad4's build took 8 minutes, and 20 cut two shards off
+    # with no test failed), and a new Rust release builds from nothing.
+    timeout-minutes: 35
     env:
       # xtask/src/build.rs, WORKER_BUILD_VERSION
       WORKER_BUILD_VERSION: 0.8.5
