@@ -321,8 +321,14 @@ unfinished design, not debt.
 ## An operator key is metered per call, not per what its vendor counts
 
 - **Shortcut:** the swap charges one `key` unit a call at an estimate
-  (`fragment_core::price::DEFAULT_KEYS`, sources beside it).
-- **Risk:** calls charged above or below what they cost.
+  (`fragment_core::price::DEFAULT_KEYS`, sources beside it), except a
+  part of a key's calls priced by what its request says
+  (`price::KEY_PARTS`: ElevenLabs' speech by its text's characters, at
+  the multilingual models' $0.08 per 1,000 whatever the model, so Flash
+  and Turbo's $0.04 calls are charged twice their list).
+- **Risk:** calls charged above or below what they cost: every other
+  ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
+  is charged a minute of music.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.

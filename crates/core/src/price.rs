@@ -341,14 +341,15 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 8 for HappyHorse's videos (2026-10-31),
+/// raised it, and each still does: 9 for ElevenLabs' speech by its
+/// characters (2026-11-07), after 8 for HappyHorse's videos (2026-10-31),
 /// after 7 for OpenRouter's GLM-5.3 Flash (2026-10-15), after 6 for the Clef family (2026-10-14), 5
 /// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
 /// keys (2026-10-09) and 3 for
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 8;
+pub const DEFAULT_BOOK_VERSION: u32 = 9;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -436,8 +437,10 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// names its own (`fragment_core::catalog`). The swap meters a call, not
 /// what the vendor counts (tokens, posts, minutes), so a vendor that bills
 /// by those is priced at a typical call of the managed skill that uses it,
-/// and the estimate says what it assumes.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 8] = [
+/// and the estimate says what it assumes. A part of a key's calls priced
+/// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
+/// part's unit.
+pub const DEFAULT_KEYS: [(&str, i64, u64); 9] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
@@ -484,17 +487,77 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 8] = [
     // priced at $0.12.
     ("xai", 120_000, 1),
     // ElevenLabs' Music API (`/v1/music`, the music-generation skill):
-    // $0.15 per minute of music generated. Source: elevenlabs.io/pricing/api.
-    // A call is taken as a minute; the skill's jingles are 15 s, its
-    // longest compositions 5 minutes. Text to speech is $0.08 per 1,000
-    // characters on the same key.
+    // $0.15 per minute of music generated. Source: elevenlabs.io/pricing/api
+    // (read 2026-11-07). A call is taken as a minute; the skill's jingles
+    // are 15 s, its longest compositions 5 minutes. Every call on the key
+    // but text to speech (below) is priced so.
     ("elevenlabs", 150_000, 1),
+    // ElevenLabs' Text to Speech (`/v1/text-to-speech/…`, Hermes'
+    // `text_to_speech`), per character of its request's `text`
+    // (`KEY_PARTS`): $0.08 per 1,000 characters on the multilingual
+    // models (Hermes' default, `eleven_multilingual_v2`), $0.04 on Flash
+    // and Turbo, billed per character. Source: elevenlabs.io/pricing/api
+    // (read 2026-11-07). A 200-character reply is $0.016.
+    ("elevenlabs:speech", 80_000, 1_000),
 ];
+
+/// A part of an operator key's calls priced apart from its others, by what
+/// its vendor counts: a call whose path starts with `path` uses, as
+/// `priced_as` (its price in `DEFAULT_KEYS`), the characters of its JSON
+/// body's string `field`, at most `units_max`. Its name has a `:`, which no
+/// catalog row's has, so it is never a provider's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPart {
+    pub key: &'static str,
+    pub path: &'static str,
+    pub field: &'static str,
+    pub priced_as: &'static str,
+    /// The most units one call is charged: its vendor's own limit for one
+    /// request, so even a call it answered is never charged for more than
+    /// it would take.
+    pub units_max: u64,
+}
+
+/// The parts the book prices apart (FIN-443, 2026-11-07): ElevenLabs' text
+/// to speech, its streaming and `with-timestamps` calls too, was charged
+/// as a minute of music, 10 to 20 times what a short clip costs. A call
+/// takes at most 40,000 characters (Flash's limit; the multilingual
+/// models take 10,000 and v3 5,000: elevenlabs.io/pricing/api, read
+/// 2026-11-07), so one is charged at most $3.20 at list.
+pub const KEY_PARTS: [KeyPart; 1] = [KeyPart { key: "elevenlabs", path: "/v1/text-to-speech/", field: "text", priced_as: "elevenlabs:speech", units_max: 40_000 }];
 
 /// The list price of operator key `name` per call, when the price book
 /// has one: `(micros, per calls)`.
 pub fn default_key_price(name: &str) -> Option<(i64, u64)> {
     DEFAULT_KEYS.iter().find(|(n, _, _)| *n == name).map(|(_, micros, per)| (*micros, *per))
+}
+
+/// The largest body whose characters a part's call is read for: ElevenLabs
+/// takes at most 40,000 characters a call (Flash's limit), 240,000 bytes
+/// even with every one a JSON escape (`\uXXXX`), so a body past this is
+/// one its vendor refuses, and is not parsed (the swap's own limit is 32
+/// MiB).
+pub const KEY_PART_BODY_MAX_BYTES: usize = 1024 * 1024;
+
+/// What one call on operator key `key` to `path` with `body`, answered
+/// `status` (under 500: the swap charges no call its provider failed),
+/// uses, as the swap meters it: a part's call (`KEY_PARTS`) its
+/// characters, at most its `units_max`, as the part; any other one call
+/// of the key. A part's call uses none, so is charged nothing, when its
+/// vendor refused it (any answer but a 2xx: a bad request, a missing
+/// voice, a rate limit, which made nothing) or its characters cannot be
+/// read (a body that is no JSON object holding its field as a string, one
+/// past `KEY_PART_BODY_MAX_BYTES`, or none, as a socket's upgrade):
+/// billing is best effort, and a gap charges zero rather than a guess
+/// above what the call cost (decision 62).
+pub fn key_usage(key: &str, path: &str, body: &[u8], status: u16) -> Usage {
+    let Some(part) = KEY_PARTS.iter().find(|p| p.key == key && path.starts_with(p.path)) else {
+        return Usage::Key { key: key.to_string(), units: 1 };
+    };
+    let made = (200..300).contains(&status);
+    let said = (made && body.len() <= KEY_PART_BODY_MAX_BYTES).then(|| serde_json::from_slice::<serde_json::Value>(body).ok()).flatten();
+    let units = said.as_ref().and_then(|v| v.get(part.field)?.as_str()).map_or(0, |s| s.chars().count() as u64);
+    Usage::Key { key: part.priced_as.to_string(), units: units.min(part.units_max) }
 }
 
 /// Why a book is refused.
@@ -716,7 +779,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 8);
+        assert_eq!(book.version, 9);
         assert_eq!(book.models.len(), 12);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
@@ -856,8 +919,119 @@ mod tests {
         assert_eq!(call("x"), Priced { list: 50_000, cost: 50_000, charge: 75_000 }, "ten post resources");
         assert_eq!(call("fal"), Priced { list: 6_000, cost: 6_000, charge: 9_000 }, "one MP Klein 9B image");
         assert_eq!(call("browser-use"), Priced { list: 1_667, cost: 1_667, charge: 2_500 }, "five browser minutes");
+        let spoken = |units| book.price(&Usage::Key { key: "elevenlabs:speech".into(), units }).unwrap();
+        assert_eq!(spoken(200), Priced { list: 16_000, cost: 16_000, charge: 24_000 }, "a 200-character reply, $0.08 per 1,000");
+        assert_eq!(spoken(1), Priced { list: 80, cost: 80, charge: 120 });
+        assert_eq!(spoken(0), Priced { list: 0, cost: 0, charge: 0 }, "a call whose characters were not read");
         assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
+        assert_eq!(default_key_price("elevenlabs:speech"), Some((80_000, 1_000)));
         assert_eq!(default_key_price("nonesuch"), None);
+    }
+
+    /// Goal: each part the book prices apart is priced once, in
+    /// `DEFAULT_KEYS`, as is its key, and its name is no provider's.
+    #[test]
+    fn each_key_part_has_one_price_and_no_providers_name() {
+        for p in KEY_PARTS {
+            assert!(default_key_price(p.key).is_some(), "{p:?}: its key's other calls are priced");
+            assert!(default_key_price(p.priced_as).is_some(), "{p:?}: priced");
+            assert_eq!(DEFAULT_KEYS.iter().filter(|(n, _, _)| *n == p.priced_as).count(), 1, "{p:?}: once");
+            assert!(p.priced_as.starts_with(&format!("{}:", p.key)) && !crate::catalog::valid_name(p.priced_as), "{p:?}: never a catalog row's name");
+            assert!(printable(p.priced_as, NAME_MAX_BYTES), "{p:?}: a name the ledger stores");
+            assert!(p.path.starts_with('/') && p.path.ends_with('/'), "{p:?}: a path's whole segments");
+            // its most characters fit the body read, each a JSON escape
+            assert!(p.units_max >= 1 && p.units_max as usize * 6 + 1024 <= KEY_PART_BODY_MAX_BYTES, "{p:?}: its most units are read");
+        }
+    }
+
+    /// Goal (FIN-443): ElevenLabs' text to speech is metered by its text's
+    /// characters, each of its endpoints, and its music, as every other
+    /// call on the key, as one call (a minute). Method: the calls Hermes'
+    /// `text_to_speech` and the music skill make, priced as a deployment's
+    /// book prices them.
+    #[test]
+    fn speech_is_metered_by_its_characters_and_music_by_the_call() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let reply = "a".repeat(200);
+        let body = serde_json::to_vec(&serde_json::json!({ "text": reply, "model_id": "eleven_multilingual_v2" })).unwrap();
+        let spoken = Usage::Key { key: "elevenlabs:speech".into(), units: 200 };
+        for path in ["/v1/text-to-speech/pNInz6obpgDQGcFmaJgB", "/v1/text-to-speech/v/stream", "/v1/text-to-speech/v/with-timestamps", "/v1/text-to-speech/v/stream/with-timestamps"] {
+            assert_eq!(key_usage("elevenlabs", path, &body, 200), spoken, "{path}");
+        }
+        assert_eq!(book.price(&spoken).unwrap().charge, 24_000, "$0.024, not a minute of music's $0.225");
+        let music = serde_json::to_vec(&serde_json::json!({ "prompt": "a jingle", "music_length_ms": 15_000 })).unwrap();
+        let minute = Usage::Key { key: "elevenlabs".into(), units: 1 };
+        assert_eq!(key_usage("elevenlabs", "/v1/music", &music, 200), minute);
+        assert_eq!(key_usage("elevenlabs", "/v1/music/plan", &music, 200), minute);
+        assert_eq!(book.price(&minute).unwrap().charge, 225_000);
+        // characters, not bytes: ElevenLabs bills each character
+        let accented = serde_json::to_vec(&serde_json::json!({ "text": "héllo, 世界" })).unwrap();
+        assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech/v", &accented, 200), Usage::Key { key: "elevenlabs:speech".into(), units: 9 });
+        // the path's own segment: a sibling endpoint is no speech
+        assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech-other", &body, 200), minute);
+        assert_eq!(key_usage("elevenlabs", "/v2/text-to-speech/v", &body, 200), minute);
+        // only the key the part names
+        assert_eq!(key_usage("perplexity", "/v1/text-to-speech/v", &body, 200), Usage::Key { key: "perplexity".into(), units: 1 });
+    }
+
+    /// Goal (FIN-443's review): a speech call ElevenLabs refused made
+    /// nothing, so is charged nothing, whatever its text; one it answered
+    /// is charged at most a request's limit; every other call on the key is
+    /// a call, as the swap charges any answer under 500. Method: a 10,000
+    /// character request at each answer the swap meters.
+    #[test]
+    fn a_refused_speech_call_is_charged_nothing() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let long = serde_json::to_vec(&serde_json::json!({ "text": "a".repeat(10_000) })).unwrap();
+        let spoken = |status| key_usage("elevenlabs", "/v1/text-to-speech/v/stream", &long, status);
+        for made in [200, 201, 299] {
+            assert_eq!(spoken(made), Usage::Key { key: "elevenlabs:speech".into(), units: 10_000 }, "{made}");
+        }
+        assert_eq!(book.price(&spoken(200)).unwrap().charge, 1_200_000, "10,000 characters made: $0.80 at list");
+        // a bad request, no key, no voice, too long, a rate or concurrency limit, a redirect not followed
+        for refused in [400, 401, 402, 403, 404, 409, 413, 422, 429, 302, 304, 100, 0] {
+            let u = spoken(refused);
+            assert_eq!(u, Usage::Key { key: "elevenlabs:speech".into(), units: 0 }, "{refused}");
+            assert_eq!(book.price(&u).unwrap().charge, 0, "{refused}");
+        }
+        // a 2xx is charged at most a request's limit: 40,000 characters, $4.80
+        let huge = serde_json::to_vec(&serde_json::json!({ "text": "a".repeat(1_000_000) })).unwrap();
+        let most = key_usage("elevenlabs", "/v1/text-to-speech/v", &huge, 200);
+        assert_eq!(most, Usage::Key { key: "elevenlabs:speech".into(), units: 40_000 });
+        assert_eq!(book.price(&most).unwrap().charge, 4_800_000);
+        assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech/v", &huge, 413), Usage::Key { key: "elevenlabs:speech".into(), units: 0 }, "refused as too long: nothing");
+        // music, and any other call, is one call at every answer the swap meters
+        for status in [200, 400, 429] {
+            assert_eq!(key_usage("elevenlabs", "/v1/music", b"{}", status), Usage::Key { key: "elevenlabs".into(), units: 1 }, "{status}");
+        }
+    }
+
+    /// Goal: a speech call whose characters the meter cannot read is
+    /// charged nothing, never a guess above its cost (decision 62).
+    /// Method: bodies that are no JSON object holding `text` as a string,
+    /// and none (a socket's upgrade, `stream-input`).
+    #[test]
+    fn a_speech_call_the_meter_cannot_read_is_charged_nothing() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let none = Usage::Key { key: "elevenlabs:speech".into(), units: 0 };
+        for body in [&b""[..], b"text=hello", b"{\"text\":", b"[\"hello\"]", b"\"hello\"", b"{\"text\":42}", b"{\"text\":null}", b"{\"words\":\"hello\"}", &[0xff, 0xfe][..]] {
+            assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech/v/stream-input", body, 200), none, "{}", String::from_utf8_lossy(body));
+        }
+        assert_eq!(book.price(&none).unwrap().charge, 0);
+        assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech/v", b"{\"text\":\"\"}", 200), none, "an empty text has no characters");
+        // the largest body read, and one past it
+        let sized = |n: usize| format!("{{\"text\":\"{}\"}}", "a".repeat(n - 11)).into_bytes();
+        assert_eq!(sized(KEY_PART_BODY_MAX_BYTES).len(), KEY_PART_BODY_MAX_BYTES);
+        let most = Usage::Key { key: "elevenlabs:speech".into(), units: 40_000 };
+        assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech/v", &sized(KEY_PART_BODY_MAX_BYTES), 200), most, "read, at most its vendor's limit");
+        assert_eq!(key_usage("elevenlabs", "/v1/text-to-speech/v", &sized(KEY_PART_BODY_MAX_BYTES + 1), 200), none, "past it, not parsed");
+        // a release whose book has no part's price refuses its rows, as it
+        // does any it cannot price: the ledger charges them nothing
+        let older = PriceBook { keys: book.keys.iter().filter(|k| k.key != "elevenlabs:speech").cloned().collect(), ..book.clone() };
+        assert_eq!(older.price(&Usage::Key { key: "elevenlabs:speech".into(), units: 200 }), Err(PriceError::NoPrice));
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at
