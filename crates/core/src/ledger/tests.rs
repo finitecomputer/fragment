@@ -650,12 +650,14 @@ fn a_fal_image_is_charged_by_its_pixels_and_once() {
     let fal = serde_json::json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&fal.to_string()).unwrap().key_prices());
-    let call = |method, path, body, status| crate::price::key_usage("fal", &KeyCall { method, host: "queue.fal.run", path, body, status });
+    let call = |method, host, path, body, status| crate::price::key_usage("fal", &KeyCall { method, host, path, body, status });
     let ask = br#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
-    let made = call("POST", "/fal-ai/flux-2/klein/9b", ask, 200);
-    let polled = call("GET", "/fal-ai/flux-2/requests/0b1e/status", b"", 200);
-    let result = call("GET", "/fal-ai/flux-2/requests/0b1e", b"", 200);
-    let refused = call("POST", "/fal-ai/flux-2/klein/9b", ask, 422);
+    // a synchronous run is charged; a queued submit, its poll and result nothing
+    let made = call("POST", "fal.run", "/fal-ai/flux-2/klein/9b", ask, 200);
+    let polled = call("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status", b"", 200);
+    let result = call("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e", b"", 200);
+    let refused = call("POST", "fal.run", "/fal-ai/flux-2/klein/9b", ask, 422);
+    assert_eq!(call("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", ask, 200), Usage::Key { key: "fal".into(), units: 0 }, "a queued submit");
     assert_eq!(made, Usage::Key { key: "fal:image".into(), units: 1024 * 576 });
     assert_eq!((&polled, &result, &refused), (&Usage::Key { key: "fal".into(), units: 0 }, &Usage::Key { key: "fal".into(), units: 0 }, &Usage::Key { key: "fal:image".into(), units: 0 }));
     let mut w = World::seat();
@@ -685,10 +687,10 @@ fn a_fal_image_is_charged_by_its_pixels_and_once() {
 }
 
 /// FIN-445: xAI's key charged every call as an X search ($0.18). Goal: a
-/// deployment's book charges an X search as before, a plain chat call a
-/// typical chat's tokens and an image by the images it asks for, each
-/// once across a replay and a restart; one xAI refused nothing; a release
-/// whose book has no chat price charges its rows nothing. Method: the
+/// deployment's book charges an X search as before and an image one image,
+/// a chat (its tokens not read) nothing, each once across a replay and a
+/// restart; one xAI refused nothing; a release whose book has no image
+/// price charges its rows nothing. Method: the
 /// swap's rows as it meters them (`price::key_usage`), sent again.
 #[test]
 fn an_xai_call_is_charged_as_what_it_is_and_once() {
@@ -698,30 +700,30 @@ fn an_xai_call_is_charged_as_what_it_is_and_once() {
     let call = |path, body, status| crate::price::key_usage("xai", &KeyCall { method: "POST", host: "api.x.ai", path, body, status });
     let searched = call("/v1/responses", br#"{"model":"grok-4.3","input":"news","tools":[{"type":"x_search"}]}"#, 200);
     let chatted = call("/v1/chat/completions", br#"{"model":"grok-4.3","messages":[{"role":"user","content":"hi"}]}"#, 200);
-    let drawn = call("/v1/images/generations", br#"{"prompt":"a cat","n":2}"#, 200);
-    let refused = call("/v1/chat/completions", b"{}", 429);
-    assert_eq!((&searched, &chatted, &drawn), (&Usage::Key { key: "xai".into(), units: 1 }, &Usage::Key { key: "xai:chat".into(), units: 1 }, &Usage::Key { key: "xai:image".into(), units: 2 }));
+    let drawn = call("/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat","n":2}"#, 200);
+    let refused = call("/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 429);
+    assert_eq!((&searched, &chatted, &drawn), (&Usage::Key { key: "xai".into(), units: 1 }, &Usage::Key { key: "xai".into(), units: 0 }, &Usage::Key { key: "xai:image".into(), units: 1 }));
     let mut w = World::seat();
     w.ok(Op::Book(configured.clone()));
     let before = w.balance();
-    let rows = vec![row("key:c-1:x1", searched, None, T0), row("key:c-1:x2", chatted.clone(), None, T0), row("key:c-1:x3", drawn, None, T0), row("key:c-1:x4", refused, None, T0)];
+    let rows = vec![row("key:c-1:x1", searched, None, T0), row("key:c-1:x2", chatted, None, T0), row("key:c-1:x3", drawn.clone(), None, T0), row("key:c-1:x4", refused, None, T0)];
     let batch = meter("key:c-1:x1", rows);
-    // an X search at $0.12, a chat at $0.015 and two images at $0.02, each with the margin
-    let charged = Outcome::Metered(Metered { charged: 180_000 + 22_500 + 60_000, rows_new: 4, rows_before: 0, refused: vec![] });
+    // an X search at $0.12 and an image at $0.02, each with the margin; a chat and a refusal nothing
+    let charged = Outcome::Metered(Metered { charged: 180_000 + 30_000, rows_new: 4, rows_before: 0, refused: vec![] });
     assert_eq!(w.replays(batch.clone()), charged);
-    assert_eq!(w.balance(), before - 262_500);
+    assert_eq!(w.balance(), before - 210_000);
     let mut w = w.restarted();
     w.replays(Op::Book(configured.clone()));
     assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
-    let again = w.ok(meter("key:c-1:x2-again", vec![row("key:c-1:x2", chatted.clone(), None, T0)]));
+    let again = w.ok(meter("key:c-1:x3-again", vec![row("key:c-1:x3", drawn.clone(), None, T0)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
-    assert_eq!(w.balance(), before - 262_500);
-    // a release before the chat price: its row refused as unpriced, charging nothing
-    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "xai:chat").cloned().collect(), ..configured };
+    assert_eq!(w.balance(), before - 210_000);
+    // a release before the image price: its row refused as unpriced, charging nothing
+    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "xai:image").cloned().collect(), ..configured };
     w.ok(Op::Book(older));
-    let Outcome::Metered(m) = w.ok(meter("key:c-1:y1", vec![row("key:c-1:y1", chatted, None, T0)])) else { panic!("a batch answers Metered") };
+    let Outcome::Metered(m) = w.ok(meter("key:c-1:y1", vec![row("key:c-1:y1", drawn, None, T0)])) else { panic!("a batch answers Metered") };
     assert_eq!((m.charged, m.rows_new, m.refused.iter().map(|r| r.why).collect::<Vec<_>>()), (0, 0, vec![Refused::NoPrice]));
-    assert_eq!(w.balance(), before - 262_500);
+    assert_eq!(w.balance(), before - 210_000);
 }
 
 /// Bug 2: a step's charge is its row under the step's key, whatever

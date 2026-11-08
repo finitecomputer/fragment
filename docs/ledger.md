@@ -126,27 +126,26 @@ informational. The fee is AI Gateway's on credits, so it applies to
   price, else the book's (`DEFAULT_KEYS`), an estimate of a typical call
   where its vendor bills something else. A part of a key's calls the
   book prices apart (`KEY_PARTS`) is metered in its vendor's own unit
-  from the request: ElevenLabs' text to speech
-  (`/v1/text-to-speech/…`) is `elevenlabs:speech`, a unit a character of
-  its JSON body's `text`, at most 40,000 (a request's limit), at $0.08
-  per 1,000 (FIN-443); its music and every other call on the key is one
-  call, a minute of music. A fal generation (a `POST` to a model at
-  `queue.fal.run` or `fal.run`) is `fal:image`, a unit a pixel its JSON
-  body asks for (`num_images` of its `image_size`; absent, Klein's
-  default on Klein's text to image, else none, as an edit's is its
-  input's), at most 16
-  megapixels, at $0.006 per 1,048,576 (FIN-445); every other call on
-  fal's key (its queue's polls, statuses, results and cancels, its
-  uploads) is none of the key's, charged nothing. On xAI's key, a call
-  whose `tools` name `x_search` is one call of the key (an X search, as
-  before); a chat call without (`/v1/chat/completions`, `/v1/responses`,
-  `/v1/messages`) is one `xai:chat`, a typical chat's tokens; an image
-  call (`/v1/images/generations`) its `n` `xai:image`; any other call
-  (a video, a model list) none (FIN-445). A part's call its
-  vendor refused (any answer but a 2xx) or whose units are not read (no
-  JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is
-  charged nothing, and a release whose book has no part's price refuses
-  its rows as unpriced, charging nothing.
+  from the request: ElevenLabs' text to speech (`/v1/text-to-speech/…`)
+  is `elevenlabs:speech`, a unit a character of its JSON body's `text`,
+  at most 40,000 (a request's limit), at $0.08 per 1,000 (FIN-443); its
+  music and every other call on the key is one call, a minute of music.
+  On fal's key (FIN-445), only FLUX.2 Klein 9B's synchronous run (`POST
+  fal.run/fal-ai/flux-2/klein/9b`) is charged, as `fal:image`, a unit a
+  pixel its JSON body asks for (`num_images` of its `image_size`,
+  Klein's default when absent), at most 16 megapixels, at $0.006 per
+  1,048,576; every other call (a queued generation, its polls and
+  result, an edit, another model, an upload) is none of the key's,
+  charged nothing. On xAI's key, a call whose `tools` name `x_search` is
+  one call of the key (an X search, as before), and an image call naming
+  a grok-imagine-image model one `xai:image` ($0.02); any other call (a
+  chat, whose tokens are not read, a video, a model list) none. Only a
+  call so classified is charged, and only on a 2xx: a part's call, or
+  any call on a key priced by its parts, that its vendor refused or
+  redirected, or whose units are not read (no JSON, no `text` or no
+  size, a body past `KEY_PART_BODY_MAX_BYTES`), is charged nothing, and
+  a release whose book has no part's price refuses its rows as unpriced,
+  charging nothing.
 
 - **OpenRouter's price** (decision 61; a decision for Paul): a slot on
   OpenRouter is priced at the ceiling it routes under

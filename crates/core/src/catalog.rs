@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(priced(&fal), vec![("fal".to_string(), 6_000, 1), ("fal:image".to_string(), 6_000, 1_048_576)]);
         // xAI's chat and images apart from its X searches
         let xai = parse(json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }])).unwrap();
-        assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:chat".to_string(), 15_000, 1), ("xai:image".to_string(), 20_000, 1)]);
+        assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:image".to_string(), 20_000, 1)]);
     }
 
     /// Invalid: every rule, each a typed refusal.
