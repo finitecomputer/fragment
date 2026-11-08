@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(c.get("mail").unwrap().placements[0], Placement::Basic { half: Half::Password });
         assert_eq!(c.hosts(), vec!["api.mail.test", "api.perplexity.ai", "gmail.googleapis.com", "places.googleapis.com", "www.googleapis.com"]);
         assert_eq!(c.env_names(), vec!["GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_PLACES_API_KEY", "MAIL_API_KEY", "PERPLEXITY_API_KEY"]);
-        assert_eq!(c.key_prices().iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["perplexity", "google-places", "google-places:photo", "google-places:autocomplete"], "only operator keys are priced, with their parts");
+        assert_eq!(c.key_prices().iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["perplexity", "google-places", "google-places:photo"], "only operator keys are priced, with their parts");
         // the wire form reads back as it is written
         let again = Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap();
         assert_eq!(again, c);
@@ -727,10 +727,10 @@ mod tests {
         // xAI's chat and images apart from its X searches
         let xai = parse(json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }])).unwrap();
         assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:image".to_string(), 20_000, 1)]);
-        // Google Places' photos and autocompletes apart from its searches
+        // Google Places' photos apart from its searches
         let places = parse(json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }])).unwrap();
         let keys: Vec<String> = priced(&places).into_iter().map(|(k, _, _)| k).collect();
-        assert_eq!(keys, ["google-places", "google-places:photo", "google-places:autocomplete"]);
+        assert_eq!(keys, ["google-places", "google-places:photo"]);
         // Firecrawl's credits
         let firecrawl = parse(json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }])).unwrap();
         assert_eq!(priced(&firecrawl), vec![("firecrawl".to_string(), 10_000, 1), ("firecrawl:credit".to_string(), 5_000, 1)]);
