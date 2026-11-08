@@ -1128,6 +1128,56 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
           return fetch(url, options);
         };
       }
+      // Every read that can change Settings' Computer known from its start,
+      // in every document of this page (`add_agent_ui` holds them): the
+      // computer's (`/api/computers…`, but Settings' own `/uses`, which it
+      // draws only once answered) and the list's read, which `load` (shell.js)
+      // awaits with the computer's before it draws either. `hold()` holds
+      // the computer's asked from then on and, once each read already on
+      // its way has had its body read (`api` reads every answer's) and a
+      // task has passed (what awaited it drawn), says `settled`.
+      if (window === window.top) {
+        const send = window.fetch.bind(window);
+        const kind = (u, o) => {
+          const p = new URL(String(u instanceof Request ? u.url : u), location.href).pathname;
+          const get = (o?.method ?? (u instanceof Request ? u.method : 'GET')).toUpperCase() === 'GET';
+          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') && !p.endsWith('/uses') ? 'computer' : null;
+        };
+        const open = new Set(), queued = [];
+        let holding = false;
+        const go = (u, o) => {
+          let finish;
+          const read = { url: String(u), done: new Promise((r) => { finish = () => { open.delete(read); r(); }; }) };
+          open.add(read);
+          return send(u, o).then((r) => {
+            for (const m of ['json', 'text']) { const body = r[m].bind(r); r[m] = () => body().finally(finish); }
+            return r;
+          }, (e) => { finish(); throw e; });
+        };
+        window.fetch = (u, o) => {
+          const k = kind(u, o);
+          if (!k) return send(u, o);
+          if (holding && k === 'computer') return new Promise((res, rej) => queued.push({ url: String(u), go: () => go(u, o).then(res, rej) }));
+          return go(u, o);
+        };
+        const reads = window.__computerHold = {
+          settled: false, earlier: [],
+          hold() {
+            holding = true;
+            reads.settled = false;
+            const earlier = [...open];
+            reads.earlier = earlier.map((r) => r.url);
+            Promise.all(earlier.map((r) => r.done)).then(() => {
+              const c = new MessageChannel();
+              c.port1.onmessage = () => { reads.settled = true; };
+              c.port2.postMessage(0);
+            });
+            return true;
+          },
+          held: () => queued.map((q) => q.url),
+          release() { holding = false; queued.splice(0).forEach((q) => q.go()); return true; },
+        };
+      }
     "#)?;
     b.viewport(&page, 1280, 800, false)?;
 
@@ -8285,24 +8335,16 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
     // each agent's settings read (agent.json) held until New agent shows,
-    // so the cards are drawn reading, however warm the reads; and each read
-    // of the computer asked from here on (the list's `load`, a wake, its
-    // notices: all that changes Settings' Computer, above Agents) held
-    // through both measurings and the press, so only the cards' reads land
-    // between them. Settings' own read of what the computer used (`/uses`)
-    // goes, as Settings draws only once it answers.
-    b.eval(
-        page,
-        "(() => { const f = window.fetch; \
-          const kind = (u) => { const p = new URL(String(u), location.href); \
-            return p.searchParams.get('path') === 'agent.json' ? 'agent' : p.pathname.startsWith('/api/computers') && !p.pathname.endsWith('/uses') ? 'computer' : null; }; \
-          const held = { agent: [], computer: [] }, going = new Set(); \
-          window.__settingsHeld = { count: (k) => held[k].length, urls: (k) => held[k].map((h) => h.url), \
-            go: (k) => { going.add(k); held[k].splice(0).forEach((h) => h.go()); if (going.size === 2) window.fetch = f; return true; } }; \
-          window.fetch = (u, o) => { const k = kind(u); if (!k || going.has(k)) return f(u, o); \
-            return new Promise((res) => held[k].push({ url: String(u), go: () => res(f(u, o)) })); }; \
-          return true; })()",
-    )?;
+    // so the cards are drawn reading, however warm the reads
+    b.eval(page, "(() => { const f = window.fetch; window.__settingsReads = []; window.fetch = (u, o) => (String(u).includes('path=agent.json') && !window.__settingsReadsGo) ? new Promise((res) => window.__settingsReads.push(() => res(f(u, o)))) : f(u, o); return true; })()")?;
+    // and nothing else that changes Settings' Computer, above Agents (a
+    // read of the computer: the list's `load`, a wake, its notices) lands
+    // from Settings' opening through New agent's press: those asked from
+    // here on held, and those already on their way read and drawn first
+    // (the page's `__computerHold`, known from its start)
+    b.eval(page, "window.__computerHold.hold()")?;
+    let settled = b.until(page, "window.__computerHold.settled", wait);
+    let earlier = b.eval(page, "window.__computerHold.earlier")?;
     b.click(page, "#settings")?;
     // one button, New agent, opens its dialog. It stays where it showed as
     // each agent's card reads its settings (its Model pick read: Hermes'
@@ -8313,9 +8355,9 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let shown = b.eval(
         page,
         "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); \
-          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsHeld.count('agent') }; })()",
+          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsReads.length }; })()",
     )?;
-    b.eval(page, "window.__settingsHeld.go('agent')")?;
+    b.eval(page, "(window.__settingsReadsGo = true, window.__settingsReads.forEach((r) => r()), true)")?;
     let models_read = b.until(
         page,
         "(() => { const cards = [...document.querySelectorAll('#settings-page .agent-setting')]; \
@@ -8325,15 +8367,16 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let read = b.eval(page, "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); return [r.x, r.y]; })()")?;
     s.ok(
         "Settings' agent cards keep their size as their models are read: drawn reading, New agent stays where it showed",
-        offered
+        settled
+            && offered
             && shown["held"].as_u64().is_some_and(|n| n > 0)
             && shown["reading"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|t| t == "Reading…"))
             && models_read
             && shown["at"] == read,
-        json!({ "shown": shown, "read": read, "computer_held": b.eval(page, "window.__settingsHeld.urls('computer')")? }),
+        json!({ "shown": shown, "read": read, "settled": settled, "earlier": earlier, "held": b.eval(page, "window.__computerHold.held()")? }),
     );
     b.click(page, "#settings-page .agent-add-open")?;
-    b.eval(page, "window.__settingsHeld.go('computer')")?;
+    b.eval(page, "window.__computerHold.release()")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
     // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)
