@@ -781,6 +781,34 @@ fn a_firecrawl_call_is_charged_its_credits_and_once() {
     assert_eq!(w.balance(), before - 22_500);
 }
 
+/// FIN-445: Browser Use's key charged a session's start, each status read
+/// and its stop each as five minutes. Goal: a deployment's book charges
+/// the start alone, once across a replay and a restart. Method: Hermes'
+/// browser provider's calls as the swap meters them, sent again.
+#[test]
+fn a_browser_session_is_charged_once_at_its_start() {
+    let browser = serde_json::json!([{ "name": "browser-use", "kind": "operator", "hosts": ["api.browser-use.com"], "placements": [{ "header": "x-browser-use-api-key" }], "env": ["BROWSER_USE_API_KEY"] }]);
+    let mut configured = book();
+    configured.keys.extend(crate::catalog::Catalog::parse(&browser.to_string()).unwrap().key_prices());
+    let call = |method, path, status| crate::price::key_usage("browser-use", &KeyCall { method, host: "api.browser-use.com", path, body: b"{}", status });
+    let started = call("POST", "/api/v3/browsers", 201);
+    let read = call("GET", "/api/v3/browsers/b-1", 200);
+    let stopped = call("PATCH", "/api/v3/browsers/b-1", 200);
+    let mut w = World::seat();
+    w.ok(Op::Book(configured.clone()));
+    let before = w.balance();
+    let batch = meter("key:c-1:b1", vec![row("key:c-1:b1", started.clone(), None, T0), row("key:c-1:b2", read, None, T0), row("key:c-1:b3", stopped, None, T0)]);
+    // five minutes at $0.02 an hour, with the margin, and nothing for the rest
+    let charged = Outcome::Metered(Metered { charged: 2_500, rows_new: 3, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(batch.clone()), charged);
+    let mut w = w.restarted();
+    w.replays(Op::Book(configured));
+    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
+    let again = w.ok(meter("key:c-1:b1-again", vec![row("key:c-1:b1", started, None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
+    assert_eq!(w.balance(), before - 2_500);
+}
+
 /// Bug 2: a step's charge is its row under the step's key, whatever
 /// attempt made the call (decision 62): a retry or a replay that sends it
 /// again, in a batch of its own, is charged nothing more.

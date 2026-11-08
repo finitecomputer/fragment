@@ -146,7 +146,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   and `:autocomplete`, each at its own list; any other call none. On
   Firecrawl's key, a scrape, a search, a map and a batch scrape are
   their credits as `firecrawl:credit` ($0.005 each); a crawl, an
-  extract and a status poll none. A part's call its
+  extract and a status poll none. On Browser Use's key, a session's or
+  a task's start is one call of the key (five minutes); its status, its
+  stop and any other call none. A part's call its
   vendor refused (any answer but a 2xx) or whose units are not read (no
   JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is
   charged nothing, and a release whose book has no part's price refuses

@@ -70,6 +70,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "xai: a call with the x_search tool is charged an X search, a plain chat call a chat's, and any other call (a model list's) nothing",
     "google-places: a place's details are charged its own price, under a search's",
     "firecrawl: a scrape is charged its one credit, not a search's two, and a call around it (a status poll) nothing",
+    "browser-use: a session's start is charged its five minutes, and a call around it (its status read) nothing",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -303,6 +304,10 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let said = say(s, 139, &format!("fetch http://api.firecrawl.dev/v2/scrape with $FIRECRAWL_API_KEY posting {FIRECRAWL_SCRAPE}"))?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     let scrape_sent = said.starts_with("fetched 200") && seen["host"] == "api.firecrawl.dev" && seen["method"] == "POST" && seen["path"] == "/v2/scrape" && seen["body"] == FIRECRAWL_SCRAPE;
+    // a Browser Use session's start, as Hermes' browser provider makes it (FIN-445)
+    let said = say(s, 140, "fetch http://api.browser-use.com/api/v3/browsers with $BROWSER_USE_API_KEY in x-browser-use-api-key posting {}")?;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    let session_sent = said.starts_with("fetched 200") && seen["host"] == "api.browser-use.com" && seen["method"] == "POST" && seen["path"] == "/api/v3/browsers";
     // xAI's X search and a plain chat call (FIN-445): charged below as each is
     let mut xai_seen = vec![];
     for (n, path, body) in [(136, "/v1/responses", XAI_SEARCH), (137, "/v1/chat/completions", XAI_CHAT)] {
@@ -345,12 +350,13 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
 
     // the charges: each operator key's call, at its price; and the month's counts
-    let keyed = ["perplexity", "elevenlabs", "google-places", "browser-use", "x"];
+    let keyed = ["perplexity", "elevenlabs", "google-places", "x"];
     // each key's call, the speech calls as its part (`price::KEY_PARTS`):
     // the one made, and the two refused; fal's image and its poll; and
     // xAI's X search, chat and model list; a place's details; and
-    // Firecrawl's scrape and the GET before it
-    let held_rows = keyed.len() + 3 + 2 + 3 + 1 + 2;
+    // Firecrawl's scrape and the GET before it; Browser Use's start and the
+    // GET before it
+    let held_rows = keyed.len() + 3 + 2 + 3 + 1 + 2 + 2;
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows);
     let rows = held();
@@ -375,7 +381,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[35], detail_sent && held_row("google-places:details", 1, detail) && detail < charge_of("google-places"), json!({ "detail": detail, "rows": rows }));
     let credit = charge_of("firecrawl:credit");
     s.ok(SWAP_CHECKS[36], scrape_sent && held_row("firecrawl:credit", 1, credit) && held_row("firecrawl", 0, 0) && credit < charge_of("firecrawl"), json!({ "credit": credit, "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 2, charge_of("google-places") + charge_of("google-places:details")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 2, image), ("browser-use", 1, charge_of("browser-use")), ("xai", 3, charge_of("xai") + charge_of("xai:chat")), (SWAP_OWN, 1, 0)];
+    s.ok(SWAP_CHECKS[37], session_sent && held_row("browser-use", 1, charge_of("browser-use")) && held_row("browser-use", 0, 0), json!({ "rows": rows }));
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 2, charge_of("google-places") + charge_of("google-places:details")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 2, image), ("browser-use", 2, charge_of("browser-use")), ("xai", 3, charge_of("xai") + charge_of("xai:chat")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));

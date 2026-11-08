@@ -482,7 +482,8 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 16] = [
     // Browser Use: $0.02 per browser-hour, $5/GB residential proxy.
     // https://browser-use.com/pricing (2026-10-09). A control request is
     // estimated as a 5-minute session, excluding proxy traffic, rounded
-    // up to a micro-dollar; create and stop are separate metered calls.
+    // up to a micro-dollar. Only a session's or a task's start is priced
+    // so (`key_usage`); its status, its stop and every other call is free.
     ("browser-use", 20_000, 12),
     // Perplexity's Search API (`POST /search`, Hermes' own web search):
     // $5.00 per 1,000 requests. Source:
@@ -708,6 +709,9 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 ///   a place's details (`/v1/places/<id>`), its photo
 ///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
 ///   other call none.
+/// - Browser Use: a `POST` that starts a browser session or a task
+///   (`/api/v<n>/browsers`, `/sessions`, `/tasks` or `/runs`) is one call
+///   of the key; its status, its stop and any other call none.
 /// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`), a
 ///   map and a batch scrape their credits, as `firecrawl:credit`; any
 ///   other call (a crawl or an extract, billed as they run, a status
@@ -757,6 +761,14 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
                 _ => return Usage::Key { key: key.to_string(), units: 0 },
             };
             ("firecrawl:credit", credits)
+        }
+        "browser-use" => {
+            // `/api/v<n>/<what>`, any version
+            let what = call.path.strip_prefix("/api/v").and_then(|p| p.split_once('/')).filter(|(v, _)| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())).map(|(_, what)| what);
+            match (call.method, what) {
+                ("POST", Some("browsers" | "sessions" | "tasks" | "runs")) => ("browser-use", Some(1)),
+                _ => return Usage::Key { key: key.to_string(), units: 0 },
+            }
         }
         _ => return Usage::Key { key: key.to_string(), units: 1 },
     };
@@ -1514,6 +1526,30 @@ mod tests {
         assert_eq!(book.price(&most).unwrap().charge, 7_500_000, "$5 at list");
         let older = PriceBook { keys: book.keys.iter().filter(|k| k.key != "firecrawl:credit").cloned().collect(), ..book.clone() };
         assert_eq!(older.price(&Usage::Key { key: "firecrawl:credit".into(), units: 1 }), Err(PriceError::NoPrice));
+    }
+
+    /// Goal (FIN-445): a Browser Use session is charged once, at its
+    /// start, as five minutes, and its status and stop calls nothing; one
+    /// Browser Use refused nothing. Method: Hermes' browser provider's
+    /// calls (API v3) and an agent's SDK calls (v2, v4).
+    #[test]
+    fn a_browser_use_session_is_charged_at_its_start_only() {
+        let used = |method: &str, path: &str, status| key_usage("browser-use", &KeyCall { method, host: "api.browser-use.com", path, body: br#"{"timeout":15}"#, status });
+        let start = Usage::Key { key: "browser-use".into(), units: 1 };
+        for path in ["/api/v3/browsers", "/api/v2/browsers", "/api/v4/browsers", "/api/v2/sessions", "/api/v2/tasks", "/api/v4/runs"] {
+            assert_eq!(used("POST", path, 200), start, "{path}");
+            assert_eq!(used("POST", path, 201), start, "{path} created");
+        }
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        assert_eq!(book.price(&start).unwrap().charge, 2_500, "five minutes");
+        let free = Usage::Key { key: "browser-use".into(), units: 0 };
+        for (method, path) in [("PATCH", "/api/v3/browsers/b-1"), ("DELETE", "/api/v3/browsers/b-1"), ("GET", "/api/v3/browsers/b-1"), ("GET", "/api/v3/browsers"), ("GET", "/api/v2/tasks/t-1"), ("GET", "/api/v2/billing/account"), ("POST", "/api/v3/browsers/b-1"), ("POST", "/api/vx/browsers"), ("POST", "/api/v/browsers"), ("POST", "/browsers")] {
+            assert_eq!(used(method, path, 200), free, "{method} {path}");
+        }
+        for refused in [400, 401, 402, 404, 422, 429, 302, 0] {
+            assert_eq!(used("POST", "/api/v3/browsers", refused), free, "{refused}");
+        }
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

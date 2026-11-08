@@ -346,7 +346,9 @@ unfinished design, not debt.
   tier's (Pro, Essentials) is charged Enterprise's; a Firecrawl crawl,
   extract, agent or browser session (billed as it runs) and a scrape's
   PDF pages and other add-ons are charged nothing, and a search that
-  returns fewer results than it asks for is charged for its `limit`.
+  returns fewer results than it asks for is charged for its `limit`; a
+  Browser Use session is charged five minutes at its start, whatever it
+  ran, and a task its session alone, not its model's tokens.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
