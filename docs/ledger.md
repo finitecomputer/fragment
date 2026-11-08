@@ -132,7 +132,9 @@ informational. The fee is AI Gateway's on credits, so it applies to
   per 1,000 (FIN-443); its music and every other call on the key is one
   call, a minute of music. A fal generation (a `POST` to a model at
   `queue.fal.run` or `fal.run`) is `fal:image`, a unit a pixel its JSON
-  body asks for (`num_images` of its `image_size`), at most 16
+  body asks for (`num_images` of its `image_size`; absent, Klein's
+  default on Klein's text to image, else none, as an edit's is its
+  input's), at most 16
   megapixels, at $0.006 per 1,048,576 (FIN-445); every other call on
   fal's key (its queue's polls, statuses, results and cancels, its
   uploads) is none of the key's, charged nothing. On xAI's key, a call
@@ -142,19 +144,20 @@ informational. The fee is AI Gateway's on credits, so it applies to
   call (`/v1/images/generations`) its `n` `xai:image`; any other call
   (a video, a model list) none (FIN-445). On Google Places' key, a
   text or nearby search is one call of the key; a place's details, its
-  photo and an autocomplete are one `google-places:details`, `:photo`
-  and `:autocomplete`, each at its own list; any other call none. On
-  Firecrawl's key, a scrape, a search, a map and a batch scrape are
-  their credits as `firecrawl:credit` ($0.005 each); a crawl, an
-  extract and a status poll none. On Browser Use's key, a session's or
-  a task's start is one call of the key (five minutes); its status, its
-  stop and any other call none. On X's key, a post lookup
-  (`/2/tweets/<id>`, `/2/tweets?ids=…`) is its posts' `x:post` ($0.005
-  each), a user lookup its users' `x:user` ($0.010 each); a search and
-  any other call one call of the key, ten posts. A part's call its
-  vendor refused (any answer but a 2xx) or whose units are not read (no
-  JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is
-  charged nothing, and a release whose book has no part's price refuses
+  photo (made by its default redirect to the image too) and an
+  autocomplete are one `google-places:details`, `:photo` and
+  `:autocomplete`, each at its own list; any other call none. On
+  Firecrawl's key, a scrape, a search and a map are their credits as
+  `firecrawl:credit` ($0.005 each); a crawl, a batch scrape (billed as
+  each page completes), an extract and a status poll none. On Browser
+  Use's key, a session's or a task's start is one call of the key (five
+  minutes); its status, its stop and any other call none. On X's key, a
+  post lookup (`/2/tweets/<id>`, `/2/tweets?ids=…`) is its posts'
+  `x:post` ($0.005 each), a user lookup its users' `x:user` ($0.010
+  each); a search and any other call one call of the key, ten posts. A
+  part's call its vendor refused (any answer but a 2xx) or whose units
+  are not read (no JSON, no `text` or no size, a body past
+  `KEY_PART_BODY_MAX_BYTES`) is charged nothing, and a release whose book has no part's price refuses
   its rows as unpriced, charging nothing.
 
 - **OpenRouter's price** (decision 61; a decision for Paul): a slot on

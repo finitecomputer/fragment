@@ -475,7 +475,8 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 18] = [
     // $5: a scrape (Hermes' `web_extract`) 1 a page, 4 more for each LLM
     // format (JSON, a question, highlights, audio, video); a search
     // (Hermes' `web_search`) 2 per 10 results it asks for, and a scrape
-    // each if it scrapes them; a map 1; a batch scrape a scrape a URL.
+    // each if it scrapes them; a map 1. A crawl or a batch scrape is
+    // billed as each page completes, so is charged nothing here.
     // Sources: docs.firecrawl.dev/billing, firecrawl.dev/pricing and
     // docs.firecrawl.dev/api-reference/endpoint/search (read 2026-11-07).
     ("firecrawl:credit", 5_000, 1),
@@ -663,8 +664,13 @@ impl KeyCall<'_> {
 /// synchronous runs); its others (`rest.fal.ai`'s uploads) make nothing.
 const FAL_RUNS: [&str; 2] = ["queue.fal.run", "fal.run"];
 
+/// FLUX.2 Klein 9B's text to image (Hermes' `image_generate`), whose
+/// `image_size` absent is its default, `landscape_4_3` (an edit's is its
+/// input image's, which the meter does not see).
+const FAL_KLEIN: &str = "/fal-ai/flux-2/klein/9b";
+
 /// fal's `image_size` presets in pixels (FLUX.2 Klein's, and its other
-/// image models'), the first its default.
+/// image models'), the first Klein's default.
 const FAL_SIZES: [(&str, u64); 6] = [
     ("landscape_4_3", 1024 * 768),
     ("landscape_16_9", 1024 * 576),
@@ -674,13 +680,15 @@ const FAL_SIZES: [(&str, u64); 6] = [
     ("portrait_16_9", 576 * 1024),
 ];
 
-/// The pixels a fal generation asks for: `num_images` (absent, 1) images
-/// of its `image_size`, a preset, `{width, height}`, or absent, the
-/// default preset; none for any other (an unknown preset, a size that is
-/// no two whole numbers).
-fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+/// The pixels a fal generation to `path` asks for: `num_images` (absent,
+/// 1) images of its `image_size`, a preset or `{width, height}`, or
+/// absent, Klein's default on Klein's text to image; none for any other
+/// (an absent size elsewhere, an edit's being its input's, an unknown
+/// preset, a size that is no two whole numbers).
+fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let each = match said.get("image_size") {
-        None => FAL_SIZES[0].1,
+        None if path == FAL_KLEIN => FAL_SIZES[0].1,
+        None => return None,
         Some(serde_json::Value::String(preset)) => FAL_SIZES.iter().find(|(name, _)| name == preset)?.1,
         Some(size) => size.get("width")?.as_u64()?.checked_mul(size.get("height")?.as_u64()?)?,
     };
@@ -703,17 +711,25 @@ fn firecrawl_page(formats: Option<&serde_json::Value>) -> u64 {
 }
 
 /// The credits a Firecrawl search asks for: 2 per 10 results (`limit`,
-/// absent 10, a source each of its `sources` but `alexandria`, which is
-/// free), and a page each when `scrapeOptions` names `formats`. None for
-/// a `limit` or `sources` that is no count or list.
-fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    let limit = said.get("limit").map_or(Some(10), serde_json::Value::as_u64)?;
+/// absent `limit_default`, a source each of the kinds its `sources` name
+/// but `alexandria`, which is free), and a page each when `scrapeOptions`
+/// names some `formats` (none, it scrapes nothing). None for a `limit` or
+/// `sources` that is no count or list of kinds.
+fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>, limit_default: u64) -> Option<u64> {
+    let limit = said.get("limit").map_or(Some(limit_default), serde_json::Value::as_u64)?;
     let sources = match said.get("sources") {
         None => 1,
-        Some(all) => all.as_array()?.iter().filter(|s| s.as_str().or_else(|| s.get("type")?.as_str()) != Some("alexandria")).count() as u64,
+        Some(all) => {
+            let mut kinds: Vec<&str> = all.as_array()?.iter().map(|s| s.as_str().or_else(|| s.get("type")?.as_str())).collect::<Option<_>>()?;
+            kinds.retain(|kind| *kind != "alexandria");
+            kinds.sort_unstable();
+            kinds.dedup();
+            kinds.len() as u64
+        }
     };
     let results = limit.checked_mul(sources)?;
-    let scraped = said.get("scrapeOptions").and_then(|o| o.get("formats")).map_or(0, |formats| firecrawl_page(Some(formats)));
+    let formats = said.get("scrapeOptions").and_then(|o| o.get("formats")).filter(|f| f.as_array().is_some_and(|all| !all.is_empty()));
+    let scraped = formats.map_or(0, |formats| firecrawl_page(Some(formats)));
     Some((2 * results.div_ceil(10)).saturating_add(results.saturating_mul(scraped)))
 }
 
@@ -735,8 +751,8 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 ///   `/v1/images/generations` its `n` images (absent, 1).
 /// - Google Places (New): a text or nearby search is one call of the key;
 ///   a place's details (`/v1/places/<id>`), its photo
-///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
-///   other call none.
+///   (`…/photos/<photo>/media`, made by its redirect to the image too) or
+///   an autocomplete one of its part; any other call none.
 /// - X: a `GET` of posts by their ids (`/2/tweets/<id>`,
 ///   `/2/tweets?ids=…`) is its posts' `x:post`; of users by their ids or
 ///   names its users' `x:user`; a search and any other call one call of
@@ -744,10 +760,10 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 /// - Browser Use: a `POST` that starts a browser session or a task
 ///   (`/api/v<n>/browsers`, `/sessions`, `/tasks` or `/runs`) is one call
 ///   of the key; its status, its stop and any other call none.
-/// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`), a
-///   map and a batch scrape their credits, as `firecrawl:credit`; any
-///   other call (a crawl or an extract, billed as they run, a status
-///   poll, free) none.
+/// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`, its
+///   `limit` 5 on v1 and 10 on v2 when absent) and a map their credits,
+///   as `firecrawl:credit`; any other call (a crawl, a batch scrape or an
+///   extract, billed as each page completes, a status poll, free) none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -759,7 +775,7 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option
 pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     let (priced_as, units) = match key {
         "elevenlabs" if call.path.starts_with("/v1/text-to-speech/") => ("elevenlabs:speech", call.said().and_then(|said| Some(said.get("text")?.as_str()?.chars().count() as u64))),
-        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().as_ref().and_then(fal_pixels)),
+        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().and_then(|said| fal_pixels(call.path, &said))),
         "fal" => return Usage::Key { key: key.to_string(), units: 0 },
         "xai" => {
             let said = call.said();
@@ -787,9 +803,8 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
             let credits = match (call.method, what) {
                 // a page a call, read or not
                 ("POST", Some("scrape")) => Some(said.as_ref().map_or(1, |s| firecrawl_page(s.get("formats")))),
-                ("POST", Some("search")) => said.as_ref().and_then(firecrawl_search),
+                ("POST", Some("search")) => said.as_ref().and_then(|s| firecrawl_search(s, if call.path.starts_with("/v1/") { 5 } else { 10 })),
                 ("POST", Some("map")) => Some(1),
-                ("POST", Some("batch/scrape")) => said.as_ref().and_then(|s| Some(s.get("urls")?.as_array()?.len() as u64 * firecrawl_page(s.get("formats")))),
                 _ => return Usage::Key { key: key.to_string(), units: 0 },
             };
             ("firecrawl:credit", credits)
@@ -822,7 +837,10 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     };
     // a part's, or one of its key's own (xAI's X search), made by a 2xx
     let most = KEY_PARTS.iter().find(|p| p.priced_as == priced_as).map_or(1, |p| p.units_max);
-    let made = (200..300).contains(&call.status);
+    // a Places photo's answer is a redirect to it unless it asks for JSON
+    // (`skipHttpRedirect`), and the swap never follows one
+    let redirected = priced_as == "google-places:photo" && matches!(call.status, 301 | 302 | 303 | 307 | 308);
+    let made = (200..300).contains(&call.status) || redirected;
     Usage::Key { key: priced_as.to_string(), units: units.filter(|_| made).map_or(0, |u| u.min(most)) }
 }
 
@@ -1369,8 +1387,16 @@ mod tests {
         }
         assert_eq!(sized(r#"{"prompt":"p","image_size":{"width":1920,"height":1080}}"#), units(1920 * 1080));
         assert_eq!(sized(r#"{"prompt":"p","image_size":"square_hd","num_images":4}"#), units(4 * 1_048_576));
-        assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "the default, landscape_4_3");
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", br#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#, 200), units(1024 * 768), "an edit, at the default");
+        assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "Klein's default, landscape_4_3");
+        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", br#"{"prompt":"p","num_images":2}"#, 200), units(2 * 1024 * 768));
+        // an edit's size is its input's unless it names one (FIN-445 review)
+        let edit = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", body.as_bytes(), 200);
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#), units(0), "an edit of an input the meter does not see");
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":"square"}"#), units(512 * 512));
+        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":{"width":2048,"height":2048}}"#), units(4 * 1_048_576));
+        // another model's default is its own: unread
+        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p"}"#, 200), units(0));
+        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p","image_size":"square_hd"}"#, 200), units(1_048_576));
         // only fal's key
         assert_eq!(key_usage("x", &KeyCall { query: "", method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
     }
@@ -1493,7 +1519,12 @@ mod tests {
         assert_eq!(charge(&one("google-places")), 52_500, "an Enterprise search, as before");
         assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw", 200), one("google-places:details"));
         assert_eq!(charge(&one("google-places:details")), 30_000, "$0.03, not a search's $0.0525");
-        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"));
+        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"), "skipHttpRedirect: its JSON");
+        // its default answer is a redirect to the image (FIN-445 review)
+        for redirect in [301, 302, 303, 307, 308] {
+            assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", redirect), one("google-places:photo"), "{redirect}");
+        }
+        assert_eq!(charge(&one("google-places:photo")), 10_500);
         assert_eq!(places("POST", "/v1/places:autocomplete", 200), one("google-places:autocomplete"));
         let free = Usage::Key { key: "google-places".into(), units: 0 };
         for path in ["/v1/places/", "/v1/places/ChIJ/photos/AUc7", "/v1/places:searchtext", "/v1/places:searchText/x", "/v2/places:searchText", "/maps/api/place/textsearch/json", "/"] {
@@ -1512,6 +1543,12 @@ mod tests {
             assert_eq!(places("POST", "/v1/places:searchText", refused), Usage::Key { key: "google-places".into(), units: 0 }, "{refused}");
             assert_eq!(places("GET", "/v1/places/ChIJ", refused), Usage::Key { key: "google-places:details".into(), units: 0 }, "{refused}");
         }
+        // a photo refused, or not modified, made nothing; a redirect is a photo's alone
+        for refused in [400, 403, 404, 429, 300, 304, 0] {
+            assert_eq!(places("GET", "/v1/places/ChIJ/photos/AUc7/media", refused), Usage::Key { key: "google-places:photo".into(), units: 0 }, "{refused}");
+        }
+        assert_eq!(places("POST", "/v1/places:searchText", 302), Usage::Key { key: "google-places".into(), units: 0 });
+        assert_eq!(places("GET", "/v1/places/ChIJ", 302), Usage::Key { key: "google-places:details".into(), units: 0 });
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("google-places:")).cloned().collect(), ..book.clone() };
@@ -1546,11 +1583,22 @@ mod tests {
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":11}"#, 200), credits(4), "rounded up per 10");
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["web","news",{"type":"alexandria"}]}"#, 200), credits(4), "per source, alexandria free");
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5,"scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 5), "and a page each scraped");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5,"scrapeOptions":{"formats":[{"type":"json"}]}}"#, 200), credits(2 + 5 * 5));
+        // FIN-445 review: scraping only with some formats, v1's own limit, each source kind once
+        for scrape_options in [r#""#, r#","scrapeOptions":{}"#, r#","scrapeOptions":{"formats":[]}"#] {
+            let body = format!(r#"{{"query":"rust","limit":10{scrape_options}}}"#);
+            assert_eq!(firecrawl("POST", "/v2/search", body.as_bytes(), 200), credits(2), "{body}");
+            assert_eq!(firecrawl("POST", "/v1/search", body.as_bytes(), 200), credits(2), "{body}");
+        }
+        assert_eq!(firecrawl("POST", "/v1/search", br#"{"query":"q"}"#, 200), credits(2), "v1's 5 results");
+        assert_eq!(firecrawl("POST", "/v1/search", br#"{"query":"q","scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 5));
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 10), "v2's 10");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["web","web",{"type":"web"}]}"#, 200), credits(2), "web once");
         assert_eq!(firecrawl("POST", "/v2/map", br#"{"url":"u"}"#, 200), credits(1));
-        assert_eq!(firecrawl("POST", "/v2/batch/scrape", br#"{"urls":["a","b","c"],"formats":[{"type":"json"}]}"#, 200), credits(15));
         let free = Usage::Key { key: "firecrawl".into(), units: 0 };
-        for (method, path) in [("GET", "/v2/crawl/0b1e"), ("GET", "/v2/batch/scrape/0b1e"), ("GET", "/v2/extract/0b1e"), ("POST", "/v2/crawl"), ("POST", "/v2/extract"), ("POST", "/v2/agent"), ("GET", "/v2/team/credit-usage"), ("GET", "/v2/scrape"), ("POST", "/v3/scrape")] {
-            assert_eq!(firecrawl(method, path, br#"{"url":"u","limit":10}"#, 200), free, "{method} {path}");
+        // a batch is billed as each page completes, as a crawl is: its submit is no page (FIN-445 review)
+        for (method, path) in [("GET", "/v2/crawl/0b1e"), ("GET", "/v2/batch/scrape/0b1e"), ("GET", "/v2/extract/0b1e"), ("POST", "/v2/crawl"), ("POST", "/v2/batch/scrape"), ("POST", "/v1/batch/scrape"), ("DELETE", "/v2/batch/scrape/0b1e"), ("POST", "/v2/extract"), ("POST", "/v2/agent"), ("GET", "/v2/team/credit-usage"), ("GET", "/v2/scrape"), ("POST", "/v3/scrape")] {
+            assert_eq!(firecrawl(method, path, br#"{"url":"u","urls":["a","b"],"limit":10}"#, 200), free, "{method} {path}");
         }
     }
 
@@ -1564,10 +1612,9 @@ mod tests {
             assert_eq!(firecrawl("POST", "/v2/scrape", br#"{"url":"u"}"#, refused), none, "{refused}");
             assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q"}"#, refused), none, "{refused}");
         }
-        for body in [&b""[..], b"query=q", br#"{"query":"q","limit":"5"}"#, br#"{"query":"q","limit":-1}"#, br#"{"query":"q","sources":"web"}"#, br#"{"query":"q","limit":0}"#] {
+        for body in [&b""[..], b"query=q", br#"{"query":"q","limit":"5"}"#, br#"{"query":"q","limit":-1}"#, br#"{"query":"q","sources":"web"}"#, br#"{"query":"q","sources":[42]}"#, br#"{"query":"q","limit":0}"#] {
             assert_eq!(firecrawl("POST", "/v2/search", body, 200), none, "{}", String::from_utf8_lossy(body));
         }
-        assert_eq!(firecrawl("POST", "/v2/batch/scrape", br#"{"urls":"a"}"#, 200), none);
         let most = Usage::Key { key: "firecrawl:credit".into(), units: 1_000 };
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":100,"sources":["web","news","images"],"scrapeOptions":{"formats":["json"]}}"#, 200), most);
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":18446744073709551615,"sources":["web","news"]}"#, 200), none, "an overflow is no count");
