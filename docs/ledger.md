@@ -135,7 +135,12 @@ informational. The fee is AI Gateway's on credits, so it applies to
   body asks for (`num_images` of its `image_size`), at most 16
   megapixels, at $0.006 per 1,048,576 (FIN-445); every other call on
   fal's key (its queue's polls, statuses, results and cancels, its
-  uploads) is none of the key's, charged nothing. A part's call its
+  uploads) is none of the key's, charged nothing. On xAI's key, a call
+  whose `tools` name `x_search` is one call of the key (an X search, as
+  before); a chat call without (`/v1/chat/completions`, `/v1/responses`,
+  `/v1/messages`) is one `xai:chat`, a typical chat's tokens; an image
+  call (`/v1/images/generations`) its `n` `xai:image`; any other call
+  (a video, a model list) none (FIN-445). A part's call its
   vendor refused (any answer but a 2xx) or whose units are not read (no
   JSON, no `text` or no size, a body past `KEY_PART_BODY_MAX_BYTES`) is
   charged nothing, and a release whose book has no part's price refuses

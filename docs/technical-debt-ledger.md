@@ -328,13 +328,19 @@ unfinished design, not debt.
   and Turbo's $0.04 calls are charged twice their list; fal's
   generations by the pixels they ask for, at FLUX.2 Klein 9B's $0.006 a
   megapixel whatever the model, an absent size taken as Klein's default
-  `landscape_4_3`).
+  `landscape_4_3`; xAI's X searches as 20 posts and a chat call's tokens,
+  its other chat calls as 10,000 tokens in and 1,000 out on grok-4.3,
+  its images at grok-imagine-image's $0.02).
 - **Risk:** calls charged above or below what they cost: every other
   ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
   is charged a minute of music; a fal model dearer than Klein (FLUX.2
   Pro's $0.03 a megapixel, a video, an upscale) is charged far under its
   cost, and one cheaper over it, and a model that makes no image at
-  Klein's default image.
+  Klein's default image; a long Grok chat, a dearer model (grok-4.7's $2
+  in and $6 out per million) or a grok-imagine-image-2.0 image is
+  charged under its cost, and a short one over it; a Grok video or
+  server-side tools other than X Search (web search, code execution)
+  are charged nothing.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.

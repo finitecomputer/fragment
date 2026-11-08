@@ -702,7 +702,7 @@ mod tests {
     }
 
     /// FIN-443: an operator key whose calls the book prices in part apart
-    /// (ElevenLabs' speech, fal's images) is priced so too, at the book's price whatever
+    /// (ElevenLabs' speech, fal's images, xAI's chat) is priced so too, at the book's price whatever
     /// the row's own; a row of another kind by its name is metered not.
     #[test]
     fn a_keys_parts_are_priced_with_it() {
@@ -724,6 +724,9 @@ mod tests {
         // FIN-445: fal's images by their pixels
         let fal = parse(json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }])).unwrap();
         assert_eq!(priced(&fal), vec![("fal".to_string(), 6_000, 1), ("fal:image".to_string(), 6_000, 1_048_576)]);
+        // xAI's chat and images apart from its X searches
+        let xai = parse(json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }])).unwrap();
+        assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:chat".to_string(), 15_000, 1), ("xai:image".to_string(), 20_000, 1)]);
     }
 
     /// Invalid: every rule, each a typed refusal.

@@ -341,8 +341,9 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 10 for fal's images by their pixels
-/// (2026-11-07), after 9 for ElevenLabs' speech by its characters
+/// raised it, and each still does: 11 for xAI's chat and images apart
+/// from its X searches (2026-11-07), after 10 for fal's images by their
+/// pixels (2026-11-07), after 9 for ElevenLabs' speech by its characters
 /// (2026-11-07), after 8 for HappyHorse's videos (2026-10-31),
 /// after 7 for OpenRouter's GLM-5.3 Flash (2026-10-15), after 6 for the Clef family (2026-10-14), 5
 /// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
@@ -350,7 +351,7 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 10;
+pub const DEFAULT_BOOK_VERSION: u32 = 11;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -441,7 +442,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes. A part of a key's calls priced
 /// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
 /// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 10] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 12] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
@@ -493,8 +494,19 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 10] = [
     // (prices in effect since 2026-09-21) and docs.x.ai/docs/models
     // (grok-4.3: $1.25 in, $2.50 out per million). A call is taken as 20
     // posts ($0.10) and 10,000 tokens in and 1,000 out ($0.015): $0.115,
-    // priced at $0.12.
+    // priced at $0.12. Only a call with the `x_search` tool is priced so
+    // (`KEY_PARTS`); the key's other calls are below, or free.
     ("xai", 120_000, 1),
+    // A Grok chat call on the key without X Search (`/v1/chat/completions`,
+    // `/v1/responses`, `/v1/messages`), taken as the X Search call's own
+    // tokens, 10,000 in and 1,000 out on grok-4.3: $0.015. Source:
+    // docs.x.ai/developers/pricing (read 2026-11-07).
+    ("xai:chat", 15_000, 1),
+    // A Grok image (`/v1/images/generations`), per image its request asks
+    // for (`n`): grok-imagine-image's $0.02 ($0.04 on
+    // grok-imagine-image-2.0, charged under its list). Source:
+    // docs.x.ai/developers/pricing (read 2026-11-07).
+    ("xai:image", 20_000, 1),
     // ElevenLabs' Music API (`/v1/music`, the music-generation skill):
     // $0.15 per minute of music generated. Source: elevenlabs.io/pricing/api
     // (read 2026-11-07). A call is taken as a minute; the skill's jingles
@@ -537,9 +549,14 @@ pub struct KeyPart {
 ///   several images. A call is charged at most 16 megapixels, $0.096 at
 ///   list: Klein makes at most 4 images a call (`num_images`), and its
 ///   largest preset is 1 megapixel.
-pub const KEY_PARTS: [KeyPart; 2] = [
+/// - xAI's chat and image calls were charged as an X search, $0.18 a call:
+///   a plain Grok chat call about twelve times its typical cost. A call
+///   is charged at most 10 images (`n`, xAI's most a request).
+pub const KEY_PARTS: [KeyPart; 4] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
+    KeyPart { key: "xai", priced_as: "xai:chat", units_max: 1 },
+    KeyPart { key: "xai", priced_as: "xai:image", units_max: 10 },
 ];
 
 /// The list price of operator key `name` per call, when the price book
@@ -569,11 +586,9 @@ pub struct KeyCall<'a> {
 }
 
 impl KeyCall<'_> {
-    /// Its body's JSON object, when its vendor made what it asked (a 2xx)
-    /// and its body is one to read.
+    /// Its body's JSON object, when it is one to read.
     fn said(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let made = (200..300).contains(&self.status);
-        match (made && self.body.len() <= KEY_PART_BODY_MAX_BYTES).then(|| serde_json::from_slice(self.body).ok()).flatten() {
+        match (self.body.len() <= KEY_PART_BODY_MAX_BYTES).then(|| serde_json::from_slice(self.body).ok()).flatten() {
             Some(serde_json::Value::Object(said)) => Some(said),
             _ => None,
         }
@@ -612,14 +627,19 @@ fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> 
 /// What one call on operator key `key` uses, as the swap meters it: a
 /// part's call (`KEY_PARTS`) its units, at most its `units_max`, as the
 /// part; a call its vendor does not bill (fal's queue polls, statuses,
-/// results and cancels, its uploads) none of the key's; any other one
-/// call of the key.
+/// results and cancels, its uploads), or one the book does not price
+/// apart on a key priced by its parts (xAI's), none of the key's; any
+/// other one call of the key.
 ///
 /// - ElevenLabs' text to speech (`/v1/text-to-speech/…`): the characters
 ///   of its JSON body's `text`.
 /// - A fal generation (a `POST` to a model at `queue.fal.run` or
 ///   `fal.run`, not under its queue's `…/requests/…`): the pixels it asks
 ///   for (`fal_pixels`).
+/// - xAI: a `POST` to `/v1/responses` or `/v1/chat/completions` whose
+///   `tools` name `x_search` is one call of the key (an X search); one
+///   without, or to `/v1/messages`, one `xai:chat`; one to
+///   `/v1/images/generations` its `n` images (absent, 1).
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -633,10 +653,24 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
         "elevenlabs" if call.path.starts_with("/v1/text-to-speech/") => ("elevenlabs:speech", call.said().and_then(|said| Some(said.get("text")?.as_str()?.chars().count() as u64))),
         "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().as_ref().and_then(fal_pixels)),
         "fal" => return Usage::Key { key: key.to_string(), units: 0 },
+        "xai" => {
+            let said = call.said();
+            let searches = said.as_ref().and_then(|s| s.get("tools")?.as_array()).is_some_and(|tools| tools.iter().any(|t| t.get("type").and_then(serde_json::Value::as_str) == Some("x_search")));
+            match (call.method, call.path) {
+                ("POST", "/v1/responses" | "/v1/chat/completions") if searches => ("xai", Some(1)),
+                // one call, read or not (a long context past the body read)
+                ("POST", "/v1/responses" | "/v1/chat/completions" | "/v1/messages") => ("xai:chat", Some(1)),
+                ("POST", "/v1/images/generations") => ("xai:image", said.and_then(|s| s.get("n").map_or(Some(1), serde_json::Value::as_u64))),
+                // a video, a stored response read, a model list: priced by none
+                _ => return Usage::Key { key: key.to_string(), units: 0 },
+            }
+        }
         _ => return Usage::Key { key: key.to_string(), units: 1 },
     };
-    let part = KEY_PARTS.iter().find(|p| p.priced_as == priced_as).expect("each part key_usage meters is listed");
-    Usage::Key { key: priced_as.to_string(), units: units.map_or(0, |u| u.min(part.units_max)) }
+    // a part's, or one of its key's own (xAI's X search), made by a 2xx
+    let most = KEY_PARTS.iter().find(|p| p.priced_as == priced_as).map_or(1, |p| p.units_max);
+    let made = (200..300).contains(&call.status);
+    Usage::Key { key: priced_as.to_string(), units: units.filter(|_| made).map_or(0, |u| u.min(most)) }
 }
 
 /// Why a book is refused.
@@ -858,7 +892,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 10);
+        assert_eq!(book.version, 11);
         assert_eq!(book.models.len(), 12);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
@@ -1010,6 +1044,8 @@ mod tests {
         assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
         assert_eq!(default_key_price("elevenlabs:speech"), Some((80_000, 1_000)));
         assert_eq!(default_key_price("fal:image"), Some((6_000, 1_048_576)));
+        assert_eq!(call("xai:chat"), Priced { list: 15_000, cost: 15_000, charge: 22_500 }, "a Grok chat call's tokens");
+        assert_eq!(call("xai:image"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "a grok-imagine-image");
         assert_eq!(default_key_price("nonesuch"), None);
     }
 
@@ -1208,6 +1244,74 @@ mod tests {
         let older = PriceBook { keys: book.keys.iter().filter(|k| k.key != "fal:image").cloned().collect(), ..book.clone() };
         assert_eq!(older.price(&Usage::Key { key: "fal:image".into(), units: 589_824 }), Err(PriceError::NoPrice));
         assert_eq!(older.price(&Usage::Key { key: "fal".into(), units: 0 }).unwrap().charge, 0, "a poll is free in it too");
+    }
+
+    /// A call on xAI's key, answered `status`, as the swap meters it.
+    fn xai(method: &str, path: &str, body: &[u8], status: u16) -> Usage {
+        key_usage("xai", &KeyCall { method, host: "api.x.ai", path, body, status })
+    }
+
+    /// Goal (FIN-445): only an X search on xAI's key is charged as one; a
+    /// plain Grok chat call is charged a typical chat's tokens, an image
+    /// the images it asks for, and any other call nothing. Method: the
+    /// call Hermes' `x_search` makes, and the chat and image calls an
+    /// agent's code makes with `XAI_API_KEY`.
+    #[test]
+    fn an_xai_call_is_charged_as_an_x_search_only_when_it_is_one() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let hermes = br#"{"model":"grok-4.3","input":[{"role":"user","content":"what is new on X about fragments"}],"tools":[{"type":"x_search"}]}"#;
+        let search = Usage::Key { key: "xai".into(), units: 1 };
+        assert_eq!(xai("POST", "/v1/responses", hermes, 200), search, "Hermes' x_search");
+        assert_eq!(xai("POST", "/v1/chat/completions", br#"{"model":"grok-4.3","messages":[],"tools":[{"type":"web_search"},{"type":"x_search","allowed_x_handles":["x"]}]}"#, 200), search);
+        assert_eq!(book.price(&search).unwrap().charge, 180_000, "an X search, as before");
+        let chat = Usage::Key { key: "xai:chat".into(), units: 1 };
+        for (path, body) in [
+            ("/v1/chat/completions", &br#"{"model":"grok-4.3","messages":[{"role":"user","content":"hi"}]}"#[..]),
+            ("/v1/responses", br#"{"model":"grok-4.3","input":"hi"}"#),
+            ("/v1/responses", br#"{"model":"grok-4.3","input":"hi","tools":[{"type":"web_search"}]}"#),
+            ("/v1/responses", br#"{"model":"grok-4.3","input":"hi","tools":"x_search"}"#),
+            ("/v1/messages", br#"{"model":"grok-4.3","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#),
+            ("/v1/chat/completions", b"a body the meter does not read"),
+        ] {
+            assert_eq!(xai("POST", path, body, 200), chat, "{path} {}", String::from_utf8_lossy(body));
+        }
+        assert_eq!(book.price(&chat).unwrap().charge, 22_500, "$0.0225, not an X search's $0.18");
+        let images = |units| Usage::Key { key: "xai:image".into(), units };
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 200), images(1));
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat","n":4}"#, 200), images(4));
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"prompt":"a cat","n":50}"#, 200), images(10), "at most a request's 10");
+        assert_eq!(book.price(&images(1)).unwrap().charge, 30_000);
+        let free = Usage::Key { key: "xai".into(), units: 0 };
+        for (method, path) in [("GET", "/v1/models"), ("GET", "/v1/responses/resp_1"), ("DELETE", "/v1/responses/resp_1"), ("POST", "/v1/videos/generations"), ("POST", "/v1/tokenize-text"), ("GET", "/v1/api-key"), ("GET", "/v1/chat/completions")] {
+            assert_eq!(xai(method, path, hermes, 200), free, "{method} {path}");
+        }
+        assert_eq!(book.price(&free).unwrap().charge, 0);
+    }
+
+    /// Goal: a call xAI refused made nothing, so is charged nothing, an X
+    /// search too; an image call whose count the meter cannot read is
+    /// charged nothing; a release whose book has no chat or image price
+    /// refuses those rows, and prices an X search as before. Method: every
+    /// answer the swap meters, and bodies that say no count.
+    #[test]
+    fn an_xai_call_refused_or_unread_is_charged_nothing() {
+        let hermes = br#"{"model":"grok-4.3","input":"news","tools":[{"type":"x_search"}]}"#;
+        // a bad request, no key, no credit, no model, a rate limit, a redirect not followed
+        for refused in [400, 401, 403, 404, 422, 429, 302, 0] {
+            assert_eq!(xai("POST", "/v1/responses", hermes, refused), Usage::Key { key: "xai".into(), units: 0 }, "{refused}");
+            assert_eq!(xai("POST", "/v1/chat/completions", b"{}", refused), Usage::Key { key: "xai:chat".into(), units: 0 }, "{refused}");
+            assert_eq!(xai("POST", "/v1/images/generations", b"{}", refused), Usage::Key { key: "xai:image".into(), units: 0 }, "{refused}");
+        }
+        for body in [&b""[..], b"n=2", b"[1]", br#"{"n":"2"}"#, br#"{"n":-1}"#, br#"{"n":1.5}"#, br#"{"n":0}"#] {
+            assert_eq!(xai("POST", "/v1/images/generations", body, 200), Usage::Key { key: "xai:image".into(), units: 0 }, "{}", String::from_utf8_lossy(body));
+        }
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("xai:")).cloned().collect(), ..book.clone() };
+        assert_eq!(older.price(&Usage::Key { key: "xai:chat".into(), units: 1 }), Err(PriceError::NoPrice));
+        assert_eq!(older.price(&Usage::Key { key: "xai:image".into(), units: 1 }), Err(PriceError::NoPrice));
+        assert_eq!(older.price(&Usage::Key { key: "xai".into(), units: 1 }).unwrap().charge, 180_000, "an X search, as before");
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at
