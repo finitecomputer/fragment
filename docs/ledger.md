@@ -138,11 +138,12 @@ informational. The fee is AI Gateway's on credits, so it applies to
   result, an edit, another model, an upload) is none of the key's,
   charged nothing. On xAI's key, a call whose `tools` name `x_search` is
   one call of the key (an X search, as before), and an image call naming
-  a grok-imagine-image model one `xai:image` ($0.02); any other call (a
-  chat, whose tokens are not read, a video, a model list) none. On
-  Google Places' key, a place's photo and an autocomplete are one
-  `google-places:photo` and `:autocomplete`, each at its own list; a
-  search or a place's details, whose tier is its field mask's, and any
+  a grok-imagine-image model and made in its answer (not `deferred`) one
+  `xai:image` ($0.02); any other call (a chat, whose tokens are not
+  read, a deferred image, a video, a model list) none. On Google Places'
+  key, a place's photo is one `google-places:photo`, at its own list; a
+  search or a place's details (whose tier is its field mask's), an
+  autocomplete (free in a session that ends in a Details call) and any
   other call none. Only a call so classified is charged, and only on a
   2xx: a part's call, or any call on a key priced by its parts, that its
   vendor refused or redirected, or whose units are not read (no JSON, no
