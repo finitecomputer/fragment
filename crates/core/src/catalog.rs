@@ -731,6 +731,9 @@ mod tests {
         let places = parse(json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }])).unwrap();
         let keys: Vec<String> = priced(&places).into_iter().map(|(k, _, _)| k).collect();
         assert_eq!(keys, ["google-places", "google-places:details", "google-places:photo", "google-places:autocomplete"]);
+        // Firecrawl's credits
+        let firecrawl = parse(json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }])).unwrap();
+        assert_eq!(priced(&firecrawl), vec![("firecrawl".to_string(), 10_000, 1), ("firecrawl:credit".to_string(), 5_000, 1)]);
     }
 
     /// Invalid: every rule, each a typed refusal.

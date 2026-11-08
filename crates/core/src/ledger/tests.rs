@@ -753,6 +753,34 @@ fn a_places_detail_is_charged_its_own_price_and_once() {
     assert_eq!(w.balance(), before - 82_500);
 }
 
+/// FIN-445: Firecrawl's key charged every call as a search (2 credits),
+/// its status polls too. Goal: a deployment's book charges a scrape and a
+/// search their credits and a poll nothing, each once across a replay and
+/// a restart. Method: the swap's rows as it meters them, sent again.
+#[test]
+fn a_firecrawl_call_is_charged_its_credits_and_once() {
+    let firecrawl = serde_json::json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }]);
+    let mut configured = book();
+    configured.keys.extend(crate::catalog::Catalog::parse(&firecrawl.to_string()).unwrap().key_prices());
+    let call = |method, path, body, status| crate::price::key_usage("firecrawl", &KeyCall { method, host: "api.firecrawl.dev", path, body, status });
+    let scraped = call("POST", "/v2/scrape", br#"{"url":"https://example.com/","formats":["markdown","html"]}"#, 200);
+    let searched = call("POST", "/v2/search", br#"{"query":"q","limit":5}"#, 200);
+    let polled = call("GET", "/v2/crawl/0b1e", b"", 200);
+    let mut w = World::seat();
+    w.ok(Op::Book(configured.clone()));
+    let before = w.balance();
+    let batch = meter("key:c-1:w1", vec![row("key:c-1:w1", scraped.clone(), None, T0), row("key:c-1:w2", searched, None, T0), row("key:c-1:w3", polled, None, T0)]);
+    // a credit and two, at $0.005 each with the margin, and nothing
+    let charged = Outcome::Metered(Metered { charged: 7_500 + 15_000, rows_new: 3, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(batch.clone()), charged);
+    let mut w = w.restarted();
+    w.replays(Op::Book(configured));
+    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
+    let again = w.ok(meter("key:c-1:w1-again", vec![row("key:c-1:w1", scraped, None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
+    assert_eq!(w.balance(), before - 22_500);
+}
+
 /// Bug 2: a step's charge is its row under the step's key, whatever
 /// attempt made the call (decision 62): a retry or a replay that sends it
 /// again, in a batch of its own, is charged nothing more.

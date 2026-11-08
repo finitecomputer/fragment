@@ -341,7 +341,8 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// The default book's version, informational since a ledger takes any book
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
-/// raised it, and each still does: 12 for Google Places' details, photos
+/// raised it, and each still does: 13 for Firecrawl's credits by the call
+/// (2026-11-07), after 12 for Google Places' details, photos
 /// and autocomplete apart from its searches (2026-11-07), after 11 for
 /// xAI's chat and images apart
 /// from its X searches (2026-11-07), after 10 for fal's images by their
@@ -353,7 +354,7 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// DeepSeek V4 Flash, past the 2 that finite.place's preview configs
 /// already carried. A deployment's `price_book_version` raises it further (its
 /// operator keys' prices); the book is the higher of the two.
-pub const DEFAULT_BOOK_VERSION: u32 = 12;
+pub const DEFAULT_BOOK_VERSION: u32 = 13;
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
 /// in neurons too (crate::media).
@@ -444,7 +445,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes. A part of a key's calls priced
 /// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
 /// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 16] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
@@ -454,9 +455,17 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
     ("x", 50_000, 1),
     // Firecrawl search: 2 credits per 10 results, Hobby PAYG $5 per
     // 1,000 credits. One search is $0.01; a basic scrape is $0.005.
-    // https://www.firecrawl.dev/pricing (2026-10-09). The shared key is
-    // priced as a search; per-request estimates are in the debt ledger.
+    // https://www.firecrawl.dev/pricing (2026-10-09). A row an older
+    // release queued is priced so; this release's are below.
     ("firecrawl", 10_000, 1),
+    // A Firecrawl credit (`KEY_PARTS`), Hobby's pay-as-you-go 1,000 for
+    // $5: a scrape (Hermes' `web_extract`) 1 a page, 4 more for each LLM
+    // format (JSON, a question, highlights, audio, video); a search
+    // (Hermes' `web_search`) 2 per 10 results it asks for, and a scrape
+    // each if it scrapes them; a map 1; a batch scrape a scrape a URL.
+    // Sources: docs.firecrawl.dev/billing, firecrawl.dev/pricing and
+    // docs.firecrawl.dev/api-reference/endpoint/search (read 2026-11-07).
+    ("firecrawl:credit", 5_000, 1),
     // FAL FLUX.2 Klein 9B: $0.006 per megapixel, a 1 MP image assumed.
     // https://fal.ai/models/fal-ai/flux-2/klein/9b (2026-10-09). A row an
     // older release queued is priced so; this release's are below.
@@ -571,7 +580,10 @@ pub struct KeyPart {
 /// - Google Places' details, photos and autocomplete were charged as an
 ///   Enterprise text search, $35.00 per 1,000: a detail 1.75 times its
 ///   list, a photo 5 times and an autocomplete 12 times.
-pub const KEY_PARTS: [KeyPart; 7] = [
+/// - Firecrawl's calls were charged as a search, 2 credits: a scrape, 1,
+///   twice its list, and each crawl or batch's status poll a search. A
+///   call is charged at most 1,000 credits ($5 at list).
+pub const KEY_PARTS: [KeyPart; 8] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
     KeyPart { key: "xai", priced_as: "xai:chat", units_max: 1 },
@@ -579,6 +591,7 @@ pub const KEY_PARTS: [KeyPart; 7] = [
     KeyPart { key: "google-places", priced_as: "google-places:details", units_max: 1 },
     KeyPart { key: "google-places", priced_as: "google-places:photo", units_max: 1 },
     KeyPart { key: "google-places", priced_as: "google-places:autocomplete", units_max: 1 },
+    KeyPart { key: "firecrawl", priced_as: "firecrawl:credit", units_max: 1_000 },
 ];
 
 /// The list price of operator key `name` per call, when the price book
@@ -646,6 +659,35 @@ fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> 
     each.checked_mul(images)
 }
 
+/// Firecrawl's formats that cost 4 credits a page more than a scrape's 1:
+/// an LLM's reading (docs.firecrawl.dev/billing, read 2026-11-07).
+const FIRECRAWL_LLM_FORMATS: [&str; 7] = ["json", "extract", "question", "query", "highlights", "audio", "video"];
+
+/// The credits a page scraped with `formats` costs (strings, or objects
+/// naming their `type`; absent, markdown alone): 1, and 4 for each LLM
+/// format.
+fn firecrawl_page(formats: Option<&serde_json::Value>) -> u64 {
+    let llm = formats.and_then(serde_json::Value::as_array).map_or(0, |all| {
+        all.iter().filter(|f| f.as_str().or_else(|| f.get("type")?.as_str()).is_some_and(|name| FIRECRAWL_LLM_FORMATS.contains(&name))).count() as u64
+    });
+    1 + 4 * llm
+}
+
+/// The credits a Firecrawl search asks for: 2 per 10 results (`limit`,
+/// absent 10, a source each of its `sources` but `alexandria`, which is
+/// free), and a page each when `scrapeOptions` names `formats`. None for
+/// a `limit` or `sources` that is no count or list.
+fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    let limit = said.get("limit").map_or(Some(10), serde_json::Value::as_u64)?;
+    let sources = match said.get("sources") {
+        None => 1,
+        Some(all) => all.as_array()?.iter().filter(|s| s.as_str().or_else(|| s.get("type")?.as_str()) != Some("alexandria")).count() as u64,
+    };
+    let results = limit.checked_mul(sources)?;
+    let scraped = said.get("scrapeOptions").and_then(|o| o.get("formats")).map_or(0, |formats| firecrawl_page(Some(formats)));
+    Some((2 * results.div_ceil(10)).saturating_add(results.saturating_mul(scraped)))
+}
+
 /// What one call on operator key `key` uses, as the swap meters it: a
 /// part's call (`KEY_PARTS`) its units, at most its `units_max`, as the
 /// part; a call its vendor does not bill (fal's queue polls, statuses,
@@ -666,6 +708,10 @@ fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> 
 ///   a place's details (`/v1/places/<id>`), its photo
 ///   (`…/photos/<photo>/media`) or an autocomplete one of its part; any
 ///   other call none.
+/// - Firecrawl (v1 and v2): a scrape, a search (`firecrawl_search`), a
+///   map and a batch scrape their credits, as `firecrawl:credit`; any
+///   other call (a crawl or an extract, billed as they run, a status
+///   poll, free) none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -699,6 +745,19 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
             (_, Some(photo)) if photo.contains("/photos/") && photo.ends_with("/media") => ("google-places:photo", Some(1)),
             _ => return Usage::Key { key: key.to_string(), units: 0 },
         },
+        "firecrawl" => {
+            let said = call.said();
+            let what = call.path.strip_prefix("/v1/").or_else(|| call.path.strip_prefix("/v2/"));
+            let credits = match (call.method, what) {
+                // a page a call, read or not
+                ("POST", Some("scrape")) => Some(said.as_ref().map_or(1, |s| firecrawl_page(s.get("formats")))),
+                ("POST", Some("search")) => said.as_ref().and_then(firecrawl_search),
+                ("POST", Some("map")) => Some(1),
+                ("POST", Some("batch/scrape")) => said.as_ref().and_then(|s| Some(s.get("urls")?.as_array()?.len() as u64 * firecrawl_page(s.get("formats")))),
+                _ => return Usage::Key { key: key.to_string(), units: 0 },
+            };
+            ("firecrawl:credit", credits)
+        }
         _ => return Usage::Key { key: key.to_string(), units: 1 },
     };
     // a part's, or one of its key's own (xAI's X search), made by a 2xx
@@ -926,7 +985,7 @@ mod tests {
     fn the_defaults_are_a_valid_book() {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
-        assert_eq!(book.version, 12);
+        assert_eq!(book.version, 13);
         assert_eq!(book.models.len(), 12);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
@@ -1083,6 +1142,7 @@ mod tests {
         assert_eq!(call("google-places:details"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "$20 per 1,000 Enterprise details");
         assert_eq!(call("google-places:photo"), Priced { list: 7_000, cost: 7_000, charge: 10_500 }, "$7 per 1,000 photos");
         assert_eq!(call("google-places:autocomplete"), Priced { list: 2_830, cost: 2_830, charge: 4_245 }, "$2.83 per 1,000 autocompletes");
+        assert_eq!(call("firecrawl:credit"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "a Hobby PAYG credit");
         assert_eq!(default_key_price("nonesuch"), None);
     }
 
@@ -1395,6 +1455,65 @@ mod tests {
         let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("google-places:")).cloned().collect(), ..book.clone() };
         assert_eq!(older.price(&Usage::Key { key: "google-places:details".into(), units: 1 }), Err(PriceError::NoPrice));
         assert_eq!(older.price(&Usage::Key { key: "google-places".into(), units: 1 }).unwrap().charge, 52_500);
+    }
+
+    /// A JSON `POST` on Firecrawl's key, answered `status`, in credits.
+    fn firecrawl(method: &str, path: &str, body: &[u8], status: u16) -> Usage {
+        key_usage("firecrawl", &KeyCall { method, host: "api.firecrawl.dev", path, body, status })
+    }
+
+    /// Goal (FIN-445): a Firecrawl call is charged the credits it costs,
+    /// and its status polls nothing. Method: Hermes' `web_extract` and
+    /// `web_search` bodies (its Firecrawl provider), and an agent's SDK
+    /// calls.
+    #[test]
+    fn a_firecrawl_call_is_charged_its_credits() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        let credits = |units| Usage::Key { key: "firecrawl:credit".into(), units };
+        let extract = br#"{"url":"https://example.com/","formats":["markdown","html"]}"#;
+        assert_eq!(firecrawl("POST", "/v2/scrape", extract, 200), credits(1), "Hermes' web_extract");
+        assert_eq!(book.price(&credits(1)).unwrap().charge, 7_500, "$0.0075, not a search's $0.015");
+        assert_eq!(firecrawl("POST", "/v1/scrape", extract, 200), credits(1));
+        assert_eq!(firecrawl("POST", "/v2/scrape", br#"{"url":"u"}"#, 200), credits(1), "markdown alone");
+        assert_eq!(firecrawl("POST", "/v2/scrape", br#"{"url":"u","formats":["markdown",{"type":"json","prompt":"p"}]}"#, 200), credits(5));
+        assert_eq!(firecrawl("POST", "/v2/scrape", br#"{"url":"u","formats":["json","highlights",{"type":"screenshot"}]}"#, 200), credits(9), "each LLM format 4 more");
+        assert_eq!(firecrawl("POST", "/v2/scrape", b"a body the meter does not read", 200), credits(1), "a page, read or not");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5}"#, 200), credits(2), "Hermes' web_search");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q"}"#, 200), credits(2), "10 results");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":11}"#, 200), credits(4), "rounded up per 10");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["web","news",{"type":"alexandria"}]}"#, 200), credits(4), "per source, alexandria free");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5,"scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 5), "and a page each scraped");
+        assert_eq!(firecrawl("POST", "/v2/map", br#"{"url":"u"}"#, 200), credits(1));
+        assert_eq!(firecrawl("POST", "/v2/batch/scrape", br#"{"urls":["a","b","c"],"formats":[{"type":"json"}]}"#, 200), credits(15));
+        let free = Usage::Key { key: "firecrawl".into(), units: 0 };
+        for (method, path) in [("GET", "/v2/crawl/0b1e"), ("GET", "/v2/batch/scrape/0b1e"), ("GET", "/v2/extract/0b1e"), ("POST", "/v2/crawl"), ("POST", "/v2/extract"), ("POST", "/v2/agent"), ("GET", "/v2/team/credit-usage"), ("GET", "/v2/scrape"), ("POST", "/v3/scrape")] {
+            assert_eq!(firecrawl(method, path, br#"{"url":"u","limit":10}"#, 200), free, "{method} {path}");
+        }
+    }
+
+    /// Goal: a Firecrawl call it refused (or that returned no document) is
+    /// charged nothing, and a search the meter cannot count nothing; a
+    /// call at most 1,000 credits; an older book refuses the rows.
+    #[test]
+    fn a_firecrawl_call_refused_or_uncounted_is_charged_nothing() {
+        let none = Usage::Key { key: "firecrawl:credit".into(), units: 0 };
+        for refused in [400, 401, 402, 403, 404, 408, 429, 302, 0] {
+            assert_eq!(firecrawl("POST", "/v2/scrape", br#"{"url":"u"}"#, refused), none, "{refused}");
+            assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q"}"#, refused), none, "{refused}");
+        }
+        for body in [&b""[..], b"query=q", br#"{"query":"q","limit":"5"}"#, br#"{"query":"q","limit":-1}"#, br#"{"query":"q","sources":"web"}"#, br#"{"query":"q","limit":0}"#] {
+            assert_eq!(firecrawl("POST", "/v2/search", body, 200), none, "{}", String::from_utf8_lossy(body));
+        }
+        assert_eq!(firecrawl("POST", "/v2/batch/scrape", br#"{"urls":"a"}"#, 200), none);
+        let most = Usage::Key { key: "firecrawl:credit".into(), units: 1_000 };
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":100,"sources":["web","news","images"],"scrapeOptions":{"formats":["json"]}}"#, 200), most);
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":18446744073709551615,"sources":["web","news"]}"#, 200), none, "an overflow is no count");
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        assert_eq!(book.price(&most).unwrap().charge, 7_500_000, "$5 at list");
+        let older = PriceBook { keys: book.keys.iter().filter(|k| k.key != "firecrawl:credit").cloned().collect(), ..book.clone() };
+        assert_eq!(older.price(&Usage::Key { key: "firecrawl:credit".into(), units: 1 }), Err(PriceError::NoPrice));
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

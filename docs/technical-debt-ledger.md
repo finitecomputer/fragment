@@ -331,7 +331,8 @@ unfinished design, not debt.
   `landscape_4_3`; xAI's X searches as 20 posts and a chat call's tokens,
   its other chat calls as 10,000 tokens in and 1,000 out on grok-4.3,
   its images at grok-imagine-image's $0.02; Google Places by its
-  path at the goplaces skill's Enterprise tier, not its field mask).
+  path at the goplaces skill's Enterprise tier, not its field mask;
+  Firecrawl's search by the results it asks for, not those it returns).
 - **Risk:** calls charged above or below what they cost: every other
   ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
   is charged a minute of music; a fal model dearer than Klein (FLUX.2
@@ -342,7 +343,10 @@ unfinished design, not debt.
   charged under its cost, and a short one over it; a Grok video or
   server-side tools other than X Search (web search, code execution)
   are charged nothing; a Places call whose field mask is a cheaper
-  tier's (Pro, Essentials) is charged Enterprise's.
+  tier's (Pro, Essentials) is charged Enterprise's; a Firecrawl crawl,
+  extract, agent or browser session (billed as it runs) and a scrape's
+  PDF pages and other add-ons are charged nothing, and a search that
+  returns fewer results than it asks for is charged for its `limit`.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.
