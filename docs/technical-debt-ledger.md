@@ -327,8 +327,8 @@ unfinished design, not debt.
   the multilingual models' $0.08 per 1,000 whatever the model, so Flash
   and Turbo's $0.04 calls are charged twice their list; fal's
   synchronous Klein runs by the pixels they ask for; xAI's X searches as
-  20 posts and a call's tokens, its images as one grok-imagine-image
-  ($0.02) a call; Google Places' photos and autocompletes at their own
+  20 posts and a call's tokens, its synchronous images as one
+  grok-imagine-image ($0.02) a call; Google Places' photos at their own
   list; Firecrawl's scrapes and maps by their credits; a Browser Use
   session's start as five minutes).
 - **Risk:** calls charged above or below what they cost: every other
@@ -336,17 +336,17 @@ unfinished design, not debt.
   is charged a minute of music; a queued fal generation (Hermes'
   `image_generate`), an edit and every other fal model are charged
   nothing until a queued job is settled from its result's answer, once
-  per request id; a Grok chat (its tokens not read), a video and
-  server-side tools other than X Search are charged nothing, a
+  per request id; a Grok chat (its tokens not read), a deferred image, a
+  video and server-side tools other than X Search are charged nothing, a
   grok-imagine-image-2.0 image or several images a call under their
   cost, and an X search that fetches fewer than 20 posts over it; Google
   Places' searches and details (their tier their field mask's, which the
-  meter does not read) are charged nothing; a Firecrawl search (its
-  returned results not counted), crawl, batch scrape, extract, agent or
-  browser session is charged nothing, as are a scrape's PDF pages and
-  other add-ons; a Browser Use session is charged five minutes at its
-  start, whatever it ran, and a task its session alone, not its model's
-  tokens.
+  meter does not read) and autocompletes (free in a session that ends in
+  a Details call) are charged nothing; a Firecrawl search (its returned
+  results not counted), crawl, batch scrape, extract, agent or browser
+  session is charged nothing, as are a scrape's PDF pages and other
+  add-ons; a Browser Use session is charged five minutes at its start,
+  whatever it ran, and a task its session alone, not its model's tokens.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.

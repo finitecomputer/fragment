@@ -342,8 +342,8 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
 /// whose contents differ from its own (docs/ledger.md; #451). Before, a
 /// ledger took only a newer version, so each change to the defaults
 /// raised it, and each still does: 13 for Firecrawl's credits by the call
-/// (2026-11-07), after 12 for Google Places' details, photos
-/// and autocomplete apart from its searches (2026-11-07), after 11 for
+/// (2026-11-07), after 12 for Google Places' photos apart from its
+/// searches (2026-11-07), after 11 for
 /// xAI's chat and images apart
 /// from its X searches (2026-11-07), after 10 for fal's images by their
 /// pixels (2026-11-07), after 9 for ElevenLabs' speech by its characters
@@ -445,7 +445,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes. A part of a key's calls priced
 /// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
 /// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 14] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 13] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
@@ -504,16 +504,13 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 14] = [
     // 2026-09-28), the free monthly caps not counted. A row an older
     // release queued is priced so. Since FIN-445 a search or a place's
     // details is charged nothing: its tier is its field mask's, which the
-    // meter does not read, and the lowest (IDs only) is free. A photo and
-    // an autocomplete, one price each, are below.
+    // meter does not read, and the lowest (IDs only) is free; so is an
+    // autocomplete, free in a session that ends in a Details call. A
+    // photo, one price, is below.
     ("google-places", 35_000_000, 1_000),
     // Place Photos (`GET /v1/places/<id>/photos/<photo>/media`): $7.00 per
     // 1,000. Source as above (read 2026-11-07).
     ("google-places:photo", 7_000_000, 1_000),
-    // Autocomplete Requests (`POST /v1/places:autocomplete`): $2.83 per
-    // 1,000 (a session's usage is free). Source as above (read
-    // 2026-11-07).
-    ("google-places:autocomplete", 2_830_000, 1_000),
     // xAI's X Search (Hermes' native `x_search`: `/v1/responses` with the
     // `x_search` tool): $5 per 1,000 posts fetched and $10 per 1,000 user
     // profiles, plus tokens. Source: docs.x.ai/developers/tools/x-search
@@ -524,9 +521,11 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 14] = [
     // (`KEY_PARTS`); its images are below, and every other call (a chat,
     // its tokens not read) is free.
     ("xai", 120_000, 1),
-    // A Grok image (`/v1/images/generations`) naming a grok-imagine-image
-    // model (`XAI_IMAGE_MODELS`), one a call whatever its `n`, which is
-    // what it asks for, not what it made: grok-imagine-image's $0.02
+    // A Grok image made synchronously (`/v1/images/generations` naming a
+    // grok-imagine-image model, `XAI_IMAGE_MODELS`, and not `deferred`: its
+    // answer is the image), one a call whatever its `n`, which is what it
+    // asks for, not what it made; a deferred one, only its request id until
+    // it is made or fails, is free here: grok-imagine-image's $0.02
     // ($0.04 on grok-imagine-image-2.0, charged under its list). Source:
     // docs.x.ai/developers/pricing (read 2026-11-07).
     ("xai:image", 20_000, 1),
@@ -576,20 +575,20 @@ pub struct KeyPart {
 ///   An image is charged one a call now (a request's count is what it
 ///   asks for, not what it made), and a chat nothing (its tokens are not
 ///   read).
-/// - Google Places' photos and autocompletes were charged as an Enterprise
-///   text search, $35.00 per 1,000: a photo 5 times its list, an
-///   autocomplete 12 times. Its searches and details, whose tier is their
-///   field mask's (the meter reads no header), are charged nothing now.
+/// - Google Places' photos were charged as an Enterprise text search,
+///   $35.00 per 1,000, 5 times their list. Its searches and details,
+///   whose tier is their field mask's (the meter reads no header), and its
+///   autocompletes, free in a session that ends in a Details call, are
+///   charged nothing now.
 /// - Firecrawl's calls were charged as a search, 2 credits: a scrape, 1,
 ///   twice its list, and each crawl or batch's status poll a search. A
 ///   scrape and a map are charged their credits now, at most 1,000 a call
 ///   ($5 at list); a search, its returned results not counted, nothing.
-pub const KEY_PARTS: [KeyPart; 6] = [
+pub const KEY_PARTS: [KeyPart; 5] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
     KeyPart { key: "xai", priced_as: "xai:image", units_max: 1 },
     KeyPart { key: "google-places", priced_as: "google-places:photo", units_max: 1 },
-    KeyPart { key: "google-places", priced_as: "google-places:autocomplete", units_max: 1 },
     KeyPart { key: "firecrawl", priced_as: "firecrawl:credit", units_max: 1_000 },
 ];
 
@@ -695,12 +694,13 @@ fn firecrawl_page(formats: Option<&serde_json::Value>) -> u64 {
 ///   it asks for (`fal_pixels`).
 /// - xAI: a `POST` to `/v1/responses` or `/v1/chat/completions` whose
 ///   `tools` name `x_search` is one call of the key (an X search); one to
-///   `/v1/images/generations` naming a grok-imagine-image model one
-///   `xai:image`; any other call (a chat, its tokens not read) none.
-/// - Google Places (New): a place's photo (`…/photos/<photo>/media`) or an
-///   autocomplete one of its part; a search or a place's details (their
-///   tier their field mask's, which the meter does not read) and any other
-///   call none.
+///   `/v1/images/generations` naming a grok-imagine-image model, made in
+///   its answer (not `deferred`), one `xai:image`; any other call (a chat,
+///   its tokens not read; a deferred image) none.
+/// - Google Places (New): a place's photo (`…/photos/<photo>/media`) one
+///   of its part; a search or a place's details (their tier their field
+///   mask's, which the meter does not read), an autocomplete (free in a
+///   session that ends in a Details call) and any other call none.
 /// - Browser Use: a `POST` that starts a new browser session or task
 ///   (`/api/v<n>/browsers`, `/sessions`, `/tasks` or `/runs`, its JSON
 ///   body read and naming no `sessionId`) is one call of the key; a task
@@ -727,7 +727,11 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
             let searches = said.as_ref().and_then(|s| s.get("tools")?.as_array()).is_some_and(|tools| tools.iter().any(|t| t.get("type").and_then(serde_json::Value::as_str) == Some("x_search")));
             match (call.method, call.path) {
                 ("POST", "/v1/responses" | "/v1/chat/completions") if searches => ("xai", Some(1)),
-                ("POST", "/v1/images/generations") if said.as_ref().and_then(|s| s.get("model")?.as_str()).is_some_and(|model| XAI_IMAGE_MODELS.contains(&model)) => {
+                // made in its answer: a known model, not deferred (a request id
+                // alone, the image made later or not)
+                ("POST", "/v1/images/generations")
+                    if said.as_ref().is_some_and(|s| s.get("model").and_then(serde_json::Value::as_str).is_some_and(|model| XAI_IMAGE_MODELS.contains(&model)) && s.get("deferred").is_none_or(|d| *d == serde_json::Value::Bool(false))) =>
+                {
                     ("xai:image", said.and_then(|s| s.get("n").map_or(Some(1), serde_json::Value::as_u64)).map(|n| n.min(1)))
                 }
                 // a chat (its tokens not read), a video, a stored response read, a model list
@@ -735,10 +739,10 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
             }
         }
         // the method is the path's (Google refuses any other), so not read;
-        // a search's or a place's details' tier is its field mask's: none
-        "google-places" => match (call.path, call.path.strip_prefix("/v1/places/")) {
-            ("/v1/places:autocomplete", _) => ("google-places:autocomplete", Some(1)),
-            (_, Some(photo)) if photo.contains("/photos/") && photo.ends_with("/media") => ("google-places:photo", Some(1)),
+        // a search's or a place's details' tier is its field mask's, and an
+        // autocomplete is free in a session that ends in a Details call: none
+        "google-places" => match call.path.strip_prefix("/v1/places/") {
+            Some(photo) if photo.contains("/photos/") && photo.ends_with("/media") => ("google-places:photo", Some(1)),
             _ => return Usage::Key { key: key.to_string(), units: 0 },
         },
         "firecrawl" => {
@@ -1144,7 +1148,6 @@ mod tests {
         assert_eq!(default_key_price("fal:image"), Some((6_000, 1_048_576)));
         assert_eq!(call("xai:image"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "a grok-imagine-image");
         assert_eq!(call("google-places:photo"), Priced { list: 7_000, cost: 7_000, charge: 10_500 }, "$7 per 1,000 photos");
-        assert_eq!(call("google-places:autocomplete"), Priced { list: 2_830, cost: 2_830, charge: 4_245 }, "$2.83 per 1,000 autocompletes");
         assert_eq!(call("firecrawl:credit"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "a Hobby PAYG credit");
         assert_eq!(default_key_price("nonesuch"), None);
     }
@@ -1381,6 +1384,13 @@ mod tests {
         let image = Usage::Key { key: "xai:image".into(), units: 1 };
         assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 200), image);
         assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image-2.0","prompt":"a cat","n":4}"#, 200), image, "one a call: its n is asked, not made");
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat","deferred":false}"#, 200), image, "synchronous, said so");
+        // deferred: a request id alone, the image made later or not (FIN-445 review)
+        for deferred in ["true", r#""true""#, "1", "null"] {
+            let body = format!(r#"{{"model":"grok-imagine-image","prompt":"a cat","deferred":{deferred}}}"#);
+            assert_eq!(xai("POST", "/v1/images/generations", body.as_bytes(), 200), Usage::Key { key: "xai".into(), units: 0 }, "{body}");
+        }
+        assert_eq!(xai("GET", "/v1/images/generations/req-1", b"", 200), Usage::Key { key: "xai".into(), units: 0 }, "its result's read");
         assert_eq!(book.price(&image).unwrap().charge, 30_000);
         for body in [&br#"{"model":"grok-imagine-image-mini","prompt":"a cat"}"#[..], br#"{"prompt":"a cat"}"#, br#"{"model":42,"prompt":"a cat"}"#] {
             assert_eq!(xai("POST", "/v1/images/generations", body, 200), free, "a model the book does not price: {}", String::from_utf8_lossy(body));
@@ -1422,9 +1432,10 @@ mod tests {
     }
 
     /// Goal (FIN-445, and its review: when in doubt, charge zero): a Places
-    /// photo and an autocomplete are charged their own list, each one
-    /// price; a search or a place's details, whose tier is its field mask's
-    /// (IDs only is free), and any other call nothing. Method: the goplaces
+    /// photo is charged its own list, one price; a search or a place's
+    /// details, whose tier is its field mask's (IDs only is free), an
+    /// autocomplete (free in a session that ends in a Details call) and any
+    /// other call nothing. Method: the goplaces
     /// skill's calls (Places API (New)), and the others the API takes.
     #[test]
     fn a_places_call_is_charged_as_what_it_is() {
@@ -1434,10 +1445,8 @@ mod tests {
         let one = |key: &str| Usage::Key { key: key.into(), units: 1 };
         assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"), "skipHttpRedirect: its JSON");
         assert_eq!(charge(&one("google-places:photo")), 10_500, "$0.0105, not a search's $0.0525");
-        assert_eq!(places("POST", "/v1/places:autocomplete", 200), one("google-places:autocomplete"));
-        assert_eq!(charge(&one("google-places:autocomplete")), 4_245);
         let free = Usage::Key { key: "google-places".into(), units: 0 };
-        for (method, path) in [("POST", "/v1/places:searchText"), ("POST", "/v1/places:searchNearby"), ("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw"), ("GET", "/v1/places/"), ("GET", "/v1/places/ChIJ/photos/AUc7"), ("POST", "/v1/places:searchtext"), ("GET", "/v2/places/ChIJ/photos/AUc7/media"), ("GET", "/maps/api/place/textsearch/json"), ("GET", "/")] {
+        for (method, path) in [("POST", "/v1/places:autocomplete"), ("POST", "/v1/places:searchText"), ("POST", "/v1/places:searchNearby"), ("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw"), ("GET", "/v1/places/"), ("GET", "/v1/places/ChIJ/photos/AUc7"), ("POST", "/v1/places:searchtext"), ("GET", "/v2/places/ChIJ/photos/AUc7/media"), ("GET", "/maps/api/place/textsearch/json"), ("GET", "/")] {
             assert_eq!(places(method, path, 200), free, "{method} {path}");
         }
         assert_eq!(charge(&free), 0);
@@ -1450,7 +1459,6 @@ mod tests {
     fn a_places_call_google_refused_or_redirected_is_charged_nothing() {
         for status in [400, 401, 403, 404, 429, 301, 302, 303, 307, 308, 304, 0] {
             assert_eq!(places("GET", "/v1/places/ChIJ/photos/AUc7/media", status), Usage::Key { key: "google-places:photo".into(), units: 0 }, "{status}");
-            assert_eq!(places("POST", "/v1/places:autocomplete", status), Usage::Key { key: "google-places:autocomplete".into(), units: 0 }, "{status}");
         }
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
