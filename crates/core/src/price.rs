@@ -444,7 +444,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes. A part of a key's calls priced
 /// apart (`KEY_PARTS`) is listed here too, by its part's name, per that
 /// part's unit.
-pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
+pub const DEFAULT_KEYS: [(&str, i64, u64); 13] = [
     // X API application-bearer reads, separate from Grok's xai key:
     // $0.005 per Post and $0.010 per User resource. The x-api-finite
     // helper's default recent search fetches 10 posts: $0.05 assumed
@@ -461,14 +461,15 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
     // https://fal.ai/models/fal-ai/flux-2/klein/9b (2026-10-09). A row an
     // older release queued is priced so; this release's are below.
     ("fal", 6_000, 1),
-    // A fal generation (`KEY_PARTS`; Hermes' `image_generate`), per pixel
-    // its request asks for, at FLUX.2 Klein 9B's "$0.006 per megapixel"
-    // whatever the model, a megapixel taken as 1,048,576 pixels, the
-    // larger reading, as fal says neither. Source:
-    // fal.ai/models/fal-ai/flux-2/klein/9b (read 2026-11-07). Hermes'
-    // default, one 1024 × 576 `landscape_16_9` image, is $0.0034. Its
-    // queue's polls, statuses and results and its uploads are free: fal
-    // prices "per output" (fal.ai/pricing, read 2026-11-07).
+    // FLUX.2 Klein 9B's synchronous run (`KEY_PARTS`), per pixel its
+    // request asks for: "$0.006 per megapixel", a megapixel taken as
+    // 1,048,576 pixels, the larger reading, as fal says neither. Source:
+    // fal.ai/models/fal-ai/flux-2/klein/9b (read 2026-11-07). One
+    // 1024 × 576 `landscape_16_9` image is $0.0034. Every other fal call is
+    // free here: a queued generation (Hermes' `image_generate`) until its
+    // result can be settled, another model at its own rate, and the queue's
+    // polls, results and uploads, which fal does not bill ("per output":
+    // fal.ai/pricing, read 2026-11-07).
     ("fal:image", 6_000, 1_048_576),
     // Browser Use: $0.02 per browser-hour, $5/GB residential proxy.
     // https://browser-use.com/pricing (2026-10-09). A control request is
@@ -488,15 +489,12 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
     // and regularOpeningHours, Enterprise fields; Place Details Enterprise
     // is $20.00, so a call is priced at the dearer of its two. Source:
     // developers.google.com/maps/billing-and-pricing/pricing (last updated
-    // 2026-09-28), the free monthly caps not counted. Since FIN-445 only a
-    // text or nearby search (`places:searchText`, `places:searchNearby`,
-    // Enterprise $35.00 too) is priced so (`KEY_PARTS`); the key's other
-    // calls are below, or free.
+    // 2026-09-28), the free monthly caps not counted. A row an older
+    // release queued is priced so. Since FIN-445 a search or a place's
+    // details is charged nothing: its tier is its field mask's, which the
+    // meter does not read, and the lowest (IDs only) is free. A photo and
+    // an autocomplete, one price each, are below.
     ("google-places", 35_000_000, 1_000),
-    // Place Details Enterprise (`GET /v1/places/<id>`, the goplaces
-    // skill's field mask): $20.00 per 1,000. Source as above (read
-    // 2026-11-07).
-    ("google-places:details", 20_000_000, 1_000),
     // Place Photos (`GET /v1/places/<id>/photos/<photo>/media`): $7.00 per
     // 1,000. Source as above (read 2026-11-07).
     ("google-places:photo", 7_000_000, 1_000),
@@ -511,16 +509,13 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 15] = [
     // (grok-4.3: $1.25 in, $2.50 out per million). A call is taken as 20
     // posts ($0.10) and 10,000 tokens in and 1,000 out ($0.015): $0.115,
     // priced at $0.12. Only a call with the `x_search` tool is priced so
-    // (`KEY_PARTS`); the key's other calls are below, or free.
+    // (`KEY_PARTS`); its images are below, and every other call (a chat,
+    // its tokens not read) is free.
     ("xai", 120_000, 1),
-    // A Grok chat call on the key without X Search (`/v1/chat/completions`,
-    // `/v1/responses`, `/v1/messages`), taken as the X Search call's own
-    // tokens, 10,000 in and 1,000 out on grok-4.3: $0.015. Source:
-    // docs.x.ai/developers/pricing (read 2026-11-07).
-    ("xai:chat", 15_000, 1),
-    // A Grok image (`/v1/images/generations`), per image its request asks
-    // for (`n`): grok-imagine-image's $0.02 ($0.04 on
-    // grok-imagine-image-2.0, charged under its list). Source:
+    // A Grok image (`/v1/images/generations`) naming a grok-imagine-image
+    // model (`XAI_IMAGE_MODELS`), one a call whatever its `n`, which is
+    // what it asks for, not what it made: grok-imagine-image's $0.02
+    // ($0.04 on grok-imagine-image-2.0, charged under its list). Source:
     // docs.x.ai/developers/pricing (read 2026-11-07).
     ("xai:image", 20_000, 1),
     // ElevenLabs' Music API (`/v1/music`, the music-generation skill):
@@ -562,21 +557,21 @@ pub struct KeyPart {
 ///   most $3.20 at list.
 /// - fal's generations were charged as an image, and so was each of the
 ///   SDK's queue polls, its status checks and its result: an image cost
-///   several images. A call is charged at most 16 megapixels, $0.096 at
-///   list: Klein makes at most 4 images a call (`num_images`), and its
-///   largest preset is 1 megapixel.
-/// - xAI's chat and image calls were charged as an X search, $0.18 a call:
-///   a plain Grok chat call about twelve times its typical cost. A call
-///   is charged at most 10 images (`n`, xAI's most a request).
-/// - Google Places' details, photos and autocomplete were charged as an
-///   Enterprise text search, $35.00 per 1,000: a detail 1.75 times its
-///   list, a photo 5 times and an autocomplete 12 times.
-pub const KEY_PARTS: [KeyPart; 7] = [
+///   several images. Only a synchronous Klein run is charged now, at most
+///   16 megapixels a call, $0.096 at list: Klein makes at most 4 images a
+///   call (`num_images`), and its largest preset is 1 megapixel.
+/// - xAI's chat and image calls were charged as an X search, $0.18 a call.
+///   An image is charged one a call now (a request's count is what it
+///   asks for, not what it made), and a chat nothing (its tokens are not
+///   read).
+/// - Google Places' photos and autocompletes were charged as an Enterprise
+///   text search, $35.00 per 1,000: a photo 5 times its list, an
+///   autocomplete 12 times. Its searches and details, whose tier is their
+///   field mask's (the meter reads no header), are charged nothing now.
+pub const KEY_PARTS: [KeyPart; 5] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
-    KeyPart { key: "xai", priced_as: "xai:chat", units_max: 1 },
-    KeyPart { key: "xai", priced_as: "xai:image", units_max: 10 },
-    KeyPart { key: "google-places", priced_as: "google-places:details", units_max: 1 },
+    KeyPart { key: "xai", priced_as: "xai:image", units_max: 1 },
     KeyPart { key: "google-places", priced_as: "google-places:photo", units_max: 1 },
     KeyPart { key: "google-places", priced_as: "google-places:autocomplete", units_max: 1 },
 ];
@@ -617,14 +612,16 @@ impl KeyCall<'_> {
     }
 }
 
-/// fal's hosts that run a model (`queue.fal.run`'s queue and `fal.run`'s
-/// synchronous runs); its others (`rest.fal.ai`'s uploads) make nothing.
-const FAL_RUNS: [&str; 2] = ["queue.fal.run", "fal.run"];
+/// FLUX.2 Klein 9B's text to image, run synchronously (`fal.run`): the one
+/// fal call known to have made what it asked for, at a rate the book
+/// knows. A queued one (`queue.fal.run`) is made after its submit, or
+/// fails or is cancelled, so is charged nothing until its result can be
+/// settled (the debt ledger); an edit's size is its input image's, which
+/// the meter does not see.
+const FAL_KLEIN_RUN: (&str, &str) = ("fal.run", "/fal-ai/flux-2/klein/9b");
 
-/// FLUX.2 Klein 9B's text to image (Hermes' `image_generate`), whose
-/// `image_size` absent is its default, `landscape_4_3` (an edit's is its
-/// input image's, which the meter does not see).
-const FAL_KLEIN: &str = "/fal-ai/flux-2/klein/9b";
+/// xAI's image models, each priced at least `xai:image`'s $0.02 an image.
+const XAI_IMAGE_MODELS: [&str; 2] = ["grok-imagine-image", "grok-imagine-image-2.0"];
 
 /// fal's `image_size` presets in pixels (FLUX.2 Klein's, and its other
 /// image models'), the first Klein's default.
@@ -637,15 +634,13 @@ const FAL_SIZES: [(&str, u64); 6] = [
     ("portrait_16_9", 576 * 1024),
 ];
 
-/// The pixels a fal generation to `path` asks for: its `num_images`
-/// (absent, one) images of its `image_size`, a preset or `{width,
-/// height}`, or absent, Klein's default on Klein's text to image; none
-/// for any other (an absent size elsewhere, an edit's being its input's,
-/// an unknown preset, a size that is no two whole numbers).
-fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+/// The pixels a Klein run asks for: its `num_images` (absent, one) images
+/// of its `image_size`, a preset, `{width, height}`, or absent, Klein's
+/// default; none for any other (an unknown preset, a size that is no two
+/// whole numbers).
+fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let each = match said.get("image_size") {
-        None if path == FAL_KLEIN => FAL_SIZES[0].1,
-        None => return None,
+        None => FAL_SIZES[0].1,
         Some(serde_json::Value::String(preset)) => FAL_SIZES.iter().find(|(name, _)| name == preset)?.1,
         Some(size) => size.get("width")?.as_u64()?.checked_mul(size.get("height")?.as_u64()?)?,
     };
@@ -655,24 +650,21 @@ fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> 
 
 /// What one call on operator key `key` uses, as the swap meters it: a
 /// part's call (`KEY_PARTS`) its units, at most its `units_max`, as the
-/// part; a call its vendor does not bill (fal's queue polls, statuses,
-/// results and cancels, its uploads), or one the book does not price
-/// apart on a key priced by its parts (xAI's), none of the key's; any
-/// other one call of the key.
+/// part; any other call on a key priced by its parts (fal's, xAI's) none of the
+/// key's; any other one call of the key.
 ///
 /// - ElevenLabs' text to speech (`/v1/text-to-speech/…`): the characters
 ///   of its JSON body's `text`.
-/// - A fal generation (a `POST` to a model at `queue.fal.run` or
-///   `fal.run`, not under its queue's `…/requests/…`): the pixels it asks
-///   for (`fal_pixels`).
+/// - fal: a synchronous Klein run (`FAL_KLEIN_RUN`, a `POST`): the pixels
+///   it asks for (`fal_pixels`).
 /// - xAI: a `POST` to `/v1/responses` or `/v1/chat/completions` whose
-///   `tools` name `x_search` is one call of the key (an X search); one
-///   without, or to `/v1/messages`, one `xai:chat`; one to
-///   `/v1/images/generations` its `n` images (absent, 1).
-/// - Google Places (New): a text or nearby search is one call of the key;
-///   a place's details (`/v1/places/<id>`), its photo
-///   (`…/photos/<photo>/media`, made by its redirect to the image too) or
-///   an autocomplete one of its part; any other call none.
+///   `tools` name `x_search` is one call of the key (an X search); one to
+///   `/v1/images/generations` naming a grok-imagine-image model one
+///   `xai:image`; any other call (a chat, its tokens not read) none.
+/// - Google Places (New): a place's photo (`…/photos/<photo>/media`) or an
+///   autocomplete one of its part; a search or a place's details (their
+///   tier their field mask's, which the meter does not read) and any other
+///   call none.
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -684,25 +676,24 @@ fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> 
 pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     let (priced_as, units) = match key {
         "elevenlabs" if call.path.starts_with("/v1/text-to-speech/") => ("elevenlabs:speech", call.said().and_then(|said| Some(said.get("text")?.as_str()?.chars().count() as u64))),
-        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().and_then(|said| fal_pixels(call.path, &said))),
+        "fal" if call.method == "POST" && (call.host, call.path) == FAL_KLEIN_RUN => ("fal:image", call.said().as_ref().and_then(fal_pixels)),
         "fal" => return Usage::Key { key: key.to_string(), units: 0 },
         "xai" => {
             let said = call.said();
             let searches = said.as_ref().and_then(|s| s.get("tools")?.as_array()).is_some_and(|tools| tools.iter().any(|t| t.get("type").and_then(serde_json::Value::as_str) == Some("x_search")));
             match (call.method, call.path) {
                 ("POST", "/v1/responses" | "/v1/chat/completions") if searches => ("xai", Some(1)),
-                // one call, read or not (a long context past the body read)
-                ("POST", "/v1/responses" | "/v1/chat/completions" | "/v1/messages") => ("xai:chat", Some(1)),
-                ("POST", "/v1/images/generations") => ("xai:image", said.and_then(|s| s.get("n").map_or(Some(1), serde_json::Value::as_u64))),
-                // a video, a stored response read, a model list: priced by none
+                ("POST", "/v1/images/generations") if said.as_ref().and_then(|s| s.get("model")?.as_str()).is_some_and(|model| XAI_IMAGE_MODELS.contains(&model)) => {
+                    ("xai:image", said.and_then(|s| s.get("n").map_or(Some(1), serde_json::Value::as_u64)).map(|n| n.min(1)))
+                }
+                // a chat (its tokens not read), a video, a stored response read, a model list
                 _ => return Usage::Key { key: key.to_string(), units: 0 },
             }
         }
-        // the method is the path's (Google refuses any other), so not read
+        // the method is the path's (Google refuses any other), so not read;
+        // a search's or a place's details' tier is its field mask's: none
         "google-places" => match (call.path, call.path.strip_prefix("/v1/places/")) {
-            ("/v1/places:searchText" | "/v1/places:searchNearby", _) => ("google-places", Some(1)),
             ("/v1/places:autocomplete", _) => ("google-places:autocomplete", Some(1)),
-            (_, Some(place)) if !place.is_empty() && !place.contains('/') => ("google-places:details", Some(1)),
             (_, Some(photo)) if photo.contains("/photos/") && photo.ends_with("/media") => ("google-places:photo", Some(1)),
             _ => return Usage::Key { key: key.to_string(), units: 0 },
         },
@@ -710,10 +701,7 @@ pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     };
     // a part's, or one of its key's own (xAI's X search), made by a 2xx
     let most = KEY_PARTS.iter().find(|p| p.priced_as == priced_as).map_or(1, |p| p.units_max);
-    // a Places photo's answer is a redirect to it unless it asks for JSON
-    // (`skipHttpRedirect`), and the swap never follows one
-    let redirected = priced_as == "google-places:photo" && matches!(call.status, 301 | 302 | 303 | 307 | 308);
-    let made = (200..300).contains(&call.status) || redirected;
+    let made = (200..300).contains(&call.status);
     Usage::Key { key: priced_as.to_string(), units: units.filter(|_| made).map_or(0, |u| u.min(most)) }
 }
 
@@ -1088,9 +1076,7 @@ mod tests {
         assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
         assert_eq!(default_key_price("elevenlabs:speech"), Some((80_000, 1_000)));
         assert_eq!(default_key_price("fal:image"), Some((6_000, 1_048_576)));
-        assert_eq!(call("xai:chat"), Priced { list: 15_000, cost: 15_000, charge: 22_500 }, "a Grok chat call's tokens");
         assert_eq!(call("xai:image"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "a grok-imagine-image");
-        assert_eq!(call("google-places:details"), Priced { list: 20_000, cost: 20_000, charge: 30_000 }, "$20 per 1,000 Enterprise details");
         assert_eq!(call("google-places:photo"), Priced { list: 7_000, cost: 7_000, charge: 10_500 }, "$7 per 1,000 photos");
         assert_eq!(call("google-places:autocomplete"), Priced { list: 2_830, cost: 2_830, charge: 4_245 }, "$2.83 per 1,000 autocompletes");
         assert_eq!(default_key_price("nonesuch"), None);
@@ -1214,43 +1200,46 @@ mod tests {
         key_usage("fal", &KeyCall { method, host, path, body, status })
     }
 
-    /// Goal (FIN-445): a fal generation is charged by the pixels it asks
-    /// for, at Klein's rate, and the calls the SDK makes around it (its
-    /// queue's polls, status, result and cancel, its uploads) nothing.
+    /// Goal (FIN-445, and its review: when in doubt, charge zero): only a
+    /// call known to have made a known model's image is charged, a
+    /// synchronous FLUX.2 Klein 9B run, by the pixels it asks for; a queued
+    /// submit (fal makes it later, or fails or cancels it), its polls and
+    /// result, an edit, another model and every other call nothing.
     /// Method: the calls Hermes' `image_generate` makes for one image
     /// (`fal_client` 0.13: a submit, a status poll every 0.25 s and up,
-    /// the result), priced as a deployment's book prices them.
+    /// the result), and a synchronous run of the same request.
     #[test]
-    fn a_fal_image_is_metered_by_its_pixels_and_its_queue_by_nothing() {
+    fn a_fal_image_is_charged_only_when_a_known_model_made_it() {
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let hermes = br#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9","num_inference_steps":4,"output_format":"png","enable_safety_checker":false}"#;
         let made = Usage::Key { key: "fal:image".into(), units: 1024 * 576 };
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", hermes, 200), made, "the queue's submit");
-        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", hermes, 200), made, "a synchronous run");
+        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", hermes, 200), made, "a synchronous run: its answer is the image");
+        assert_eq!(book.price(&made).unwrap().charge, 5_063, "$0.0051");
         let free = Usage::Key { key: "fal".into(), units: 0 };
         let around = [
+            ("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b"),
             ("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status"),
             ("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status/stream"),
             ("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e"),
             ("PUT", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/cancel"),
-            ("POST", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/cancel"),
             ("POST", "rest.fal.ai", "/storage/upload/initiate"),
             ("POST", "rest.fal.ai", "/storage/auth/token"),
-            ("GET", "queue.fal.run", "/fal-ai/flux-2/klein/9b"),
+            ("GET", "fal.run", "/fal-ai/flux-2/klein/9b"),
+            ("POST", "fal.run", "/fal-ai/flux-2/klein/9b/edit"),
+            ("POST", "fal.run", "/fal-ai/flux-2/klein/4b"),
+            ("POST", "fal.run", "/fal-ai/flux-2-pro"),
+            ("POST", "fal.run", "/fal-ai/flux-2/klein/9b/"),
         ];
         for (method, host, path) in around {
             assert_eq!(fal(method, host, path, hermes, 200), free, "{method} {host}{path}");
         }
-        // one image: a submit, six polls (2 s at fal_client's backoff, 0.25 s
-        // and 5% more each) and the result, once eight images' $0.072
-        let calls = [made.clone()].into_iter().chain(std::iter::repeat_n(free.clone(), 7));
-        let charged: i64 = calls.map(|u| book.price(&u).unwrap().charge).sum();
-        assert_eq!(charged, 5_063, "$0.0051");
+        // Hermes' queued image (a submit, six polls, the result) is charged
+        // nothing until its result can be settled, once eight images' $0.072
         assert_eq!(8 * book.price(&Usage::Key { key: "fal".into(), units: 1 }).unwrap().charge, 72_000);
         assert_eq!(book.price(&free).unwrap().charge, 0);
         // the presets, a size of its own, several images, and none named
-        let sized = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", body.as_bytes(), 200);
+        let sized = |body: &str| fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", body.as_bytes(), 200);
         let units = |units| Usage::Key { key: "fal:image".into(), units };
         for (preset, pixels) in [("square_hd", 1_048_576), ("square", 262_144), ("portrait_4_3", 786_432), ("portrait_16_9", 589_824), ("landscape_4_3", 786_432), ("landscape_16_9", 589_824)] {
             assert_eq!(sized(&format!(r#"{{"prompt":"p","image_size":"{preset}"}}"#)), units(pixels), "{preset}");
@@ -1258,47 +1247,38 @@ mod tests {
         assert_eq!(sized(r#"{"prompt":"p","image_size":{"width":1920,"height":1080}}"#), units(1920 * 1080));
         assert_eq!(sized(r#"{"prompt":"p","image_size":"square_hd","num_images":4}"#), units(4 * 1_048_576));
         assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "Klein's default, landscape_4_3");
-        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", br#"{"prompt":"p","num_images":2}"#, 200), units(2 * 1024 * 768));
-        // an edit's size is its input's unless it names one (FIN-445 review)
-        let edit = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", body.as_bytes(), 200);
-        assert_eq!(edit(r#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#), units(0), "an edit of an input the meter does not see");
-        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":"square"}"#), units(512 * 512));
-        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":{"width":2048,"height":2048}}"#), units(4 * 1_048_576));
-        // another model's default is its own: unread
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p"}"#, 200), units(0));
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p","image_size":"square_hd"}"#, 200), units(1_048_576));
         // only fal's key
-        assert_eq!(key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
+        assert_eq!(key_usage("perplexity", &KeyCall { method: "POST", host: "fal.run", path: "/fal-ai/flux-2/klein/9b", body: hermes, status: 200 }), Usage::Key { key: "perplexity".into(), units: 1 });
     }
 
-    /// Goal: a fal generation the meter cannot read, or fal refused, is
-    /// charged nothing, and one it made at most a call's most (decision
-    /// 62); a release whose book has no image price charges its rows
-    /// nothing. Method: bodies that say no size, every answer the swap
-    /// meters, and sizes past the cap.
+    /// Goal: a Klein run the meter cannot read, or fal refused, is charged
+    /// nothing, and one it made at most a call's most (decision 62); a
+    /// release whose book has no image price charges its rows nothing.
+    /// Method: bodies that say no size, every answer the swap meters, and
+    /// sizes past the cap.
     #[test]
     fn a_fal_call_the_meter_cannot_read_or_fal_refused_is_charged_nothing() {
         let none = Usage::Key { key: "fal:image".into(), units: 0 };
-        let submit = |body: &[u8], status| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", body, status);
+        let run = |body: &[u8], status| fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", body, status);
         for body in [&b""[..], b"prompt=p", b"{\"prompt\":", b"[\"p\"]", b"\"p\"", br#"{"image_size":"poster"}"#, br#"{"image_size":{"width":1024}}"#, br#"{"image_size":{"width":-1,"height":1024}}"#, br#"{"image_size":{"width":1.5,"height":1024}}"#, br#"{"image_size":{"width":"1024","height":"1024"}}"#, br#"{"image_size":42}"#, br#"{"num_images":"2"}"#, br#"{"num_images":-1}"#, br#"{"num_images":0}"#, &[0xff, 0xfe][..]] {
-            assert_eq!(submit(body, 200), none, "{}", String::from_utf8_lossy(body));
+            assert_eq!(run(body, 200), none, "{}", String::from_utf8_lossy(body));
         }
         // a bad request, no key, a locked account, a rate limit, a redirect not followed
         for refused in [400, 401, 403, 404, 422, 429, 302, 100, 0] {
-            assert_eq!(submit(br#"{"prompt":"p"}"#, refused), none, "{refused}");
+            assert_eq!(run(br#"{"prompt":"p"}"#, refused), none, "{refused}");
         }
         // at most 16 megapixels a call, even sizes that overflow
         let most = Usage::Key { key: "fal:image".into(), units: 16 * 1_048_576 };
-        assert_eq!(submit(br#"{"image_size":{"width":100000,"height":100000}}"#, 200), most);
-        assert_eq!(submit(br#"{"image_size":{"width":18446744073709551615,"height":2},"num_images":2}"#, 200), none, "an overflow is no size");
-        assert_eq!(submit(br#"{"image_size":"square_hd","num_images":1000}"#, 200), most);
+        assert_eq!(run(br#"{"image_size":{"width":100000,"height":100000}}"#, 200), most);
+        assert_eq!(run(br#"{"image_size":{"width":18446744073709551615,"height":2},"num_images":2}"#, 200), none, "an overflow is no size");
+        assert_eq!(run(br#"{"image_size":"square_hd","num_images":1000}"#, 200), most);
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         assert_eq!(book.price(&most).unwrap().charge, 144_000, "$0.096 at list");
         // a release before the image price refuses its rows as unpriced
         let older = PriceBook { keys: book.keys.iter().filter(|k| k.key != "fal:image").cloned().collect(), ..book.clone() };
         assert_eq!(older.price(&Usage::Key { key: "fal:image".into(), units: 589_824 }), Err(PriceError::NoPrice));
-        assert_eq!(older.price(&Usage::Key { key: "fal".into(), units: 0 }).unwrap().charge, 0, "a poll is free in it too");
+        assert_eq!(older.price(&Usage::Key { key: "fal".into(), units: 0 }).unwrap().charge, 0, "a free call is free in it too");
     }
 
     /// A call on xAI's key, answered `status`, as the swap meters it.
@@ -1306,11 +1286,11 @@ mod tests {
         key_usage("xai", &KeyCall { method, host: "api.x.ai", path, body, status })
     }
 
-    /// Goal (FIN-445): only an X search on xAI's key is charged as one; a
-    /// plain Grok chat call is charged a typical chat's tokens, an image
-    /// the images it asks for, and any other call nothing. Method: the
-    /// call Hermes' `x_search` makes, and the chat and image calls an
-    /// agent's code makes with `XAI_API_KEY`.
+    /// Goal (FIN-445, and its review: when in doubt, charge zero): only an
+    /// X search on xAI's key is charged as one, and an image of a known
+    /// model one image a call; a chat (its tokens not read) and any other
+    /// call nothing. Method: the call Hermes' `x_search` makes, and the chat
+    /// and image calls an agent's code makes with `XAI_API_KEY`.
     #[test]
     fn an_xai_call_is_charged_as_an_x_search_only_when_it_is_one() {
         let mut book = PriceBook::defaults();
@@ -1320,7 +1300,7 @@ mod tests {
         assert_eq!(xai("POST", "/v1/responses", hermes, 200), search, "Hermes' x_search");
         assert_eq!(xai("POST", "/v1/chat/completions", br#"{"model":"grok-4.3","messages":[],"tools":[{"type":"web_search"},{"type":"x_search","allowed_x_handles":["x"]}]}"#, 200), search);
         assert_eq!(book.price(&search).unwrap().charge, 180_000, "an X search, as before");
-        let chat = Usage::Key { key: "xai:chat".into(), units: 1 };
+        let free = Usage::Key { key: "xai".into(), units: 0 };
         for (path, body) in [
             ("/v1/chat/completions", &br#"{"model":"grok-4.3","messages":[{"role":"user","content":"hi"}]}"#[..]),
             ("/v1/responses", br#"{"model":"grok-4.3","input":"hi"}"#),
@@ -1329,15 +1309,15 @@ mod tests {
             ("/v1/messages", br#"{"model":"grok-4.3","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#),
             ("/v1/chat/completions", b"a body the meter does not read"),
         ] {
-            assert_eq!(xai("POST", path, body, 200), chat, "{path} {}", String::from_utf8_lossy(body));
+            assert_eq!(xai("POST", path, body, 200), free, "a chat: {path} {}", String::from_utf8_lossy(body));
         }
-        assert_eq!(book.price(&chat).unwrap().charge, 22_500, "$0.0225, not an X search's $0.18");
-        let images = |units| Usage::Key { key: "xai:image".into(), units };
-        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 200), images(1));
-        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat","n":4}"#, 200), images(4));
-        assert_eq!(xai("POST", "/v1/images/generations", br#"{"prompt":"a cat","n":50}"#, 200), images(10), "at most a request's 10");
-        assert_eq!(book.price(&images(1)).unwrap().charge, 30_000);
-        let free = Usage::Key { key: "xai".into(), units: 0 };
+        let image = Usage::Key { key: "xai:image".into(), units: 1 };
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image","prompt":"a cat"}"#, 200), image);
+        assert_eq!(xai("POST", "/v1/images/generations", br#"{"model":"grok-imagine-image-2.0","prompt":"a cat","n":4}"#, 200), image, "one a call: its n is asked, not made");
+        assert_eq!(book.price(&image).unwrap().charge, 30_000);
+        for body in [&br#"{"model":"grok-imagine-image-mini","prompt":"a cat"}"#[..], br#"{"prompt":"a cat"}"#, br#"{"model":42,"prompt":"a cat"}"#] {
+            assert_eq!(xai("POST", "/v1/images/generations", body, 200), free, "a model the book does not price: {}", String::from_utf8_lossy(body));
+        }
         for (method, path) in [("GET", "/v1/models"), ("GET", "/v1/responses/resp_1"), ("DELETE", "/v1/responses/resp_1"), ("POST", "/v1/videos/generations"), ("POST", "/v1/tokenize-text"), ("GET", "/v1/api-key"), ("GET", "/v1/chat/completions")] {
             assert_eq!(xai(method, path, hermes, 200), free, "{method} {path}");
         }
@@ -1346,25 +1326,25 @@ mod tests {
 
     /// Goal: a call xAI refused made nothing, so is charged nothing, an X
     /// search too; an image call whose count the meter cannot read is
-    /// charged nothing; a release whose book has no chat or image price
-    /// refuses those rows, and prices an X search as before. Method: every
-    /// answer the swap meters, and bodies that say no count.
+    /// charged nothing; a release whose book has no image price refuses
+    /// those rows, and prices an X search as before. Method: every answer
+    /// the swap meters, and bodies that say no count.
     #[test]
     fn an_xai_call_refused_or_unread_is_charged_nothing() {
         let hermes = br#"{"model":"grok-4.3","input":"news","tools":[{"type":"x_search"}]}"#;
+        let image = br#"{"model":"grok-imagine-image","prompt":"a cat"}"#;
         // a bad request, no key, no credit, no model, a rate limit, a redirect not followed
         for refused in [400, 401, 403, 404, 422, 429, 302, 0] {
             assert_eq!(xai("POST", "/v1/responses", hermes, refused), Usage::Key { key: "xai".into(), units: 0 }, "{refused}");
-            assert_eq!(xai("POST", "/v1/chat/completions", b"{}", refused), Usage::Key { key: "xai:chat".into(), units: 0 }, "{refused}");
-            assert_eq!(xai("POST", "/v1/images/generations", b"{}", refused), Usage::Key { key: "xai:image".into(), units: 0 }, "{refused}");
+            assert_eq!(xai("POST", "/v1/images/generations", image, refused), Usage::Key { key: "xai:image".into(), units: 0 }, "{refused}");
         }
-        for body in [&b""[..], b"n=2", b"[1]", br#"{"n":"2"}"#, br#"{"n":-1}"#, br#"{"n":1.5}"#, br#"{"n":0}"#] {
-            assert_eq!(xai("POST", "/v1/images/generations", body, 200), Usage::Key { key: "xai:image".into(), units: 0 }, "{}", String::from_utf8_lossy(body));
+        for n in [r#""2""#, "-1", "1.5", "0", "null"] {
+            let body = format!(r#"{{"model":"grok-imagine-image","prompt":"a cat","n":{n}}}"#);
+            assert_eq!(xai("POST", "/v1/images/generations", body.as_bytes(), 200), Usage::Key { key: "xai:image".into(), units: 0 }, "{body}");
         }
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("xai:")).cloned().collect(), ..book.clone() };
-        assert_eq!(older.price(&Usage::Key { key: "xai:chat".into(), units: 1 }), Err(PriceError::NoPrice));
         assert_eq!(older.price(&Usage::Key { key: "xai:image".into(), units: 1 }), Err(PriceError::NoPrice));
         assert_eq!(older.price(&Usage::Key { key: "xai".into(), units: 1 }).unwrap().charge, 180_000, "an X search, as before");
     }
@@ -1374,9 +1354,10 @@ mod tests {
         key_usage("google-places", &KeyCall { method, host: "places.googleapis.com", path, body: b"", status })
     }
 
-    /// Goal (FIN-445): a Google Places search is charged an Enterprise
-    /// search as before, a place's details, its photo and an autocomplete
-    /// each its own list, and any other call nothing. Method: the goplaces
+    /// Goal (FIN-445, and its review: when in doubt, charge zero): a Places
+    /// photo and an autocomplete are charged their own list, each one
+    /// price; a search or a place's details, whose tier is its field mask's
+    /// (IDs only is free), and any other call nothing. Method: the goplaces
     /// skill's calls (Places API (New)), and the others the API takes.
     #[test]
     fn a_places_call_is_charged_as_what_it_is() {
@@ -1384,46 +1365,31 @@ mod tests {
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let charge = |u: &Usage| book.price(u).unwrap().charge;
         let one = |key: &str| Usage::Key { key: key.into(), units: 1 };
-        assert_eq!(places("POST", "/v1/places:searchText", 200), one("google-places"));
-        assert_eq!(places("POST", "/v1/places:searchNearby", 200), one("google-places"));
-        assert_eq!(charge(&one("google-places")), 52_500, "an Enterprise search, as before");
-        assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw", 200), one("google-places:details"));
-        assert_eq!(charge(&one("google-places:details")), 30_000, "$0.03, not a search's $0.0525");
         assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", 200), one("google-places:photo"), "skipHttpRedirect: its JSON");
-        // its default answer is a redirect to the image (FIN-445 review)
-        for redirect in [301, 302, 303, 307, 308] {
-            assert_eq!(places("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw/photos/AUc7tXX/media", redirect), one("google-places:photo"), "{redirect}");
-        }
-        assert_eq!(charge(&one("google-places:photo")), 10_500);
+        assert_eq!(charge(&one("google-places:photo")), 10_500, "$0.0105, not a search's $0.0525");
         assert_eq!(places("POST", "/v1/places:autocomplete", 200), one("google-places:autocomplete"));
+        assert_eq!(charge(&one("google-places:autocomplete")), 4_245);
         let free = Usage::Key { key: "google-places".into(), units: 0 };
-        for path in ["/v1/places/", "/v1/places/ChIJ/photos/AUc7", "/v1/places:searchtext", "/v1/places:searchText/x", "/v2/places:searchText", "/maps/api/place/textsearch/json", "/"] {
-            assert_eq!(places("GET", path, 200), free, "{path}");
+        for (method, path) in [("POST", "/v1/places:searchText"), ("POST", "/v1/places:searchNearby"), ("GET", "/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw"), ("GET", "/v1/places/"), ("GET", "/v1/places/ChIJ/photos/AUc7"), ("POST", "/v1/places:searchtext"), ("GET", "/v2/places/ChIJ/photos/AUc7/media"), ("GET", "/maps/api/place/textsearch/json"), ("GET", "/")] {
+            assert_eq!(places(method, path, 200), free, "{method} {path}");
         }
         assert_eq!(charge(&free), 0);
     }
 
-    /// Goal: a Places call Google refused (a bad field mask, a key over
-    /// its quota) is charged nothing, a search too; a release whose book
-    /// has no details price refuses those rows, and prices a search as
-    /// before.
+    /// Goal: a Places call Google refused or redirected (a photo's default
+    /// answer, its image elsewhere) is charged nothing; a release whose
+    /// book has no photo price refuses those rows.
     #[test]
-    fn a_places_call_google_refused_is_charged_nothing() {
-        for refused in [400, 401, 403, 404, 429, 302, 0] {
-            assert_eq!(places("POST", "/v1/places:searchText", refused), Usage::Key { key: "google-places".into(), units: 0 }, "{refused}");
-            assert_eq!(places("GET", "/v1/places/ChIJ", refused), Usage::Key { key: "google-places:details".into(), units: 0 }, "{refused}");
+    fn a_places_call_google_refused_or_redirected_is_charged_nothing() {
+        for status in [400, 401, 403, 404, 429, 301, 302, 303, 307, 308, 304, 0] {
+            assert_eq!(places("GET", "/v1/places/ChIJ/photos/AUc7/media", status), Usage::Key { key: "google-places:photo".into(), units: 0 }, "{status}");
+            assert_eq!(places("POST", "/v1/places:autocomplete", status), Usage::Key { key: "google-places:autocomplete".into(), units: 0 }, "{status}");
         }
-        // a photo refused, or not modified, made nothing; a redirect is a photo's alone
-        for refused in [400, 403, 404, 429, 300, 304, 0] {
-            assert_eq!(places("GET", "/v1/places/ChIJ/photos/AUc7/media", refused), Usage::Key { key: "google-places:photo".into(), units: 0 }, "{refused}");
-        }
-        assert_eq!(places("POST", "/v1/places:searchText", 302), Usage::Key { key: "google-places".into(), units: 0 });
-        assert_eq!(places("GET", "/v1/places/ChIJ", 302), Usage::Key { key: "google-places:details".into(), units: 0 });
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let older = PriceBook { keys: book.keys.iter().filter(|k| !k.key.starts_with("google-places:")).cloned().collect(), ..book.clone() };
-        assert_eq!(older.price(&Usage::Key { key: "google-places:details".into(), units: 1 }), Err(PriceError::NoPrice));
-        assert_eq!(older.price(&Usage::Key { key: "google-places".into(), units: 1 }).unwrap().charge, 52_500);
+        assert_eq!(older.price(&Usage::Key { key: "google-places:photo".into(), units: 1 }), Err(PriceError::NoPrice));
+        assert_eq!(older.price(&Usage::Key { key: "google-places".into(), units: 1 }).unwrap().charge, 52_500, "an older release's row, as before");
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

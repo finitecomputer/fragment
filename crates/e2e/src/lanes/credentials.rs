@@ -66,9 +66,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
     "a key's call the book prices by what it says (ElevenLabs' text to speech) reaches its host as it came, body and all, and is charged its text's characters, not a call",
     "and one its provider refused (a bad request, a rate limit) made nothing: its row and the agent's count charge nothing, whatever its text",
-    "fal: an image's submit reaches its host as it came and is charged the pixels it asks for, and a call around it (its queue's poll) nothing",
-    "xai: a call with the x_search tool is charged an X search, a plain chat call a chat's, and any other call (a model list's) nothing",
-    "google-places: a place's details are charged its own price, under a search's, and its photo, answered by its redirect to the image, its own",
+    "fal: a synchronous Klein run reaches its host as it came and is charged the pixels it asks for; a queued submit, made later or not, and a poll nothing",
+    "xai: a call with the x_search tool is charged an X search, and a plain chat call (its tokens not read) and any other call (a model list's) nothing",
+    "google-places: a place's photo is charged its own price, and a search and a place's details (their tier their field mask's) nothing",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -90,8 +90,9 @@ fn charge_for(key: &str, units: i64) -> i64 {
 const SPOKEN: &str = r#"{"text":"Hello there, friend.","model_id":"eleven_multilingual_v2"}"#;
 const SPOKEN_CHARS: i64 = 20;
 
-/// A fal image's submit, as Hermes' `image_generate` posts it, and the
-/// pixels it asks for: one `landscape_16_9` image, 1024 × 576.
+/// A fal image's request, as Hermes' `image_generate` posts it to the
+/// queue, and the pixels it asks for: one `landscape_16_9` image,
+/// 1024 × 576.
 const FAL_ASK: &str = r#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
 const FAL_PIXELS: i64 = 1024 * 576;
 
@@ -265,13 +266,13 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         said.starts_with("fetched 200") && seen["host"] == "places.googleapis.com" && seen["query"] == json!([["fields", "name"], ["key", key_value("google-places")]]),
         json!({ "said": said, "seen": seen }),
     );
-    // a place's details (FIN-445): charged below at its own price
+    // a place's details (FIN-445): charged below nothing, its tier its field mask's
     let said = say(s, 138, "fetch http://places.googleapis.com/v1/places/ChIJe2e?fields=rating with $GOOGLE_PLACES_API_KEY in query key")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     let detail_sent = said.starts_with("fetched 200") && seen["host"] == "places.googleapis.com" && seen["path"] == "/v1/places/ChIJe2e";
-    // its photo, answered as Google does by default: a redirect to the image
-    let said = say(s, 142, "fetch http://places.googleapis.com/v1/places/ChIJe2e/photos/AUe2e/media?maxWidthPx=400&e2e_status=302 with $GOOGLE_PLACES_API_KEY in query key")?;
-    let photo_sent = said.starts_with("fetched 302");
+    // its photo, answered as JSON (`skipHttpRedirect`; a redirect is charged nothing)
+    let said = say(s, 142, "fetch http://places.googleapis.com/v1/places/ChIJe2e/photos/AUe2e/media?maxWidthPx=400&skipHttpRedirect=true with $GOOGLE_PLACES_API_KEY in query key")?;
+    let photo_sent = said.starts_with("fetched 200");
 
     // Hermes' tool vendors share the existing upstream fake: each real
     // host and SDK header, with no vendor-specific response simulation.
@@ -288,12 +289,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             said.starts_with("fetched 200") && seen["host"] == host && seen["auth"][header] == format!("{scheme}{}", key_value(name)),
             json!({ "said": said, "seen": seen }));
     }
-    // fal's image, its submit as Hermes posts it (FIN-445): charged below by
-    // its pixels, and the call above (a poll's) nothing
+    // fal's image (FIN-445): queued as Hermes does, charged nothing (made
+    // later, or not); run synchronously, charged below by its pixels; and
+    // the call above (a poll's) nothing
     let said = say(s, 135, &format!("fetch http://queue.fal.run/fal-ai/flux-2/klein/9b with $FAL_KEY in authorization posting {FAL_ASK}"))?;
+    let queued = said.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|seen| seen["host"] == "queue.fal.run" && seen["method"] == "POST");
+    let said = say(s, 143, &format!("fetch http://fal.run/fal-ai/flux-2/klein/9b with $FAL_KEY in authorization posting {FAL_ASK}"))?;
     let fal_seen = s.upstream.seen().last().cloned().unwrap_or_default();
-    let fal_sent = said.starts_with("fetched 200")
-        && fal_seen["host"] == "queue.fal.run"
+    let fal_sent = queued
+        && said.starts_with("fetched 200")
+        && fal_seen["host"] == "fal.run"
         && fal_seen["method"] == "POST"
         && fal_seen["path"] == "/fal-ai/flux-2/klein/9b"
         && fal_seen["body"] == FAL_ASK
@@ -340,11 +345,12 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
 
     // the charges: each operator key's call, at its price; and the month's counts
-    let keyed = ["perplexity", "elevenlabs", "google-places", "firecrawl", "browser-use", "x"];
+    let keyed = ["perplexity", "elevenlabs", "firecrawl", "browser-use", "x"];
     // each key's call, the speech calls as its part (`price::KEY_PARTS`):
-    // the one made, and the two refused; fal's image and its poll; and
-    // xAI's X search, chat and model list; and a place's details and photo
-    let held_rows = keyed.len() + 3 + 2 + 3 + 2;
+    // the one made, and the two refused; fal's run, its queued submit and
+    // its poll; xAI's X search, chat and model list; and Places' search,
+    // details and photo
+    let held_rows = keyed.len() + 3 + 3 + 3 + 3;
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows);
     let rows = held();
@@ -360,15 +366,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(SWAP_CHECKS[32], refused_sent && nothing == 2, json!({ "said": refused_said, "rows": rows }));
     let image = charge_for("fal:image", FAL_PIXELS);
     let fal_made = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "fal:image", "units": FAL_PIXELS }) && theirs(r) && charged(r) == Some(image));
-    let fal_polled = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "fal", "units": 0 }) && theirs(r) && charged(r) == Some(0));
+    let fal_polled = rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": "fal", "units": 0 }) && theirs(r) && charged(r) == Some(0)).count() == 2;
     s.ok(SWAP_CHECKS[33], fal_sent && fal_made && fal_polled && image < charge_of("fal"), json!({ "seen": fal_seen, "image": image, "rows": rows }));
-    let held_row = |key: &str, units: i64, micros: i64| rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(micros));
-    let xai_charged = held_row("xai", 1, charge_of("xai")) && held_row("xai:chat", 1, charge_of("xai:chat")) && held_row("xai", 0, 0);
-    s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && xai_charged && charge_of("xai:chat") < charge_of("xai") / 5, json!({ "seen": xai_seen, "rows": rows }));
-    let detail = charge_of("google-places:details");
+    let held_row = |key: &str, units: i64, micros: i64| rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(micros)).count();
+    let xai_charged = held_row("xai", 1, charge_of("xai")) == 1 && held_row("xai", 0, 0) == 2;
+    s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && xai_charged, json!({ "seen": xai_seen, "rows": rows }));
     let photo = charge_of("google-places:photo");
-    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && held_row("google-places:details", 1, detail) && held_row("google-places:photo", 1, photo) && detail < charge_of("google-places"), json!({ "detail": detail, "photo": photo, "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places") + charge_of("google-places:details") + charge_of("google-places:photo")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 2, image), ("browser-use", 1, charge_of("browser-use")), ("xai", 3, charge_of("xai") + charge_of("xai:chat")), (SWAP_OWN, 1, 0)];
+    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && held_row("google-places:photo", 1, photo) == 1 && held_row("google-places", 0, 0) == 2, json!({ "photo": photo, "rows": rows }));
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places:photo")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 3, image), ("browser-use", 1, charge_of("browser-use")), ("xai", 3, charge_of("xai")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
