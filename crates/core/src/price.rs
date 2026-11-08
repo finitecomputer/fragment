@@ -670,22 +670,31 @@ fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> 
 
 /// Firecrawl's formats that cost 4 credits a page more than a scrape's 1:
 /// an LLM's reading (docs.firecrawl.dev/billing, read 2026-11-07).
-const FIRECRAWL_LLM_FORMATS: [&str; 7] = ["json", "extract", "question", "query", "highlights", "audio", "video"];
+/// Each is its kind (its bit), charged once a page however often it is
+/// named: JSON and v1's `extract` are one, a question and a query one.
+const FIRECRAWL_LLM_FORMATS: [(&str, u8); 7] = [("json", 0), ("extract", 0), ("question", 1), ("query", 1), ("highlights", 2), ("audio", 3), ("video", 4)];
+
+/// Firecrawl's sources that are free, and make no page to scrape: its
+/// tool catalogues (docs.firecrawl.dev/api-reference/endpoint/search).
+const FIRECRAWL_FREE_SOURCES: [&str; 2] = ["alexandria", "skills"];
 
 /// The credits a page scraped with `formats` costs (strings, or objects
-/// naming their `type`; absent, markdown alone): 1, and 4 for each LLM
-/// format.
+/// naming their `type`; absent, markdown alone): 1, and 4 for each kind
+/// of LLM format it names.
 fn firecrawl_page(formats: Option<&serde_json::Value>) -> u64 {
-    let llm = formats.and_then(serde_json::Value::as_array).map_or(0, |all| {
-        all.iter().filter(|f| f.as_str().or_else(|| f.get("type")?.as_str()).is_some_and(|name| FIRECRAWL_LLM_FORMATS.contains(&name))).count() as u64
+    let kinds = formats.and_then(serde_json::Value::as_array).map_or(0u8, |all| {
+        all.iter()
+            .filter_map(|f| f.as_str().or_else(|| f.get("type")?.as_str()))
+            .filter_map(|name| FIRECRAWL_LLM_FORMATS.iter().find(|(llm, _)| *llm == name))
+            .fold(0, |kinds, (_, kind)| kinds | 1 << kind)
     });
-    1 + 4 * llm
+    1 + 4 * u64::from(kinds.count_ones())
 }
 
 /// The credits a Firecrawl search asks for: 2 per 10 results (`limit`,
 /// absent `limit_default`, a source each of the kinds its `sources` name
-/// but `alexandria`, which is free), and a page each when `scrapeOptions`
-/// names some `formats` (none, it scrapes nothing). None for a `limit` or
+/// but the free ones, `FIRECRAWL_FREE_SOURCES`), and a page each when
+/// `scrapeOptions` names some `formats` (none, it scrapes nothing). None for a `limit` or
 /// `sources` that is no count or list of kinds.
 fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>, limit_default: u64) -> Option<u64> {
     let limit = said.get("limit").map_or(Some(limit_default), serde_json::Value::as_u64)?;
@@ -693,7 +702,7 @@ fn firecrawl_search(said: &serde_json::Map<String, serde_json::Value>, limit_def
         None => 1,
         Some(all) => {
             let mut kinds: Vec<&str> = all.as_array()?.iter().map(|s| s.as_str().or_else(|| s.get("type")?.as_str())).collect::<Option<_>>()?;
-            kinds.retain(|kind| *kind != "alexandria");
+            kinds.retain(|kind| !FIRECRAWL_FREE_SOURCES.contains(kind));
             kinds.sort_unstable();
             kinds.dedup();
             kinds.len() as u64
@@ -1544,6 +1553,21 @@ mod tests {
         assert_eq!(firecrawl("POST", "/v1/search", br#"{"query":"q","scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 5));
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","scrapeOptions":{"formats":["markdown"]}}"#, 200), credits(2 + 10), "v2's 10");
         assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["web","web",{"type":"web"}]}"#, 200), credits(2), "web once");
+        // each kind of LLM format once a page, a question and a query one kind (FIN-445 review)
+        let scraped = |formats: &str| firecrawl("POST", "/v2/scrape", format!(r#"{{"url":"u","formats":{formats}}}"#).as_bytes(), 200);
+        assert_eq!(scraped(r#"[{"type":"json","prompt":"name"},{"type":"json","prompt":"name"}]"#), credits(5));
+        assert_eq!(scraped(r#"[{"type":"question","question":"q"},{"type":"query","prompt":"q"}]"#), credits(5));
+        assert_eq!(scraped(r#"["json",{"type":"highlights"}]"#), credits(9), "two kinds");
+        assert_eq!(scraped(r#"["json","extract"]"#), credits(5), "v1's extract is JSON");
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":5,"scrapeOptions":{"formats":[{"type":"json"},{"type":"json"}]}}"#, 200), credits(2 + 5 * 5));
+        // the tool catalogues are free and make no page
+        for sources in [r#"["skills"]"#, r#"[{"type":"skills"}]"#, r#"["skills","alexandria"]"#] {
+            for scrape in ["", r#","scrapeOptions":{"formats":[{"type":"json","prompt":"name"}]}"#] {
+                let body = format!(r#"{{"query":"q","limit":10,"sources":{sources}{scrape}}}"#);
+                assert_eq!(firecrawl("POST", "/v2/search", body.as_bytes(), 200), credits(0), "{body}");
+            }
+        }
+        assert_eq!(firecrawl("POST", "/v2/search", br#"{"query":"q","limit":10,"sources":["skills","web","alexandria"]}"#, 200), credits(2), "web alone");
         assert_eq!(firecrawl("POST", "/v2/map", br#"{"url":"u"}"#, 200), credits(1));
         let free = Usage::Key { key: "firecrawl".into(), units: 0 };
         // a batch is billed as each page completes, as a crawl is: its submit is no page (FIN-445 review)
