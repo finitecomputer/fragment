@@ -1710,7 +1710,8 @@
           "offers_per_day",
           "last_paid_seat",
           "private_while_reaching",
-          "unshare_first"
+          "unshare_first",
+          "key_paused"
         ],
         "type": "string",
         "x-fragment-direction": "out",

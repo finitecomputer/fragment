@@ -210,6 +210,11 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   done on the lost life after that save (Paul, 2026-10-23).
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
+- `key_paused`: a shared key's charges this last hour reached its owner's
+  cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
+  calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
+  until `resumesAt`, when the shell draws again. Worked out on read from
+  the computer's `key_hour`, and told as a charge reaches the cap.
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). The shell shows them over

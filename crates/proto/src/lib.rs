@@ -780,10 +780,13 @@ pub enum Reason {
     /// else in it, an invite waiting), so for now it takes no secret and no
     /// door: it is made private first (FIN-352; `Sharing::beyond`).
     UnshareFirst,
+    /// A shared key's calls are paused: its charges this last hour reached
+    /// the cap its person holds them to (FIN-448, `fragment_core::key_hour`).
+    KeyPaused,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 27] = [
+    pub const ALL: [Reason; 28] = [
         Reason::TrialUnknown,
         Reason::TrialEnded,
         Reason::TrialUsed,
@@ -811,6 +814,7 @@ impl Reason {
         Reason::LastPaidSeat,
         Reason::PrivateWhileReaching,
         Reason::UnshareFirst,
+        Reason::KeyPaused,
     ];
 
     /// Its name on the wire.
@@ -843,6 +847,7 @@ impl Reason {
             Reason::LastPaidSeat => "last_paid_seat",
             Reason::PrivateWhileReaching => "private_while_reaching",
             Reason::UnshareFirst => "unshare_first",
+            Reason::KeyPaused => "key_paused",
         }
     }
 
@@ -2983,6 +2988,7 @@ mod tests {
             (LastPaidSeat, "last_paid_seat"),
             (PrivateWhileReaching, "private_while_reaching"),
             (UnshareFirst, "unshare_first"),
+            (KeyPaused, "key_paused"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
         for (reason, wire) in all {

@@ -1956,7 +1956,9 @@ platform's, reaching no provider: 400 `invalid_request` (a malformed
 placeholder, a provider not offered or in a place it does not take, more
 than 4, or two agents' in one request), 403 `forbidden` (another host than
 its provider's, a tag naming no agent here, an agent narrowed from it), 403
-`not_connected`, or the ledger's 402 or 403.
+`not_connected`, the ledger's 402 or 403, or 429 `rate_limited` (reason
+`key_paused`, with `retry_after_ms`) for a shared key whose charges this
+last hour reached its owner's cap (docs/computers.md, `key_paused`).
 
 ### An agent's routines (decision 38)
 
