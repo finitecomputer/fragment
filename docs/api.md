@@ -1123,7 +1123,8 @@ none (its picture is its `avatar.png`): a making or `PUT` on one is 400.
 | `DELETE /api/f/{name}/icon` | editors | → `{icon: null}` |
 
 - **A making** names one object for the fragment's title, description and
-  the hint, draws `icon::CANDIDATES` of it, cuts each out and checks it,
+  the hint (the object a hint names, without its writing or negations, as
+  `subject`), draws `icon::CANDIDATES` of it, cuts each out and checks it,
   within a minute. `candidates` are those kept, best first, each `png` the
   icon's bytes as base64, `score` how surely it shows one object of its
   subject; `flaws` counts the refused by flaw: `empty`, `cut_off`, `tile`,
