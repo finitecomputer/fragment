@@ -321,6 +321,8 @@ run it as a background terminal task after revealing the working app;
 never hold up creation, deployment or the first link for it. It uses the
 app's title, description and optional hint, then sets the best candidate.
 If none passes the checks, it reports failure and keeps the current icon.
+Its output's `subject` is what was drawn: read it before telling the person
+what the icon shows.
 Generation and upload require editor access and bill the app's owner.
 
 Preview refresh queues the browser capture; check `fragment status` for
