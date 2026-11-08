@@ -550,19 +550,26 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
   // it never undoes one. One that fails leaves it unknown and says so in
   // Settings, with Try again (`homeUnread`); Settings shown read it again.
   // That line stays while a read is out (a list's refresh reads it too), so
-  // it never jumps from under a hand: an answer takes it away. ----
+  // it never jumps from under a hand: an answer takes it away. Reads may
+  // overlap (Try again reads afresh): only the newest one's answer applies,
+  // success or failure (`homeReads`, each read's number), so an older one
+  // never puts back what a newer one replaced. ----
   const homes = new Map();
   const homeWrites = new Map();
-  const homeReads = new Set();
+  const homeReads = new Map();
+  let homeReadsAsked = 0;
   const homeUnread = new Set();
   const wrote = (agent) => homeWrites.set(agent, (homeWrites.get(agent) ?? 0) + 1);
-  function readHome(agent) {
-    if (homeReads.has(agent)) return;
-    homeReads.add(agent);
+  // (`afresh`: a read of its own, whatever read is out)
+  function readHome(agent, afresh = false) {
+    if (!afresh && homeReads.has(agent)) return;
+    const mine = ++homeReadsAsked;
+    homeReads.set(agent, mine);
     const asked = homeWrites.get(agent) ?? 0;
     agentJson(agent)
       .catch((e) => (e.status === 404 ? {} : null))
       .then((j) => {
+        if (homeReads.get(agent) !== mine) return;
         homeReads.delete(agent);
         if ((homeWrites.get(agent) ?? 0) !== asked) return;
         if (j) {
@@ -611,8 +618,7 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
       });
     } catch (e) {
       wrote(agent);
-      homeReads.delete(agent);
-      readHome(agent);
+      readHome(agent, true);
       throw e;
     }
     wrote(agent);
@@ -639,10 +645,7 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
     const again = el("button", "quiet", "Try again");
     again.type = "button";
     // a read of its own, whatever read is out: that one was asked before
-    again.onclick = () => {
-      homeReads.delete(a.fragment);
-      readHome(a.fragment);
-    };
+    again.onclick = () => readHome(a.fragment, true);
     const unread = actionLine(el("span", "muted", "Couldn't read where it reaches you."), again);
     unread.dataset.homeUnread = a.fragment;
     homeUnreadLines.set(pick, unread);

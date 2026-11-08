@@ -4869,6 +4869,8 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // refused while `__refuse` is not false
     let refusing = format!(
         "(() => {{ const real = window.fetch; window.__refused = 0; window.fetch = (u, o) => {{ if (window.__refuse !== false && (o?.method ?? 'GET') === 'GET' && String(u).endsWith({})) {{ window.__refused++; \
+         const no = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         if (window.__hold === true) {{ window.__hold = false; return new Promise((done) => {{ window.__release = () => done(no()); }}); }} \
          return Promise.resolve(new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }})); }} return real(u, o); }}; }})();",
         js(&format!("/api/f/{agent}/file?path=agent.json"))
     );
@@ -4894,21 +4896,32 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
     b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
+    // a list's refresh reads it again (`loadHomes`): one held out, as a
+    // slow read is, while the hand is on Try again, made by a list change
+    // (a fragment made). The line stays under the hand through it
+    b.eval(&p, "(window.__hold = true, true)")?;
+    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": format!("{}-refresh", me.first), "template": "blank" })), &[])?;
+    anyhow::ensure!(made.status == 200, "a fragment made, for a list's refresh: {made}");
+    let held = said && b.until(&p, "typeof window.__release === 'function'", wait);
     // reads answer from the press of Try again on, so the read it starts is
-    // the one that answers; any before it, a list's refresh's, still fail
-    // (and the line waits under the hand through them)
+    // the one that answers; the refresh's, asked before, is refused
     b.eval(&p, &format!("(document.addEventListener('click', (e) => {{ if (e.target.closest?.({})) window.__refuse = false; }}, true), true)", js(&format!("[data-home-unread={agent:?}] button"))))?;
-    if said {
+    if held {
         b.click(&p, &format!("[data-home-unread={agent:?}] button"))?;
     }
-    let retried = said && b.until(&p, &painted, wait);
-    let second = json!({ "line": line, "seen": b.eval(&p, &seen)? });
+    let retried = held && b.until(&p, &painted, wait);
+    let second = json!({ "line": line, "held": held, "seen": b.eval(&p, &seen)? });
+    // the refresh's read let go (refused), so nothing is left out
+    b.eval(&p, "(window.__release?.(), true)")?;
     b.close(p)?;
     s.ok(
-        "a home read that fails with Settings open says so under its pick in one line, with Try again, which reads it again and shows it",
-        said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && retried,
+        "a home read that fails with Settings open says so under its pick in one line, with Try again, which stays under the hand while a list's refresh reads it, then reads it again and shows it",
+        said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && held && retried,
         second,
     );
+    let refresh = made.body["name"].as_str().unwrap_or("").to_string();
+    let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{refresh}"), None, &[])?;
+    anyhow::ensure!(deleted.status == 200, "the fragment made for a refresh deleted: {deleted}");
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
