@@ -49,6 +49,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
+use fragment_core::key_pause::{KeyPause, KeyPauses};
 use fragment_core::computer::{
     alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
@@ -624,45 +625,22 @@ struct Asked {
 }
 
 /// `computer/used`'s body: an agent's calls a provider answered, at `at`,
-/// each with what it was charged.
+/// each with what it was charged; `opened`, when the gate heard the
+/// ledger let its operator keys' calls through (0: none heard), which ends
+/// a pause heard before it (`fragment_core::key_pause`).
 #[derive(Deserialize)]
 struct UsedAsk {
     agent: String,
     at: i64,
     uses: Vec<Used>,
+    #[serde(default)]
+    opened: i64,
 }
 
 #[derive(Deserialize)]
 struct Used {
     provider: String,
     micros: i64,
-}
-
-/// An operator key paused for its owner (docs/ledger.md, "Shared-key
-/// guard"), as the swap heard the ledger refuse it: its notice
-/// (`ComputerNotice::KeyPaused`) until `resumes_at`, a call on it going
-/// through, or its owner changing its cap. Kept as a line of text
-/// (`<provider> <spent> <cap> <resumes at>`), as `computer/key-pause`
-/// sends it: the cell's Wasm carries no decoder of its own for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct KeyPause {
-    provider: String,
-    spent_micros: i64,
-    cap_micros: i64,
-    resumes_at: i64,
-}
-
-impl KeyPause {
-    fn of_line(line: &str) -> Option<KeyPause> {
-        let mut w = line.split_whitespace();
-        let provider = w.next()?.to_string();
-        let mut n = || w.next()?.parse::<i64>().ok();
-        Some(KeyPause { provider, spent_micros: n()?, cap_micros: n()?, resumes_at: n()? })
-    }
-
-    fn line(&self) -> String {
-        format!("{} {} {} {}", self.provider, self.spent_micros, self.cap_micros, self.resumes_at)
-    }
 }
 
 /// `computer/uses`' body: a month (`YYYY-MM`), or this one.
@@ -974,46 +952,24 @@ impl ComputerCell {
 
     /// `told` and a notice of each key still paused, after them.
     fn with_pauses(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
-        told.extend(self.key_pauses()?.into_iter().map(|p| ComputerNotice::KeyPaused { provider: p.provider, spent_micros: p.spent_micros, cap_micros: p.cap_micros, resumes_at: p.resumes_at }));
+        told.extend(self.key_pauses()?.live(js::now_ms()).map(KeyPause::notice));
         Ok(told)
     }
 
-    /// The pauses kept, one past its `resumes_at` among them until the next
-    /// write; a record that does not read is none (best effort, as the
-    /// guard is).
-    fn stored_pauses(&self) -> CellResult<Vec<KeyPause>> {
-        Ok(self.meta(MetaKey::KeyPauses)?.map(|v| v.lines().filter_map(KeyPause::of_line).collect()).unwrap_or_default())
+    /// Its keys' pauses as kept (`fragment_core::key_pause`): text a
+    /// release before the guard never wrote, read as none.
+    fn key_pauses(&self) -> CellResult<KeyPauses> {
+        Ok(KeyPauses::read(&self.meta(MetaKey::KeyPauses)?.unwrap_or_default()))
     }
 
-    /// The keys paused now.
-    fn key_pauses(&self) -> CellResult<Vec<KeyPause>> {
-        let now = js::now_ms();
-        Ok(self.stored_pauses()?.into_iter().filter(|p| p.resumes_at > now).collect())
-    }
-
-    /// `provider`'s pause as `pause` says (none: it resumed), its owner's
-    /// pages told as it starts, its cap changes, or it goes (once ended by
-    /// its time too: a page that showed it reads it gone).
-    async fn key_paused(&self, provider: &str, pause: Option<KeyPause>) -> CellResult<()> {
-        let now = js::now_ms();
-        let mut all = self.stored_pauses()?;
-        let held = all.iter().find(|p| p.provider == provider).cloned();
-        let live = held.as_ref().filter(|h| h.resumes_at > now);
-        let tell = match (live, &pause) {
-            // each refused call tells it again: written only as it says
-            // more (another cap, or a resume a minute or more later)
-            (Some(h), Some(p)) if h.cap_micros == p.cap_micros && p.resumes_at < h.resumes_at + 60_000 => return Ok(()),
-            (Some(h), Some(p)) => h.cap_micros != p.cap_micros,
-            (None, Some(_)) => true,
-            (_, None) if held.is_none() => return Ok(()),
-            (_, None) => true,
-        };
-        all.retain(|p| p.provider != provider && p.resumes_at > now);
-        all.extend(pause);
-        assert!(all.len() <= self.cfg.providers.providers().len(), "a pause a catalog row at most");
-        match all.is_empty() {
-            true => self.delete_meta(MetaKey::KeyPauses)?,
-            false => self.set_meta(MetaKey::KeyPauses, &all.iter().map(KeyPause::line).collect::<Vec<_>>().join("\n"))?,
+    /// Its keys' pauses changed by `change` (whether its owner's pages are
+    /// told; `None`: nothing changed, nothing written), kept, and told.
+    async fn key_pauses_changed(&self, change: impl FnOnce(&mut KeyPauses) -> Option<bool>) -> CellResult<()> {
+        let mut kept = self.key_pauses()?;
+        let Some(tell) = change(&mut kept) else { return Ok(()) };
+        match kept.text() {
+            text if text.is_empty() => self.delete_meta(MetaKey::KeyPauses)?,
+            text => self.set_meta(MetaKey::KeyPauses, &text)?,
         }
         if tell {
             self.tell_owner().await;
@@ -2778,23 +2734,29 @@ impl ComputerCell {
                 let b: UsedAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
                 self.count_uses(&b)?;
-                // a call that went through: its key is paused no more
-                let paused = self.stored_pauses()?;
-                for u in b.uses.iter().filter(|u| paused.iter().any(|p| p.provider == u.provider)) {
-                    self.key_paused(&u.provider, None).await?;
+                // a call the ledger let through after its key's pause began
+                // ends it; one let through before it proves nothing
+                let now = js::now_ms();
+                for u in &b.uses {
+                    self.key_pauses_changed(|k| k.used(&u.provider, b.opened, now).then_some(true)).await?;
                 }
                 json_response(&json!({ "ok": true }))
             }
             "computer/key-pause" => {
-                // `{provider, pause}`: its line (`KeyPause`), or null
+                // `{provider, pause}`: a refusal heard (its line,
+                // `KeyPause::line`), or null: its owner changed its cap
                 let b: Value = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
                 let provider = b["provider"].as_str().unwrap_or_default();
                 let pause = b["pause"].as_str().map(KeyPause::of_line);
-                if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) || pause.as_ref().is_some_and(|p| p.as_ref().is_none_or(|p| p.provider != provider || p.spent_micros < 0 || p.cap_micros <= 0)) {
+                if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) || pause.as_ref().is_some_and(|p| p.as_ref().is_none_or(|p| p.provider != provider)) {
                     return Err(CellError::invalid(format!("a pause names one of its operator keys, {provider:?}, and what it spent of its cap")));
                 }
-                self.key_paused(provider, pause.flatten()).await?;
+                let now = js::now_ms();
+                match pause.flatten() {
+                    Some(p) => self.key_pauses_changed(|k| k.paused(p, now)).await?,
+                    None => self.key_pauses_changed(|k| Some(k.lifted(provider, now))).await?,
+                }
                 json_response(&json!({ "ok": true }))
             }
             "computer/uses" => {
@@ -3895,29 +3857,39 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // the operator's keys among them, and the gate asked for them last:
     // each key its own question, the standing and its guard in one ask
     let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)).collect();
+    // when the ledger was heard letting them through: the earliest of the
+    // keys' answers (0: none heard), which ends no pause heard after it
+    let mut opened = i64::MAX;
     if let Some((_, owner, _)) = &payer {
         for (i, p) in keys.iter().enumerate() {
             if keys[..i].iter().any(|q| q.provider == p.provider) {
                 continue;
             }
             let open = crate::ledger::KeyOpen { key: p.provider.clone() };
-            if let Err(e) = crate::ledger::may(env, owner, &open).await {
-                let refused = CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message));
-                let Some(Refused::KeyPaused { cap, spent, resumes_in_ms }) = e.refused else { return Err(refused) };
-                // its owner is told, once a pause: the computer's notice,
-                // with the one tap that lifts its cap
-                let line = KeyPause { provider: p.provider.clone(), spent_micros: spent, cap_micros: cap, resumes_at: js::now_ms() + resumes_in_ms }.line();
-                let pause = json!({ "provider": p.provider, "pause": line });
-                let (env, computer) = (env.clone(), computer.to_string());
-                ctx.wait_until(async move {
-                    if let Err(e) = ask(&env, &computer, "computer/key-pause", &pause).await {
-                        console_error!("{}", json!({ "egress": "swap", "keyPause": e.message }));
-                    }
-                });
-                return Err(refused.retry_after(resumes_in_ms.max(1_000).unsigned_abs()));
-            }
+            let e = match crate::ledger::may_heard(env, owner, &open).await {
+                Ok(at) => {
+                    opened = opened.min(at);
+                    continue;
+                }
+                Err(e) => e,
+            };
+            let refused = CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message));
+            let Some(Refused::KeyPaused { cap, spent, resumes_in_ms }) = e.refused else { return Err(refused) };
+            // its owner is told, once a pause: the computer's notice, with
+            // the one tap that lifts its cap (the platform's next step)
+            let (allow_micros, resumes_at) = (fragment_core::ledger::guard::next_lift(cap), js::now_ms() + resumes_in_ms);
+            let line = KeyPause { provider: p.provider.clone(), spent_micros: spent, cap_micros: cap, allow_micros, resumes_at, paused_at: e.heard_at }.line();
+            let pause = json!({ "provider": p.provider, "pause": line });
+            let (env, computer) = (env.clone(), computer.to_string());
+            ctx.wait_until(async move {
+                if let Err(e) = ask(&env, &computer, "computer/key-pause", &pause).await {
+                    console_error!("{}", json!({ "egress": "swap", "keyPause": e.message }));
+                }
+            });
+            return Err(refused.retry_after(resumes_in_ms.max(1_000).unsigned_abs()));
         }
     }
+    let opened = if opened == i64::MAX { 0 } else { opened };
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
     // after the answer, never in its way
@@ -3949,7 +3921,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             if !rows.is_empty() {
                 crate::meter::charge(&env, &owner, rows).await;
             }
-            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
+            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses, "opened": opened })).await {
                 console_error!("{}", json!({ "egress": "swap", "used": e.message }));
             }
         });

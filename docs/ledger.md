@@ -284,9 +284,15 @@ two seconds and spent $300 in about 35 minutes through the shared key.
 - **The notice:** as it refuses, the swap tells the agent's computer,
   whose owner is shown `key_paused` over every chat (docs/computers.md,
   What its owner is told), once a pause: "ElevenLabs calls paused: $5.03
-  this hour", with one button, Allow up to four times its cap an hour.
-  It goes as a call on the key goes through, as its cap changes (the
-  route tells the person's computer), or at the pause's end.
+  this hour", with one button, the platform's next step
+  (`guard::next_lift`: four times the cap, at most `KEY_CAP_MAX`, sent as
+  the notice's `allowMicros`); at the most, it says so, with no button.
+  It ends only on evidence (`fragment_core::key_pause`): its deadline
+  (the page draws again then, idle or not), its owner changing the cap
+  (the route tells the person's computer, which then refuses a pause
+  heard before it), or a call the ledger was heard letting through after
+  the pause was heard. A call let through before it (in flight as it
+  began, or by another isolate's cached allowance) ends nothing.
 - **Best effort:** asked through the gate (below), an allowance kept a
   minute in each isolate and a pause five seconds (`KEY_PAUSE_KEEP_MS`),
   so a lift reaches the next call within seconds; a ledger that does not

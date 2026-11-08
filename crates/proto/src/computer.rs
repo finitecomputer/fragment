@@ -611,10 +611,19 @@ pub enum ComputerNotice {
     /// "Shared-key guard"): its owner's calls on `provider` were charged
     /// `spent_micros` this last hour, at its cap `cap_micros`, and resume
     /// by `resumes_at` as the hour passes, or at once when its owner raises
-    /// the cap (`PUT /api/ledger/key-cap/{key}`). Told once a pause: gone
-    /// as a call on it goes through, or its cap changes.
+    /// the cap to `allow_micros` (`PUT /api/ledger/key-cap/{key}`), the
+    /// next the platform allows; none at the most it allows. Told once a
+    /// pause: gone at `resumes_at`, as its cap changes, or as a call the
+    /// ledger let through after it goes through.
     #[serde(rename_all = "camelCase")]
-    KeyPaused { provider: String, spent_micros: i64, cap_micros: i64, resumes_at: i64 },
+    KeyPaused {
+        provider: String,
+        spent_micros: i64,
+        cap_micros: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_micros: Option<i64>,
+        resumes_at: i64,
+    },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as

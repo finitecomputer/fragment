@@ -56,7 +56,18 @@ pub const SLOT_MS: i64 = 5 * 60_000;
 pub const SLOTS: i64 = HOUR_MS / SLOT_MS;
 
 const _: () = assert!(HOUR_MS % SLOT_MS == 0, "the hour is whole slots");
+/// How far one tap of a paused key's notice lifts its cap (`next_lift`).
+pub const LIFT_STEP: i64 = 4;
+
 const _: () = assert!(KEY_HOUR_CAP > 0 && KEY_HOUR_CAP <= KEY_CAP_MAX, "the guard's default is a cap a person may set");
+
+/// The cap one tap of a paused key's notice allows after `cap`:
+/// `LIFT_STEP` times it, at most `KEY_CAP_MAX`; none at the most already.
+/// The platform's alone: the notice says it (`allow_micros`), and the page
+/// sends what it says.
+pub fn next_lift(cap: i64) -> Option<i64> {
+    (cap < KEY_CAP_MAX).then(|| cap.saturating_mul(LIFT_STEP).clamp(1, KEY_CAP_MAX))
+}
 
 /// The shared key a key row's usage names: a part's name (`price::KeyPart`,
 /// `<key>:<part>`) is its key's, so a key's guard sums all its parts. A
@@ -481,5 +492,27 @@ mod tests {
         // an org has no keys
         let mut org = World { ledger: Ledger::new_org(T0), store: Memory::default(), now: T0, book: book() };
         assert_eq!(org.cap("keycap:voice:o", "voice", Some(KEY_HOUR_CAP)), Err(Refused::PersonsOnly));
+    }
+
+    /// Goal (Alex on #1117, P2 2): a tap never offers more than a person
+    /// may allow. Method: the default's steps, a cap above $250, $320 (a
+    /// fourth tap), the most, and past it; each offer is one `set_key_cap`
+    /// takes.
+    #[test]
+    fn a_lift_offers_only_what_a_person_may_allow() {
+        assert_eq!(next_lift(KEY_HOUR_CAP), Some(20 * USD));
+        assert_eq!(next_lift(20 * USD), Some(80 * USD));
+        assert_eq!(next_lift(80 * USD), Some(320 * USD));
+        assert_eq!(next_lift(251 * USD), Some(KEY_CAP_MAX), "past $250: the most, not four times");
+        assert_eq!(next_lift(320 * USD), Some(KEY_CAP_MAX));
+        assert_eq!(next_lift(KEY_CAP_MAX - 1), Some(KEY_CAP_MAX));
+        assert_eq!(next_lift(KEY_CAP_MAX), None, "at the most: no offer");
+        assert_eq!(next_lift(KEY_CAP_MAX + 1), None);
+        assert_eq!(next_lift(1), Some(4));
+        let mut w = World::funded();
+        for (n, cap) in [KEY_HOUR_CAP, 320 * USD, KEY_CAP_MAX - 1].into_iter().enumerate() {
+            let offer = next_lift(cap).expect("an offer under the most");
+            assert_eq!(w.cap(&format!("keycap:voice:o{n}"), "voice", Some(offer)), Ok(()), "{offer} is a cap a person may set");
+        }
     }
 }

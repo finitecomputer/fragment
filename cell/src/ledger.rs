@@ -971,6 +971,9 @@ pub struct LedgerError {
     pub code: ErrorCode,
     pub message: String,
     pub refused: Option<Refused>,
+    /// When a gate heard the refusal (`may_heard`), on this isolate's
+    /// clock; 0 elsewhere.
+    pub heard_at: i64,
 }
 
 impl From<LedgerError> for CellError {
@@ -981,13 +984,13 @@ impl From<LedgerError> for CellError {
 
 impl From<Refused> for LedgerError {
     fn from(why: Refused) -> LedgerError {
-        LedgerError { code: why.code(), message: why.message(), refused: Some(why) }
+        LedgerError { code: why.code(), message: why.message(), refused: Some(why), heard_at: 0 }
     }
 }
 
 impl From<CellError> for LedgerError {
     fn from(e: CellError) -> LedgerError {
-        LedgerError { code: e.code, message: e.message, refused: None }
+        LedgerError { code: e.code, message: e.message, refused: None, heard_at: 0 }
     }
 }
 
@@ -1031,7 +1034,7 @@ async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u
         refused: Option<Refused>,
     }
     match serde_json::from_slice::<Refusal>(&bytes) {
-        Ok(r) => Err(LedgerError { code: r.error, message: r.message, refused: r.refused }),
+        Ok(r) => Err(LedgerError { code: r.error, message: r.message, refused: r.refused, heard_at: 0 }),
         Err(_) => Err(CellError::host(format!("the ledger answered {status}")).into()),
     }
 }
@@ -1045,6 +1048,14 @@ async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u
 /// out), lets it start, says so in the log, and is asked again next time
 /// (decision 62: billing never stops an agent).
 pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R) -> Result<(), LedgerError> {
+    may_heard(env, person, question).await.map(|_| ())
+}
+
+/// `may`, saying when its answer was heard (this isolate's clock): an
+/// allowance's time, 0 when no ledger answered (the spend goes on, on no
+/// evidence), and a refusal's in its `heard_at`. A key's pause is compared
+/// by them (`fragment_core::key_pause`).
+pub async fn may_heard<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R) -> Result<i64, LedgerError> {
     gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes"), GATE_WAIT_MS).await
 }
 
@@ -1060,7 +1071,7 @@ pub async fn may_beside<R: Route<Answer = Done>>(env: &Env, person: &str, questi
     match GATE.with(|g| g.borrow().step(&gate_key(person, R::PATH, &body), js::now_ms())) {
         Step::Go => Ok(()),
         Step::Refuse(why) => Err(why.into()),
-        Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await,
+        Step::AskFirst => gated(env, person, R::PATH, body, GATE_WAIT_MS).await.map(|_| ()),
         Step::GoAndAsk => {
             let (env, person) = (env.clone(), person.to_string());
             // its answer is kept by `gated`; a refusal is the next call's
@@ -1085,12 +1096,13 @@ pub fn gate_heard(person: &str) -> Value {
 }
 
 /// `may`, one copy for both questions: route `path` with `body`, the
-/// ledger waited on for at most `wait_ms`.
-async fn gated(env: &Env, person: &str, path: &'static str, body: String, wait_ms: u64) -> Result<(), LedgerError> {
+/// ledger waited on for at most `wait_ms`; when its answer was heard
+/// (`may_heard`).
+async fn gated(env: &Env, person: &str, path: &'static str, body: String, wait_ms: u64) -> Result<i64, LedgerError> {
     let key = gate_key(person, path, &body);
     let now = js::now_ms();
-    if let Some(answer) = GATE.with(|g| g.borrow().fresh(&key, now)) {
-        return answer.map_err(LedgerError::from);
+    if let Some((answer, at)) = GATE.with(|g| g.borrow().fresh_heard(&key, now)) {
+        return answer.map(|()| at).map_err(|why| LedgerError { heard_at: at, ..why.into() });
     }
     let asked = std::pin::pin!(asked(env, person, path, body));
     let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(wait_ms)));
@@ -1108,7 +1120,8 @@ async fn gated(env: &Env, person: &str, path: &'static str, body: String, wait_m
             (None, None)
         }
     };
-    GATE.with(|g| g.borrow_mut().heard(&key, heard, now)).map_err(|why| said.unwrap_or_else(|| why.into()))
+    let heard_at = if heard.is_some() { now } else { 0 };
+    GATE.with(|g| g.borrow_mut().heard(&key, heard, now)).map(|()| heard_at).map_err(|why| LedgerError { heard_at, ..said.unwrap_or_else(|| why.into()) })
 }
 
 /// Forgets every answer this isolate's gate heard (a test fleet's

@@ -212,10 +212,12 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   its next start runs, until its owner puts that version off.
 - `key_paused`: an operator key its agents call is paused at its hourly
   cap (docs/ledger.md, "Shared-key guard"): the swap's, kept in the DO
-  (`key_pauses`) as it refuses, so the one notice with a clock: told
-  until its `resumesAt`, a call on the key going through, or its owner
-  changing the cap. The shell's one button, Allow up to four times the
-  cap an hour, is `PUT /api/ledger/key-cap/{key}`.
+  (`key_pauses`, `fragment_core::key_pause`) as it refuses, so the one
+  notice with a clock: told until its `resumesAt` (the shell draws again
+  then), its owner changing the cap, or a call on the key that the
+  ledger let through after the pause was heard. The shell's one button
+  sends the cap the notice offers (`allowMicros`, the platform's next
+  step) to `PUT /api/ledger/key-cap/{key}`; at the most, it says so.
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). The shell shows them over
