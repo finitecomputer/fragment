@@ -54,6 +54,7 @@ mod sessions;
 mod share;
 mod shell;
 mod signin;
+mod simplex_settings;
 mod site;
 mod slides;
 mod sync;

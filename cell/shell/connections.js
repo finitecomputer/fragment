@@ -661,24 +661,32 @@ export function createAgentHomes({ el, icon, named, actionLine, settingLabel, mo
     pick.dataset.read = "1";
   }
   const paintHomes = () => document.querySelectorAll("select[data-home-for]").forEach(paintHome);
-  return { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome };
+  return { chatTitle, homeMark, loadHomes, homePicker, paintHomes, setHome, simplexChatOf };
 }
 
 // The computer port UI owns its frame-message listener and origin checks.
-export function createSimplex({ api, el, section, actionLine, named, seg, computer, getSeat, titleOf, frameOf, show, paneIcon, notice, setHome }) {
+export function createSimplex({ api, el, section, actionLine, named, seg, computer, getSeat, titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome }) {
   // ---- an agent's SimpleX: its link page, a port of its computer's own
   // origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
-  // the one-time QR code, and whom it is linked to ----
+  // the one-time QR code, and whom it is linked to. Shown in the connector
+  // setup dialog (connector-setup.js), as Telegram's setup is (FIN-393);
+  // linking again (Unlink, then Link) is how a person reconnects ----
+  const opening = new Set();
   async function openSimplex(agent) {
-    if (!computer()?.simplex || !agent) return;
+    if (!computer()?.simplex || !agent || opening.has(agent)) return;
+    opening.add(agent);
+    const pressed = pressSetup();
     try {
       const t = await api("POST", `/api/computers/${seg(computer().computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
       const frame = named(frameOf(t.url, `${titleOf(agent)} on SimpleX`), agent, (n) => `${n} on SimpleX`, "aria-label");
       frame.dataset.simplex = agent;
       frame.addEventListener("load", () => nameSimplex(frame));
-      show({ key: `simplex:${agent}`, title: titleOf(agent), subtitle: "SimpleX", icon: paneIcon("link"), body: frame, persist: false });
+      // its invitation's QR code, whole, on a wide screen (connector-setup.js)
+      openSetup({ pressed, frame, agent, title: "SimpleX", tall: true, onClose: refreshSimplex });
     } catch (e) {
       notice("SimpleX did not open", e.message);
+    } finally {
+      opening.delete(agent);
     }
   }
   // Its page knows the agent by its label: told its name as it loads, and
@@ -690,7 +698,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     } catch {}
   }
   // The link page asks for a ticket to link or unlink its agent (`{fragment:
-  // "simplex", agent, want}`): only a pane of Settings' onto its computer's
+  // "simplex", agent, want}`): only a frame of Settings' dialog onto its computer's
   // port, for its own agent. The platform makes it for the agent's owner
   // alone, signed (an unlink's closes the agent's door at once), and the
   // page hands it to the computer, which takes nothing else (docs/api.md,
@@ -727,7 +735,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     fillSimplex(s);
     return s;
   }
-  const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment), getSeat()?.good, getSeat()?.kind, getSeat()?.sleeps]);
+  const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => [a.fragment, simplexChatOf(a.fragment)?.name ?? null]), getSeat()?.good, getSeat()?.kind, getSeat()?.sleeps]);
   // A computer's view read again (its list's socket told of a change): the
   // section shown, changed or hidden as the view now says.
   function refreshSimplex() {
@@ -750,7 +758,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     const secure = el("span", "role-tag connector-tag", "Secure");
     secure.title = "End-to-end encrypted to your computer";
     tags.append(el("span", "role-tag connector-tag", "Experimental"), secure);
-    s.append(tags, el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
+    s.append(tags, el("p", "muted", "Message your agents from SimpleX Chat."));
     if (!agents.length) {
       s.append(el("p", "muted", "Make an agent first."));
       return;
@@ -763,11 +771,23 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
       s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Turn off "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
       return;
     }
+    // Set up, and Open once it has its SimpleX chat (its computer makes
+    // one as its link is made: the list says so, never a guess)
     for (const a of agents) {
-      const open = el("button", "row", "Set up");
-      open.type = "button";
-      open.onclick = () => openSimplex(a.fragment);
-      s.append(actionLine(named(el("span"), a.fragment), open));
+      const go = el("button", "row", "Set up");
+      go.type = "button";
+      go.dataset.simplexFor = a.fragment;
+      go.onclick = () => openSimplex(a.fragment);
+      const actions = [go];
+      const chat = simplexChatOf(a.fragment);
+      if (chat) {
+        const open = el("button", "row", "Open");
+        open.type = "button";
+        open.dataset.simplexOpen = chat.name;
+        open.onclick = () => openChat(chat.name);
+        actions.unshift(open);
+      }
+      s.append(actionLine(named(el("span"), a.fragment), ...actions));
     }
   }
   return { simplexSection, refreshSimplex, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
@@ -793,7 +813,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
 // it is set up; bound to another meanwhile (its owner, elsewhere), kept as
 // theirs; not bound, deleted; unreadable, kept (its row finds it once its
 // door reads). So a press never deletes one it could not account for.
-export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, openSetup, openChat, notice, load }) {
+export function createTelegram({ api, el, section, actionLine, named, seg, computer, fragments, listed, own, connectorLabel, markOffer, framed, pressSetup, openSetup, openChat, notice, load }) {
   const DOOR = "telegram";
   const TITLE = "Telegram";
   const SETUP = "/setup.html";
@@ -827,7 +847,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   }
   // the connector bound as `agent`'s Telegram door, if any
   const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
-  const openConnector = (name, agent) => openSetup({ src: framed(name, SETUP), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  const openConnector = (pressed, name, agent) => openSetup({ pressed, src: framed(name, SETUP), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
   // Its binding, as `POST …/door` answers or, its answer lost, as its door
   // reads: the binding to `agent`; a refusal, or no binding, throws (the
   // connector deleted), and so do a read that fails and a binding to
@@ -847,6 +867,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   async function setUp(agent) {
     if (making.has(agent)) return;
     making.add(agent);
+    const pressed = pressSetup();
     refreshTelegram();
     let made = null;
     try {
@@ -856,7 +877,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       if (!(await readTelegram())) throw new Error("Couldn't read your Telegram chats. Try again.");
       const connector = boundOf(agent);
       if (connector) {
-        openConnector(connector, agent);
+        openConnector(pressed, connector, agent);
         return;
       }
       made = await api("POST", "/api/fragments", { label: connectorLabel(agent, DOOR), template: DOOR });
@@ -867,7 +888,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       doors.set(made.name, { door: door.door, agent: door.agent });
       // the list read first, so its chat is under its agent as its setup opens
       await load().catch(() => {});
-      openConnector(made.name, agent);
+      openConnector(pressed, made.name, agent);
     } catch (e) {
       if (made && !e.keep) {
         bound.delete(made.name);
