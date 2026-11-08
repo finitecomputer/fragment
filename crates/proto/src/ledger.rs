@@ -213,7 +213,7 @@ pub struct QuoteAsk {
 /// One planned use: `calls` calls (absent, one), each using what it says.
 /// Told apart by the field it names: `key`, `model` or `usage`. Read as
 /// its fields (`PlannedFields`), not as serde's untagged reading, which
-/// buffers each item to try every kind: 12 KB more of the cell's Wasm.
+/// buffers each item to try every kind: about 6 KB more of the cell's Wasm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged, try_from = "PlannedFields")]
 pub enum Planned {
