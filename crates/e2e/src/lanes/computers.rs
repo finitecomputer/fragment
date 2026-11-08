@@ -171,6 +171,9 @@ const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::
 /// On a preview, a model call Hermes makes after its reply (a title) can
 /// keep its work open a while, and a save of its `/data` takes seconds more.
 const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
+/// An awake save's disk read follows its `Saved` in the same event: one
+/// exec of `df` in its container, which the cell bounds at a few seconds.
+const DISK_READ_AFTER_SAVE: Duration = Duration::from_secs(20);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
 const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
@@ -179,8 +182,8 @@ const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered 
 /// the stub and the fakes.
 const SAVE_CHECKS: [&str; 7] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
+    "and its disk is read again after that awake save",
     "it keeps its newest three saves (and the one it came up from), newest first, and its view lists them",
-    "an always-on computer is saved without sleeping",
     "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a save is two records, /data and its work (/data/work), and a wake restores both",
     "a sleep whose save fails keeps its container, and its view says so",
@@ -188,10 +191,13 @@ const SAVE_CHECKS: [&str; 7] = [
 ];
 
 /// Its saves (docs/computers.md, Lifecycle): a turn's end
-/// saves it awake, an always-on computer is saved, a failed save keeps
-/// its container (the lever's `fail-saves`), and one that works sleeps it.
-/// Starts awake, ends asleep. Answers how many replies of its agent it
-/// added.
+/// saves it awake, and its disk is read after (`reads_disk_after`), a
+/// failed save keeps its container (the lever's `fail-saves`), and one that
+/// works sleeps it. That an always-on computer is saved awake too is the
+/// core's decision (`always_on_is_saved_without_sleeping`,
+/// `always_on_never_sleeps_nor_meters`): the cell carries out the same
+/// save either way. Starts awake, ends asleep. Answers how many replies of
+/// its agent it added.
 fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
     let view = || api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let reply_of = |seq: i64| {
@@ -212,23 +218,23 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         saved && v["phase"] == "awake" && newest["held"] == true && newest["generation"] == v["restored"]["generation"],
         format!("replied at {replied_at}; newest save {newest}; {v}"),
     );
+    // the cell reads its disk once that save's `Saved` is applied (after
+    // it, so the read may still be under way): a read at or after the save,
+    // with no start since (the same generation)
+    let saved_at = newest["atMs"].as_i64().unwrap_or(i64::MAX);
+    let mut disk = Value::Null;
+    let read = saved && s.eventually(DISK_READ_AFTER_SAVE, || {
+        disk = lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
+        disk["at"].as_i64().is_some_and(|at| at >= saved_at)
+    });
+    s.ok(SAVE_CHECKS[1], read && disk["total"].as_u64().is_some_and(|t| t > 0) && view()["restored"]["generation"] == v["restored"]["generation"], json!({ "save": newest, "disk": disk }));
     let all = lever(api, c.id, "saves")?.body["saves"].clone();
     let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
     s.ok(
-        SAVE_CHECKS[1],
+        SAVE_CHECKS[2],
         ((1..=3).contains(&numbers.len()) || (numbers.len() == 4 && all[3]["id"] == v["restored"]["save"])) && numbers.windows(2).all(|w| w[0] > w[1]) && v["saves"].as_array().map(|l| l.len()) == Some(numbers.len()) && v["saves"][0]["id"] == newest["id"],
         format!("{all} / {}", v["saves"]),
     );
-    // always on: a turn's end saves it, and it never sleeps for it
-    let r = lever_with(api, c.id, json!({ "op": "always-on", "on": true }))?;
-    let said = say(61, "a turn while always on")?;
-    let answered = r.status == 200 && s.eventually(c.wake, || reply_of(seq_of(&said)).is_some());
-    let replied_at = reply_of(seq_of(&said)).and_then(|r| r["at"].as_i64()).unwrap_or(i64::MAX);
-    let saved = answered && s.eventually(SAVED_AFTER_WORK, || saved_after(replied_at));
-    let generation = view()["restored"]["generation"].clone();
-    let v = view();
-    s.ok(SAVE_CHECKS[2], saved && v["phase"] == "awake" && v["restored"]["generation"] == generation, format!("{r} / {}", newest_save(api, c.id)));
-    lever_with(api, c.id, json!({ "op": "always-on", "on": false }))?;
     // what the guest's answer to the hold names is left out of its save (the
     // stub names `*.scratch`), and the rest is kept, across a sleep and a wake
     let said = |n: u32, text: &str| -> Result<String> {
@@ -274,19 +280,19 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
         r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != saves_before["id"],
         format!("{r} / {newest}"),
     );
-    Ok(8)
+    Ok(7)
 }
 
 /// The disk checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes.
-const DISK_CHECKS: [&str; 3] = [
+const DISK_CHECKS: [&str; 2] = [
     "its disk is read once its start is ready: its size and what is free",
-    "and again after an awake save, a newer read",
     "and at its next start once it is ready, not before",
 ];
 
-/// Its disk, read (`df`) once its start is ready and after each awake save
-/// (`reads_disk_after`), as the `saves` lever shows it; each read judged
+/// Its disk, read (`df`) once its start is ready (`reads_disk_after`; its
+/// read after an awake save is the save checks'), as the `saves` lever
+/// shows it; each read judged
 /// by what made it (a start come up, a save taken), never a fixed wait.
 /// A start's read follows its `Ready`, so its view says awake first: an
 /// owner's wake answers after the read, but a start its alarm made (a
@@ -295,13 +301,11 @@ const DISK_CHECKS: [&str; 3] = [
 /// start came up (its `restored.at`), never as its phase.
 /// When a read finds it filling is `disk_filling`'s, proved by the core's
 /// and the shell's tests: a test fleet's computers share their host's
-/// disk. Starts and ends awake. Answers how many replies of its agent it
-/// added.
-fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+/// disk. Starts and ends awake.
+fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
     let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
     let disk = || lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
-    let number = |save: &Value| save["number"].as_u64().unwrap_or(0);
     let at = |d: &Value| d["at"].as_i64().unwrap_or(0);
     // the read of the start that came up at `restored`'s `at`
     let read_of = |s: &Suite, restored: &Value| {
@@ -317,24 +321,16 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let (read, d) = read_of(s, &v["restored"]);
     let (total, free) = (d["total"].as_u64().unwrap_or(0), d["free"].as_u64().unwrap_or(u64::MAX));
     s.ok(DISK_CHECKS[0], v["phase"] == "awake" && read && total > 0 && free <= total, json!({ "disk": d, "restored": v["restored"] }));
-    // a turn, then nothing: its end is saved awake, and the disk read after
-    let before = number(&newest_save(api, c.id));
-    let r = say(509, "a turn whose end is saved awake")?;
-    let turn = turn_of(c.agent, c.chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
-    let replied = s.eventually(c.wake, || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).iter().any(|x| x["body"]["turn"] == turn.as_str()));
-    let saved = replied && s.eventually(SAVED_AFTER_WORK, || number(&newest_save(api, c.id)) > before && at(&disk()) > at(&d));
-    let after_save = disk();
-    s.ok(DISK_CHECKS[1], saved && after_save["total"].as_u64() == Some(total), json!({ "before": d, "after": after_save }));
     // a sleep and a wake: read at the start, once it came up
     api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
     let (read, started) = read_of(s, &woke.body["restored"]);
     s.ok(
-        DISK_CHECKS[2],
-        woke.body["phase"] == "awake" && read && at(&started) > at(&after_save),
+        DISK_CHECKS[1],
+        woke.body["phase"] == "awake" && read && at(&started) > at(&d) && started["total"].as_u64() == Some(total),
         json!({ "disk": started, "restored": woke.body["restored"] }),
     );
-    Ok(1)
+    Ok(())
 }
 
 /// The bound checks (r4, r6: a sick container after a wake, and a sleep
@@ -2249,7 +2245,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         bound_checks(s, api, &crashing)?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
-        replies_so_far += disk_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        disk_checks(s, api, &crashing)?;
     } else {
         for label in SAVE_CHECKS.iter().chain(BOUND_CHECKS.iter()).chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()).chain(DISK_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
