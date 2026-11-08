@@ -458,14 +458,15 @@ pub const DEFAULT_KEYS: [(&str, i64, u64); 10] = [
     // https://fal.ai/models/fal-ai/flux-2/klein/9b (2026-10-09). A row an
     // older release queued is priced so; this release's are below.
     ("fal", 6_000, 1),
-    // A fal generation (`KEY_PARTS`; Hermes' `image_generate`), per pixel
-    // its request asks for, at FLUX.2 Klein 9B's "$0.006 per megapixel"
-    // whatever the model, a megapixel taken as 1,048,576 pixels, the
-    // larger reading, as fal says neither. Source:
-    // fal.ai/models/fal-ai/flux-2/klein/9b (read 2026-11-07). Hermes'
-    // default, one 1024 × 576 `landscape_16_9` image, is $0.0034. Its
-    // queue's polls, statuses and results and its uploads are free: fal
-    // prices "per output" (fal.ai/pricing, read 2026-11-07).
+    // FLUX.2 Klein 9B's synchronous run (`KEY_PARTS`), per pixel its
+    // request asks for: "$0.006 per megapixel", a megapixel taken as
+    // 1,048,576 pixels, the larger reading, as fal says neither. Source:
+    // fal.ai/models/fal-ai/flux-2/klein/9b (read 2026-11-07). One
+    // 1024 × 576 `landscape_16_9` image is $0.0034. Every other fal call is
+    // free here: a queued generation (Hermes' `image_generate`) until its
+    // result can be settled, another model at its own rate, and the queue's
+    // polls, results and uploads, which fal does not bill ("per output":
+    // fal.ai/pricing, read 2026-11-07).
     ("fal:image", 6_000, 1_048_576),
     // Browser Use: $0.02 per browser-hour, $5/GB residential proxy.
     // https://browser-use.com/pricing (2026-10-09). A control request is
@@ -534,9 +535,9 @@ pub struct KeyPart {
 ///   most $3.20 at list.
 /// - fal's generations were charged as an image, and so was each of the
 ///   SDK's queue polls, its status checks and its result: an image cost
-///   several images. A call is charged at most 16 megapixels, $0.096 at
-///   list: Klein makes at most 4 images a call (`num_images`), and its
-///   largest preset is 1 megapixel.
+///   several images. Only a synchronous Klein run is charged now, at most
+///   16 megapixels a call, $0.096 at list: Klein makes at most 4 images a
+///   call (`num_images`), and its largest preset is 1 megapixel.
 pub const KEY_PARTS: [KeyPart; 2] = [
     KeyPart { key: "elevenlabs", priced_as: "elevenlabs:speech", units_max: 40_000 },
     KeyPart { key: "fal", priced_as: "fal:image", units_max: 16 * 1_048_576 },
@@ -580,14 +581,13 @@ impl KeyCall<'_> {
     }
 }
 
-/// fal's hosts that run a model (`queue.fal.run`'s queue and `fal.run`'s
-/// synchronous runs); its others (`rest.fal.ai`'s uploads) make nothing.
-const FAL_RUNS: [&str; 2] = ["queue.fal.run", "fal.run"];
-
-/// FLUX.2 Klein 9B's text to image (Hermes' `image_generate`), whose
-/// `image_size` absent is its default, `landscape_4_3` (an edit's is its
-/// input image's, which the meter does not see).
-const FAL_KLEIN: &str = "/fal-ai/flux-2/klein/9b";
+/// FLUX.2 Klein 9B's text to image, run synchronously (`fal.run`): the one
+/// fal call known to have made what it asked for, at a rate the book
+/// knows. A queued one (`queue.fal.run`) is made after its submit, or
+/// fails or is cancelled, so is charged nothing until its result can be
+/// settled (the debt ledger); an edit's size is its input image's, which
+/// the meter does not see.
+const FAL_KLEIN_RUN: (&str, &str) = ("fal.run", "/fal-ai/flux-2/klein/9b");
 
 /// fal's `image_size` presets in pixels (FLUX.2 Klein's, and its other
 /// image models'), the first Klein's default.
@@ -600,15 +600,13 @@ const FAL_SIZES: [(&str, u64); 6] = [
     ("portrait_16_9", 576 * 1024),
 ];
 
-/// The pixels a fal generation to `path` asks for: its `num_images`
-/// (absent, one) images of its `image_size`, a preset or `{width,
-/// height}`, or absent, Klein's default on Klein's text to image; none
-/// for any other (an absent size elsewhere, an edit's being its input's,
-/// an unknown preset, a size that is no two whole numbers).
-fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+/// The pixels a Klein run asks for: its `num_images` (absent, one) images
+/// of its `image_size`, a preset, `{width, height}`, or absent, Klein's
+/// default; none for any other (an unknown preset, a size that is no two
+/// whole numbers).
+fn fal_pixels(said: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let each = match said.get("image_size") {
-        None if path == FAL_KLEIN => FAL_SIZES[0].1,
-        None => return None,
+        None => FAL_SIZES[0].1,
         Some(serde_json::Value::String(preset)) => FAL_SIZES.iter().find(|(name, _)| name == preset)?.1,
         Some(size) => size.get("width")?.as_u64()?.checked_mul(size.get("height")?.as_u64()?)?,
     };
@@ -618,15 +616,13 @@ fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> 
 
 /// What one call on operator key `key` uses, as the swap meters it: a
 /// part's call (`KEY_PARTS`) its units, at most its `units_max`, as the
-/// part; a call its vendor does not bill (fal's queue polls, statuses,
-/// results and cancels, its uploads) none of the key's; any other one
-/// call of the key.
+/// part; any other call on a key priced by its parts (fal's) none of the
+/// key's; any other one call of the key.
 ///
 /// - ElevenLabs' text to speech (`/v1/text-to-speech/…`): the characters
 ///   of its JSON body's `text`.
-/// - A fal generation (a `POST` to a model at `queue.fal.run` or
-///   `fal.run`, not under its queue's `…/requests/…`): the pixels it asks
-///   for (`fal_pixels`).
+/// - fal: a synchronous Klein run (`FAL_KLEIN_RUN`, a `POST`): the pixels
+///   it asks for (`fal_pixels`).
 ///
 /// A part's call uses none, so is charged nothing, when its vendor
 /// refused it (any answer but a 2xx: a bad request, a missing voice, a
@@ -638,7 +634,7 @@ fn fal_pixels(path: &str, said: &serde_json::Map<String, serde_json::Value>) -> 
 pub fn key_usage(key: &str, call: &KeyCall) -> Usage {
     let (priced_as, units) = match key {
         "elevenlabs" if call.path.starts_with("/v1/text-to-speech/") => ("elevenlabs:speech", call.said().and_then(|said| Some(said.get("text")?.as_str()?.chars().count() as u64))),
-        "fal" if call.method == "POST" && FAL_RUNS.contains(&call.host) && !call.path.contains("/requests/") => ("fal:image", call.said().and_then(|said| fal_pixels(call.path, &said))),
+        "fal" if call.method == "POST" && (call.host, call.path) == FAL_KLEIN_RUN => ("fal:image", call.said().as_ref().and_then(fal_pixels)),
         "fal" => return Usage::Key { key: key.to_string(), units: 0 },
         _ => return Usage::Key { key: key.to_string(), units: 1 },
     };
@@ -1138,43 +1134,46 @@ mod tests {
         key_usage("fal", &KeyCall { method, host, path, body, status })
     }
 
-    /// Goal (FIN-445): a fal generation is charged by the pixels it asks
-    /// for, at Klein's rate, and the calls the SDK makes around it (its
-    /// queue's polls, status, result and cancel, its uploads) nothing.
+    /// Goal (FIN-445, and its review: when in doubt, charge zero): only a
+    /// call known to have made a known model's image is charged, a
+    /// synchronous FLUX.2 Klein 9B run, by the pixels it asks for; a queued
+    /// submit (fal makes it later, or fails or cancels it), its polls and
+    /// result, an edit, another model and every other call nothing.
     /// Method: the calls Hermes' `image_generate` makes for one image
     /// (`fal_client` 0.13: a submit, a status poll every 0.25 s and up,
-    /// the result), priced as a deployment's book prices them.
+    /// the result), and a synchronous run of the same request.
     #[test]
-    fn a_fal_image_is_metered_by_its_pixels_and_its_queue_by_nothing() {
+    fn a_fal_image_is_charged_only_when_a_known_model_made_it() {
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         let hermes = br#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9","num_inference_steps":4,"output_format":"png","enable_safety_checker":false}"#;
         let made = Usage::Key { key: "fal:image".into(), units: 1024 * 576 };
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", hermes, 200), made, "the queue's submit");
-        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", hermes, 200), made, "a synchronous run");
+        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", hermes, 200), made, "a synchronous run: its answer is the image");
+        assert_eq!(book.price(&made).unwrap().charge, 5_063, "$0.0051");
         let free = Usage::Key { key: "fal".into(), units: 0 };
         let around = [
+            ("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b"),
             ("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status"),
             ("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status/stream"),
             ("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e"),
             ("PUT", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/cancel"),
-            ("POST", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/cancel"),
             ("POST", "rest.fal.ai", "/storage/upload/initiate"),
             ("POST", "rest.fal.ai", "/storage/auth/token"),
-            ("GET", "queue.fal.run", "/fal-ai/flux-2/klein/9b"),
+            ("GET", "fal.run", "/fal-ai/flux-2/klein/9b"),
+            ("POST", "fal.run", "/fal-ai/flux-2/klein/9b/edit"),
+            ("POST", "fal.run", "/fal-ai/flux-2/klein/4b"),
+            ("POST", "fal.run", "/fal-ai/flux-2-pro"),
+            ("POST", "fal.run", "/fal-ai/flux-2/klein/9b/"),
         ];
         for (method, host, path) in around {
             assert_eq!(fal(method, host, path, hermes, 200), free, "{method} {host}{path}");
         }
-        // one image: a submit, six polls (2 s at fal_client's backoff, 0.25 s
-        // and 5% more each) and the result, once eight images' $0.072
-        let calls = [made.clone()].into_iter().chain(std::iter::repeat_n(free.clone(), 7));
-        let charged: i64 = calls.map(|u| book.price(&u).unwrap().charge).sum();
-        assert_eq!(charged, 5_063, "$0.0051");
+        // Hermes' queued image (a submit, six polls, the result) is charged
+        // nothing until its result can be settled, once eight images' $0.072
         assert_eq!(8 * book.price(&Usage::Key { key: "fal".into(), units: 1 }).unwrap().charge, 72_000);
         assert_eq!(book.price(&free).unwrap().charge, 0);
         // the presets, a size of its own, several images, and none named
-        let sized = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", body.as_bytes(), 200);
+        let sized = |body: &str| fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", body.as_bytes(), 200);
         let units = |units| Usage::Key { key: "fal:image".into(), units };
         for (preset, pixels) in [("square_hd", 1_048_576), ("square", 262_144), ("portrait_4_3", 786_432), ("portrait_16_9", 589_824), ("landscape_4_3", 786_432), ("landscape_16_9", 589_824)] {
             assert_eq!(sized(&format!(r#"{{"prompt":"p","image_size":"{preset}"}}"#)), units(pixels), "{preset}");
@@ -1182,47 +1181,38 @@ mod tests {
         assert_eq!(sized(r#"{"prompt":"p","image_size":{"width":1920,"height":1080}}"#), units(1920 * 1080));
         assert_eq!(sized(r#"{"prompt":"p","image_size":"square_hd","num_images":4}"#), units(4 * 1_048_576));
         assert_eq!(sized(r#"{"prompt":"p"}"#), units(1024 * 768), "Klein's default, landscape_4_3");
-        assert_eq!(fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", br#"{"prompt":"p","num_images":2}"#, 200), units(2 * 1024 * 768));
-        // an edit's size is its input's unless it names one (FIN-445 review)
-        let edit = |body: &str| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b/edit", body.as_bytes(), 200);
-        assert_eq!(edit(r#"{"prompt":"p","image_urls":["https://v3.fal.media/files/a.png"]}"#), units(0), "an edit of an input the meter does not see");
-        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":"square"}"#), units(512 * 512));
-        assert_eq!(edit(r#"{"prompt":"p","image_urls":["a"],"image_size":{"width":2048,"height":2048}}"#), units(4 * 1_048_576));
-        // another model's default is its own: unread
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p"}"#, 200), units(0));
-        assert_eq!(fal("POST", "queue.fal.run", "/fal-ai/flux-2-pro", br#"{"prompt":"p","image_size":"square_hd"}"#, 200), units(1_048_576));
         // only fal's key
-        assert_eq!(key_usage("x", &KeyCall { method: "GET", host: "api.x.com", path: "/2/tweets/search/recent", body: b"", status: 200 }), Usage::Key { key: "x".into(), units: 1 });
+        assert_eq!(key_usage("perplexity", &KeyCall { method: "POST", host: "fal.run", path: "/fal-ai/flux-2/klein/9b", body: hermes, status: 200 }), Usage::Key { key: "perplexity".into(), units: 1 });
     }
 
-    /// Goal: a fal generation the meter cannot read, or fal refused, is
-    /// charged nothing, and one it made at most a call's most (decision
-    /// 62); a release whose book has no image price charges its rows
-    /// nothing. Method: bodies that say no size, every answer the swap
-    /// meters, and sizes past the cap.
+    /// Goal: a Klein run the meter cannot read, or fal refused, is charged
+    /// nothing, and one it made at most a call's most (decision 62); a
+    /// release whose book has no image price charges its rows nothing.
+    /// Method: bodies that say no size, every answer the swap meters, and
+    /// sizes past the cap.
     #[test]
     fn a_fal_call_the_meter_cannot_read_or_fal_refused_is_charged_nothing() {
         let none = Usage::Key { key: "fal:image".into(), units: 0 };
-        let submit = |body: &[u8], status| fal("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", body, status);
+        let run = |body: &[u8], status| fal("POST", "fal.run", "/fal-ai/flux-2/klein/9b", body, status);
         for body in [&b""[..], b"prompt=p", b"{\"prompt\":", b"[\"p\"]", b"\"p\"", br#"{"image_size":"poster"}"#, br#"{"image_size":{"width":1024}}"#, br#"{"image_size":{"width":-1,"height":1024}}"#, br#"{"image_size":{"width":1.5,"height":1024}}"#, br#"{"image_size":{"width":"1024","height":"1024"}}"#, br#"{"image_size":42}"#, br#"{"num_images":"2"}"#, br#"{"num_images":-1}"#, br#"{"num_images":0}"#, &[0xff, 0xfe][..]] {
-            assert_eq!(submit(body, 200), none, "{}", String::from_utf8_lossy(body));
+            assert_eq!(run(body, 200), none, "{}", String::from_utf8_lossy(body));
         }
         // a bad request, no key, a locked account, a rate limit, a redirect not followed
         for refused in [400, 401, 403, 404, 422, 429, 302, 100, 0] {
-            assert_eq!(submit(br#"{"prompt":"p"}"#, refused), none, "{refused}");
+            assert_eq!(run(br#"{"prompt":"p"}"#, refused), none, "{refused}");
         }
         // at most 16 megapixels a call, even sizes that overflow
         let most = Usage::Key { key: "fal:image".into(), units: 16 * 1_048_576 };
-        assert_eq!(submit(br#"{"image_size":{"width":100000,"height":100000}}"#, 200), most);
-        assert_eq!(submit(br#"{"image_size":{"width":18446744073709551615,"height":2},"num_images":2}"#, 200), none, "an overflow is no size");
-        assert_eq!(submit(br#"{"image_size":"square_hd","num_images":1000}"#, 200), most);
+        assert_eq!(run(br#"{"image_size":{"width":100000,"height":100000}}"#, 200), most);
+        assert_eq!(run(br#"{"image_size":{"width":18446744073709551615,"height":2},"num_images":2}"#, 200), none, "an overflow is no size");
+        assert_eq!(run(br#"{"image_size":"square_hd","num_images":1000}"#, 200), most);
         let mut book = PriceBook::defaults();
         book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
         assert_eq!(book.price(&most).unwrap().charge, 144_000, "$0.096 at list");
         // a release before the image price refuses its rows as unpriced
         let older = PriceBook { keys: book.keys.iter().filter(|k| k.key != "fal:image").cloned().collect(), ..book.clone() };
         assert_eq!(older.price(&Usage::Key { key: "fal:image".into(), units: 589_824 }), Err(PriceError::NoPrice));
-        assert_eq!(older.price(&Usage::Key { key: "fal".into(), units: 0 }).unwrap().charge, 0, "a poll is free in it too");
+        assert_eq!(older.price(&Usage::Key { key: "fal".into(), units: 0 }).unwrap().charge, 0, "a free call is free in it too");
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

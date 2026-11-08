@@ -650,12 +650,14 @@ fn a_fal_image_is_charged_by_its_pixels_and_once() {
     let fal = serde_json::json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }]);
     let mut configured = book();
     configured.keys.extend(crate::catalog::Catalog::parse(&fal.to_string()).unwrap().key_prices());
-    let call = |method, path, body, status| crate::price::key_usage("fal", &KeyCall { method, host: "queue.fal.run", path, body, status });
+    let call = |method, host, path, body, status| crate::price::key_usage("fal", &KeyCall { method, host, path, body, status });
     let ask = br#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
-    let made = call("POST", "/fal-ai/flux-2/klein/9b", ask, 200);
-    let polled = call("GET", "/fal-ai/flux-2/requests/0b1e/status", b"", 200);
-    let result = call("GET", "/fal-ai/flux-2/requests/0b1e", b"", 200);
-    let refused = call("POST", "/fal-ai/flux-2/klein/9b", ask, 422);
+    // a synchronous run is charged; a queued submit, its poll and result nothing
+    let made = call("POST", "fal.run", "/fal-ai/flux-2/klein/9b", ask, 200);
+    let polled = call("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e/status", b"", 200);
+    let result = call("GET", "queue.fal.run", "/fal-ai/flux-2/requests/0b1e", b"", 200);
+    let refused = call("POST", "fal.run", "/fal-ai/flux-2/klein/9b", ask, 422);
+    assert_eq!(call("POST", "queue.fal.run", "/fal-ai/flux-2/klein/9b", ask, 200), Usage::Key { key: "fal".into(), units: 0 }, "a queued submit");
     assert_eq!(made, Usage::Key { key: "fal:image".into(), units: 1024 * 576 });
     assert_eq!((&polled, &result, &refused), (&Usage::Key { key: "fal".into(), units: 0 }, &Usage::Key { key: "fal".into(), units: 0 }, &Usage::Key { key: "fal:image".into(), units: 0 }));
     let mut w = World::seat();
