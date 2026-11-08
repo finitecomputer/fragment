@@ -89,6 +89,60 @@ A file the cell serves belongs in the release assets built by
 `crates/templates` into `cell/build/assets`, not `include_bytes!`.
 Dev and e2e use separate state; failed e2e logs remain in `target/e2e/`.
 
+## Proving your work
+
+You prove your own work before anyone merges it. CI on a pull request is
+not the safety net, and nobody waits on bot reviews. This machine runs the
+tests faster than CI does, so run them here. Work is ready only when you
+can show evidence that it does what it claims and breaks nothing else.
+"It compiles" and "the tests I wrote pass" are not evidence.
+
+Put an evidence pack in the PR body and in your report:
+
+- **What and why:** what changed and why, in plain words. Say whether it
+  touches the wire, stored rows or money.
+- **What ran:** each command with its result and counts, on the final head
+  merged with current `master`:
+  - `cargo xtask check`.
+  - `cargo xtask e2e --only …` for every section that covers a changed file.
+    Grep `crates/e2e` for each file and run every lane that uses it.
+  - For `images/` or the bridge: `cargo test --workspace` and the Docker
+    tests (`cargo test -p fragment-bridge --test docker -- --ignored`).
+  - For iOS: `xcodebuild` tests on the Mac, in a build folder of your own,
+    on a simulator chosen by id.
+  - For the cell: the Wasm delta against the exact `master` you merged,
+    both built in one worktree.
+- **Proof of the change itself:**
+  - A fix comes with a test that fails before it and passes after; say
+    that you watched it fail.
+  - Anything a person sees comes with screenshots of the real app against
+    a dev stack: web at 1280 and 390 px, iOS from the simulator, light and
+    dark where it matters. Nothing staged or mocked.
+  - When only the real platform can tell, run a hosted check against
+    preview (`cargo xtask e2e --hosted`, preview account only).
+- **Gaps:** what you didn't verify and what could still go wrong. Never
+  claim more than you checked.
+
+Then get a Codex review of the diff, one round. Only a bug a person would
+hit blocks: wrong money, lost or wrong data, a crash, a broken or slowed
+call, or a security hole. Fix those, and file anything else in Linear. A
+second round only checks the fixes, and there is no third.
+
+Keep PRs small and many. Ten small proven PRs land faster and safer than
+one large one.
+
+## How work lands
+
+- Paul reads the evidence and says merge; the coordinating session merges
+  directly. There is no merge queue, required check or required approval.
+- `master` runs one CI at a time (`check`, the e2e, and the Docker lanes
+  when images change). Only the newest push waits, so a burst of merges
+  is tested together at the tip. Green deploys preview.
+- If `master` goes red, preview is not deployed. Fix it forward at once
+  with another small PR, proven the same way.
+- Paul tries preview, then promotes it to production by pushing
+  `production`. That run keeps its own proof before it deploys.
+
 ## Rules and approvals
 
 - Prefer an idiomatic Cloudflare feature, standard crate or maintained
@@ -100,7 +154,7 @@ Dev and e2e use separate state; failed e2e logs remain in `target/e2e/`.
   parity across runtimes.
 - One concern per PR. Work goes to github.com/finitecomputer/fragment
   as a branch and PR against `master`; names under `ci/` are refused.
-  The coordinating session reviews PRs once CI is green.
+  It merges on Paul's word, with its evidence (Proving your work).
 - Only Paul updates `production`: his push or merge approves production
   deployment. Green master pushes deploy preview automatically. CI and
   rollout code define proof, preparation and rollback checks; preserve them.
