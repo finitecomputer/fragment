@@ -1436,14 +1436,18 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
     let landed = chrome.until(page, "location.search === '?clicked' && document.readyState === 'complete' && !document.getElementById('aims')", Duration::from_secs(15));
     s.ok("a link that takes the page to another document: the click is done, the page there", landed, json!({ "from": path }));
 
-    // armed, then left by its own link for another document and come back
-    // to from the back/forward cache (a page of the platform's with no
-    // socket, so it may be cached): the outgoing document dropped its aim
-    // (`pagehide`)
+    // armed, then left for another document and come back to from the
+    // back/forward cache (a page of the platform's with no socket, so it
+    // may be cached): the outgoing document dropped its aim (`pagehide`).
+    // Left by the harness's navigation, answered once the new document is
+    // there: a click on the page's own link could race its web font
+    // (`font-display: swap`), whose late swap moves the link, between a
+    // press and its release too, and that click goes to the paragraph
+    // (run 42438054022); `#away` above is the link click
     let legal = chrome.open(&format!("{base}/about"))?;
     let armed = chrome.eval(&legal, "(addEventListener('pageshow', (e) => { window.__restored = e.persisted; }), window.__clickGuard.arm('body', 1), window.__clickGuard.armed())")?;
-    chrome.click(&legal, "a[href='/terms']")?;
-    let left = chrome.until(&legal, "location.pathname === '/terms' && document.readyState === 'complete'", Duration::from_secs(15));
+    chrome.navigate(&legal, &format!("{base}/terms"))?;
+    let left = chrome.eval(&legal, "location.pathname === '/terms'")? == true;
     chrome.back(&legal)?;
     let back = chrome.until(&legal, "location.pathname === '/about' && document.readyState === 'complete' && window.__restored !== undefined", Duration::from_secs(15));
     let came = chrome.eval(&legal, "({ restored: window.__restored ?? null, armed: window.__clickGuard.armed() })")?;

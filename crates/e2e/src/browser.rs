@@ -528,7 +528,7 @@ impl Browser {
     /// Its frame's events may come before the navigation's answer, so the
     /// command is sent and read here, every other message kept as `send`
     /// keeps it.
-    fn navigate(&mut self, page: &Page, url: &str) -> Result<()> {
+    pub fn navigate(&mut self, page: &Page, url: &str) -> Result<()> {
         self.send("Page.enable", json!({}), Some(&page.session))?;
         self.send("Runtime.enable", json!({}), Some(&page.session))?;
         self.next += 1;
