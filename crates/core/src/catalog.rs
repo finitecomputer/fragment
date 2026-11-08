@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(c.get("mail").unwrap().placements[0], Placement::Basic { half: Half::Password });
         assert_eq!(c.hosts(), vec!["api.mail.test", "api.perplexity.ai", "gmail.googleapis.com", "places.googleapis.com", "www.googleapis.com"]);
         assert_eq!(c.env_names(), vec!["GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_PLACES_API_KEY", "MAIL_API_KEY", "PERPLEXITY_API_KEY"]);
-        assert_eq!(c.key_prices().iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["perplexity", "google-places"], "only operator keys are priced");
+        assert_eq!(c.key_prices().iter().map(|k| k.key.as_str()).collect::<Vec<_>>(), vec!["perplexity", "google-places", "google-places:photo"], "only operator keys are priced, with their parts");
         // the wire form reads back as it is written
         let again = Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap();
         assert_eq!(again, c);
@@ -702,7 +702,7 @@ mod tests {
     }
 
     /// FIN-443: an operator key whose calls the book prices in part apart
-    /// (ElevenLabs' speech) is priced so too, at the book's price whatever
+    /// (ElevenLabs' speech, fal's images, xAI's chat) is priced so too, at the book's price whatever
     /// the row's own; a row of another kind by its name is metered not.
     #[test]
     fn a_keys_parts_are_priced_with_it() {
@@ -721,6 +721,22 @@ mod tests {
         let mut book = crate::price::PriceBook::defaults();
         book.keys = eleven("operator", None).key_prices();
         assert_eq!(book.validate(), Ok(()), "a book the ledger takes");
+        // FIN-445: fal's images by their pixels
+        let fal = parse(json!([{ "name": "fal", "kind": "operator", "hosts": ["queue.fal.run", "fal.run", "rest.fal.ai"], "placements": [{ "header": "authorization", "format": "Key {}" }], "env": ["FAL_KEY"] }])).unwrap();
+        assert_eq!(priced(&fal), vec![("fal".to_string(), 6_000, 1), ("fal:image".to_string(), 6_000, 1_048_576)]);
+        // xAI's chat and images apart from its X searches
+        let xai = parse(json!([{ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"] }])).unwrap();
+        assert_eq!(priced(&xai), vec![("xai".to_string(), 120_000, 1), ("xai:image".to_string(), 20_000, 1)]);
+        // Google Places' photos apart from its searches
+        let places = parse(json!([{ "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"], "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }], "env": ["GOOGLE_PLACES_API_KEY"] }])).unwrap();
+        let keys: Vec<String> = priced(&places).into_iter().map(|(k, _, _)| k).collect();
+        assert_eq!(keys, ["google-places", "google-places:photo"]);
+        // Firecrawl's credits
+        let firecrawl = parse(json!([{ "name": "firecrawl", "kind": "operator", "hosts": ["api.firecrawl.dev"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["FIRECRAWL_API_KEY"] }])).unwrap();
+        assert_eq!(priced(&firecrawl), vec![("firecrawl".to_string(), 10_000, 1), ("firecrawl:credit".to_string(), 5_000, 1)]);
+        // X's searches alone: no part
+        let x = parse(json!([{ "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["X_API_BEARER_TOKEN"] }])).unwrap();
+        assert_eq!(priced(&x), vec![("x".to_string(), 50_000, 1)]);
     }
 
     /// Invalid: every rule, each a typed refusal.

@@ -66,6 +66,12 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
     "a key's call the book prices by what it says (ElevenLabs' text to speech) reaches its host as it came, body and all, and is charged its text's characters, not a call",
     "and one its provider refused (a bad request, a rate limit) made nothing: its row and the agent's count charge nothing, whatever its text",
+    "fal: a synchronous Klein run reaches its host as it came and is charged the pixels it asks for; a queued submit, made later or not, and a poll nothing",
+    "xai: a call with the x_search tool is charged an X search, and a plain chat call (its tokens not read) and any other call (a model list's) nothing",
+    "google-places: a place's photo is charged its own price, and a search and a place's details (their tier their field mask's) nothing",
+    "firecrawl: a scrape is charged its one credit, not a search's two, and a call around it (a status poll) nothing",
+    "browser-use: a new session's start is charged its five minutes, and a task on that session and a call around it (its status read) nothing",
+    "x: a search is charged ten posts, as before, and a lookup (its returned resources not counted) nothing",
     "an operator key charged its hourly cap within the hour pauses: its next call is refused 429 key_paused, saying what it spent and when it resumes, reaching no provider and charged nothing",
     "while it is paused, another key's call goes on: the key pauses, not the account",
     "a ledger that does not answer in time lets a paused key's call go: the guard fails open",
@@ -91,6 +97,20 @@ const SPOKEN: &str = r#"{"text":"Hello there, friend.","model_id":"eleven_multil
 const SPOKEN_CHARS: i64 = 20;
 /// A long speech call's characters: a few reach the guard's cap.
 const LONG_CHARS: i64 = 10_000;
+
+/// A fal image's request, as Hermes' `image_generate` posts it to the
+/// queue, and the pixels it asks for: one `landscape_16_9` image,
+/// 1024 × 576.
+const FAL_ASK: &str = r#"{"prompt":"a lighthouse at dusk","image_size":"landscape_16_9"}"#;
+const FAL_PIXELS: i64 = 1024 * 576;
+
+/// A Firecrawl scrape, as Hermes' `web_extract` posts it: one credit.
+const FIRECRAWL_SCRAPE: &str = r#"{"url":"https://example.com/","formats":["markdown","html"]}"#;
+
+/// An X search, as Hermes' `x_search` posts it, and a plain Grok chat
+/// call: no spaces, so no word of theirs is a rule of the scripted agent's.
+const XAI_SEARCH: &str = r#"{"model":"grok-4.3","input":"news","tools":[{"type":"x_search"}]}"#;
+const XAI_CHAT: &str = r#"{"model":"grok-4.3","messages":[{"role":"user","content":"hi"}]}"#;
 
 /// The placeholder the platform gives `agent` on computer `id` for
 /// `provider`: a local run holds the node's host secret, so it makes one
@@ -257,6 +277,13 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         said.starts_with("fetched 200") && seen["host"] == "places.googleapis.com" && seen["query"] == json!([["fields", "name"], ["key", key_value("google-places")]]),
         json!({ "said": said, "seen": seen }),
     );
+    // a place's details (FIN-445): charged below nothing, its tier its field mask's
+    let said = say(s, 138, "fetch http://places.googleapis.com/v1/places/ChIJe2e?fields=rating with $GOOGLE_PLACES_API_KEY in query key")?;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    let detail_sent = said.starts_with("fetched 200") && seen["host"] == "places.googleapis.com" && seen["path"] == "/v1/places/ChIJe2e";
+    // its photo, answered as JSON (`skipHttpRedirect`; a redirect is charged nothing)
+    let said = say(s, 142, "fetch http://places.googleapis.com/v1/places/ChIJe2e/photos/AUe2e/media?maxWidthPx=400&skipHttpRedirect=true with $GOOGLE_PLACES_API_KEY in query key")?;
+    let photo_sent = said.starts_with("fetched 200");
 
     // Hermes' tool vendors share the existing upstream fake: each real
     // host and SDK header, with no vendor-specific response simulation.
@@ -272,6 +299,44 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         s.ok(SWAP_CHECKS[22 + i],
             said.starts_with("fetched 200") && seen["host"] == host && seen["auth"][header] == format!("{scheme}{}", key_value(name)),
             json!({ "said": said, "seen": seen }));
+    }
+    // fal's image (FIN-445): queued as Hermes does, charged nothing (made
+    // later, or not); run synchronously, charged below by its pixels; and
+    // the call above (a poll's) nothing
+    let said = say(s, 135, &format!("fetch http://queue.fal.run/fal-ai/flux-2/klein/9b with $FAL_KEY in authorization posting {FAL_ASK}"))?;
+    let queued = said.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|seen| seen["host"] == "queue.fal.run" && seen["method"] == "POST");
+    let said = say(s, 143, &format!("fetch http://fal.run/fal-ai/flux-2/klein/9b with $FAL_KEY in authorization posting {FAL_ASK}"))?;
+    let fal_seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    let fal_sent = queued
+        && said.starts_with("fetched 200")
+        && fal_seen["host"] == "fal.run"
+        && fal_seen["method"] == "POST"
+        && fal_seen["path"] == "/fal-ai/flux-2/klein/9b"
+        && fal_seen["body"] == FAL_ASK
+        && fal_seen["auth"]["authorization"] == format!("Key {}", key_value("fal"));
+    // Firecrawl's scrape (FIN-445): charged below its credit, the GET above nothing
+    let said = say(s, 139, &format!("fetch http://api.firecrawl.dev/v2/scrape with $FIRECRAWL_API_KEY posting {FIRECRAWL_SCRAPE}"))?;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    let scrape_sent = said.starts_with("fetched 200") && seen["host"] == "api.firecrawl.dev" && seen["method"] == "POST" && seen["path"] == "/v2/scrape" && seen["body"] == FIRECRAWL_SCRAPE;
+    // a Browser Use session's start, as Hermes' browser provider makes it (FIN-445)
+    let said = say(s, 140, "fetch http://api.browser-use.com/api/v3/browsers with $BROWSER_USE_API_KEY in x-browser-use-api-key posting {}")?;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    let session_sent = said.starts_with("fetched 200") && seen["host"] == "api.browser-use.com" && seen["method"] == "POST" && seen["path"] == "/api/v3/browsers";
+    // a task on that session (v4's `sessionId`): no new start
+    let said = say(s, 144, r#"fetch http://api.browser-use.com/api/v4/runs with $BROWSER_USE_API_KEY in x-browser-use-api-key posting {"task":"e2e","sessionId":"e2e-session"}"#)?;
+    let reused_sent = said.starts_with("fetched 200");
+    // X: a lookup of two posts, as the x-api-finite helper asks, charged
+    // nothing (its returned resources not counted), and its search ten posts
+    let said = say(s, 141, "fetch http://api.x.com/2/tweets?ids=20%2C21 with $X_API_BEARER_TOKEN")?;
+    let lookup_sent = said.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|seen| seen["host"] == "api.x.com" && seen["path"] == "/2/tweets");
+    let said = say(s, 145, "fetch http://api.x.com/2/tweets/search/recent?query=e2e&max_results=10 with $X_API_BEARER_TOKEN")?;
+    let search_sent = said.starts_with("fetched 200");
+    // xAI's X search and a plain chat call (FIN-445): charged below as each is
+    let mut xai_seen = vec![];
+    for (n, path, body) in [(136, "/v1/responses", XAI_SEARCH), (137, "/v1/chat/completions", XAI_CHAT)] {
+        let said = say(s, n, &format!("fetch http://api.x.ai{path} with $XAI_API_KEY posting {body}"))?;
+        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+        xai_seen.push(said.starts_with("fetched 200") && seen["host"] == "api.x.ai" && seen["method"] == "POST" && seen["path"] == path && seen["body"] == body);
     }
 
     // refusals: the wrong place, the wrong host, a forged tag, another computer's
@@ -308,10 +373,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
 
     // the charges: each operator key's call, at its price; and the month's counts
-    let keyed = ["perplexity", "elevenlabs", "google-places", "firecrawl", "fal", "browser-use", "xai", "x"];
-    // each key's call, and the speech calls as its part (`price::KEY_PARTS`):
-    // the one made, and the two refused
-    let held_rows = keyed.len() + 3;
+    let keyed = ["perplexity", "elevenlabs", "x"];
+    // each key's call, the speech calls as its part (`price::KEY_PARTS`):
+    // the one made, and the two refused; fal's run, its queued submit and
+    // its poll; xAI's X search, chat and model list; Places' search,
+    // details and photo; Firecrawl's scrape and the GET before it; Browser
+    // Use's start, its task on that session and the GET before it; and X's
+    // lookup and the GET before it (its search is keyed's)
+    let held_rows = keyed.len() + 3 + 3 + 3 + 3 + 2 + 3 + 2;
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
     let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == held_rows);
     let rows = held();
@@ -325,7 +394,20 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let nothing = rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": "elevenlabs:speech", "units": 0 }) && theirs(r) && charged(r) == Some(0)).count();
     // the agent's count, below, has its 4 ElevenLabs calls at the made ones' charges alone
     s.ok(SWAP_CHECKS[32], refused_sent && nothing == 2, json!({ "said": refused_said, "rows": rows }));
-    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 1, charge_of("google-places")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 1, charge_of("fal")), ("browser-use", 1, charge_of("browser-use")), ("xai", 1, charge_of("xai")), (SWAP_OWN, 1, 0)];
+    let image = charge_for("fal:image", FAL_PIXELS);
+    let fal_made = rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": "fal:image", "units": FAL_PIXELS }) && theirs(r) && charged(r) == Some(image));
+    let fal_polled = rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": "fal", "units": 0 }) && theirs(r) && charged(r) == Some(0)).count() == 2;
+    s.ok(SWAP_CHECKS[33], fal_sent && fal_made && fal_polled && image < charge_of("fal"), json!({ "seen": fal_seen, "image": image, "rows": rows }));
+    let held_row = |key: &str, units: i64, micros: i64| rows.iter().filter(|r| *usage(r) == json!({ "kind": "key", "key": key, "units": units }) && theirs(r) && charged(r) == Some(micros)).count();
+    let xai_charged = held_row("xai", 1, charge_of("xai")) == 1 && held_row("xai", 0, 0) == 2;
+    s.ok(SWAP_CHECKS[34], xai_seen == [true, true] && xai_charged, json!({ "seen": xai_seen, "rows": rows }));
+    let photo = charge_of("google-places:photo");
+    s.ok(SWAP_CHECKS[35], detail_sent && photo_sent && held_row("google-places:photo", 1, photo) == 1 && held_row("google-places", 0, 0) == 2, json!({ "photo": photo, "rows": rows }));
+    let credit = charge_of("firecrawl:credit");
+    s.ok(SWAP_CHECKS[36], scrape_sent && held_row("firecrawl:credit", 1, credit) == 1 && held_row("firecrawl", 0, 0) == 1 && credit < charge_of("firecrawl"), json!({ "credit": credit, "rows": rows }));
+    s.ok(SWAP_CHECKS[37], session_sent && reused_sent && held_row("browser-use", 1, charge_of("browser-use")) == 1 && held_row("browser-use", 0, 0) == 2, json!({ "rows": rows }));
+    s.ok(SWAP_CHECKS[38], lookup_sent && search_sent && held_row("x", 0, 0) == 2, json!({ "rows": rows }));
+    let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 4, charge_of("elevenlabs") + speech), ("google-places", 3, charge_of("google-places:photo")), ("firecrawl", 2, charge_of("firecrawl:credit")), ("fal", 3, image), ("browser-use", 3, charge_of("browser-use")), ("xai", 3, charge_of("xai")), ("x", 3, charge_of("x")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
     let counted = |u: &Value| expect.iter().all(|(p, calls, micros)| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == *p && x["agent"] == w.agent && x["calls"] == *calls && x["micros"] == *micros)));
     let all = s.eventually(Duration::from_secs(20), || counted(&uses()));
@@ -371,22 +453,22 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let speak = format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {long}");
     let mut spoke = vec![];
     for n in 0..calls as u32 {
-        spoke.push(say(s, 140 + n, &speak)?);
+        spoke.push(say(s, 150 + n, &speak)?);
     }
     let made = held_rows + calls as usize;
     let reached = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == made);
     forget_gate(api, &owner_id)?;
     let seen_before = s.upstream.seen().len();
-    let paused = say(s, 147, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"))?;
+    let paused = say(s, 157, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"))?;
     let unreached = s.upstream.seen().len() == seen_before;
-    let other = say(s, 148, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let other = say(s, 158, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let went = other.starts_with("fetched 200") && s.upstream.seen().last().is_some_and(|l| l["host"] == "api.perplexity.ai");
     // the perplexity call's row lands, and the paused call made none
     let settled = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == made + 1);
     let rows = held();
     let charged_once = rows.len() == made + 1 && rows.iter().filter(|r| of_elevenlabs(r)).count() == eleven_rows + calls as usize;
     s.ok(
-        SWAP_CHECKS[33],
+        SWAP_CHECKS[39],
         spoke.iter().all(|said| said.starts_with("fetched 200"))
             && reached
             && paused.starts_with("fetched 429")
@@ -399,16 +481,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             && charged_once,
         json!({ "spoke": spoke.iter().map(|x| x.chars().take(80).collect::<String>()).collect::<Vec<_>>(), "spent": spent, "calls": calls, "paused": paused, "rows": rows.len() }),
     );
-    s.ok(SWAP_CHECKS[34], went, &other);
+    s.ok(SWAP_CHECKS[40], went, &other);
     // a ledger slower than the gate waits: the call goes, as decision 62 has
     let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
     let slowed = slow(3_000)?;
     forget_gate(api, &owner_id)?;
-    let open = say(s, 149, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"));
+    let open = say(s, 159, &format!("fetch http://api.elevenlabs.io/v1/text-to-speech/e2e-voice with $ELEVENLABS_API_KEY in xi-api-key posting {SPOKEN}"));
     let unslowed = slow(0)?;
     forget_gate(api, &owner_id)?;
     let open = open?;
-    s.ok(SWAP_CHECKS[35], slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200"), json!({ "open": open, "slowed": slowed.body }));
+    s.ok(SWAP_CHECKS[41], slowed.status == 200 && unslowed.status == 200 && open.starts_with("fetched 200"), json!({ "open": open, "slowed": slowed.body }));
     Ok(turns)
 }
 
