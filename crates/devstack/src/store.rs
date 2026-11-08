@@ -514,38 +514,70 @@ pub fn missing<'a>(bound: &[(String, &'a str)], listed: &[Listed]) -> Vec<(Strin
 }
 
 /// Seeds wrangler's local store under `persist` (a node's state directory)
-/// with `values` (each a name and its value), unless it holds exactly
-/// these already: a stamp beside the state records what was seeded, and a
-/// cleared state takes it along. Locally, a `create` of a name the store
-/// holds replaces its value, so this never lists or updates. Answers
-/// whether it seeded.
-pub fn seed_local(tools: &Tools, persist: &Path, values: &[(&str, &str)]) -> Result<bool, StoreError> {
+/// with `values` (each a name and its value), each secret unless it holds
+/// it already at that value: a stamp beside the state records each secret
+/// seeded (its name and a digest of its value), and a cleared state takes
+/// it along. A node of another shape binds a few secrets more or fewer, so
+/// switching shapes seeds only those (one wrangler run each, about a
+/// second), and a changed value is seeded again. Locally, a `create` of a
+/// name the store holds replaces its value, so this never lists or
+/// updates; a secret no value names stays, bound by nothing. Answers how
+/// many it seeded.
+pub fn seed_local(tools: &Tools, persist: &Path, values: &[(&str, &str)]) -> Result<usize, StoreError> {
     assert!(persist.is_absolute(), "a state directory is named absolutely: wrangler runs from the repo root");
     assert!(values.len() <= bindings::CACHE_ENTRIES_MAX, "at most a Worker's bindings");
-    let mut digest = Sha256::new();
-    digest.update(LOCAL_STORE_ID.as_bytes());
-    for (name, value) in values {
+    for (name, _) in values {
         checked_name(name)?;
-        for part in [name.as_bytes(), value.as_bytes()] {
-            digest.update((part.len() as u64).to_be_bytes());
-            digest.update(part);
-        }
     }
-    let wanted: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
     let stamp: PathBuf = persist.join(SEEDED_STAMP);
-    if std::fs::read_to_string(&stamp).ok().as_deref() == Some(wanted.as_str()) {
-        return Ok(false);
+    let mut held = read_seeded(&std::fs::read_to_string(&stamp).unwrap_or_default());
+    let unseeded = unseeded(&held, values);
+    if unseeded.is_empty() {
+        return Ok(0);
     }
     std::fs::create_dir_all(persist).map_err(|source| StoreError::Io { what: format!("create {}", persist.display()), source })?;
     let store = Store::Local { persist };
     // bounded: at most a Worker's bindings, one wrangler run each
-    for (name, value) in values {
-        let value = Value::checked(value.as_bytes().to_vec(), name)?;
-        put(tools, &store, name, value, None)?;
+    for (name, value, digest) in &unseeded {
+        put(tools, &store, name, Value::checked(value.as_bytes().to_vec(), name)?, None)?;
+        // after each put: a seeding cut short seeds the rest again
+        held.insert(name.to_string(), digest.clone());
+        let lines: String = held.iter().map(|(n, d)| format!("{n} {d}\n")).collect();
+        std::fs::write(&stamp, lines).map_err(|source| StoreError::Io { what: format!("write {}", stamp.display()), source })?;
     }
-    // written last: a seeding cut short leaves no stamp, and runs again
-    std::fs::write(&stamp, &wanted).map_err(|source| StoreError::Io { what: format!("write {}", stamp.display()), source })?;
-    Ok(true)
+    Ok(unseeded.len())
+}
+
+/// A secret's digest in the stamp: the local store's id, its name and its
+/// value, each length-prefixed.
+fn seeded_digest(name: &str, value: &str) -> String {
+    let mut digest = Sha256::new();
+    for part in [LOCAL_STORE_ID.as_bytes(), name.as_bytes(), value.as_bytes()] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    digest.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The stamp's secrets, each name to its value's digest: a line that is
+/// not a name and a digest (an older stamp's one digest, a write cut
+/// short) names nothing, so its secrets are seeded again.
+fn read_seeded(stamp: &str) -> BTreeMap<String, String> {
+    stamp
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, digest)| valid_name(name) && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|(name, digest)| (name.to_string(), digest.to_string()))
+        .collect()
+}
+
+/// The `values` `held` lacks at their value, in order, each with its digest.
+fn unseeded<'a>(held: &BTreeMap<String, String>, values: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str, String)> {
+    values
+        .iter()
+        .map(|(name, value)| (*name, *value, seeded_digest(name, value)))
+        .filter(|(name, _, digest)| held.get(*name) != Some(digest))
+        .collect()
 }
 
 #[cfg(test)]
@@ -611,6 +643,38 @@ mod tests {
         assert!(!args_hold_no_value(&["--value=x".into()]) && !args_hold_no_value(&["--value".into(), "x".into()]));
         assert!(std::panic::catch_unwind(|| create_args(&account, "has space")).is_err(), "a name is checked first");
         assert!(std::panic::catch_unwind(|| update_args(&account, "id; rm")).is_err());
+    }
+
+    /// A fresh state seeds every secret; the same values seed none; a
+    /// changed value, or a secret another shape adds, seeds that one alone;
+    /// back to the first shape seeds none; an older stamp's one digest, or
+    /// a line cut short, names nothing.
+    #[test]
+    fn seeding_skips_only_what_the_store_holds_at_its_value() {
+        fn names<'a>(v: Vec<(&'a str, &'a str, String)>) -> Vec<&'a str> {
+            v.into_iter().map(|(n, _, _)| n).collect()
+        }
+        let plain = [("fragment-host-secret", "h1"), ("fragment-stripe-key", "sk")];
+        let mut held = BTreeMap::new();
+        assert_eq!(names(unseeded(&held, &plain)), ["fragment-host-secret", "fragment-stripe-key"]);
+        for (name, value, digest) in unseeded(&held, &plain) {
+            assert_eq!(digest, seeded_digest(name, value));
+            held.insert(name.to_string(), digest);
+        }
+        let stamp: String = held.iter().map(|(n, d)| format!("{n} {d}\n")).collect();
+        assert_eq!(read_seeded(&stamp), held, "the stamp reads back as written");
+        assert!(unseeded(&held, &plain).is_empty());
+        let changed = [("fragment-host-secret", "h2"), ("fragment-stripe-key", "sk")];
+        assert_eq!(names(unseeded(&held, &changed)), ["fragment-host-secret"]);
+        let shaped = [("fragment-host-secret", "h1"), ("fragment-openrouter-key", "or")];
+        assert_eq!(names(unseeded(&held, &shaped)), ["fragment-openrouter-key"]);
+        held.insert("fragment-openrouter-key".into(), seeded_digest("fragment-openrouter-key", "or"));
+        assert!(unseeded(&held, &plain).is_empty(), "a secret no value names stays held");
+        assert_ne!(seeded_digest("a", "bc"), seeded_digest("ab", "c"));
+        let older = "3f".repeat(32);
+        assert!(read_seeded(&older).is_empty());
+        let cut = format!("fragment-host-secret {}", &seeded_digest("fragment-host-secret", "h1")[..40]);
+        assert!(read_seeded(&cut).is_empty());
     }
 
     /// Names: the store's characters, and a length this repo bounds.
