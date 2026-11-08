@@ -637,12 +637,24 @@ impl Catalog {
             .collect()
     }
 
-    /// The operator keys' prices, as the price book takes them.
+    /// The operator keys' prices, as the price book takes them, and each
+    /// part of their calls the book prices apart (`price::KEY_PARTS`) at
+    /// the book's price, which a row's own price does not change: the swap
+    /// meters a part's calls as the part (`price::key_usage`) on any
+    /// operator row of its key's name.
     pub fn key_prices(&self) -> Vec<crate::price::KeyPrice> {
-        self.providers
-            .iter()
-            .filter_map(|p| p.price.filter(|_| p.kind == Kind::Operator).map(|price| crate::price::KeyPrice { key: p.name.clone(), micros: price.micros, per: price.per }))
-            .collect()
+        use crate::price::{default_key_price, KeyPrice, KEY_PARTS};
+        let mut prices = vec![];
+        for p in self.providers.iter().filter(|p| p.kind == Kind::Operator) {
+            if let Some(price) = p.price {
+                prices.push(KeyPrice { key: p.name.clone(), micros: price.micros, per: price.per });
+            }
+            for part in KEY_PARTS.iter().filter(|part| part.key == p.name) {
+                let (micros, per) = default_key_price(part.priced_as).expect("each part is priced in DEFAULT_KEYS");
+                prices.push(KeyPrice { key: part.priced_as.to_string(), micros, per });
+            }
+        }
+        prices
     }
 }
 
@@ -687,6 +699,28 @@ mod tests {
         let again = Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap();
         assert_eq!(again, c);
         assert!(Catalog::parse("[]").unwrap().is_empty());
+    }
+
+    /// FIN-443: an operator key whose calls the book prices in part apart
+    /// (ElevenLabs' speech) is priced so too, at the book's price whatever
+    /// the row's own; a row of another kind by its name is metered not.
+    #[test]
+    fn a_keys_parts_are_priced_with_it() {
+        let eleven = |kind: &str, price: Option<serde_json::Value>| {
+            let mut row = json!({ "name": "elevenlabs", "kind": kind, "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"] });
+            if let Some(p) = price {
+                row["price"] = p;
+            }
+            parse(json!([row])).unwrap()
+        };
+        let priced = |c: &Catalog| c.key_prices().into_iter().map(|k| (k.key, k.micros, k.per)).collect::<Vec<_>>();
+        let speech = ("elevenlabs:speech".to_string(), 80_000, 1_000);
+        assert_eq!(priced(&eleven("operator", None)), vec![("elevenlabs".to_string(), 150_000, 1), speech.clone()]);
+        assert_eq!(priced(&eleven("operator", Some(json!({ "micros": 7, "per": 1 })))), vec![("elevenlabs".to_string(), 7, 1), speech], "the row's own price is its other calls'");
+        assert!(priced(&eleven("own", None)).is_empty(), "a person's own key is never metered");
+        let mut book = crate::price::PriceBook::defaults();
+        book.keys = eleven("operator", None).key_prices();
+        assert_eq!(book.validate(), Ok(()), "a book the ledger takes");
     }
 
     /// Invalid: every rule, each a typed refusal.

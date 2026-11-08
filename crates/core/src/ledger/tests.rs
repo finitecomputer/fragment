@@ -596,6 +596,44 @@ fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "and the row in another batch is charged once");
 }
 
+/// FIN-443: every ElevenLabs call was charged as a minute of music, so
+/// short speech clips cost people 10 to 20 times what they cost. Goal: a
+/// deployment's book (its keys' prices from its catalog) charges a speech
+/// call by its text's characters and a music call by the minute, each
+/// once, across a replay and a restart; a release whose book has no
+/// speech price (one rolled back to) charges its rows nothing. Method:
+/// the swap's rows as it meters them (`price::key_usage`), sent again.
+#[test]
+fn a_speech_call_is_charged_by_its_characters_and_once() {
+    let eleven = serde_json::json!([{ "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"] }]);
+    let mut configured = book();
+    configured.keys.extend(crate::catalog::Catalog::parse(&eleven.to_string()).unwrap().key_prices());
+    let reply = serde_json::to_vec(&serde_json::json!({ "text": "a".repeat(200), "model_id": "eleven_multilingual_v2" })).unwrap();
+    let spoken = crate::price::key_usage("elevenlabs", "/v1/text-to-speech/voice", &reply);
+    let music = crate::price::key_usage("elevenlabs", "/v1/music", br#"{"prompt":"a jingle","music_length_ms":15000}"#);
+    assert_eq!((&spoken, &music), (&Usage::Key { key: "elevenlabs:speech".into(), units: 200 }, &Usage::Key { key: "elevenlabs".into(), units: 1 }));
+    let mut w = World::seat();
+    w.ok(Op::Book(configured.clone()));
+    let before = w.balance();
+    let batch = meter("key:c-1:a1", vec![row("key:c-1:a1", spoken.clone(), None, T0), row("key:c-1:a2", music, None, T0)]);
+    // 200 characters at $0.08 per 1,000, a minute at $0.15, each with the margin
+    let charged = Outcome::Metered(Metered { charged: 24_000 + 225_000, rows_new: 2, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(batch.clone()), charged);
+    assert_eq!(w.balance(), before - 249_000);
+    let mut w = w.restarted();
+    w.replays(Op::Book(configured.clone()));
+    assert_eq!(w.ok(batch), charged, "a batch sent again answers as it did");
+    let again = w.ok(meter("key:c-1:a1-again", vec![row("key:c-1:a1", spoken.clone(), None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "the row in another batch is charged once");
+    assert_eq!(w.balance(), before - 249_000);
+    // a release before the speech price: its row refused as unpriced, charging nothing
+    let older = PriceBook { keys: configured.keys.iter().filter(|k| k.key != "elevenlabs:speech").cloned().collect(), ..configured };
+    w.ok(Op::Book(older));
+    let Outcome::Metered(m) = w.ok(meter("key:c-1:b1", vec![row("key:c-1:b1", spoken, None, T0)])) else { panic!("a batch answers Metered") };
+    assert_eq!((m.charged, m.rows_new, m.refused.iter().map(|r| r.why).collect::<Vec<_>>()), (0, 0, vec![Refused::NoPrice]));
+    assert_eq!(w.balance(), before - 249_000);
+}
+
 /// Bug 2: a step's charge is its row under the step's key, whatever
 /// attempt made the call (decision 62): a retry or a replay that sends it
 /// again, in a batch of its own, is charged nothing more.

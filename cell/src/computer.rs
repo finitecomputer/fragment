@@ -3804,20 +3804,23 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // after the answer, never in its way
     if let (Some((agent, owner, identity)), true) = (payer, answered) {
         let book = &cfg.book;
-        let key = |p: &Placeholder| Usage::Key { key: p.provider.clone(), units: 1 };
+        // what each key's call used: a call, or the units of a part the
+        // book prices apart (ElevenLabs' speech, by its characters)
+        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, url.path(), &body))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
         let uses: Vec<Value> = plan
             .wanted
             .iter()
             .map(|p| {
-                let micros = if keys.contains(&p) { book.price(&key(p)).map_or(0, |priced| priced.charge) } else { 0 };
+                let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
+                let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
                 json!({ "provider": p.provider, "micros": micros })
             })
             .collect();
         let at = js::now_ms();
-        let rows: Vec<MeterRow> = keys
-            .iter()
-            .map(|p| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage: key(p), fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
+        let rows: Vec<MeterRow> = used
+            .into_iter()
+            .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
             .collect();
         let (env, computer) = (env.clone(), computer.to_string());
         ctx.wait_until(async move {
