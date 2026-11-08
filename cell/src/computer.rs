@@ -49,6 +49,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
+use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
@@ -323,7 +324,8 @@ enum MetaKey {
     /// `<day> <bytes>`.
     RelayDay,
     /// The clock a test fleet moved (the `clock` lever): the milliseconds its
-    /// uses' months are counted and read ahead by. None elsewhere.
+    /// uses' months and its keys' hours are counted and read ahead by. None
+    /// elsewhere.
     ClockOffset,
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
@@ -2142,10 +2144,19 @@ impl ComputerCell {
         if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
         }
-        let month = Month::of(b.at.saturating_add(self.offset_ms()?));
+        let offset = self.offset_ms()?;
+        let (at, now) = (b.at.saturating_add(offset), js::now_ms() + offset);
+        let month = Month::of(at);
         for u in &b.uses {
-            if self.cfg.providers.get(&u.provider).is_none() || u.micros < 0 {
+            let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
                 return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
+            };
+            // a shared key's charge counts in its hour (fragment_core::key_hour)
+            if provider.kind == Kind::Operator && u.micros > 0 {
+                self.exec(
+                    "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
+                    vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
+                )?;
             }
             let m = i64::from(month.0);
             let held = self.rows("SELECT COUNT(*) AS n FROM uses WHERE month = ?", vec![m.into()])?;
@@ -2160,7 +2171,8 @@ impl ComputerCell {
             )?;
         }
         let oldest = i64::from(month.0.saturating_sub(USES_MONTHS_KEPT - 1));
-        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])
+        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])?;
+        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])
     }
 
     fn view(&self) -> CellResult<ComputerView> {
