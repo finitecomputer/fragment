@@ -211,13 +211,49 @@ pub struct QuoteAsk {
 }
 
 /// One planned use: `calls` calls (absent, one), each using what it says.
-/// Told apart by the field it names: `key`, `model` or `usage`.
+/// Told apart by the field it names: `key`, `model` or `usage`. Read as
+/// its fields (`PlannedFields`), not as serde's untagged reading, which
+/// buffers each item to try every kind: 12 KB more of the cell's Wasm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "PlannedFields")]
 pub enum Planned {
     Key(PlannedKey),
     Model(PlannedModel),
     Usage(PlannedUsage),
+}
+
+/// A `Planned` as it is read: every kind's fields, flat, none unknown.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlannedFields {
+    key: Option<String>,
+    units: Option<u64>,
+    model: Option<String>,
+    input: Option<u64>,
+    cached_input: Option<u64>,
+    cache_write: Option<u64>,
+    output: Option<u64>,
+    usage: Option<serde_json::Value>,
+    calls: Option<u64>,
+}
+
+impl TryFrom<PlannedFields> for Planned {
+    type Error = String;
+
+    /// The kind its one name says, with that kind's fields alone.
+    fn try_from(f: PlannedFields) -> Result<Planned, String> {
+        let tokens = [f.input, f.cached_input, f.cache_write, f.output];
+        let calls = f.calls;
+        match (f.key, f.model, f.usage) {
+            (Some(key), None, None) if tokens.iter().all(Option::is_none) => Ok(Planned::Key(PlannedKey { key, units: f.units, calls })),
+            (None, Some(model), None) if f.units.is_none() => {
+                let [input, cached_input, cache_write, output] = tokens.map(|t| t.unwrap_or(0));
+                Ok(Planned::Model(PlannedModel { model, input, cached_input, cache_write, output, calls }))
+            }
+            (None, None, Some(usage)) if f.units.is_none() && tokens.iter().all(Option::is_none) => Ok(Planned::Usage(PlannedUsage { usage, calls })),
+            _ => Err("an item names one of `key` (with `units`), `model` (with its tokens) or `usage`, and `calls`".into()),
+        }
+    }
 }
 
 /// Calls on an operator key, or on a part of its calls the book prices
@@ -347,6 +383,10 @@ mod tests {
             json!({ "calls": 3 }),
             json!({ "key": 3 }),
             json!({ "key": "fal", "calls": -1 }),
+            json!({ "key": "fal", "output": 3 }),
+            json!({ "model": "cheap", "units": 3 }),
+            json!({ "usage": { "kind": "requests", "count": 1 }, "units": 3 }),
+            json!({ "usage": null }),
         ] {
             assert!(serde_json::from_value::<Planned>(bad.clone()).is_err(), "{bad}");
         }
