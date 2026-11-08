@@ -24,8 +24,10 @@ protocol PlaybackEngine: AnyObject {
 ///
 /// A sound plays as Messages plays one tapped: aloud on the speaker (never
 /// the earpiece a recording's session would route it to), with the
-/// silent switch on or off, as a tap asked for it; others' audio pauses
-/// meanwhile and resumes after. A call or unplugged headphones pause it.
+/// silent switch on or off, as a tap asked for it (`.playback`); others'
+/// audio pauses meanwhile and resumes once it pauses, ends or stops: the
+/// session is held only while it plays. A call or unplugged headphones
+/// pause it.
 @MainActor @Observable
 final class AudioPlayback {
     static let shared = AudioPlayback(engine: { AVPlayerEngine(url: $0) }, session: .system, pausesForTheSystem: true)
@@ -56,6 +58,8 @@ final class AudioPlayback {
     @ObservationIgnored private var engine: PlaybackEngine?
     @ObservationIgnored private var ticking: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    /// The session is this player's (activated, not yet let go).
+    @ObservationIgnored private var holdsSession = false
 
     init(engine: @escaping @MainActor (URL) -> PlaybackEngine, session: Session, pausesForTheSystem: Bool = false) {
         makeEngine = engine
@@ -87,7 +91,7 @@ final class AudioPlayback {
         if current != id { load(id, url: url) }
         guard let engine else { return }
         if engine.ended || (duration > 0 && elapsed >= duration) { engine.seek(0); elapsed = 0 }
-        session.activate()
+        session.activate(); holdsSession = true
         engine.play()
         playing = true
         tick()
@@ -99,6 +103,7 @@ final class AudioPlayback {
         playing = false
         ticking?.cancel(); ticking = nil
         if let engine { elapsed = engine.elapsed }
+        letGo()
     }
 
     /// Moves `id`'s place to `fraction` of it (`length` seconds, as read
@@ -119,16 +124,22 @@ final class AudioPlayback {
     func stop() {
         ticking?.cancel(); ticking = nil
         engine?.pause()
-        let was = engine != nil
         engine = nil
         current = nil; playing = false; elapsed = 0; duration = 0
-        if was { session.deactivate() }
+        letGo()
     }
 
     /// Where `id` is in the player, as its view shows it: its place when it
     /// is the one in the player, else its start.
     func place(_ id: String) -> (elapsed: Double, playing: Bool)? {
         current == id ? (elapsed, playing) : nil
+    }
+
+    /// Lets the session go, once, so others' audio resumes.
+    private func letGo() {
+        guard holdsSession else { return }
+        holdsSession = false
+        session.deactivate()
     }
 
     private func load(_ id: String, url: URL) {
@@ -149,7 +160,7 @@ final class AudioPlayback {
                     // played to its end: back to its start, paused, as Messages leaves one
                     engine.pause(); engine.seek(0)
                     self.elapsed = 0; self.playing = false
-                    self.session.deactivate()
+                    self.letGo()
                     return
                 }
                 if abs(now - self.elapsed) >= 0.03 { self.elapsed = now }
