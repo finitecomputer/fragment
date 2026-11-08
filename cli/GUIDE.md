@@ -826,6 +826,12 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
   `in` names others. Its arguments are `fragment search`'s question,
   `{q, in?, limit?, mode?, fields?, after?, before?}`, and its result is
   `fragment search --json`'s.
+- Everyone has `fragment-quote`: what a planned job would cost the
+  caller's payer, and what they have left (Your ledger). Its arguments
+  are `POST /api/ledger/quote`'s, `{items}`, each `{key, units?,
+  calls?}`, `{model, input?, cachedInput?, cacheWrite?, output?,
+  calls?}` or `{usage, calls?}`; its result is `fragment quote --json`'s,
+  after the line a person reads.
 - One server serves one fragment: add one for each. Claude desktop
   takes one in its config's `mcpServers`: `{"my-thing": {"command":
   "/Users/<you>/.local/bin/fragment", "args": ["mcp", "my-thing"]}}` (a
@@ -884,7 +890,24 @@ why: replay it after a top-up or next month.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
 
+Before a job that spends (speech, images, searches, many model calls),
+quote it: `fragment quote` prices a plan with the same book your ledger
+charges with, and says what you have left this month (an agent's quote
+is its owner's). It spends nothing. Its items follow one another, each a
+name and its amounts: an operator key (`perplexity`, `xai`), a part of
+a key's calls priced apart (`elevenlabs:speech` by its text's
+characters, `fal:image` by its pixels, `xai:image` one a call) or a
+model (`cheap`, `medium`, an id); `<n>` or `<n>x` its calls, `<n>in`,
+`<n>cached`, `<n>write` and `<n>out` a model's tokens a call, `<n>` with
+a unit (`60000chars`, `1048576px`) a key's units a call. A name the
+book does not price here is said so, never guessed. Refused for credit
+or a budget? `fragment quote` alone reads what is left.
+
 ```
+fragment quote elevenlabs:speech 60000chars   # "about $7.20; you have $95.40 left this month"
+fragment quote fal:image 40x 1048576px xai 10x   # several items, each one's price too
+fragment quote cheap 2000in 500out 40x        # 40 turns on the cheap tier
+fragment quote                                # what you have left, alone
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
 fragment runs my-thing             # each run shows what it cost
@@ -1082,6 +1105,7 @@ fragment login [--force] [--no-wait] [--no-browser]
 fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W [--id ID]]
+fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]

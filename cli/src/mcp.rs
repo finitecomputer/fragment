@@ -21,7 +21,9 @@
 //! `fragment-search` (search.rs), fragments' indexes searched as one, this
 //! fragment's unless its `in` names others. Its arguments are the search
 //! route's question (docs/api.md, "Search across fragments"), and its name
-//! is none an operation can have.
+//! is none an operation can have. Everyone has `fragment-quote` (quote.rs):
+//! what a planned job would cost the caller's payer, and what they have
+//! left (docs/api.md, Ledger), the quote route's question its arguments.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
@@ -325,6 +327,7 @@ impl Server<'_> {
                 if self.role >= Role::Viewer {
                     tools.push(crate::search::tool());
                 }
+                tools.push(crate::quote::tool());
                 Ok(json!({ "tools": tools }))
             }
             "tools/call" => self.call(params),
@@ -363,6 +366,26 @@ impl Server<'_> {
         })
     }
 
+    /// The `fragment-quote` tool's call: the quote its arguments ask,
+    /// answered with the line a person reads first, then the quote.
+    fn quote(&self, input: Value) -> Value {
+        let asked = serde_json::from_value::<fragment_proto::ledger::QuoteAsk>(input)
+            .map_err(|e| Failed { code: Code::InvalidUsage.as_str().into(), status: None, message: format!("{}'s arguments are {{items}}, each {{key, units?, calls?}}, {{model, input?, cachedInput?, cacheWrite?, output?, calls?}} or {{usage, calls?}}: {e}", crate::quote::TOOL) });
+        let answer = asked.and_then(|asked| {
+            let body = answered(self.client.post_json("/api/ledger/quote", &asked))?;
+            let quote = serde_json::from_slice::<fragment_proto::ledger::Quote>(&body).map_err(|e| Failed { code: Code::ServerError.as_str().into(), status: None, message: format!("the platform's answer is no quote: {e}") })?;
+            Ok((asked, quote))
+        });
+        match answer {
+            Ok((asked, quote)) => {
+                let value = serde_json::to_value(&quote).expect("a quote serializes");
+                let text = format!("{}\n{}", crate::quote::said(&asked.items, &quote).join("\n"), serde_json::to_string(&value).expect("a JSON value serializes"));
+                json!({ "content": [{ "type": "text", "text": text }], "structuredContent": value, "isError": false })
+            }
+            Err(f) => json!({ "content": [{ "type": "text", "text": format!("{}: {}", f.code, f.message) }], "structuredContent": { "error": f.json() }, "isError": true }),
+        }
+    }
+
     fn call(&mut self, params: &Value) -> Result<Value, RpcError> {
         let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call names its tool (params.name)"))?;
         let input = match params.get("arguments") {
@@ -372,6 +395,9 @@ impl Server<'_> {
         };
         if name == crate::search::TOOL {
             return self.search(input);
+        }
+        if name == crate::quote::TOOL {
+            return Ok(self.quote(input));
         }
         // a tool the client knows and this server does not: deployed since
         if !self.operations.contains_key(name) {
@@ -526,7 +552,7 @@ mod tests {
         assert_eq!((init["serverInfo"]["name"].as_str(), init["serverInfo"]["title"].as_str()), (Some("fragment"), Some(NAME)));
         assert!(init["instructions"].as_str().is_some_and(|i| i.contains(NAME) && i.contains("--write") && i.contains("(editor)")), "{init}");
         assert_eq!(answers[1], json!({ "jsonrpc": "2.0", "id": 2, "result": {} }), "ping");
-        assert_eq!(names(&answers[2]), ["find", "list", crate::search::TOOL], "read-only: the described queries the caller may call, whose input is an object, and a reader's search");
+        assert_eq!(names(&answers[2]), ["find", "list", crate::search::TOOL, crate::quote::TOOL], "read-only: the described queries the caller may call, whose input is an object, a reader's search, and a quote");
         let tools = answers[2]["result"]["tools"].as_array().unwrap();
         let list = json!({ "name": "list", "description": "Every todo.", "inputSchema": { "type": "object" }, "annotations": { "readOnlyHint": true, "openWorldHint": false } });
         assert_eq!(tools[1], list, "no input declared: any object");
@@ -560,7 +586,7 @@ mod tests {
         // with --write: the described mutations and jobs too
         let answers = session(&client, NAME, true, &[initialize(1, "2025-06-18"), request(2, "tools/list", json!({})), call(3, "add", json!({ "text": "eggs" })), call(4, "add", json!({}))]);
         assert!(answers[0]["result"]["instructions"].as_str().is_some_and(|i| i.contains("change it")), "{}", answers[0]);
-        assert_eq!(names(&answers[1]), ["add", "digest", "find", "list", crate::search::TOOL]);
+        assert_eq!(names(&answers[1]), ["add", "digest", "find", "list", crate::search::TOOL, crate::quote::TOOL]);
         let add = &answers[1]["result"]["tools"][0];
         assert_eq!(add["annotations"], json!({ "readOnlyHint": false, "idempotentHint": false, "openWorldHint": false }), "{add}");
         assert_eq!(answers[2]["result"]["structuredContent"], json!({ "id": 7 }));
@@ -574,11 +600,11 @@ mod tests {
     fn the_callers_role_bounds_the_tools() {
         let (owner, _) = host("owner");
         let client = Client::new(&owner.url, crate::auth::fixed(7));
-        assert_eq!(names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]), ["find", "list", "secret", crate::search::TOOL]);
+        assert_eq!(names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]), ["find", "list", "secret", crate::search::TOOL, crate::quote::TOOL]);
         let (viewer, seen) = host("viewer");
         let client = Client::new(&viewer.url, crate::auth::fixed(7));
         let answers = session(&client, NAME, true, &[request(1, "tools/list", json!({})), call(2, "add", json!({ "text": "x" })), call(3, "secret", json!({}))]);
-        assert_eq!(names(&answers[0]), ["find", "list", crate::search::TOOL], "a viewer's --write adds nothing an editor calls");
+        assert_eq!(names(&answers[0]), ["find", "list", crate::search::TOOL, crate::quote::TOOL], "a viewer's --write adds nothing an editor calls");
         assert!(answers[1]["error"]["message"].as_str().is_some_and(|m| m.contains("needs the editor role, and you are a viewer")), "{}", answers[1]);
         assert!(answers[2]["error"]["message"].as_str().is_some_and(|m| m.contains("needs the owner role")), "{}", answers[2]);
         assert!(seen.lock().unwrap().iter().all(|r| r.0 == "GET"), "nothing was called");
@@ -740,5 +766,61 @@ mod tests {
         let (stranger, _) = host("public");
         let client = Client::new(&stranger.url, crate::auth::fixed(7));
         assert!(!names(&session(&client, NAME, false, &[request(1, "tools/list", json!({}))])[0]).contains(&crate::search::TOOL), "no reader, no search");
+    }
+
+    /// Goal: anyone has the `fragment-quote` tool, whatever their role
+    /// here: the quote route's question its arguments, its answer the
+    /// route's with the line a person reads first, a refusal the tool's
+    /// error with the platform's code, arguments the route does not take
+    /// refused before anything is sent. Method: a session against a host
+    /// answering the route, as a stranger to the fragment.
+    #[test]
+    fn anyone_quotes_through_one_tool_more() {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let ledger = json!({ "plan": "seat", "seat": "active", "month": "2026-11", "balanceMicros": 95_400_000, "includedMicros": 95_400_000, "includedGrantedMicros": 100_000_000,
+            "purchasedMicros": 0, "reservedMicros": 0, "availableMicros": 97_400_000, "overdraftMicros": 2_000_000, "standing": { "standing": "ok" }, "priceBook": 9, "fragments": [] });
+        let platform = FakeHost::start(
+            0,
+            Arc::new(move |r: &Request| {
+                let body: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+                log.lock().unwrap().push((r.method.clone(), r.path.clone(), body.clone(), None));
+                match (r.method.as_str(), r.path.as_str()) {
+                    ("GET", p) if p == format!("/api/f/{NAME}/status") => Response::json(200, &status("public")),
+                    ("POST", "/api/ledger/quote") if body["items"][0]["key"] == "boom" => Response::json(402, &json!({ "error": "budget_used_up", "message": "no credit" })),
+                    ("POST", "/api/ledger/quote") => Response::json(200, &json!({
+                        "items": [{ "pricedAs": "elevenlabs:speech", "eachMicros": 4_800_000, "calls": 1, "chargeMicros": 4_800_000 }],
+                        "totalMicros": 4_800_000, "leftMicros": 95_400_000, "ledger": ledger })),
+                    _ => Response::json(404, &json!({ "error": "not_found", "message": "no such route" })),
+                }
+            }),
+        )
+        .expect("start the fake host");
+        let client = Client::new(&platform.url, crate::auth::fixed(7));
+        let speech = json!({ "items": [{ "key": "elevenlabs:speech", "units": 60000 }] });
+        let answers = session(
+            &client,
+            NAME,
+            false,
+            &[
+                request(1, "tools/list", json!({})),
+                call(2, crate::quote::TOOL, speech.clone()),
+                call(3, crate::quote::TOOL, json!({ "items": [{ "key": "boom" }] })),
+                call(4, crate::quote::TOOL, json!({ "items": [{ "key": "fal", "unit": 3 }] })),
+                call(5, crate::quote::TOOL, json!({})),
+            ],
+        );
+        assert_eq!(names(&answers[0]), [crate::quote::TOOL], "a stranger here has the quote alone");
+        assert_eq!(answers[0]["result"]["tools"][0]["annotations"]["readOnlyHint"], true);
+        let q = &answers[1]["result"];
+        assert_eq!((q["isError"].clone(), q["structuredContent"]["totalMicros"].clone()), (json!(false), json!(4_800_000)), "{q}");
+        assert!(text(&answers[1]).starts_with("about $4.80; you have $95.40 left this month\n{"), "{}", text(&answers[1]));
+        assert_eq!(answers[2]["result"]["isError"], true);
+        assert_eq!(answers[2]["result"]["structuredContent"]["error"], json!({ "code": "budget_used_up", "status": 402, "message": "no credit" }));
+        for refused in &answers[3..] {
+            assert_eq!((refused["result"]["isError"].clone(), refused["result"]["structuredContent"]["error"]["code"].clone()), (json!(true), json!("invalid_usage")), "{refused}");
+        }
+        let asked: Vec<Value> = seen.lock().unwrap().iter().filter(|r| r.1 == "/api/ledger/quote").map(|r| r.2.clone()).collect();
+        assert_eq!(asked, [speech, json!({ "items": [{ "key": "boom" }] })], "the arguments as they came; the refused ones sent nothing");
     }
 }

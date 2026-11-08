@@ -7,6 +7,7 @@ mod codestorage;
 mod mcp;
 mod notice;
 mod operator;
+mod quote;
 mod search;
 mod session;
 mod sync;
@@ -235,6 +236,19 @@ enum Cmd {
     Ledger {
         #[command(subcommand)]
         sub: Option<LedgerCmd>,
+    },
+    /// What a planned job would cost, priced with the book your ledger
+    /// charges with, and what you have left this month (an agent: its
+    /// owner's). Items one after another, each a name (an operator key, a
+    /// part of one, or a model) and its amounts: `fragment quote
+    /// elevenlabs:speech 60000chars`, `fragment quote fal:image 40x
+    /// 1048576px`, `fragment quote cheap 2000in 500out 40x`. Spends
+    /// nothing; with no items, what is left
+    Quote {
+        /// Each item's name, then its amounts: `<n>` or `<n>x` its calls,
+        /// `<n>in` `<n>cached` `<n>write` `<n>out` a model's tokens a call,
+        /// `<n>` and a unit (`60000chars`) a key's units a call
+        items: Vec<String>,
     },
     /// A fragment's monthly cap, which you own: past it, AI steps and agent
     /// turns stop for everyone but you until next month (default $5)
@@ -2435,6 +2449,14 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v.result)?);
             if v.replayed {
                 eprintln!("(replayed: operation {id} had already run)");
+            }
+        }
+        Cmd::Quote { items } => {
+            let asked = quote::parse(&items).map_err(usage)?;
+            let answer = quote::quote(&c, asked.clone())?;
+            json_exit(j, &answer);
+            for line in quote::said(&asked, &answer) {
+                println!("{line}");
             }
         }
         Cmd::Search { query, fragments, all, limit, mode, fields, after, before } => {

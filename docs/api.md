@@ -1427,6 +1427,7 @@ the wire shows of its rules:
 | --- | --- | --- |
 | `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus {plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}`: `balanceMicros` negative while they owe; `reservedMicros` always 0 (decision 62); `availableMicros` what may be charged before read-only; `priceBook` the version the answering release charges with |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`; `null` is the default |
+| `POST /api/ledger/quote` | a person (an agent: its owner's) | `QuoteAsk {items}` → `Quote {items: [{pricedAs?, eachMicros?, calls, chargeMicros?, unknown?: no_price \| no_units \| invalid \| too_large}], totalMicros, leftMicros, ledger: LedgerStatus}`: what a planned job would be charged (docs/ledger.md, A quote), each item priced as its payer's ledger charges a row, with the answering release's book, in the order asked. An item is `{key, units?, calls?}` (an operator key or a part of its calls, `elevenlabs:speech`, `fal:image`, by the book's name; `units` each call's, required of a part that counts more than one a call), `{model, input?, cachedInput?, cacheWrite?, output?, calls?}` (a name the model route takes, or the book's id) or `{usage, calls?}` (a ledger row's `Usage`); `calls` 1 to `QUOTE_CALLS_MAX` (1,000,000), absent one; at most `QUOTE_ITEMS_MAX` (64) items, else 400. A name the book does not price is `unknown`, never guessed, and adds nothing to `totalMicros`; `leftMicros` is the balance, at least 0. No items reads the ledger alone. It reads and keeps nothing |
 | `POST /api/ledger/{person}/grant` | operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit; `by` the signing operator |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat holder's next push wins (debt ledger) |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}` |
@@ -1821,8 +1822,9 @@ fragment's host the same paths are the fragment's.
 `fragment mcp <fragment> [--write]` serves a fragment's described
 operations as MCP tools over stdio (cli/src/mcp.rs, which states the
 mapping; cli/GUIDE.md, "Your operations as tools"). The platform serves
-nothing new for it: it reads `GET status` and calls `POST ops/{op}`,
-signed as every CLI request is.
+nothing new for it: it reads `GET status` and calls `POST ops/{op}`, and
+its `fragment-search` and `fragment-quote` tools `POST /api/search` and
+`POST /api/ledger/quote`, signed as every CLI request is.
 
 ## Connections (decisions 22 and 37)
 

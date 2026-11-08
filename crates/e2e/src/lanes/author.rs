@@ -910,27 +910,60 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap_or_else(|_| json!({ "not JSON-RPC": l }))).collect())
     };
     let tools = |list: &Value| list["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
-    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" }))])?;
+    let quote = json!({ "items": [{ "model": "cheap", "input": 1_000, "output": 100, "calls": 4 }] });
+    let read = mcp(false, &[("count", json!({})), ("measure", json!({})), ("say", json!({ "text": "from mcp" })), ("fragment-quote", quote)])?;
     let wrote = mcp(true, &[("say", json!({ "text": "from mcp" }))])?;
     let said = api.signed(&keys, "GET", &format!("/api/f/{name}/channels/room"), None)?;
     s.ok(
-        "fragment mcp serves the described queries over stdio, and a reader's search, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
-        read.len() == 5
+        "fragment mcp serves the described queries over stdio, a reader's search and a quote, signed with the CLI's key: a call answers, a refused one is the tool's error with the platform's code, and a write without --write is refused",
+        read.len() == 6
             && read[0]["result"]["serverInfo"]["title"] == name.as_str()
-            && tools(&read[1]) == ["count", "measure", "fragment-search"]
+            && tools(&read[1]) == ["count", "measure", "fragment-search", "fragment-quote"]
             && read[2]["result"]["structuredContent"]["n"].is_u64()
             && read[3]["result"]["isError"] == true
             && read[3]["result"]["structuredContent"]["error"]["code"] == "invalid_request"
             && read[3]["result"]["structuredContent"]["error"]["message"].as_str().is_some_and(|m| m.contains("/text: is required"))
-            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write")),
+            && read[4]["error"]["message"].as_str().is_some_and(|m| m.contains("--write"))
+            && read[5]["result"]["structuredContent"]["items"][0]["calls"] == 4
+            && read[5]["result"]["structuredContent"]["totalMicros"].as_i64().is_some_and(|t| t > 0 && Some(t) == read[5]["result"]["structuredContent"]["items"][0]["chargeMicros"].as_i64())
+            && read[5]["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("about $")),
         json!(read),
     );
     s.ok(
         "with --write it serves the described mutation too, and a call of it runs once",
-        tools(&wrote[1]) == ["count", "measure", "say", "fragment-search"]
+        tools(&wrote[1]) == ["count", "measure", "say", "fragment-search", "fragment-quote"]
             && wrote[2]["result"]["structuredContent"]["id"].is_u64()
             && said.body["records"].as_array().is_some_and(|r| r.iter().filter(|r| r["body"]["text"] == "from mcp").count() == 1),
         json!({ "mcp": wrote, "room": said.body }),
+    );
+    // a quote of the book's parts (FIN-443 and FIN-445), through the CLI:
+    // each priced as the ledger charges its row, a part counted by its
+    // units, none said, said so; the lines a person reads printed here
+    let asked = ["fal:image", "1x", "1048576px", "xai", "1", "xai:image", "2x", "google-places:photo", "firecrawl:credit", "5credits", "elevenlabs:speech", "200chars", "fal:image"];
+    let said = s.cli(api, &home, &[&["quote"][..], &asked].concat());
+    let lines = String::from_utf8_lossy(&said.stdout).into_owned();
+    println!("      (fragment quote {}:\n{})", asked.join(" "), lines.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n"));
+    let quoted = s.cli_json(api, &home, &[&["quote"][..], &asked, &["--json"]].concat())?;
+    let charge = |key: &str, units: u64| {
+        let (micros, per) = fragment_core::price::default_key_price(key).expect("the book prices each part");
+        let book = fragment_core::price::PriceBook { keys: vec![fragment_core::price::KeyPrice { key: key.into(), micros, per }], ..fragment_core::price::PriceBook::defaults() };
+        book.price(&fragment_core::price::Usage::Key { key: key.into(), units }).expect("a part's row is priced").charge
+    };
+    let expect = [("fal:image", 1_048_576, 1), ("xai", 1, 1), ("xai:image", 1, 2), ("google-places:photo", 1, 1), ("firecrawl:credit", 5, 1), ("elevenlabs:speech", 200, 1)];
+    let items = quoted["items"].as_array().cloned().unwrap_or_default();
+    let priced = expect.iter().zip(&items).all(|((key, units, calls), q)| q["pricedAs"] == *key && q["calls"] == *calls && q["eachMicros"].as_i64() == Some(charge(key, *units)) && q["chargeMicros"].as_i64() == Some(charge(key, *units) * *calls));
+    let total: i64 = expect.iter().map(|(key, units, calls)| charge(key, *units) * calls).sum();
+    s.ok(
+        "fragment quote prices each of the book's parts as the ledger charges its row: fal's image by its pixels, xAI's X search and its image a call, a Places photo, Firecrawl's credits, speech by its characters; a part counted by its units, none said, is said so",
+        said.status.success()
+            && items.len() == 7
+            && priced
+            && items[6] == json!({ "pricedAs": "fal:image", "calls": 1, "unknown": "no_units" })
+            && quoted["totalMicros"].as_i64() == Some(total)
+            && lines.starts_with(&format!("about {} for what is priced; you ", fragment_core::price::dollars(total)))
+            && lines.contains("  fal:image: say each call's units")
+            && lines.lines().next().is_some_and(|l| l.ends_with(" left this month") && l.rsplit_once('.').is_some_and(|(_, cents)| cents.len() == 2 + " left this month".len())),
+        json!({ "said": lines, "quoted": quoted }),
     );
     let r = s.cli_json(api, &home, &["channel", &name, "--json"])?;
     s.ok("fragment channel lists the channels", r["channels"].as_array().is_some_and(|a| a.iter().any(|c| c["name"] == "room")), &r);
