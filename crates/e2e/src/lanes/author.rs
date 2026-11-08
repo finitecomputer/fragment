@@ -961,7 +961,8 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && items[6] == json!({ "pricedAs": "fal:image", "calls": 1, "unknown": "no_units" })
             && quoted["totalMicros"].as_i64() == Some(total)
             && lines.starts_with(&format!("about {} for what is priced; you ", fragment_core::price::dollars(total)))
-            && lines.contains("  fal:image: say each call's units"),
+            && lines.contains("  fal:image: say each call's units")
+            && lines.lines().next().is_some_and(|l| l.ends_with(" left this month") && l.rsplit_once('.').is_some_and(|(_, cents)| cents.len() == 2 + " left this month".len())),
         json!({ "said": lines, "quoted": quoted }),
     );
     let r = s.cli_json(api, &home, &["channel", &name, "--json"])?;

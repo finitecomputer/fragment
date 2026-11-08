@@ -134,7 +134,7 @@ fn named(item: &Planned) -> String {
 fn why(u: Unquoted) -> &'static str {
     match u {
         Unquoted::NoPrice => "not priced here (no such key or model in this platform's price book)",
-        Unquoted::NoUnits => "say each call's units (its vendor's count: characters, pixels): `60000chars`",
+        Unquoted::NoUnits => "say each call's units, its vendor's count (`60000chars`, `1048576px`)",
         Unquoted::Invalid => "no usage the ledger counts",
         Unquoted::TooLarge => "one call past any one charge",
     }
@@ -148,9 +148,11 @@ fn why(u: Unquoted) -> &'static str {
 pub fn said(asked: &[Planned], q: &Quote) -> Vec<String> {
     let unknown = q.items.iter().any(|i| i.unknown.is_some());
     let what = if unknown { " for what is priced" } else { "" };
+    // what is left in cents, never more than is left; what is owed, never less
+    const CENT: i64 = 10_000;
     let left = match q.ledger.balance_micros {
-        b if b < 0 => format!("you owe {}", dollars(-b)),
-        _ => format!("you have {} left this month", dollars(q.left_micros)),
+        b if b < 0 => format!("you owe {}", dollars((-b + CENT - 1) / CENT * CENT)),
+        _ => format!("you have {} left this month", dollars(q.left_micros / CENT * CENT)),
     };
     let mut lines = vec![match asked.is_empty() {
         true => left,
@@ -287,9 +289,12 @@ mod tests {
         assert_eq!(lines[1], "  elevenlabs:speech\t300 × $0.024");
         assert!(lines[2].starts_with("  nope: not priced here"), "{lines:?}");
         assert_eq!(lines[3], "(now: agents and AI are stopped (no_credit))");
-        // nothing asked: what is left, alone
-        let q = Quote { items: vec![], total_micros: 0, left_micros: 95_400_000, ledger: ledger(95_400_000, Standing::Ok) };
-        assert_eq!(said(&[], &q), ["you have $95.40 left this month"]);
+        // nothing asked: what is left, alone, in cents never above it
+        let q = Quote { items: vec![], total_micros: 0, left_micros: 49_996_801, ledger: ledger(49_996_801, Standing::Ok) };
+        assert_eq!(said(&[], &q), ["you have $49.99 left this month"]);
+        // and what is owed in cents never below it
+        let q = Quote { items: vec![], total_micros: 0, left_micros: 0, ledger: ledger(-3_000_001, Standing::AgentsStopped { why: Why::NoCredit }) };
+        assert_eq!(said(&[], &q)[0], "you owe $3.01");
     }
 
     /// The tool's items are the route's: each example of the guide's, as
