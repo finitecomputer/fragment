@@ -59,12 +59,6 @@ enum Shape {
     /// platform at `fragment.localhost`, cross-site from the fragments
     /// (`<flat>.boats.localhost`, one site with each other).
     TwoSites,
-    /// As `Plain`, its model route shaped as Finite's own deployment
-    /// (deploy/example.jsonc; decision 61): `cheap` on Finite Private and
-    /// `medium` on OpenRouter (each the model fake's OpenAI-compatible face,
-    /// one key a test value), the fallback and vision on Workers AI's
-    /// GLM-5.3 Flash.
-    FinitePrivate,
     /// As `Plain`, its model route shaped as the private tier
     /// (`private_tier_models`): its tiers and vision on Finite Private, its
     /// fallback Tinfoil's DeepSeek V4.1 Flash on a key of its own, priced by
@@ -83,7 +77,7 @@ enum Shape {
     EmbeddingsRepinned,
 }
 
-/// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
+/// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
 /// a test value, in `fpk_live_`'s shape, which the model fake asks for.
 pub const FINITE_PRIVATE_KEY: &str = "fpk_live_e2e0c0ffee";
 
@@ -161,20 +155,8 @@ pub fn tinfoil_price() -> Value {
     json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 })
 }
 
-/// `FRAGMENT_MODELS` on a node shaped as Finite's: deploy/example.jsonc's
-/// two alternatives at once, less their keys, each API's base URL the model
-/// fake's: `cheap` on Finite Private, `medium` on OpenRouter's GLM-5.3
-/// Flash with its provider routing (`openrouter_routing`), `fallback` and
-/// `vision` on Workers AI's GLM-5.3 Flash.
-pub fn finite_private_models(fake: &str) -> Value {
-    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH });
-    let routed = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing() });
-    let flash = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH });
-    json!({ "cheap": private, "medium": routed, "fallback": flash, "vision": flash })
-}
-
-/// The `body` of OpenRouter's slot on a node shaped as Finite's:
-/// deploy/example.jsonc's provider routing.
+/// The `body` of Standard's OpenRouter slot on a node shaped as the
+/// private tier: deploy/example.jsonc's provider routing.
 pub fn openrouter_routing() -> Value {
     json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } })
 }
@@ -657,15 +639,6 @@ impl Suite {
         self.start_shaped(Shape::TwoSites)
     }
 
-    /// Starts the node with its model route shaped as Finite's own
-    /// deployment (`Shape::FinitePrivate`): its tiers on Finite Private.
-    pub fn start_as_finite(&mut self) -> Result<Api> {
-        self.shape = Shape::FinitePrivate;
-        let started = self.start(false);
-        self.shape = Shape::Plain;
-        started
-    }
-
     /// Starts the node with its model route shaped as the private tier
     /// (`Shape::PrivateTier`): its tiers on Finite Private, Tinfoil behind them.
     pub fn start_as_private_tier(&mut self) -> Result<Api> {
@@ -734,12 +707,11 @@ impl Suite {
             blob_grace_s: Some(BLOB_GRACE_S),
             upload_max_bytes: Some(UPLOAD_MAX_BYTES),
             // the lower rung: the model route's calls go to the Workers AI fake,
-            // and, shaped as Finite's own, its tiers to the fake's
+            // and, shaped as the private tier, its tiers to the fake's
             // OpenAI-compatible face as Finite Private (lanes/upstream.rs)
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
             models: match self.shape {
-                Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
                 Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
@@ -747,8 +719,6 @@ impl Suite {
             model_keys: {
                 let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
                 match self.shape {
-                    // one key for both tiers, as deploy/example.jsonc names it
-                    Shape::FinitePrivate => vec![key("cheap", "fragment-openrouter-key", FINITE_PRIVATE_KEY), key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY)],
                     Shape::PrivateTier => vec![
                         key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         // OpenRouter's, the key the model fake lets in for every model but Tinfoil's
@@ -785,7 +755,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -836,7 +806,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
         }
     }
 
