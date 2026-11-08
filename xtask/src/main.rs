@@ -108,6 +108,8 @@ use fragment_devstack as devstack;
 mod build;
 #[cfg(test)]
 mod ci_caches;
+#[cfg(test)]
+mod ci_gate;
 mod cloudflare;
 mod cli_release;
 mod deploy;

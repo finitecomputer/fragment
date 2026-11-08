@@ -13,7 +13,7 @@
 # with no merge queue (Paul, 2026-11-08). Master's push is the one gate:
 # `check` and every shard, then the preview's deploy only when both are
 # green. A red one deploys nothing, its summary names what failed
-# (`not-deployed`, below), and the fix goes forward as another pull
+# (`master-red`, below), and the fix goes forward as another pull
 # request. A run by hand (workflow_dispatch) runs the shards on a branch's
 # head.
 #
@@ -524,11 +524,14 @@ jobs:
           # no update header. Only a verified published release is named.
           FRAGMENT_RELEASED_CLI_VERSION: ${{ needs.cli-release.result == 'success' && needs.cli-release.outputs.version || (needs.cli-version.result == 'success' && needs.cli-version.outputs.version) || '' }}
 
-  # A master push that deployed nothing: the preview keeps its last
-  # deploy, and this run's summary names each job that failed, for the
-  # pull request that fixes it forward. Red itself, so the run's
-  # annotations say it first.
-  not-deployed:
+  # A master push whose deploy did not end green: this run's summary names
+  # each job that failed, for the pull request that fixes it forward, and
+  # says what the preview runs only when it is known. A deploy that never
+  # started left it on its last deploy; one that started and failed either
+  # rolled back or is stuck forward-only with the new Worker live
+  # (xtask/src/rollout.rs), which only its log says. Red itself, so the
+  # run's annotations say it first (xtask/src/ci_gate.rs runs this step).
+  master-red:
     needs: [deploy]
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.deploy.result != 'success' }}
     runs-on: ubuntu-latest
@@ -536,20 +539,27 @@ jobs:
     permissions:
       actions: read # this run's jobs, through the API
     steps:
-      - env:
+      - name: name what failed
+        env:
           GH_TOKEN: ${{ github.token }}
+          DEPLOY: ${{ needs.deploy.result }}
         run: |
           set -euo pipefail
           failed=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "- [\(.name)](\(.html_url)): \(.conclusion)"')
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "- [\(.name)](\(.html_url)): \(.conclusion)"') \
+            || failed="- this run's jobs could not be read: its graph says which failed"
+          case "$DEPLOY" in
+            skipped) title="Preview not deployed"; state="the deploy never started, so the preview keeps its last deploy" ;;
+            *) title="Preview deploy $DEPLOY"; state="the deploy started and ended $DEPLOY: it rolled back to the release before, or is stuck forward-only with this release live, and only its log says which" ;;
+          esac
           {
-            echo "### Preview not deployed"
+            echo "### $title"
             echo
-            echo "master's $GITHUB_SHA is red, so the preview keeps its last deploy. Fix it forward with a pull request."
+            echo "master's $GITHUB_SHA is red: $state. Fix it forward with a pull request."
             echo
-            echo "${failed:-"- no job failed, yet the deploy did not run: the run's graph says why"}"
+            echo "${failed:-"- no job failed, yet the deploy did not end green: the run's graph says why"}"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error title=Preview not deployed::$(sed -n 's/^- \[\(.*\)\](.*/\1/p' <<< "$failed" | paste -sd ',' - | sed 's/,/, /g')"
+          echo "::error title=$title::$(sed -n 's/^- \[\(.*\)\](.*/\1/p' <<< "$failed" | paste -sd ',' - | sed 's/,/, /g')"
           exit 1
 
   # Release new CLI inputs after green tests and before production deploys.

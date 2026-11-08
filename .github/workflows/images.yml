@@ -67,21 +67,44 @@ jobs:
   # Whether `check` and the Docker lane run: a change to what each checks,
   # builds or runs. Its own job, since a job's `if` reads only another
   # job's outputs. The changed
-  # files are the pull request's (from the API, every page), or the push's
-  # since its `before` (by git, hence the checkout); a run by hand runs the
-  # lane whatever it says.
+  # files are the pull request's (from the API, every page), or a master
+  # push's since the newest master commit this workflow passed on (`base`,
+  # below; by git, hence the checkout); a run by hand runs the lane
+  # whatever it says.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read # this workflow's runs, through the API
+      contents: read
+      pull-requests: read # a pull request's files
     outputs:
       check: ${{ steps.paths.outputs.check }}
       docker: ${{ steps.paths.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
+      # Not the push's `before`: a push whose run waited and was replaced
+      # by a newer push's (`concurrency`) never ran, so its change (an image
+      # change, beside a newer push's to the cell) is this run's to test
+      # (Codex review of #1118). A run that failed is no base: its change
+      # is tested again until one passes. With none to name this fails,
+      # and every job runs.
+      - name: the newest master commit this workflow passed on
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          sha=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" -f branch=master -f event=push -f status=success -f per_page=1 --jq '.workflow_runs[0].head_sha // ""')
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no master run of this workflow passed, to compare with: every job runs"; exit 1; }
+          echo "comparing with $sha, the newest master commit this workflow passed on"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - id: paths
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          base: ${{ github.ref }}
+          base: ${{ steps.base.outputs.sha || github.ref }}
           filters: |
             check:
               - images/**
