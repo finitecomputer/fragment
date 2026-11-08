@@ -798,11 +798,14 @@ async fn key_cap(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8],
     }
     let put: fragment_proto::ledger::PutCap = command_body(body, "a key's cap")?;
     let set = fragment_proto::ledger::SetKeyCap { id: commanded(&format!("keycap:{key}"), &put.id)?, key: key.to_string(), micros: put.micros };
-    ledger::ask(env, &who.id, &set).await?;
-    let computer = fragment_core::computer::default_computer_of(&who.id);
-    match computer::ask(env, &computer, "computer/key-pause", &json!({ "provider": key, "pause": null })).await {
-        Err(e) if e.code != ErrorCode::NotFound => console_error!("{}", json!({ "keyCap": key, "computer": computer, "untold": e.message })),
-        _ => {}
+    // only a change ends the notice: a replay (a late retry) would end a
+    // newer pause, and the cap is as it was
+    if ledger::ask(env, &who.id, &set).await?.applied {
+        let computer = fragment_core::computer::default_computer_of(&who.id);
+        match computer::ask(env, &computer, "computer/key-pause", &json!({ "provider": key, "pause": null })).await {
+            Err(e) if e.code != ErrorCode::NotFound => console_error!("{}", json!({ "keyCap": key, "computer": computer, "untold": e.message })),
+            _ => {}
+        }
     }
     json_answer(&json!({ "key": key, "capMicros": put.micros.unwrap_or(fragment_core::ledger::guard::KEY_HOUR_CAP), "default": put.micros.is_none() }))
 }

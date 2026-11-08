@@ -220,6 +220,26 @@ mod tests {
         assert!(!k.used("elevenlabs", T + 5 * MIN, T + 11 * MIN), "still the later time heard");
     }
 
+    /// Goal (Codex on #1117): times are when each answer arrived, so the
+    /// ledger's order holds across isolates whichever asked first, and a
+    /// provider's slow answer changes nothing. Method: call A asks at 100
+    /// but reaches the ledger last, refused (arriving at 300); call B asks
+    /// at 200, allowed first (arriving at 250), its provider answering at
+    /// 400, after A's pause is told.
+    #[test]
+    fn answers_are_ordered_as_they_arrived_not_as_they_were_asked() {
+        let mut k = KeyPauses::default();
+        let (a_arrived, b_arrived, b_done) = (T + 300, T + 250, T + 400);
+        assert_eq!(k.paused(pause(a_arrived), a_arrived), Some(true));
+        assert!(!k.used("elevenlabs", b_arrived, b_done), "allowed before the refusal arrived: proves nothing");
+        assert_eq!(told(&k, b_done), ["elevenlabs"], "still paused, its button still there");
+        // had they been stamped as asked (A at 100, B at 200), B would have
+        // ended it: the order this rule refuses to trust
+        let mut asked = KeyPauses::default();
+        asked.paused(pause(T + 100), T + 300);
+        assert!(asked.used("elevenlabs", T + 200, b_done), "as-asked times mis-order them");
+    }
+
     /// Goal: its owner's change of the cap ends the pause, and a pause
     /// heard before it, delivered late (or a refusal still cached where
     /// it was heard), is refused; one heard after it is told. Method: a

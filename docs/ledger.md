@@ -292,7 +292,10 @@ two seconds and spent $300 in about 35 minutes through the shared key.
   (the route tells the person's computer, which then refuses a pause
   heard before it), or a call the ledger was heard letting through after
   the pause was heard. A call let through before it (in flight as it
-  began, or by another isolate's cached allowance) ends nothing.
+  began, or by another isolate's cached allowance) ends nothing. Each
+  time is when its answer arrived at the gate, so the ledger's order
+  holds across isolates; and only a change of the cap ends the notice,
+  never a replay of one (`SetKeyCap` answers whether it applied).
 - **Best effort:** asked through the gate (below), an allowance kept a
   minute in each isolate and a pause five seconds (`KEY_PAUSE_KEEP_MS`),
   so a lift reaches the next call within seconds; a ledger that does not

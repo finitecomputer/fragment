@@ -323,7 +323,16 @@ impl Route for SetOverdraft {
 
 impl Route for SetKeyCap {
     const PATH: &'static str = "/key-cap";
-    type Answer = Done;
+    type Answer = KeyCapSet;
+}
+
+/// `SetKeyCap`'s answer: whether it changed the cap now, rather than
+/// replayed one taken before. Only a change ends its key's pause notice
+/// (a late retry would end a newer pause: Codex on #1117).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyCapSet {
+    pub applied: bool,
 }
 
 impl Route for SetFragmentCap {
@@ -806,7 +815,7 @@ impl LedgerCell {
             }
             <SetKeyCap as Route>::PATH => {
                 let c: SetKeyCap = decode(&body)?;
-                reply(done(self.mutate(move |l, s, now| l.set_key_cap(s, &c, now)).await?))
+                reply(self.mutate(move |l, s, now| l.set_key_cap(s, &c, now).map(|applied| KeyCapSet { applied })).await?)
             }
             <SetFragmentCap as Route>::PATH => {
                 let c: SetFragmentCap = decode(&body)?;
@@ -1120,8 +1129,12 @@ async fn gated(env: &Env, person: &str, path: &'static str, body: String, wait_m
             (None, None)
         }
     };
-    let heard_at = if heard.is_some() { now } else { 0 };
-    GATE.with(|g| g.borrow_mut().heard(&key, heard, now)).map(|()| heard_at).map_err(|why| LedgerError { heard_at, ..said.unwrap_or_else(|| why.into()) })
+    // heard as it arrived, not as it was asked (a Worker's clock moves at
+    // each await): two answers' times keep the ledger's order across
+    // isolates, whichever asked first (Codex on #1117)
+    let arrived = js::now_ms();
+    let heard_at = if heard.is_some() { arrived } else { 0 };
+    GATE.with(|g| g.borrow_mut().heard(&key, heard, arrived)).map(|()| heard_at).map_err(|why| LedgerError { heard_at, ..said.unwrap_or_else(|| why.into()) })
 }
 
 /// Forgets every answer this isolate's gate heard (a test fleet's

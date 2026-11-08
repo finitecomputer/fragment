@@ -189,13 +189,15 @@ impl Ledger {
 
     /// A key's hourly cap, set by its person (their route, never an
     /// agent's: cell/src/lib.rs): from 1 micro-dollar to `KEY_CAP_MAX`, or
-    /// `None` for the default. A key's own name, never a part's.
-    pub fn set_key_cap(&mut self, store: &mut impl Store, c: &SetKeyCap, now_ms: i64) -> Result<(), Refused> {
+    /// `None` for the default. A key's own name, never a part's. Answers
+    /// whether it changed the cap now (`false`: a replay of one taken
+    /// before, which changes nothing, and must end no newer pause).
+    pub fn set_key_cap(&mut self, store: &mut impl Store, c: &SetKeyCap, now_ms: i64) -> Result<bool, Refused> {
         self.persons_only()?;
         self.roll(now_ms);
         let command = Command::SetKeyCap(c.clone());
         if !Self::admit(store, &c.id, &command)? {
-            return Ok(());
+            return Ok(false);
         }
         if !valid_id(&c.key) || guarded_key(&c.key) != c.key {
             return Err(invalid(Invalid::Id));
@@ -205,7 +207,7 @@ impl Ledger {
         }
         store.set_key_cap(&c.key, c.micros);
         self.done(store, &c.id, command, now_ms);
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -272,6 +274,11 @@ mod tests {
         /// Its person sets `key`'s cap (`None`: the default), as their
         /// route sends it.
         fn cap(&mut self, id: &str, key: &str, micros: Option<i64>) -> Result<(), Refused> {
+            self.cap_applied(id, key, micros).map(|_| ())
+        }
+
+        /// `cap`, answering whether it changed the cap now.
+        fn cap_applied(&mut self, id: &str, key: &str, micros: Option<i64>) -> Result<bool, Refused> {
             let c = SetKeyCap { id: id.into(), key: key.into(), micros };
             self.ledger.set_key_cap(&mut self.store, &c, self.now)
         }
@@ -457,11 +464,12 @@ mod tests {
             w.call(&format!("key:c1:{n}"), "voice");
         }
         assert!(matches!(w.open("voice"), Err(Refused::KeyPaused { cap: KEY_HOUR_CAP, .. })));
-        assert_eq!(w.cap("keycap:voice:a1", "voice", Some(4 * KEY_HOUR_CAP)), Ok(()));
+        assert_eq!(w.cap_applied("keycap:voice:a1", "voice", Some(4 * KEY_HOUR_CAP)), Ok(true), "changed now");
         assert_eq!(w.open("voice"), Ok(()), "open at once, nothing waited for");
-        // a replay changes nothing; another body under its id is refused
+        // a replay changes nothing, and says so (its route then ends no
+        // newer pause); another body under its id is refused
         let (ledger, store) = (w.ledger.clone(), w.store.clone());
-        assert_eq!(w.cap("keycap:voice:a1", "voice", Some(4 * KEY_HOUR_CAP)), Ok(()));
+        assert_eq!(w.cap_applied("keycap:voice:a1", "voice", Some(4 * KEY_HOUR_CAP)), Ok(false), "a replay changed nothing now");
         assert_eq!((&w.ledger, &w.store), (&ledger, &store), "a replay changes nothing");
         assert_eq!(w.cap("keycap:voice:a1", "voice", Some(KEY_HOUR_CAP)), Err(Refused::ConflictingBody));
         // the raised cap counts as any: at it, paused again, saying it
