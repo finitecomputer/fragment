@@ -218,6 +218,10 @@ impl VaultCell {
         // sealed first (reading the host secret may yield): the checks and
         // the write below share one turn
         let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
+        // a wipe that ended while it sealed: nothing is put after it
+        if self.wiped.get() {
+            return Err(CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing"));
+        }
         self.person_is(person, true)?;
         let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
         let held = self.rows("SELECT COUNT(*) AS n FROM secrets", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
