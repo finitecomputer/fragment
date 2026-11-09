@@ -447,6 +447,8 @@ struct FragmentRoot: View {
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
     @State private var pageHeight: CGFloat = 800
+    /// A page an action's answer named, until their list has it (`openPage`).
+    @State private var opening: URL?
 
     var body: some View {
         Group {
@@ -526,6 +528,7 @@ struct FragmentRoot: View {
         .onChange(of: page) { left, _ in
             if case .chat(let name) = left { library.leftChat(name) }
         }
+        .onChange(of: library.fragments) { _, _ in openListed() }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }
         }
@@ -571,10 +574,20 @@ struct FragmentRoot: View {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
     }
-    /// A page an action's answer names: one of theirs opens here, as its
-    /// row would; any other address, in Safari.
+    /// A page an action's answer names: one of this deployment's fragments
+    /// opens here as its row would, once their list has it, by whichever
+    /// read lists it (`opening`: the read after the action may lose to a
+    /// newer one); any other address, in Safari.
     private func openPage(_ url: URL) {
-        if let fragment = library.fragment(linkedBy: url) { open(fragment) } else { openURL(url) }
+        guard MessageLinks.fragmentName(url, pages: library.pages) != nil else { return openURL(url) }
+        opening = url
+        openListed()
+    }
+    /// The page `openPage` holds, opened once their list has its fragment.
+    private func openListed() {
+        guard let url = opening, let fragment = library.fragment(linkedBy: url) else { return }
+        opening = nil
+        open(fragment)
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }
