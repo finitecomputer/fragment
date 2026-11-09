@@ -13,5 +13,5 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url) -> CellResult<Res
     if who.identity.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "notices are a person's: an agent's owner is told of it"));
     }
-    crate::computer::notices_of(env, &who.identity.id).await
+    crate::computer::notices_for(env, &who.identity.id).await
 }
