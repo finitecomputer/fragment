@@ -696,6 +696,13 @@ impl FragmentCell {
                 self.del_meta(MetaKey::ReachTold)?;
                 json!({ "reach": self.reaches()? })
             }
+            Some("records") => {
+                // posts filled in as a member made them (channels.rs `fill_records`)
+                let channel = body["channel"].as_str().ok_or_else(|| CellError::invalid("records names a channel"))?;
+                let principal = body["principal"].as_str().ok_or_else(|| CellError::invalid("records names its poster's principal"))?;
+                let posts = body["records"].as_array().ok_or_else(|| CellError::invalid("records is a list of {id, body}"))?;
+                json!({ "seq": self.fill_records(channel, principal, posts).await? })
+            }
             Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })
