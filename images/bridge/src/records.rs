@@ -722,6 +722,51 @@ pub fn turn_notice(turn: &str, category: NoticeCategory, text: &str) -> Value {
     json!({ "kind": "turn.notice", "turn": turn, "category": category.as_str(), "text": cut(text, limits::NOTICE_TEXT_MAX_CHARS) })
 }
 
+/// A helper's id in its chat's set: the first 24 hex digits of SHA-256 of
+/// its runtime's id for it (Hermes' child session id, which runs long and
+/// is said nowhere else).
+pub fn child_id(runtime_id: &str) -> String {
+    hex(&Sha256::digest(runtime_id.as_bytes()))[..24].to_string()
+}
+
+/// A helper's task, as its set says it: one line, cut.
+pub fn child_goal(goal: &str) -> String {
+    cut(&goal.split_whitespace().collect::<Vec<_>>().join(" "), limits::CHILD_GOAL_MAX_CHARS)
+}
+
+/// A helpers set's post id: `hs:<life>:<n>`, this bridge life's (never
+/// saved, so never another life's) and the `n`th set it posted, from 1:
+/// no two sets share one, whatever the clock does (`Engine::post_helpers`).
+pub fn helpers_id(life: &str, n: u64) -> String {
+    assert!(valid_life(life) && n >= 1, "a life is 32 lowercase hex, and sets number from 1: {life}");
+    format!("hs:{life}:{n}")
+}
+
+/// One helper in a chat's set: the turn that started it, its id, its task,
+/// and when the bridge saw it start (ms).
+pub struct HelperSaid<'a> {
+    pub parent: &'a str,
+    pub child: &'a str,
+    pub goal: &'a str,
+    pub since: u64,
+}
+
+/// The helpers an agent has working in a chat, all of them, as its bridge
+/// holds them now (docs/chat-records.md, `turn.helpers`): posted at each
+/// start and end, and again before `until` while any run. A reader shows
+/// a poster's newest set until `until`; an empty one shows none.
+///
+/// It names no `turn`: every reader from before it passes over a `work`
+/// record with no `turn` (chat.js `onWork`, the iOS app's `Timeline.learn`
+/// and `WorkingActivity`), so none takes it for a turn's going on (Codex
+/// and Alex on #1086: a helper's record read as its turn's hid the turn's
+/// question in words).
+pub fn turn_helpers(helpers: &[HelperSaid<'_>], until: u64) -> Value {
+    assert!(helpers.len() <= limits::HELPERS_PER_CHAT_MAX, "a chat's set is bounded");
+    let helpers: Vec<Value> = helpers.iter().map(|h| json!({ "child": h.child, "parent": h.parent, "goal": child_goal(h.goal), "since": h.since })).collect();
+    json!({ "kind": "turn.helpers", "helpers": helpers, "until": until })
+}
+
 fn cut_or_empty(text: &str, max: usize) -> String {
     if text.trim().is_empty() {
         String::new()
@@ -1180,6 +1225,27 @@ mod tests {
         assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
         assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);
+        let h = child_id("20261107_014500_ab12cd");
+        assert!(h.len() == 24 && h.bytes().all(|b| b.is_ascii_hexdigit()), "{h}");
+        let set = [
+            HelperSaid { parent: "t1", child: &h, goal: " Find three\nvenues  near Lisbon ", since: 1_790_000_000_000 },
+            HelperSaid { parent: "t2", child: "c2", goal: &"g".repeat(400), since: 1_790_000_000_001 },
+        ];
+        let body = turn_helpers(&set, 1_790_000_900_000);
+        assert_eq!(body["helpers"][0], json!({ "child": h, "parent": "t1", "goal": "Find three venues near Lisbon", "since": 1_790_000_000_000u64 }), "one line");
+        assert_eq!(body["helpers"][1]["goal"].as_str().map(|g| g.chars().count()), Some(limits::CHILD_GOAL_MAX_CHARS));
+        assert_eq!((body["kind"].clone(), body["until"].clone()), (json!("turn.helpers"), json!(1_790_000_900_000u64)));
+        assert_eq!(turn_helpers(&[], 5), json!({ "kind": "turn.helpers", "helpers": [], "until": 5 }), "none working");
+        // no reader from before helpers takes one for its turn's: it names no `turn`
+        assert!(body.get("turn").is_none());
+        let life = "0123456789abcdef0123456789abcdef";
+        assert!(valid_post_id(&helpers_id(life, u64::MAX)) && helpers_id(life, 7) == format!("hs:{life}:7"));
+        // the bound's whole set fits a record, each goal at its worst
+        let worst: Vec<String> = (0..limits::HELPERS_PER_CHAT_MAX).map(|i| format!("{i:024}")).collect();
+        let goal = "\u{1}".repeat(limits::CHILD_GOAL_MAX_CHARS);
+        let parent = "t".repeat(128);
+        let full: Vec<HelperSaid<'_>> = worst.iter().map(|c| HelperSaid { parent: &parent, child: c, goal: &goal, since: u64::MAX }).collect();
+        assert!(turn_helpers(&full, u64::MAX).to_string().len() < 64 * 1024);
         let every = [Category::Shell, Category::Web, Category::Read, Category::Write, Category::Browser, Category::Image, Category::Delegate, Category::Memory, Category::Other];
         assert_eq!(every.map(Category::as_str), ["shell", "web", "read", "write", "browser", "image", "delegate", "memory", "other"], "docs/chat-records.md's nine");
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));

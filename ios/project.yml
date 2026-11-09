@@ -71,6 +71,12 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+          # a dev stack's fragments, <name>.fragment.localhost: local
+          # networking covers .local and IP addresses, not .localhost
+          NSExceptionDomains:
+            localhost:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: true
   FragmentTests:
     type: bundle.unit-test
     platform: iOS
