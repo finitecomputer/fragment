@@ -38,6 +38,7 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, watch};
 
 use super::{Agent, ClaudeSettings, Command, Event, How, MenuItem, Runtime, RuntimeError, RuntimeFuture, RuntimeIo, TurnStart};
+use crate::limits;
 use crate::records::{self, Call, Category, Outcome, PromptOption, Step, ToolEvidence, ToolStatus};
 
 /// Its owners' commands: a new conversation, and Stop.
@@ -266,9 +267,13 @@ struct Turn {
     retried: bool,
     part: u32,
     draft: String,
-    /// Tool calls made and not answered: name, input, when, and the model
-    /// response (its assistant message) that asked for it.
-    calls: HashMap<String, (String, Value, Instant, String)>,
+    /// When its draft was last said (`drafted`), and whether it grew since.
+    drafted_at: Option<Instant>,
+    draft_due: bool,
+    /// Tool calls made and not answered: name, what it shows (`shown`),
+    /// when, and the model response (its assistant message) that asked
+    /// for it.
+    calls: HashMap<String, (String, (String, Category), Instant, String)>,
     /// The response whose calls were said last, and the place its next
     /// takes: Claude Code says each of a message's blocks on a line of its
     /// own, its message's id on each.
@@ -320,6 +325,9 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
     loop {
         idle.set(proc.is_some() && turn.is_none());
         let idle_left = cfg.idle.saturating_sub(idle_since.elapsed());
+        // the words a draft said since are said once its interval is out
+        let draft_at = turn.as_ref().and_then(draft_due);
+        let draft_left = draft_at.map_or(Duration::ZERO, |at| at.saturating_duration_since(Instant::now()));
         tokio::select! {
             m = rx.recv() => {
                 let Some(m) = m else { break };
@@ -505,6 +513,13 @@ async fn session(cfg: ClaudeConfig, key: (String, String), generations: Arc<Mute
                 crate::ev!("claude.held", { "agent": agent, "chat": chat });
                 if let Some(p) = proc.take() {
                     stop(p).await;
+                }
+            }
+            _ = tokio::time::sleep(draft_left), if draft_at.is_some() => {
+                if let Some(t) = turn.as_mut() {
+                    if let Some(text) = due_draft(t, Instant::now()) {
+                        let _ = events.send(Event::Draft { turn: t.id.clone(), text }).await;
+                    }
                 }
             }
             _ = tokio::time::sleep(idle_left), if turn.is_none() && asking.is_none() => {
@@ -1087,7 +1102,7 @@ async fn begin(cfg: &ClaudeConfig, ts: &TurnStart, cwd: &Path, id: &str, proc: &
     if let Err(e) = write(&mut p.stdin, &user_message(&message)).await {
         crate::ev!("claude.write", { "turn": ts.turn, "error": e.to_string() });
     }
-    *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
+    *turn = Some(Turn { id: ts.turn.clone(), agent: ts.agent.clone(), message: (!started).then_some(message), retried: false, part: 1, draft: String::new(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false });
 }
 
 /// What an agent's sessions start with: its own model (`agent.json`'s
@@ -1233,7 +1248,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
     let top = v["parent_tool_use_id"].is_null();
     match v["type"].as_str().unwrap_or("") {
         "stream_event" if top => {
-            if let Some(text) = drafted(t, &v["event"]) {
+            if let Some(text) = drafted(t, &v["event"], Instant::now()) {
                 let _ = events.send(Event::Draft { turn: t.id.clone(), text }).await;
             }
         }
@@ -1243,6 +1258,7 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
                     "text" => {
                         let text = b["text"].as_str().unwrap_or("").to_string();
                         t.draft.clear();
+                        t.draft_due = false;
                         if !text.trim().is_empty() {
                             let _ = events.send(Event::Reply { turn: t.id.clone(), part: t.part, text }).await;
                             t.part += 1;
@@ -1260,12 +1276,13 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
                         // before its result: the line comes before the tool
                         // runs, though the tool may start before the bridge
                         // reads it (docs/bridge.md). A question is its card.
+                        // what it shows is kept, not its input (a Write's is the whole file)
+                        let (args, category) = shown(&name, &b["input"]);
                         if name != "AskUserQuestion" && records::valid_post_id(&response) && records::valid_post_id(&id) {
-                            let (args, category) = shown(&name, &b["input"]);
-                            let call = Call { response: response.clone(), position, tool_call_id: id.clone(), tool: name.clone(), args, category };
+                            let call = Call { response: response.clone(), position, tool_call_id: id.clone(), tool: name.clone(), args: args.clone(), category };
                             let _ = events.send(Event::Called { turn: t.id.clone(), call }).await;
                         }
-                        t.calls.insert(id, (name, b["input"].clone(), Instant::now(), response));
+                        t.calls.insert(id, (name, (args, category), Instant::now(), response));
                     }
                     _ => {}
                 }
@@ -1274,13 +1291,12 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
         "user" if top => {
             for b in v["message"]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
                 let id = b["tool_use_id"].as_str().unwrap_or("").to_string();
-                let Some((name, input, at, response)) = t.calls.remove(&id) else { continue };
+                let Some((name, (args, category), at, response)) = t.calls.remove(&id) else { continue };
                 if name == "AskUserQuestion" {
                     continue;
                 }
                 let failed = b["is_error"] == true;
                 let status = if failed && t.stopping { ToolStatus::Cancelled } else if failed { ToolStatus::Failed } else { ToolStatus::Completed };
-                let (args, category) = shown(&name, &input);
                 let step = Step { tool: name, args, ok: !failed, excerpt: String::new(), category, evidence: Some(ToolEvidence { tool_call_id: id, status, duration_ms: u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX), response: records::valid_post_id(&response).then_some(response) }) };
                 let _ = events.send(Event::Step { turn: t.id.clone(), step }).await;
             }
@@ -1314,16 +1330,38 @@ async fn on_line(t: &mut Turn, v: &Value, p: &mut Proc, events: &mpsc::Sender<Ev
 }
 
 /// A streamed event of the model's answer: a text block's start clears the
-/// draft, and each piece of its text grows it (the draft so far, to show).
-fn drafted(t: &mut Turn, e: &Value) -> Option<String> {
+/// draft, and each piece of its text grows it. The draft so far, to show,
+/// at most once a `DRAFT_INTERVAL_MS` (the driver's pace of drafts): the
+/// words between are said when it is out (`draft_due`), not copied each.
+fn drafted(t: &mut Turn, e: &Value, now: Instant) -> Option<String> {
     if e["type"] == "content_block_start" && e["content_block"]["type"] == "text" {
         t.draft.clear();
+        t.draft_due = false;
     }
     if e["type"] == "content_block_delta" && e["delta"]["type"] == "text_delta" {
         t.draft.push_str(e["delta"]["text"].as_str().unwrap_or(""));
-        return Some(t.draft.clone());
+        t.draft_due = true;
+        return due_draft(t, now);
     }
     None
+}
+
+/// When a draft that grew since it was said is to be said again: its
+/// interval out.
+fn draft_due(t: &Turn) -> Option<Instant> {
+    let at = t.drafted_at.filter(|_| t.draft_due)?;
+    Some(at + Duration::from_millis(limits::DRAFT_INTERVAL_MS))
+}
+
+/// The draft so far, when it grew and its interval is out (a turn's first
+/// at once).
+fn due_draft(t: &mut Turn, now: Instant) -> Option<String> {
+    if !t.draft_due || draft_due(t).is_some_and(|due| now < due) {
+        return None;
+    }
+    t.draft_due = false;
+    t.drafted_at = Some(now);
+    Some(records::cut_bytes(&t.draft, limits::DRAFT_TEXT_MAX_BYTES))
 }
 
 /// What a failed turn's `result` says, in a person's words where it has
@@ -1512,16 +1550,26 @@ mod tests {
     }
 
     /// Goal: the model's words stream as the draft: each text block starts
-    /// one, each piece of its text grows it, and nothing else touches it.
+    /// one, each piece of its text grows it, and nothing else touches it;
+    /// it is said at once, then at most once an interval, the words between
+    /// said when it is out.
     #[test]
     fn its_words_stream_as_the_draft() {
         let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: Default::default() };
-        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false };
-        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_start", "content_block": { "type": "text" } })), None);
-        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "hel" } })).as_deref(), Some("hel"));
-        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "thinking_delta", "thinking": "hm" } })), None);
-        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": "lo" } })).as_deref(), Some("hello"));
-        assert_eq!(drafted(&mut t, &json!({ "type": "message_stop" })), None);
+        let mut t = Turn { id: "t".into(), agent, message: None, retried: false, part: 1, draft: "stale".into(), drafted_at: None, draft_due: false, calls: HashMap::new(), said: None, asked: Vec::new(), stopping: false };
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let text = |s: &str| json!({ "type": "content_block_delta", "delta": { "type": "text_delta", "text": s } });
+        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_start", "content_block": { "type": "text" } }), at(0)), None);
+        assert_eq!(drafted(&mut t, &text("hel"), at(0)).as_deref(), Some("hel"), "at once");
+        assert_eq!(drafted(&mut t, &json!({ "type": "content_block_delta", "delta": { "type": "thinking_delta", "thinking": "hm" } }), at(10)), None);
+        assert_eq!(drafted(&mut t, &text("lo"), at(20)), None, "within its interval");
+        assert_eq!(draft_due(&t), Some(at(limits::DRAFT_INTERVAL_MS)));
+        assert_eq!(due_draft(&mut t, at(limits::DRAFT_INTERVAL_MS - 1)), None);
+        assert_eq!(due_draft(&mut t, at(limits::DRAFT_INTERVAL_MS)).as_deref(), Some("hello"), "its interval out");
+        assert_eq!((draft_due(&t), due_draft(&mut t, at(1_000))), (None, None), "said: nothing due");
+        assert_eq!(drafted(&mut t, &text(" you"), at(1_000)).as_deref(), Some("hello you"), "past its interval, at once");
+        assert_eq!(drafted(&mut t, &json!({ "type": "message_stop" }), at(1_010)), None);
     }
 
     /// Goal: a tool call shows what it was called with, and its kind.
