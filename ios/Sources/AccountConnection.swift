@@ -12,14 +12,21 @@ final class AccountConnection {
     var api: FragmentAPI? {
         guard let account, account.approved, let key = try? account.signingKey else { return nil }
         if let cachedAPI, cachedAPI.baseURL == account.origin, cachedAPI.identity.publicKey == key.publicKey, cachedAPI.accountID == account.identity { return cachedAPI }
-        let client = FragmentAPI(baseURL: account.origin, identity: key, accountID: account.identity)
+        let client = FragmentAPI(baseURL: account.origin, identity: key, accountID: account.identity, session: session)
         cachedAPI = client
         return client
     }
     /// Where its account is kept, and what it may reach (`LaunchScope`).
     private let scope: LaunchScope
-    init(scope: LaunchScope = .current) {
+    /// The session its requests go through (the platform's, or a test's stub).
+    @ObservationIgnored private let session: URLSession?
+    /// Clears this app's Safari data, every app's page state with it.
+    @ObservationIgnored private let clearWebData: @MainActor () async -> Void
+    init(scope: LaunchScope = .current, session: URLSession? = nil,
+         clearWebData: @escaping @MainActor () async -> Void = { await SFSafariViewController.DataStore.default.clearWebsiteData() }) {
         self.scope = scope
+        self.session = session
+        self.clearWebData = clearWebData
         do {
             if let stored = try DeviceKeychain.read(service: scope.keychainService) {
                 guard try PlatformOrigin.parse(stored.origin.absoluteString, scope: scope) == stored.origin else { throw APIError.invalidResponse }
@@ -42,7 +49,7 @@ final class AccountConnection {
                 try DeviceKeychain.save(next, service: scope.keychainService); account = next
             }
             guard let account else { throw APIError.invalidResponse }
-            let api = try FragmentAPI(baseURL: origin, identity: account.signingKey)
+            let api = try FragmentAPI(baseURL: origin, identity: account.signingKey, session: session)
             if try await finish(api) { return }
             code = try await api.request("cli/begin", method: "POST", body: .object([:]))
         } catch { self.error = error.localizedDescription }
@@ -50,7 +57,7 @@ final class AccountConnection {
     func poll() async {
         guard let code, let account else { return }
         do {
-            let api = try FragmentAPI(baseURL: account.origin, identity: account.signingKey)
+            let api = try FragmentAPI(baseURL: account.origin, identity: account.signingKey, session: session)
             // The same interval and ten-minute bound as fragment login.
             for _ in 0..<300 {
                 try Task.checkCancellation()
@@ -66,26 +73,32 @@ final class AccountConnection {
             let person: JSONValue = try await api.request("api/identities/me")
             try Task.checkCancellation()
             guard person["kind"].string == "person", let identity = person["id"].string else { throw APIError.invalidResponse }
+            // newest wins: an answer for an account no longer this app's
+            // (removed, or replaced by another key) does nothing at all
+            guard isCurrent(api) else { throw CancellationError() }
             // this app's Safari data is the person's it was kept for: another
             // person (a new key, or this one approved by someone else) starts
             // with none of it, before they can open an app
             if account?.identity != identity {
-                await SFSafariViewController.DataStore.default.clearWebsiteData()
+                await clearWebData()
                 try Task.checkCancellation()
             }
             // the account as it is now: one removed meanwhile stays removed
-            guard var next = account, next.origin == api.baseURL,
-                  try next.signingKey.publicKey == api.identity.publicKey else { throw CancellationError() }
+            guard isCurrent(api), var next = account else { throw CancellationError() }
             next.identity = identity; next.email = person["email"].string; next.approved = true
             try DeviceKeychain.save(next, service: scope.keychainService); account = next; error = nil
             return true
         } catch APIError.unauthorized { return false }
     }
+    /// Whether `api` is this app's account as it is now: its origin and key.
+    private func isCurrent(_ api: FragmentAPI) -> Bool {
+        guard let account, account.origin == api.baseURL, let key = try? account.signingKey else { return false }
+        return key.publicKey == api.identity.publicKey
+    }
     func validate() async {
         guard let api else { return }
         do {
-            if try await finish(api) == false, account?.origin == api.baseURL,
-               (try? account?.signingKey.publicKey) == api.identity.publicKey { expire() }
+            if try await finish(api) == false, isCurrent(api) { expire() }
         } catch is CancellationError { return }
         catch { self.error = error.localizedDescription }
     }
@@ -117,7 +130,7 @@ final class AccountConnection {
         }
         try DeviceKeychain.clear(service: scope.keychainService); account = nil; code = nil; cachedAPI = nil
         // every app's page data, kept in this app's Safari view (iOS 16+; the app needs 26)
-        await SFSafariViewController.DataStore.default.clearWebsiteData()
+        await clearWebData()
     }
 }
 

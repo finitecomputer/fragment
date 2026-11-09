@@ -2,8 +2,15 @@ import SwiftUI
 
 @main
 struct FragmentApp: App {
-    init() { LaunchScope.start() }
-    var body: some Scene { WindowGroup { FragmentRoot() } }
+    /// The one account every window shows (an iPad runs several): removing,
+    /// pairing or clearing in any window is every window's at once. Made
+    /// after `LaunchScope.start`, which a UI test's store is emptied by.
+    @State private var connection: AccountConnection
+    init() {
+        LaunchScope.start()
+        _connection = State(initialValue: AccountConnection())
+    }
+    var body: some Scene { WindowGroup { FragmentRoot(connection: connection) } }
 }
 
 @MainActor @Observable
@@ -386,7 +393,8 @@ struct FragmentRoot: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var library = Library()
-    @State private var connection = AccountConnection()
+    /// The app's one account (`FragmentApp`), shared with every other window.
+    let connection: AccountConnection
     @State private var showingConnection = false
     @State private var page = ShellPage.launcher
     @State private var sidebar = false
