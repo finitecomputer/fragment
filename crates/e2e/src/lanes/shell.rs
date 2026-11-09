@@ -3249,6 +3249,7 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let shown = |kind: &str| format!("document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind={kind}]')");
+    let button = |kind: &str, label: &str| notice_button(&shown(kind), label);
     // its saves fail, and its agent answers a message: work no save keeps
     // (a stop that lost nothing would tell nothing)
     std::thread::sleep(super::computers::QUEUE_DRAIN);
@@ -3269,17 +3270,17 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     // its owner's sleep keeps it awake, and tells them
     let r = shell(api, session, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})), &[])?;
     let generation = r.body["generation"].as_u64().unwrap_or(0);
-    let warned = b.until(page, &format!("{n}?.innerText.includes(\"can't save\") && !!{n}.querySelector('button[data-action=restart]')", n = shown("unsaved")), wait);
+    let warned = b.until(page, &format!("{n}?.innerText.includes(\"can't save\") && !!{r}", n = shown("unsaved"), r = button("unsaved", "Restart now")), wait);
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-unsaved.png"));
     s.ok(
         "a sleep whose save fails is shown at once, with no reload: since when its work is unsaved, when it stops, and Restart",
-        failing.status == 200 && answered && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved since") && t.contains("If it still can't by")),
+        failing.status == 200 && answered && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved for") && t.contains("If it still can't save, it stops in ")),
         &said,
     );
     // Restart, in the notice: its save fails too, so it goes back, and says so
-    b.eval(page, &format!("({}.querySelector('button[data-action=restart]').click(), true)", shown("unsaved")))?;
-    let back = b.until(page, &format!("{n}?.innerText.includes('Your computer restarted') && !!{n}.querySelector('button[data-action=seen]')", n = shown("went_back")), std::time::Duration::from_secs(90));
+    b.eval(page, &format!("({}.click(), true)", button("unsaved", "Restart now")))?;
+    let back = b.until(page, &format!("{n}?.innerText.includes('Your computer restarted') && !!{ok}", n = shown("went_back"), ok = button("went_back", "OK")), std::time::Duration::from_secs(90));
     let v = view();
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-went-back.png"));
@@ -3287,11 +3288,11 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
         "Restart in the notice restarts it once, back to its last save, and the notice says, calmly, since when changes on it weren't kept, with an OK",
         back && v["generation"].as_u64() == Some(generation + 1)
             && v["restored"]["rollback"] == true
-            && said.as_str().is_some_and(|t| t.contains("Changes on it since") && t.contains("weren't kept") && t.contains("Your chats are all here") && !t.contains("unexpectedly")),
+            && said.as_str().is_some_and(|t| t.contains("Changes ") && t.contains("weren't kept") && t.contains("Your chats are all here") && !t.contains("unexpectedly")),
         json!({ "said": said, "view": v }),
     );
     super::computers::lever_with(api, &id, json!({ "op": "fail-saves", "times": 0 }))?;
-    b.eval(page, &format!("({}.querySelector('button[data-action=seen]').click(), true)", shown("went_back")))?;
+    b.eval(page, &format!("({}.click(), true)", button("went_back", "OK")))?;
     let gone = b.until(page, "document.getElementById('computer-notices').hidden", wait);
     b.reload(page)?;
     let loaded = b.until(page, "!document.getElementById('settings-page').hidden && document.getElementById('settings-page').innerText.toUpperCase().includes('COMPUTER')", wait);
@@ -3337,7 +3338,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     idle(s);
     let r = shell(api, session, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub-next" })), &[])?;
     let latest = r.body["latest"].as_str().unwrap_or("").to_string();
-    let told = b.until(page, &format!("{shown}?.innerText.includes('An update is ready for your computer') && !!{shown}.querySelector('button[data-action=restart]') && !!{shown}.querySelector('button[data-action=later]')"), wait);
+    let (restart, later) = (notice_button(shown, "Restart"), notice_button(shown, "Later"));
+    let told = b.until(page, &format!("{shown}?.innerText.includes('An update is ready for your computer') && !!{restart} && !!{later}"), wait);
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-update.png"));
     s.ok(
@@ -3360,7 +3362,7 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // ledger at zero credit answers): said plainly where its buttons were,
     // with Try again, in the band and in settings
     b.eval(page, FAIL_RESTART)?;
-    b.eval(page, &format!("({shown}.querySelector('button[data-action=restart]').click(), true)"))?;
+    b.eval(page, &format!("({restart}.click(), true)"))?;
     let failed = b.until(page, &format!("{RESTART_ROW}?.innerText.includes(\"Your computer didn't restart\") && {RESTART_ROW}.innerText.includes('the credit is used up') && {RESTART_ROW}.querySelector('button[data-action=restart]')?.textContent === 'Try again'"), wait);
     let in_settings = b.eval(page, "({ said: document.querySelector('#settings-page .form-error')?.textContent ?? null, button: document.querySelector('#settings-page [data-action=restart-ask]')?.textContent ?? null, update: !!document.querySelector('.computer-notice[data-kind=update]'), status: !!document.querySelector('.restart-status') })")?;
     let _ = b.screenshot(page, &shots.join("computer-restart-failed.png"));
@@ -3438,8 +3440,8 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // pinned back, another version is ready; Later puts it off, here and after a reload
     idle(s);
     shell(api, session, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })), &[])?;
-    let again = b.until(page, &format!("!!{shown}?.querySelector('button[data-action=later]')"), wait);
-    b.eval(page, &format!("({shown}.querySelector('button[data-action=later]').click(), true)"))?;
+    let again = b.until(page, &format!("!!{later}"), wait);
+    b.eval(page, &format!("({later}.click(), true)"))?;
     let hidden = b.until(page, "document.getElementById('computer-notices').hidden", wait);
     b.reload(page)?;
     let loaded = b.until(page, "!document.getElementById('settings-page').hidden && document.getElementById('settings-page').innerText.includes('Latest version')", wait);
@@ -3453,6 +3455,13 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         &v,
     );
     Ok(())
+}
+
+/// The button labelled `label` among the actions of the notice row `row`
+/// (a JS expression), or undefined (computer.js: every notice's actions
+/// are drawn the same way, so a test finds one by its words).
+fn notice_button(row: &str, label: &str) -> String {
+    format!("[...({row})?.querySelectorAll('.notice-actions button') ?? []].find((x) => x.textContent === {label:?})")
 }
 
 /// The band's row of a restart the person asked for (computer.js), or null.
@@ -3554,7 +3563,7 @@ fn knows_agent(menu: &[String]) -> bool {
 /// reads let through: the line goes, the update stays.
 fn refresh_failed_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, fragment: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
-    let update = "!!document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=update] button[data-action=restart]')";
+    let update = format!("!!{}", notice_button("document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=update]')", "Restart"));
     b.eval(page, FAIL_COMPUTERS)?;
     let r = shell(api, session, "PUT", &format!("/api/fragments/{fragment}/archived"), Some(&json!({ "archived": false })), &[])?;
     let failed = b.until(page, &format!("window.__computerReads > 0 && {REFRESH_LINE} && {update}"), wait);
@@ -8751,7 +8760,7 @@ fn threads_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
         json!({ "needs": needs, "killed": killed.status, "lost": lost, "cut": open, "ended": cut, "answered": answered, "gone": then_gone, "line": b.eval(page, line)? }),
     );
     // the restart's own notice ("Your computer restarted…"), seen, so the checks after it start from none
-    let told = "document.querySelector('#computer-notices .computer-notice[data-kind=went_back] [data-action=seen]')";
+    let told = notice_button("document.querySelector('#computer-notices .computer-notice[data-kind=went_back]')", "OK");
     let notices = shell(api, session, "GET", &format!("/api/computers/{computer}"), None, &[])?.body["notices"].clone();
     if notices.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "went_back")) && b.until(page, &format!("!!{told}"), wait) {
         b.eval(page, &format!("({told}.click(), true)"))?;

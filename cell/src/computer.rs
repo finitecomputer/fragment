@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -940,6 +940,13 @@ impl ComputerCell {
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
         self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// What its owner is told now, in words (FIN-458, `GET /api/notices`).
+    fn said(&self) -> CellResult<Vec<fragment_proto::notice::Notice>> {
+        let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
+        let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
+        Ok(said::said(&self.with_keys(notices(&life, &self.saves()?, &self.images()?, &self.rules()))?, &facts))
     }
 
     /// `told`, and a notice of each shared key its owner's cap pauses now,
@@ -2600,6 +2607,13 @@ impl ComputerCell {
                 self.look_and_tell().await;
                 json_response(&self.view()?)
             }
+            // what its owner is told, in words (`notices::route`): a deploy
+            // since its last look is news, as for its view
+            "computer/notices" => {
+                self.must(MetaKey::Id)?;
+                self.look_and_tell().await;
+                json_response(&json!({ "notices": self.said()? }))
+            }
             // an operator's view of it (orgs.rs, the person page): the whole
             // references of the image it runs and of the one its next start
             // runs, which a promotion copies (docs/computers.md, "Preview and
@@ -3233,6 +3247,16 @@ async fn owned(env: &Env, who: &str, id: &str) -> CellResult<ComputerView> {
         return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
     }
     Ok(v)
+}
+
+/// What `who`'s computer tells them now, in words (`notices::route`): none
+/// while they have none.
+pub(crate) async fn notices_of(env: &Env, who: &str) -> CellResult<Vec<Value>> {
+    match ask(env, &fragment_core::computer::default_computer_of(who), "computer/notices", &json!({})).await {
+        Ok(v) => Ok(v["notices"].as_array().cloned().unwrap_or_default()),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(vec![]),
+        Err(e) => Err(e),
+    }
 }
 
 /// `{image}` from a body.

@@ -82,10 +82,11 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // agents: by identity; computerFailed: whether the last read of their computer
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
+// notices: what they are told, in the server's words (`GET /api/notices`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
 // What a late answer may still do: one latest ask a kind (asks.js)
 const asks = createAsks();
-const state = { me: null, guest: false, fragments: [], limits: null, invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
+const state = { me: null, guest: false, fragments: [], limits: null, invites: [], notices: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -1735,8 +1736,8 @@ const launcher = createLauncher({
 // after it, the read would undo it.
 const { computerOf, prewake, renderComputer, restartComputer, computerSection } = createComputer({
   api, el, seg, named, section, line, actionLine, computer: () => state.computer,
-  agents: () => state.agents, computerFailed: () => state.computerFailed,
-  support: () => state.support, setupPending: () => onboarding.setupPending(),
+  notices: () => state.notices, agents: () => state.agents, computerFailed: () => state.computerFailed,
+  setupPending: () => onboarding.setupPending(),
   made: (c) => { asks.ask("computer"); state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
   reads: () => reads, load,
 });
@@ -1909,7 +1910,7 @@ async function shellRead(path) {
 async function load(changed = false) {
   const mine = ++reads.asked;
   const taken = asks.now("computer");
-  const [listRead, computerRead] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers")]);
+  const [listRead, computerRead, noticesRead] = await Promise.all([shellRead("/api/fragments"), shellRead("/api/computers"), shellRead("/api/notices")]);
   if (mine < reads.shown) return;
   reads.shown = mine;
   clearTimeout(reads.timer);
@@ -1924,11 +1925,11 @@ async function load(changed = false) {
     renderComputer();
     throw listRead.error;
   }
-  const deploying = listRead.deploying || computerRead.deploying;
+  const deploying = listRead.deploying || computerRead.deploying || noticesRead.deploying;
   if (deploying) reads.since ??= Date.now();
   else { reads.since = null; reads.wait = 3000; }
   const left = deploying ? READ_DEPLOY_WAIT_MS - (Date.now() - reads.since) : 0;
-  reads.updating = left > 0 && ![listRead, computerRead].some((r) => r.error && !r.deploying);
+  reads.updating = left > 0 && ![listRead, computerRead, noticesRead].some((r) => r.error && !r.deploying);
   reads.listFailed = !!listRead.error;
   if (reads.updating) {
     reads.timer = setTimeout(() => load().catch(() => {}), Math.min(reads.wait, left));
@@ -1953,6 +1954,8 @@ async function load(changed = false) {
     }
     state.support = computers.support ?? null;
   }
+  // what they are told (FIN-458): failed, what the last read said stays
+  if (noticesRead.value) state.notices = noticesRead.value.notices ?? [];
   renderChats();
   threads.refresh().catch(() => {});
   sessionArchive.load().catch(() => {});

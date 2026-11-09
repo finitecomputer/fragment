@@ -62,6 +62,7 @@ mod mail;
 mod members;
 mod meter;
 mod models;
+mod notices;
 mod ops;
 mod orgs;
 mod plane;
@@ -1263,6 +1264,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let who = signer(env, &req, &url, &[]).await?;
             json_answer(&share::access(env, &url, &who).await?)
         }
+        // what the signer is told now, each owner's in its own words (notices.rs)
+        (Method::Get, ["api", "notices"]) => notices::route(&req, env, &url).await,
         // the invites waiting on the signer's emails, theirs to answer (share.rs)
         (_, ["api", "invites", rest @ ..]) => {
             let rest = rest.to_vec();

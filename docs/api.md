@@ -1914,6 +1914,24 @@ signed in and the chat runs the release's chat; otherwise it shows nothing
 and lets itself go. The shell's Sign out and Use another account let every
 registration go first.
 
+## Notices (FIN-458)
+
+What the platform tells a person, each owner's notices in its own words
+(`Notice`, `fragment_proto::notice`), the most pressing first. Each owner
+works them out when asked and the router joins them, keeping none: today
+the person's computer's (docs/computers.md, "What its owner is told").
+`kind` is for tests and logs; a client draws every notice the same way
+and never reads it. An action `post`s its `body` (none: `{}`) to a
+platform route with the person's own credential, the route its owner's
+(below), then the client reads its notices again; or it `open`s an
+`https:` page or a `mailto:` address. `until`: when what a notice tells
+ends by the clock alone; a client counts down to it and drops the notice
+then. Their pages are told when notices change (`watch`'s `changed`).
+
+| method & path | who | answer |
+| --- | --- | --- |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`; none while they have no computer |
+
 ## Computers (docs/computers.md)
 
 A person's computer runs an image and the agent fragments assigned to it;

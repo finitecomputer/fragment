@@ -54,6 +54,8 @@
 //! From them, what its owner is told (`notices`): a rollback only when
 //! something was done on the life it lost after the save it went back to.
 
+pub mod said;
+
 use fragment_proto::computer::{ComputerNotice, ComputerRestore, ComputerSave, LifeEnd, LossCause, RestoreSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
