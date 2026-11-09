@@ -160,6 +160,8 @@ final class FragmentUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
         app.launch()
+        // a new simulator's first keyboard offers its tip, over Home
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
         let notice = { (id: String) in app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:\(id)")).firstMatch }
         let update = notice("update:"), unsaved = notice("unsaved")
         XCTAssertTrue(update.waitForExistence(timeout: 30), "the update ready is told")
