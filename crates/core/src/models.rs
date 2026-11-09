@@ -210,9 +210,11 @@ const _: () = assert!(AI_TEXT_MAX_BYTES * 2 <= fragment_proto::limits::RESULT_MA
 /// Where one of the route's models runs (a deployment's `models`, each
 /// slot one of these, `provider` its kind). Its `model` is also its row in
 /// the price book (the code's, or its slot's ceiling: `ceiling`): a call is
-/// priced as the model that answered it.
+/// priced as the model that answered it. Read as its fields
+/// (`UpstreamFields`), not as serde's internally tagged reading, which
+/// buffers each slot to find its `provider`: about 10 KB of the cell's Wasm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "provider", rename_all = "snake_case", try_from = "UpstreamFields")]
 pub enum Upstream {
     /// A Workers AI model by its catalog id, through the deployment's AI
     /// Gateway (the Worker's AI binding; dev and the e2e, the fake at
@@ -236,6 +238,43 @@ pub enum Upstream {
         #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "price_fields")]
         price: Option<Map<String, Value>>,
     },
+}
+
+/// An `Upstream` as it is read: both providers' fields, flat, none unknown.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpstreamFields {
+    provider: Provider,
+    model: String,
+    base_url: Option<String>,
+    #[serde(default, deserialize_with = "fields")]
+    body: Option<Map<String, Value>>,
+    #[serde(default, deserialize_with = "price_fields")]
+    price: Option<Map<String, Value>>,
+}
+
+/// A slot's `provider`: read as an identifier, a string alone, as the
+/// tagged reading read its tag (a derived enum also takes `{"<name>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "snake_case")]
+enum Provider {
+    WorkersAi,
+    Openai,
+}
+
+impl TryFrom<UpstreamFields> for Upstream {
+    type Error = String;
+
+    /// The provider its `provider` names, with that provider's fields alone.
+    fn try_from(f: UpstreamFields) -> Result<Upstream, String> {
+        match f.provider {
+            Provider::WorkersAi => match [("base_url", f.base_url.is_some()), ("body", f.body.is_some()), ("price", f.price.is_some())].into_iter().find(|(_, named)| *named) {
+                Some((field, _)) => Err(format!("unknown field `{field}`: a Workers AI model is its `model` alone")),
+                None => Ok(Upstream::WorkersAi { model: f.model }),
+            },
+            Provider::Openai => Ok(Upstream::Openai { base_url: f.base_url.ok_or("missing field `base_url`")?, model: f.model, body: f.body, price: f.price }),
+        }
+    }
 }
 
 /// The fields a slot's `price` names (`Upstream::own_price`): a model's
@@ -2091,6 +2130,9 @@ mod tests {
         refused(r#"{"high": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.high: the high tier is off (decision 23)");
         refused(r#"{"cheapest": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.cheapest: no slot names it, as its fallback or a tier's vision");
         refused(&slot(json!({ "provider": "anthropic", "model": "glm-5-3-flash" })), "unknown variant `anthropic`");
+        // a provider is its name, a string, as the tagged reading's tag was
+        refused(&slot(json!({ "provider": { "workers_ai": null }, "model": GLM_FLASH })), "invalid type: map");
+        refused(&slot(json!({ "provider": { "openai": null }, "base_url": "https://a.example/v1", "model": "glm-5-3-flash" })), "invalid type: map");
         refused(&slot(json!({ "model": "glm-5-3-flash" })), "missing field `provider`");
         refused(&slot(json!({ "provider": "openai", "model": "glm-5-3-flash" })), "missing field `base_url`");
         refused(&slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "glm-5-3-flash", "key": "fragment-finite-private-key" })), "unknown field `key`");
