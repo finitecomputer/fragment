@@ -569,7 +569,10 @@ struct FragmentRoot: View {
         .onChange(of: library.asked?.id, initial: true) { _, id in
             if id != nil { openedApp = nil; showingConnection = false; sidebar = false }
         }
-        .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(scenePhase)") {
+        // the library's reads and its watch, for the account as it is now: a
+        // library made anew (`resetNavigation`: its identity or approval
+        // changed, as a check of the key finds them) reads and watches anew
+        .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(connection.account?.identity ?? "")|\(connection.account?.approved == true)|\(scenePhase)") {
             if scenePhase == .active { await library.load(api); await library.watch(api) }
         }
         .onChange(of: page) { left, _ in
