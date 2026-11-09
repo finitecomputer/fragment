@@ -2612,7 +2612,7 @@ impl ComputerCell {
             "computer/notices" => {
                 self.must(MetaKey::Id)?;
                 self.look_and_tell().await;
-                json_response(&json!({ "notices": self.said()? }))
+                json_response(&fragment_proto::notice::NoticeList { notices: self.said()? })
             }
             // an operator's view of it (orgs.rs, the person page): the whole
             // references of the image it runs and of the one its next start
@@ -3249,13 +3249,14 @@ async fn owned(env: &Env, who: &str, id: &str) -> CellResult<ComputerView> {
     Ok(v)
 }
 
-/// What `who`'s computer tells them now, in words (`notices::route`): none
-/// while they have none.
-pub(crate) async fn notices_of(env: &Env, who: &str) -> CellResult<Vec<Value>> {
-    match ask(env, &fragment_core::computer::default_computer_of(who), "computer/notices", &json!({})).await {
-        Ok(v) => Ok(v["notices"].as_array().cloned().unwrap_or_default()),
-        Err(e) if e.code == ErrorCode::NotFound => Ok(vec![]),
-        Err(e) => Err(e),
+/// What `who`'s computer tells them now, in words (`notices::route`), its
+/// answer forwarded as it is (`NoticeList`); none while they have none.
+pub(crate) async fn notices_of(env: &Env, who: &str) -> CellResult<Response> {
+    let id = fragment_core::computer::default_computer_of(who);
+    let answer = crate::routed::send_again(env, "COMPUTER", &id, || crate::routed::internal_request("computer/notices", "{}")).await?;
+    match answer.status_code() {
+        404 => json_response(&fragment_proto::notice::NoticeList { notices: vec![] }),
+        _ => Ok(answer),
     }
 }
 

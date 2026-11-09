@@ -50,20 +50,22 @@ pub fn span(ms: i64) -> String {
     format!("{n} {unit}")
 }
 
-/// A provider's name for people: `xai` is xAI, `google-places` Google Places.
+/// A provider's name for people: `xai` is xAI, `google-places` Google
+/// Places (a provider's name is ASCII: `catalog::valid_name`).
 pub fn provider_name(provider: &str) -> String {
     match provider {
         "xai" => "xAI".into(),
         "elevenlabs" => "ElevenLabs".into(),
         "openrouter" => "OpenRouter".into(),
-        _ => provider
-            .split('-')
-            .map(|w| {
-                let mut c = w.chars();
-                c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        _ => {
+            let mut said = provider.replace('-', " ").into_bytes();
+            for i in 0..said.len() {
+                if i == 0 || said[i - 1] == b' ' {
+                    said[i] = said[i].to_ascii_uppercase();
+                }
+            }
+            String::from_utf8_lossy(&said).into_owned()
+        }
     }
 }
 

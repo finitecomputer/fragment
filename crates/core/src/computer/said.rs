@@ -5,7 +5,7 @@
 
 use fragment_proto::computer::ComputerNotice;
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel, Until};
-use serde_json::json;
+use serde_json::{Map, Value};
 
 use crate::notice::{provider_name, size, span, usd};
 
@@ -25,13 +25,20 @@ pub fn said(told: &[ComputerNotice], f: &Facts) -> Vec<Notice> {
     told.iter().map(|n| one(n, f)).collect()
 }
 
+/// An action's body: `{key: value}`.
+fn body(key: &str, value: impl Into<Value>) -> Value {
+    let mut m = Map::new();
+    m.insert(key.to_string(), value.into());
+    Value::Object(m)
+}
+
 fn notice(id: String, kind: &str, level: NoticeLevel, title: String) -> Notice {
     Notice { id, kind: kind.into(), level, title, text: None, detail: None, until: None, actions: vec![] }
 }
 
 fn one(n: &ComputerNotice, f: &Facts) -> Notice {
     let at = |path: &str| format!("/api/computers/{}/{path}", f.computer);
-    let restart = |label: &str| NoticeAction::post(label, at("restart"), json!({ "generation": f.generation }));
+    let restart = |label: &str| NoticeAction::post(label, at("restart"), body("generation", f.generation));
     match n {
         ComputerNotice::WontWake { why } => Notice {
             text: Some(format!("{} Your agents can't answer until it does.", wont_start(why))),
@@ -51,19 +58,19 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             // loss, which stays true however long the notice waits
             let lost = match (save, saved_at, ended_at) {
                 (None, _, _) => None,
-                (Some(_), Some(saved), Some(ended)) => Some(format!("changes made in the {} before it stopped", span(ended - saved))),
-                (Some(_), _, _) => Some("changes on it since its last save".to_string()),
+                (Some(_), Some(saved), Some(ended)) => Some(format!("made in the {} before it stopped", span(ended - saved))),
+                (Some(_), _, _) => Some("on it since its last save".to_string()),
             };
             let said = match (lost, pending) {
-                (Some(lost), true) => format!("When it starts again, {lost} won't be there."),
-                (Some(lost), false) => format!("{} weren't kept.", capitalized(&lost)),
+                (Some(lost), true) => format!("When it starts again, changes {lost} won't be there."),
+                (Some(lost), false) => format!("Changes {lost} weren't kept."),
                 (None, true) => "Nothing on it was saved yet, so it will start fresh.".into(),
                 (None, false) => "Nothing on it was saved yet, so it started fresh.".into(),
             };
             let title = if *pending { "Your computer stopped" } else { "Your computer restarted" };
             Notice {
                 text: Some(format!("{said} Your chats are all here.")),
-                actions: vec![NoticeAction::post("OK", at("notices/seen"), json!({ "life": life }))],
+                actions: vec![NoticeAction::post("OK", at("notices/seen"), body("life", *life))],
                 ..notice(format!("went_back:{life}"), "went_back", NoticeLevel::Info, title.into())
             }
         }
@@ -71,7 +78,7 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             // never restarted behind their agents' backs; an always-on
             // computer never sleeps, so never updates by itself
             text: Some(format!("Restart to get it; your chats and work are kept.{}", if f.always_on { "" } else { " It also updates by itself the next time your computer sleeps." })),
-            actions: vec![restart("Restart"), NoticeAction::post("Later", at("notices/later"), json!({ "version": version }))],
+            actions: vec![restart("Restart"), NoticeAction::post("Later", at("notices/later"), body("version", version.as_str()))],
             ..notice(format!("update:{version}"), "update", NoticeLevel::Info, "An update is ready for your computer".into())
         },
         ComputerNotice::DiskFilling { free, .. } => Notice {
@@ -82,7 +89,7 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             text: allow_micros.is_none().then(|| format!("{} an hour is the most allowed.", usd(*cap_micros))),
             until: Some(Until { at: *resumes_at, said: "Calls resume".into() }),
             // one tap lifts its cap a step from the one shown (a stale page changes nothing)
-            actions: allow_micros.map(|allow| NoticeAction::post(format!("Allow up to {} an hour", usd(allow)), at(&format!("key-caps/{provider}")), json!({ "from": cap_micros }))).into_iter().collect(),
+            actions: allow_micros.map(|allow| NoticeAction::post(format!("Allow up to {} an hour", usd(allow)), at(&format!("key-caps/{provider}")), body("from", *cap_micros))).into_iter().collect(),
             ..notice(format!("key_paused:{provider}"), "key_paused", NoticeLevel::Warn, format!("{} calls paused: {} this hour", provider_name(provider), usd(*spent_micros)))
         },
     }
@@ -106,15 +113,11 @@ fn wont_start(why: &str) -> &'static str {
     }
 }
 
-fn capitalized(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use fragment_proto::computer::LossCause;
+    use serde_json::json;
 
     const MIN: i64 = 60_000;
 
