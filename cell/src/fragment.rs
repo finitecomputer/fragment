@@ -1179,6 +1179,7 @@ impl FragmentCell {
                 let (after, before, limit) = crate::channels::page_query(&caller.url)?;
                 self.channel(&caller, channel, after, before, limit)
             }
+            (Method::Get, ["api", "channels", channel, "newest"]) => self.newest_api(&caller, channel),
             (Method::Post, ["api", "channels", channel]) => {
                 let body = body_json(&mut req).await?;
                 let channel = channel.to_string();

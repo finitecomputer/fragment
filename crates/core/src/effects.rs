@@ -177,7 +177,7 @@ mod tests {
     use serde_json::json;
 
     fn declared() -> BTreeMap<String, ChannelDecl> {
-        BTreeMap::from([("room".to_string(), ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None })])
+        BTreeMap::from([("room".to_string(), ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None, newest: vec![] })])
     }
 
     fn refusal(effects: Value) -> String {
@@ -232,8 +232,8 @@ mod tests {
     #[test]
     fn an_app_publishes_nothing_to_a_from_channel() {
         let mut channels = declared();
-        channels.insert("work".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(fragment_proto::IdentityKind::Agent), listed: None });
-        channels.insert("notes".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None });
+        channels.insert("work".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(fragment_proto::IdentityKind::Agent), listed: None, newest: vec![] });
+        channels.insert("notes".into(), ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None, newest: vec![] });
         let refused = check_record("work", "turn.step", &json!({ "turn": "t" }), &channels, None).expect_err("an app's record on an agents' channel");
         assert!(refused.contains("agent members only"), "{refused}");
         assert!(decode(&json!([{ "channel": "work", "kind": "turn.step", "body": {} }]), &channels, None).is_err(), "a mutation's effect is refused there");

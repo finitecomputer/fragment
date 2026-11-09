@@ -60,7 +60,7 @@ use fragment_core::access::{Purpose, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::{door, npub};
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
+    limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
@@ -289,6 +289,10 @@ impl FragmentCell {
         if let Some(listed) = declared.as_ref().and_then(|d| d.listed.as_ref()) {
             self.list_record(channel, listed, principal, seq, now, body)?;
         }
+        // and, of a kind it keeps the newest of, as its poster's newest
+        if let Some(d) = declared.as_ref().filter(|d| !d.newest.is_empty()) {
+            self.keep_newest(channel, &d.newest, principal, seq, body)?;
+        }
         if let Some(kept) = kept.filter(|_| !posted) {
             assert!(kept >= 1, "a channel keeps the record just appended");
             self.exec(
@@ -299,6 +303,40 @@ impl FragmentCell {
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// A record just appended to `channel`, which keeps each poster's newest
+    /// of `kinds` (`ChannelDecl::newest`), in its append's turn: of such a
+    /// kind (its body's `kind`), it is its poster's newest of it now, and
+    /// past `NEWEST_KEPT_MAX` the channel's newest posted longest ago goes.
+    /// One row written, and a delete of at most one: no list fan-out, and
+    /// nothing read back of the channel's history.
+    fn keep_newest(&self, channel: &str, kinds: &[String], principal: &str, seq: i64, body: &Value) -> CellResult<()> {
+        let Some(kind) = body.get("kind").and_then(Value::as_str).filter(|k| kinds.iter().any(|d| d == k)) else { return Ok(()) };
+        self.exec(
+            "INSERT INTO newest (channel, principal, kind, seq) VALUES (?, ?, ?, ?) ON CONFLICT (channel, principal, kind) DO UPDATE SET seq = excluded.seq",
+            vec![channel.into(), principal.into(), kind.into(), SqlStorageValue::Integer(seq)],
+        )?;
+        self.exec(
+            "DELETE FROM newest WHERE channel = ? AND seq NOT IN (SELECT seq FROM newest WHERE channel = ? ORDER BY seq DESC LIMIT ?)",
+            vec![channel.into(), channel.into(), SqlStorageValue::Integer(limits::NEWEST_KEPT_MAX as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// Each poster's newest record of each kind `channel` keeps the newest
+    /// of (`keep_newest`), the newest first: at most `NEWEST_KEPT_MAX`
+    /// rows and records read, each by its key. A record the channel no
+    /// longer keeps is none. The caller checked the channel's read role.
+    pub(crate) fn channel_newest(&self, channel: &str) -> CellResult<ChannelNewest> {
+        let rows: Vec<RecordRow> = self.typed(
+            "SELECT r.channel, r.seq, r.at, r.principal, r.kind, r.body FROM newest n JOIN records r ON r.channel = n.channel AND r.seq = n.seq
+             WHERE n.channel = ? ORDER BY n.seq DESC LIMIT ?",
+            vec![channel.into(), SqlStorageValue::Integer(limits::NEWEST_KEPT_MAX as i64)],
+        )?;
+        let records = rows.into_iter().map(RecordRow::record).collect::<CellResult<Vec<_>>>()?;
+        assert!(records.len() <= limits::NEWEST_KEPT_MAX, "a channel's newest are bounded");
+        Ok(ChannelNewest { channel: channel.to_string(), records })
     }
 
     /// Makes room in a postable channel for a record of `size` bytes: its
@@ -730,7 +768,7 @@ impl FragmentCell {
             out.push(json!({ "name": name, "read": decl.read, "post": decl.post, "signedIn": decl.signed_in, "from": decl.from, "listed": decl.listed, "seq": seq }));
             Ok(())
         };
-        let builtin = ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None };
+        let builtin = ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None, newest: vec![] };
         for b in BUILTIN_CHANNELS {
             add(b, &builtin)?;
         }
@@ -749,6 +787,18 @@ impl FragmentCell {
         let read = self.channel_read_role(channel)?;
         self.require(caller, false, read)?;
         json_response(&self.channel_page(channel, after, before, limit)?)
+    }
+
+    /// `GET /api/f/<name>/channels/<channel>/newest` (`channel_newest`):
+    /// read as the channel is.
+    pub(crate) fn newest_api(&self, caller: &Caller, channel: &str) -> CellResult<Response> {
+        self.require(caller, false, Role::Public)?;
+        if !valid_channel_name(channel) {
+            return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
+        }
+        let read = self.channel_read_role(channel)?;
+        self.require(caller, false, read)?;
+        json_response(&self.channel_newest(channel)?)
     }
 
     /// A page of `channel` (`GET …/channels/{c}`, `__channel/{c}`): at most
