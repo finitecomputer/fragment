@@ -70,8 +70,6 @@ struct NoticesBand: View {
     /// The most of the page it takes (`FragmentRoot`'s share of its
     /// height): past it, it scrolls, so the page and its toolbar stay.
     let maxHeight: CGFloat
-    /// Opens a page an action's answer names (`Library.act`).
-    let open: (URL) -> Void
     @State private var height: CGFloat = 0
     @Environment(\.openURL) private var openURL
 
@@ -138,7 +136,7 @@ struct NoticesBand: View {
         let pressed = library.acting.contains(notice.id)
         let tap = {
             if let open = action.open, let url = URL(string: open) { openURL(url) }
-            else { Task { if let page = await library.act(notice, action, api: api) { open(page) } } }
+            else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
         }
         if main {
             // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise)

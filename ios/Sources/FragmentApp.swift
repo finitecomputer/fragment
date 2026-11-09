@@ -56,7 +56,19 @@ final class Library {
     var noticesFailed = false
     var failedNotices: [String: String] = [:]
     var acting: Set<String> = []
+    /// A fragment of theirs an action's answer named, for the page to open
+    /// (`FragmentRoot`): set by the first read begun after the answer if
+    /// it lists it (`act`).
+    var answered: FragmentSummary?
     @ObservationIgnored private var loadID = UUID()
+    /// Reads begun (`load`), and a page an action's answer named with the
+    /// number of the first read begun after the answer: the first such
+    /// read to take its list decides it, once (`load` lets the newest read
+    /// begun win, so the action's own may give way to a newer one); a read
+    /// after that never opens it, the person maybe elsewhere by then. It
+    /// goes with this library, and so with the account it was asked in.
+    @ObservationIgnored private var begun = 0
+    @ObservationIgnored private var held: (page: URL, after: Int)?
     @ObservationIgnored private var settle: Task<Void, Never>?
     @ObservationIgnored private var titling: Set<String> = []
 
@@ -204,6 +216,8 @@ final class Library {
     }
     func load(_ api: FragmentAPI) async {
         let requestID = UUID(); loadID = requestID
+        begun += 1
+        let number = begun
         loading = true
         defer { if loadID == requestID { loading = false } }
         do {
@@ -223,6 +237,11 @@ final class Library {
             }
             if loadID == requestID { error = nil }
         } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
+        // its list read (or not), it decides a page held for it or an older read
+        if loadID == requestID, let page = held, number >= page.after {
+            held = nil
+            answered = fragment(linkedBy: page.page)
+        }
         await loadNotices(api, requestID)
         await loadImported(api, requestID)
         await loadPages(api)
@@ -275,8 +294,9 @@ final class Library {
     /// read again (`load`, whose newest read wins), which decides what
     /// shows whatever the post answered. Failed, the notice says why, as
     /// that read finds it, to tap again. Its answer may name a page to open
-    /// (an invite's app, a checkout), which this answers once that read has
-    /// it (an app accepted is in the list): its caller opens it.
+    /// (an invite's app, a checkout), an http(s) address alone: one of
+    /// theirs opens here if the first read begun after the answer lists it
+    /// (`held`, `answered`); any other, it answers, for Safari.
     func act(_ notice: Notice, _ action: Notice.Action, api: FragmentAPI) async -> URL? {
         guard let post = action.post, !acting.contains(notice.id) else { return nil }
         acting.insert(notice.id)
@@ -288,8 +308,11 @@ final class Library {
         } catch {
             failedNotices[notice.id] = Self.said(error)
         }
+        let page = answer["open"].string.flatMap { URL(string: $0) }.flatMap { ["https", "http"].contains($0.scheme?.lowercased()) ? $0 : nil }
+        let outside = page.flatMap { MessageLinks.fragmentName($0, pages: pages) == nil ? $0 : nil }
+        if let page, outside == nil { held = (page, begun + 1) }
         await load(api)
-        return answer["open"].string.flatMap { URL(string: $0) }
+        return outside
     }
     private func loadPages(_ api: FragmentAPI) async {
         guard pages == nil, let mine = fragments.first(where: { $0.role == "owner" }) else { return }
@@ -455,8 +478,6 @@ struct FragmentRoot: View {
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
     @State private var pageHeight: CGFloat = 800
-    /// A page an action's answer named, until their list has it (`openPage`).
-    @State private var opening: URL?
 
     var body: some View {
         Group {
@@ -489,7 +510,7 @@ struct FragmentRoot: View {
             // as the web's band is over every chat and Settings: one band,
             // never one per page.
             VStack(spacing: 0) {
-                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4, open: openPage)
+                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
                     .background(FragmentStyle.background.ignoresSafeArea(edges: .top))
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
@@ -543,7 +564,12 @@ struct FragmentRoot: View {
         .onChange(of: page) { left, _ in
             if case .chat(let name) = left { library.leftChat(name) }
         }
-        .onChange(of: library.fragments) { _, _ in openListed() }
+        // a fragment an action's answer named, the read after it listing it
+        .onChange(of: library.answered) { _, fragment in
+            guard let fragment else { return }
+            library.answered = nil
+            open(fragment)
+        }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }
         }
@@ -588,21 +614,6 @@ struct FragmentRoot: View {
     private func toggleSidebar() {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
-    }
-    /// A page an action's answer names: one of this deployment's fragments
-    /// opens here as its row would, once their list has it, by whichever
-    /// read lists it (`opening`: the read after the action may lose to a
-    /// newer one); any other address, in Safari.
-    private func openPage(_ url: URL) {
-        guard MessageLinks.fragmentName(url, pages: library.pages) != nil else { return openURL(url) }
-        opening = url
-        openListed()
-    }
-    /// The page `openPage` holds, opened once their list has its fragment.
-    private func openListed() {
-        guard let url = opening, let fragment = library.fragment(linkedBy: url) else { return }
-        opening = nil
-        open(fragment)
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }

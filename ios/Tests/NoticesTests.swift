@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import Fragment
 
@@ -55,5 +56,52 @@ struct NoticesTests {
         #expect(Library.said(APIError.refused("You already have a seat in Acme: decline this offer.")) == "You already have a seat in Acme: decline this offer.")
         #expect(Library.said(APIError.absent("No invite to garden--k3x9 waits on you.")) == "No invite to garden--k3x9 waits on you.")
         #expect(Library.said(URLError(.notConnectedToInternet)) == "Couldn't do that. Try again.")
+    }
+
+    /// An action's answer that names a page (Paul, 2026-11-09): one of
+    /// theirs opens here if the first read begun after the answer lists it,
+    /// and never after it (the person may be elsewhere by then); any other
+    /// http(s) address goes to Safari; any other scheme, nowhere.
+    @MainActor @Test func anAnswersPageOpensByTheReadAfterItAlone() async throws {
+        final class Listed: Sendable { let now = Mutex(false); let open = Mutex("") }
+        let listed = Listed()
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments":
+                let garden = listed.now.withLock { $0 } ? #",{"name":"garden--k3x9","kind":"app","role":"editor","title":"Garden plans"}"# : ""
+                return (200, #"{"fragments":[{"name":"juniper--a2","kind":"agent","role":"owner","title":"Juniper"}"# + garden + "]}")
+            case "GET /api/f/juniper--a2/status": return (200, #"{"npub":"npub1juniper","urls":{"canonical":"https://juniper--a2.finite.test/"}}"#)
+            case "POST /api/invites/garden--k3x9/accept":
+                return (200, #"{"fragment":"garden--k3x9","role":"editor","open":""# + listed.open.withLock { $0 } + #""}"#)
+            default: return (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+        let api = try stub.api()
+        let notice = try #require(try read(#"{"notices":[{"id":"invite:garden--k3x9","kind":"invite","level":"info","title":"Garden plans","actions":[{"label":"Accept","post":"/api/invites/garden--k3x9/accept","body":{}}]}]}"#).first)
+        let library = Library()
+        await library.load(api)
+        #expect(library.pages != nil, "this deployment's pages, from their own fragment")
+
+        // the read after it lists it: it opens here, Safari given nothing
+        listed.open.withLock { $0 = "https://garden--k3x9.finite.test/" }
+        listed.now.withLock { $0 = true }
+        #expect(await library.act(notice, notice.actions[0], api: api) == nil)
+        #expect(library.answered?.name == "garden--k3x9")
+        library.answered = nil
+
+        // the read after it does not: nothing opens, then or when a later read lists it
+        listed.now.withLock { $0 = false }
+        #expect(await library.act(notice, notice.actions[0], api: api) == nil)
+        #expect(library.answered == nil)
+        listed.now.withLock { $0 = true }
+        await library.load(api)
+        #expect(library.answered == nil, "a later read never opens it")
+
+        // an address not theirs is answered for Safari; another scheme, for nothing
+        listed.open.withLock { $0 = "https://checkout.example.test/c/1" }
+        #expect(await library.act(notice, notice.actions[0], api: api) == URL(string: "https://checkout.example.test/c/1"))
+        listed.open.withLock { $0 = "tel:5550100" }
+        #expect(await library.act(notice, notice.actions[0], api: api) == nil)
+        #expect(library.answered == nil)
     }
 }
