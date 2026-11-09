@@ -332,7 +332,8 @@ enum Source {
 fn source(path: &std::path::Path, layout: Option<&str>) -> Result<Source> {
     if layout.is_some() || crate::home::source::is_zip(path) {
         let layout = crate::home::Layout::named(layout.unwrap_or("hermes"))?;
-        let home = crate::home::source::Source::open(path)?;
+        // one rule for every source: what may hold a secret is skipped unread
+        let home = crate::home::open(path, &layout)?;
         let db = layout.in_home("state.db");
         if home.get(&db).is_none() {
             bail!(usage(format!("{} holds no {db}: name the home's layout (--layout), or its Hermes home", path.display())));
