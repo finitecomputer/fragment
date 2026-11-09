@@ -174,36 +174,58 @@ function parseRange(header, size) {
   return { offset: start, length: end - start + 1 };
 }
 
-// An object's answer for GET or HEAD, with Range, as S3 answers it.
+// An object's answer for GET or HEAD, with Range, as S3 answers it: one
+// R2 call each (a GET's range is read from its object, never a HEAD first:
+// each R2 call is ~190 ms from a DFW container to a WNAM bucket).
 async function objectAnswer(bucket, key, request, extraHeaders = {}) {
-  const head = await bucket.head(key);
-  if (!head) return null;
-  const size = head.size;
-  const range = parseRange(request.headers.get("range"), size);
+  const isHead = request.method === "HEAD";
+  const asked = request.headers.get("range");
+  let obj;
+  if (isHead) {
+    obj = await bucket.head(key);
+  } else if (asked) {
+    // a malformed or unsatisfiable range: S3's 416
+    const probe = /^bytes=(\d*)-(\d*)$/.exec(asked.trim());
+    if (!probe || (probe[1] === "" && probe[2] === "")) return new Response(null, { status: 416 });
+    const range = probe[1] === "" ? { suffix: Number(probe[2]) } : probe[2] === "" ? { offset: Number(probe[1]) } : { offset: Number(probe[1]), length: Number(probe[2]) - Number(probe[1]) + 1 };
+    try {
+      obj = await bucket.get(key, { range });
+    } catch (e) {
+      const head = await bucket.head(key);
+      if (!head) return null;
+      return new Response(null, { status: 416, headers: { "content-range": `bytes */${head.size}` } });
+    }
+  } else {
+    obj = await bucket.get(key);
+  }
+  if (!obj) return null;
+  const size = obj.size;
   const headers = new Headers({
     "accept-ranges": "bytes",
-    etag: head.httpEtag,
-    "last-modified": head.uploaded.toUTCString(),
-    "content-type": head.httpMetadata?.contentType || "application/octet-stream",
+    etag: obj.httpEtag,
+    "last-modified": obj.uploaded.toUTCString(),
+    "content-type": obj.httpMetadata?.contentType || "application/octet-stream",
     ...extraHeaders,
   });
-  if (range && range.bad) {
-    headers.set("content-range", `bytes */${size}`);
-    return new Response(null, { status: 416, headers });
+  if (isHead) {
+    const range = parseRange(asked, size);
+    if (range && !range.bad) {
+      headers.set("content-range", `bytes ${range.offset}-${range.offset + range.length - 1}/${size}`);
+      headers.set("content-length", String(range.length));
+      return new Response(null, { status: 206, headers });
+    }
+    headers.set("content-length", String(size));
+    return new Response(null, { status: 200, headers });
   }
-  const isHead = request.method === "HEAD";
-  if (range) {
-    headers.set("content-range", `bytes ${range.offset}-${range.offset + range.length - 1}/${size}`);
-    headers.set("content-length", String(range.length));
-    if (isHead) return new Response(null, { status: 206, headers });
-    const obj = await bucket.get(key, { range: { offset: range.offset, length: range.length } });
-    if (!obj) return null;
+  if (asked && obj.range) {
+    const r = obj.range;
+    const offset = "suffix" in r && r.suffix !== undefined ? size - Math.min(r.suffix, size) : r.offset ?? 0;
+    const length = "suffix" in r && r.suffix !== undefined ? Math.min(r.suffix, size) : r.length ?? size - offset;
+    headers.set("content-range", `bytes ${offset}-${offset + length - 1}/${size}`);
+    headers.set("content-length", String(length));
     return new Response(obj.body, { status: 206, headers });
   }
   headers.set("content-length", String(size));
-  if (isHead) return new Response(null, { status: 200, headers });
-  const obj = await bucket.get(key);
-  if (!obj) return null;
   return new Response(obj.body, { status: 200, headers });
 }
 
