@@ -338,9 +338,15 @@ pub(crate) async fn send_again(env: &Env, binding: &str, name: &str, make: impl 
 /// `name` of `binding`: its answer, read from its bytes once as `T`, or its
 /// refusal as it named it (`refusal`).
 pub(crate) async fn ask_object<T: DeserializeOwned>(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<T> {
-    let body = serde_json::to_string(body).map_err(|e| CellError::host(format!("{path}'s body: {e}")))?;
-    let bytes = object_answer(env, binding, name, path, body).await?;
+    let bytes = ask_bytes(env, binding, name, path, body).await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{binding} {name}'s answer to {path}: {e}")))
+}
+
+/// `ask_object`'s answer as its bytes, unread: for a caller that passes it
+/// on as it came (the router, a person's Vault's answer to them).
+pub(crate) async fn ask_bytes(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<Vec<u8>> {
+    let body = serde_json::to_string(body).map_err(|e| CellError::host(format!("{path}'s body: {e}")))?;
+    object_answer(env, binding, name, path, body).await
 }
 
 /// `ask_object`'s round trip, one copy for every answer's type: its 200's

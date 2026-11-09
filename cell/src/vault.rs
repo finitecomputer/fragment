@@ -25,7 +25,7 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
-use crate::json_response::json_response;
+use crate::json_response::{json_bytes, json_response};
 use crate::routed::Signed;
 
 /// What a value is sealed for: this class, and the object's id.
@@ -59,12 +59,13 @@ struct Removed {
     removed: bool,
 }
 
-/// Puts `put` into `person`'s Vault under `name`, sealed there: the same
-/// rules and answer as the person's own `PUT /api/vault/{name}`. Set
-/// again, it is replaced whole. The seam for the platform's own code
-/// (FIN-463's hand-off): it never answers the value.
-pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &PutSecret) -> CellResult<Secret> {
-    crate::routed::ask_object(env, "VAULT", person, "vault/put", &PutAsk { person: person.into(), name: name.into(), put: put.clone() }).await
+/// Puts `put` into `person`'s Vault under `name`, sealed there, under the
+/// same rules as the person's own `PUT /api/vault/{name}`. Set again, it
+/// is replaced whole. The seam for the platform's own code (FIN-463's
+/// hand-off), answered as the Vault answers it: the `Secret` set, as JSON,
+/// never its value.
+pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &PutSecret) -> CellResult<Vec<u8>> {
+    crate::routed::ask_bytes(env, "VAULT", person, "vault/put", &PutAsk { person: person.into(), name: name.into(), put: put.clone() }).await
 }
 
 /// Removes `name` from `person`'s Vault: whether there was one.
@@ -74,20 +75,18 @@ pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<bo
 }
 
 /// `/api/vault[/{name}]`, signed by `signed`: the person's own, never an
-/// agent's (their agents use its secrets, never set or list them).
+/// agent's (their agents use its secrets, never set or list them). The
+/// router finds their Vault and passes its answers on as they came.
 pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     if signed.identity.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "a vault is its person's alone: their agents use its secrets, and never set, list or remove one"));
     }
     let person = signed.identity.id.as_str();
     match (method, rest) {
-        (Method::Get, []) => {
-            let list: SecretList = crate::routed::ask_object(env, "VAULT", person, "vault/list", &Named { person: person.into(), name: None }).await?;
-            json_response(&list)
-        }
+        (Method::Get, []) => json_bytes(crate::routed::ask_bytes(env, "VAULT", person, "vault/list", &Named { person: person.into(), name: None }).await?),
         (Method::Put, [name]) => {
             let p: PutSecret = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts, place?, agents}}: {e}")))?;
-            json_response(&put(env, person, name, &p).await?)
+            json_bytes(put(env, person, name, &p).await?)
         }
         (Method::Delete, [name]) => json_response(&SecretRemoved { name: name.to_string(), removed: delete(env, person, name).await? }),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
