@@ -65,10 +65,16 @@ If it says `needs a restart`, tell your owner: "Before I bring your old
 agent over, please restart me once: Settings, then Computer, then
 Restart." Then stop until they do.
 
-**Get the zip.** An attachment is cleared after a day, so copy it first:
+**Get the zip.** Make the import's folder first:
 
 ```sh
-mkdir -p ~/home-import && cp "<the attachment's path>" ~/home-import/home.zip
+mkdir -p ~/home-import
+```
+
+An attachment is cleared after a day, so copy it at once:
+
+```sh
+cp "<the attachment's path>" ~/home-import/home.zip
 ```
 
 A Google Drive link (`drive.google.com/file/d/<id>/…`): fetch it through
@@ -82,9 +88,9 @@ df -h ~ /tmp
 
 - **No token, or a 401 or 403:** Google isn't connected. Ask your owner
   to connect it in Settings, and stop until they have.
-- **Room:** your home needs the zip's `size` free, and `/tmp` about a
-  tenth of it for its chats' database. If there isn't room, tell your
-  owner, and stop.
+- **Room:** your home needs the zip's `size` free, with room to spare.
+  If it doesn't have that, tell your owner, and stop. Step 1 checks the
+  rest of what the import needs.
 
 Then download it in the background, and wait for it to finish:
 
@@ -116,10 +122,20 @@ This changes nothing. It lists:
 - `parts`: what the layout's profile brings its own way;
 - `files`: what the cap brings, and what stays behind by reason.
 
-If it refuses because the home holds files that may hold passwords or
-keys, stop. Tell your owner the copy of their old agent held passwords
-or keys, so you didn't read it, and that the people who made the copy
-can help.
+**Room, now that the sizes are known.** Check `df -h ~ /tmp` against the
+survey:
+- `/tmp` needs about twice the `sessions` database's `bytes` free. The
+  chats' import copies the database there and lays out its chats beside
+  it.
+- Your home needs the bytes of the `parts` free (each brain and site is
+  copied out to be made), plus a fifth more.
+
+If there isn't room, tell your owner how much is needed, and stop.
+
+**Files left out unread.** `source.skipped` names each file whose name
+says it may hold a password or key (an `.env`, a private key). The
+survey left it out: nothing reads it, and nothing you make holds it.
+Name them in the report (step 8), and never go looking for them.
 
 **A profile.** If `${HERMES_SKILL_DIR}/profiles/<layout>.md` exists, read
 it now. It says what its platform's parts become here, how its old tools
@@ -279,6 +295,8 @@ Finish with one message, in plain words:
   - the jobs that are no routine;
   - the files left behind, by kind (the survey's `files.left_by_why`:
     how many videos, archives and the like, with the largest by name);
+  - the files left out unread for holding what may be a password or
+    key (`source.skipped`), by name;
   - anything that failed.
 - **What's theirs to do**, as the profile says (connecting an account in
   Settings, inviting people again).
