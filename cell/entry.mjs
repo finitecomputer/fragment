@@ -10,6 +10,9 @@ import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
 import * as rs from "./build/index.js";
+// SPIKE (FIN-463), never merged: cell/spike-fin463.mjs.
+import { spikeFetch, spikeComputer, SpikeS3Gateway, SpikeStore } from "./spike-fin463.mjs";
+export { SpikeS3Gateway, SpikeStore };
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
@@ -22,7 +25,14 @@ export class DirectoryBackupGateway extends SandboxGateway {
   }
 }
 
-export default rs.default;
+// SPIKE (FIN-463): `/api/test/spike/*` (the test secret's) is the spike's;
+// every other request is the platform's.
+export default class extends rs.default {
+  fetch(request) {
+    if (new URL(request.url).pathname.startsWith("/api/test/spike/")) return spikeFetch(request, this.env);
+    return super.fetch(request);
+  }
+}
 
 export class Fragment extends DurableObject {
   constructor(ctx, env) {
@@ -553,6 +563,8 @@ export class Computer extends DurableObject {
   webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
   webSocketError(ws, error) { return this.rs.webSocketError(ws, error); }
+  // SPIKE (FIN-463): the spike's ops on this computer's container
+  spike(op, args) { return spikeComputer(this.ctx, op, args); }
 }
 
 // Every intercepted request a computer's guest makes (docs/computers.md):
