@@ -21,7 +21,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
-use crate::api::{Code, CodedError};
+use super::stage;
+use crate::api::{Client, Code, CodedError};
 
 /// Files one source holds, at most: an old agent's stage holds about
 /// 100,000 at the most (FIN-463), and each is a row in memory here.
@@ -46,8 +47,9 @@ pub struct Entry {
 
 /// A source: its files, and how their bytes are read.
 pub struct Source {
-    /// The folder or the zip it was opened from.
-    origin: PathBuf,
+    /// The folder or the zip it was opened from (none: a stage, no file
+    /// here).
+    origin: Option<PathBuf>,
     backing: Backing,
     /// Every file, by path.
     entries: Vec<Entry>,
@@ -60,7 +62,32 @@ pub struct Source {
 
 enum Backing {
     Dir(PathBuf),
-    Zip(zip::ZipArchive<At>),
+    Zip(zip::ZipArchive<ZipReader>),
+}
+
+/// What a zip is read from: a file here, or a stage by ranges.
+#[derive(Clone)]
+pub enum ZipReader {
+    File(At),
+    Stage(stage::Ranged),
+}
+
+impl Read for ZipReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            ZipReader::File(r) => r.read(buf),
+            ZipReader::Stage(r) => r.read(buf),
+        }
+    }
+}
+
+impl Seek for ZipReader {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        match self {
+            ZipReader::File(r) => r.seek(to),
+            ZipReader::Stage(r) => r.seek(to),
+        }
+    }
 }
 
 /// A file read at an offset of its own, so that each clone of a zip reads
@@ -173,21 +200,46 @@ impl Source {
                 }
             }
         }
-        Ok(Source::with(root, Backing::Dir(root.to_path_buf()), entries.into_iter().map(|e| (e, 0)).collect(), unread))
+        Ok(Source::with(Some(root), Backing::Dir(root.to_path_buf()), entries.into_iter().map(|e| (e, 0)).collect(), unread))
     }
 
     fn zip(path: &Path) -> Result<Source> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let len = file.metadata()?.len();
-        let archive = zip::ZipArchive::new(At { file: Arc::new(file), pos: 0, len }).with_context(|| format!("reading {} as a zip", path.display()))?;
-        Source::from_archive(path, archive, &path.display().to_string())
+        let archive = zip::ZipArchive::new(ZipReader::File(At { file: Arc::new(file), pos: 0, len })).with_context(|| format!("reading {} as a zip", path.display()))?;
+        Source::from_archive(Some(path), archive, &path.display().to_string())
+    }
+
+    /// A stage (`stage:<id>`), opened through the platform as its agent,
+    /// its zip read by ranges.
+    pub fn stage(c: &Client, id: &str) -> Result<Source> {
+        let opened = stage::open(c, id)?;
+        let mut client = Client::new(&c.host, c.signer.clone());
+        client.verbose = c.verbose;
+        let blocks = stage::Blocks::new(Arc::new(client), id, opened.manifest.zip_bytes);
+        let said = format!("the stage {id}");
+        let archive = zip::ZipArchive::new(ZipReader::Stage(stage::Ranged::new(blocks))).with_context(|| format!("reading {said} as a zip"))?;
+        Source::from_archive(None, archive, &said)
+    }
+
+    /// The source an argument names: a stage (`stage:<id>`, through the
+    /// platform, `c`), a folder, or a zip file.
+    pub fn named(arg: &Path, c: Option<&Client>) -> Result<Source> {
+        match arg.to_str().and_then(stage::named) {
+            Some(id) => {
+                let id = id?;
+                let c = c.ok_or_else(|| usage(format!("a stage is read through the platform: {} needs your key, or an agent's computer", arg.display())))?;
+                Source::stage(c, id)
+            }
+            None => Source::open(arg),
+        }
     }
 
     /// A zip's files, from its central directory (no file's bytes are
     /// read). Each is named by a plain path (`plain`), or the whole zip is
     /// refused: a name a reader resolves another way than its text (`a/./b`
     /// is `a/b`) would pass what is matched by its text, a secret's glob.
-    pub fn from_archive(origin: &Path, archive: zip::ZipArchive<At>, said_as: &str) -> Result<Source> {
+    pub fn from_archive(origin: Option<&Path>, archive: zip::ZipArchive<ZipReader>, said_as: &str) -> Result<Source> {
         if archive.len() > ENTRIES_MAX {
             bail!(refused(format!("{said_as} holds more than {ENTRIES_MAX} files")));
         }
@@ -219,7 +271,7 @@ impl Source {
         Ok(Source::with(origin, Backing::Zip(archive), entries, unread))
     }
 
-    fn with(origin: &Path, backing: Backing, mut entries: Vec<(Entry, usize)>, unread: Vec<String>) -> Source {
+    fn with(origin: Option<&Path>, backing: Backing, mut entries: Vec<(Entry, usize)>, unread: Vec<String>) -> Source {
         entries.sort_by(|a, b| a.0.path.cmp(&b.0.path));
         // a zip may name one path twice: the last written is the file
         entries.dedup_by(|later, earlier| later.0.path == earlier.0.path && {
@@ -227,12 +279,12 @@ impl Source {
             true
         });
         let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
-        Source { origin: origin.to_path_buf(), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
+        Source { origin: origin.map(Path::to_path_buf), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
     }
 
-    /// The folder or the zip it was opened from, as named.
-    pub fn origin(&self) -> &Path {
-        &self.origin
+    /// The folder or the zip it was opened from, as named (none: a stage).
+    pub fn origin(&self) -> Option<&Path> {
+        self.origin.as_deref()
     }
 
     /// Every file, by path.
@@ -258,8 +310,9 @@ impl Source {
 
     /// What kind of source this is, as the survey says it.
     pub fn kind(&self) -> &'static str {
-        match self.backing {
+        match &self.backing {
             Backing::Dir(_) => "folder",
+            Backing::Zip(a) if matches!(a.clone().into_inner(), ZipReader::Stage(_)) => "stage",
             Backing::Zip(_) => "zip",
         }
     }
@@ -274,6 +327,13 @@ impl Source {
             }
             Backing::Zip(archive) => {
                 let mut archive = archive.clone();
+                // a stage's large file stored whole: by ranges at once (stage.rs)
+                let meta = archive.by_index_data(index).with_context(|| format!("reading {path}'s entry"))?;
+                let (stored, size, crc) = (meta.compression() == zip::CompressionMethod::Stored, meta.size(), meta.crc32());
+                if let (true, true, ZipReader::Stage(r)) = (stored, size >= stage::PARALLEL_MIN, archive.clone().into_inner()) {
+                    let start = archive.by_index_raw(index).with_context(|| format!("opening {path} in the zip"))?.data_start().ok_or_else(|| anyhow!("{path}: its data's place is unknown"))?;
+                    return f(&mut stage::Parallel::new(r.blocks, start, size, crc));
+                }
                 let mut member = archive.by_index(index).with_context(|| format!("opening {path} in the zip"))?;
                 f(&mut member)
             }
@@ -294,7 +354,7 @@ impl Source {
         }
         self.with_reader(path, |r| {
             let mut out = Vec::with_capacity(size as usize);
-            r.take(max + 1).read_to_end(&mut out).with_context(|| format!("reading {path}"))?;
+            r.take(max.saturating_add(1)).read_to_end(&mut out).with_context(|| format!("reading {path}"))?;
             if out.len() as u64 != size {
                 bail!("{path} read as {} bytes, not the {size} listed", out.len());
             }

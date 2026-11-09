@@ -608,6 +608,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "crc32fast",
  "dirs",
  "fragment-core",
  "fragment-fakes",

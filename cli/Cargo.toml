@@ -53,6 +53,9 @@ globset = "=0.4.20"
 # Hermes' own hash of a bundled skill (its `.bundled_manifest`), to tell
 # one an agent edited from one as shipped (`fragment home survey`)
 md-5 = "=0.10.6"
+# a stage's large file, read by ranges at once, checked whole against its
+# zip entry's CRC-32 (`home::stage`); already in the lock, through flate2
+crc32fast = "=1.5.2"
 tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 
 

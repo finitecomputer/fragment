@@ -17,6 +17,7 @@ mod routines;
 mod rules;
 mod skills;
 pub mod source;
+pub mod stage;
 mod survey;
 
 use std::path::{Path, PathBuf};
@@ -86,8 +87,15 @@ fn usage(msg: String) -> anyhow::Error {
 
 /// A home, read through `layout`: refused whole if any path in it is one
 /// that may hold a secret (by its name, or the layout's own globs).
+#[cfg(test)]
 pub fn open(path: &Path, layout: &Layout) -> Result<Source> {
-    let src = Source::open(path)?;
+    open_with(path, layout, None)
+}
+
+/// `open`, of any source a person names: a stage (`stage:<id>`) too,
+/// through the platform (`c`).
+pub fn open_with(path: &Path, layout: &Layout, c: Option<&crate::api::Client>) -> Result<Source> {
+    let src = Source::named(path, c)?;
     let globs = layout.secret_globs().map_err(|e| usage(format!("the layout {}: {e}", layout.name)))?;
     let secrets: Vec<String> = src.entries().iter().filter(|e| rules::secret_name(e.path.rsplit('/').next().unwrap_or(&e.path)) || globs.is_match(&e.path)).map(|e| e.path.clone()).collect();
     if !secrets.is_empty() {
@@ -127,9 +135,12 @@ fn extract(src: &Source, paths: &[String], to: &Path) -> Result<Extracted> {
     }
     std::fs::create_dir_all(to).with_context(|| format!("making {}", to.display()))?;
     let to = to.canonicalize().with_context(|| format!("reading {}", to.display()))?;
-    let origin = src.origin().canonicalize().with_context(|| format!("reading {}", src.origin().display()))?;
-    if to.starts_with(&origin) || origin.starts_with(&to) {
-        bail!(usage(format!("--to {} and the home {} overlap: copy into a folder apart from it", to.display(), origin.display())));
+    // a stage is no file here: nothing to overlap
+    if let Some(origin) = src.origin() {
+        let origin = origin.canonicalize().with_context(|| format!("reading {}", origin.display()))?;
+        if to.starts_with(&origin) || origin.starts_with(&to) {
+            bail!(usage(format!("--to {} and the home {} overlap: copy into a folder apart from it", to.display(), origin.display())));
+        }
     }
     let (mut files, mut bytes) = (0, 0);
     for e in picked {
@@ -197,7 +208,10 @@ impl Serialize for Done {
 impl HomeCmd {
     /// Whether it calls the platform (and so needs a key to sign with).
     pub fn calls(&self) -> bool {
-        matches!(self, HomeCmd::Files { plan: false, .. })
+        let source = match self {
+            HomeCmd::Survey { source, .. } | HomeCmd::Extract { source, .. } | HomeCmd::Files { source, .. } => source,
+        };
+        matches!(self, HomeCmd::Files { plan: false, .. }) || source.to_str().is_some_and(|s| s.starts_with(stage::SCHEME))
     }
 }
 
@@ -206,7 +220,7 @@ pub fn run(sub: HomeCmd, c: Option<&crate::api::Client>) -> Result<Done> {
     match sub {
         HomeCmd::Files { source, into, plan, layout } => {
             let layout = Layout::named(&layout)?;
-            let src = open(&source, &layout)?;
+            let src = open_with(&source, &layout, c)?;
             match c {
                 Some(c) if !plan => Ok(Done::Brought(files::bring(c, &src, &layout, &into)?)),
                 _ => Ok(Done::Planned(Box::new(files::planned(&src, &layout)?))),
@@ -214,13 +228,13 @@ pub fn run(sub: HomeCmd, c: Option<&crate::api::Client>) -> Result<Done> {
         }
         HomeCmd::Survey { source, layout } => {
             let layout = Layout::named(&layout)?;
-            let src = open(&source, &layout)?;
+            let src = open_with(&source, &layout, c)?;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
             Ok(Done::Survey(Box::new(survey::survey(&src, &layout, now)?)))
         }
         HomeCmd::Extract { source, paths, to, layout } => {
             let layout = Layout::named(&layout)?;
-            let src = open(&source, &layout)?;
+            let src = open_with(&source, &layout, c)?;
             Ok(Done::Extracted(extract(&src, &paths, &to)?))
         }
     }

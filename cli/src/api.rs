@@ -406,14 +406,14 @@ impl Client {
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
         let body = Bytes::from(body.unwrap_or_default());
         let timeout = timeout_for(body.len() as u64);
-        self.send(method, path, body, Replay::of(method), Signed::Body, timeout, None)
+        self.send(method, path, body, Replay::of(method), Signed::Body, timeout, &[])
     }
 
     /// One signed request, retried within [`REQUEST_ATTEMPTS`] as `replay`
-    /// allows (`send_retrying`); `content_type` names the body's type, when
-    /// it has one.
+    /// allows (`send_retrying`), with `headers` beside the signature (a
+    /// body's type, a range).
     #[allow(clippy::too_many_arguments)]
-    fn send(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
+    fn send(&self, method: &str, path: &str, body: Bytes, replay: Replay, signed: Signed, timeout: Duration, headers: &[(&str, &str)]) -> Result<Resp> {
         let path = &self.resolved(path)?;
         let url = self.url(method, path);
         let verb: reqwest::Method = method.parse()?;
@@ -421,8 +421,8 @@ impl Client {
         let build = || {
             let (header, value) = self.signer.header(method, &url, if signed == Signed::Body { &body } else { &[] });
             let mut req = self.http.request(verb.clone(), &url).header(header, value).timeout(timeout);
-            if let Some(t) = content_type {
-                req = req.header("content-type", t);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
             }
             if body.is_empty() { req } else { req.body(attempt_body(&body)) }
         };
@@ -451,14 +451,14 @@ impl Client {
     /// A bounded slow operation, such as icon generation. It retains the
     /// normal non-idempotent POST retry policy.
     pub fn post_json_with_timeout(&self, path: &str, v: &impl serde::Serialize, timeout: Duration) -> Result<Resp> {
-        self.send("POST", path, Bytes::from(serde_json::to_vec(v)?), Replay::ConnectOnly, Signed::Body, timeout, None)
+        self.send("POST", path, Bytes::from(serde_json::to_vec(v)?), Replay::ConnectOnly, Signed::Body, timeout, &[])
     }
     /// A POST whose body carries its idempotency id (an operation call):
     /// retried like a read (`Replay::ById`).
     pub fn post_json_by_id(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         let body = serde_json::to_vec(v)?;
         let timeout = timeout_for(body.len() as u64);
-        self.send("POST", path, Bytes::from(body), Replay::ById, Signed::Body, timeout, None)
+        self.send("POST", path, Bytes::from(body), Replay::ById, Signed::Body, timeout, &[])
     }
     pub fn put_json(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         self.request("PUT", path, Some(serde_json::to_vec(v)?))
@@ -471,12 +471,20 @@ impl Client {
     /// `content_type` is what a page reading it gets (`__blob`).
     pub fn put_blob(&self, path: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<Resp> {
         let timeout = timeout_for(bytes.len() as u64);
-        self.send("PUT", path, Bytes::from(bytes), Replay::Safe, Signed::Url, timeout, content_type)
+        let headers: Vec<(&str, &str)> = content_type.map(|t| ("content-type", t)).into_iter().collect();
+        self.send("PUT", path, Bytes::from(bytes), Replay::Safe, Signed::Url, timeout, &headers)
     }
     /// A GET whose answer is known to be about `bytes` long (a blob), given
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
-        self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
+        self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(bytes), &[])
+    }
+    /// A signed GET of bytes `start..end` of what `path` answers (`Range`):
+    /// a 206 of exactly them, else a refusal.
+    pub fn get_range(&self, path: &str, start: u64, end: u64) -> Result<Resp> {
+        assert!(start < end, "a range holds a byte: {start}..{end}");
+        let range = format!("bytes={start}-{}", end - 1);
+        self.send("GET", path, Bytes::new(), Replay::Safe, Signed::Body, timeout_for(end - start), &[("range", &range)])
     }
     /// A signed GET whose answer goes to `to` as it arrives (an export's
     /// archive, which may be gigabytes), never held whole: its bytes. A

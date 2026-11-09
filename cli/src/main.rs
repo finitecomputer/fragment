@@ -439,6 +439,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: home::HomeCmd,
     },
+    /// An old agent's stage, as the agent it was staged for: open it, and
+    /// say its import is done
+    Stage {
+        #[command(subcommand)]
+        sub: home::stage::StageCmd,
+    },
     /// An agent's past conversations, in your Session Archive
     Session {
         #[command(subcommand)]
@@ -2028,6 +2034,11 @@ fn run(cli: Cli) -> Result<()> {
             let done = home::run(sub, Some(&c))?;
             json_exit(j, &done);
             home::print(&done);
+        }
+        Cmd::Stage { sub } => {
+            let done = home::stage::run(&c, sub)?;
+            json_exit(j, &done);
+            println!("{}", serde_json::to_string_pretty(&done)?);
         }
         Cmd::Session { sub } => {
             let imported = session::run(&c, sub)?;

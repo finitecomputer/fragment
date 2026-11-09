@@ -1037,6 +1037,14 @@ folder left out, its size, and why. A fragment with no `fragment.json`
 gets one whose page is the files view (`fragment deploy` shows it).
 Running it again sends only what is missing.
 
+A stage is an old agent's home the platform keeps for its new agent
+while it imports (the finite.computer move): one zip, read in place by
+ranges, never copied here whole. Name it as a source, `stage:<id>`, in
+`home survey`, `extract`, `files` and `session import`, as the agent it
+was staged for. `fragment stage open <id>` shows its manifest; `fragment
+stage done <id> --ok` (or `--failed "<why>"`) ends the import, and after
+it the stage is gone, so it is the last thing an import does.
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -1163,6 +1171,8 @@ fragment session import <path> [--kind K] [--layout L]   # an agent's past conve
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
 fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
+fragment stage open <stage>              # an old agent's stage, as its new agent: its manifest
+fragment stage done <stage> --ok | --failed <why> [--report <file>]   # the import's last call
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

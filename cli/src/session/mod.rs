@@ -252,7 +252,7 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
             return Err(usage(format!("a session archive is a person's: {} imports into its owner's, acting for them (FRAGMENT_FOR)", mode.agent)));
         }
     }
-    if !path.exists() {
+    if !path.exists() && !path.to_str().is_some_and(|p| p.starts_with(crate::home::stage::SCHEME)) {
         bail!(usage(format!("{} is no file or folder", path.display())));
     }
     let mut spool = Spool::new(kinds)?;
@@ -261,7 +261,7 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     // on a platform computer (as its agent), its own Hermes home's
     // databases are its chats here already; a person's own Hermes is theirs
     let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
-    let problems = read(source(&path, layout.as_deref())?, &mut spool, upload_max, own.as_deref())?;
+    let problems = read(source(&path, layout.as_deref(), Some(c))?, &mut spool, upload_max, own.as_deref())?;
     let (archive, made) = archive(c, &list)?;
     let written = write(c, &archive, &spool)?;
     let mut holds: BTreeMap<String, usize> = Kind::KNOWN.iter().map(|k| (k.as_str().to_string(), 0)).collect();
@@ -329,10 +329,11 @@ enum Source {
 /// layout says; else the old Finite's export (its `chats/`, or the folder
 /// holding it), else Hermes' database (a file, or a Hermes home holding
 /// `state.db`).
-fn source(path: &std::path::Path, layout: Option<&str>) -> Result<Source> {
-    if layout.is_some() || crate::home::source::is_zip(path) {
+fn source(path: &std::path::Path, layout: Option<&str>, c: Option<&Client>) -> Result<Source> {
+    let stage = path.to_str().is_some_and(|p| p.starts_with(crate::home::stage::SCHEME));
+    if layout.is_some() || stage || crate::home::source::is_zip(path) {
         let layout = crate::home::Layout::named(layout.unwrap_or("hermes"))?;
-        let home = crate::home::source::Source::open(path)?;
+        let home = crate::home::source::Source::named(path, c)?;
         let db = layout.in_home("state.db");
         if home.get(&db).is_none() {
             bail!(usage(format!("{} holds no {db}: name the home's layout (--layout), or its Hermes home", path.display())));
@@ -1307,13 +1308,13 @@ mod tests {
     #[test]
     fn a_path_names_a_store_or_says_what_to_name() {
         let dir = tempdir();
-        let e = source(&dir, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let e = source(&dir, None, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("name the old Finite's export, Hermes' state.db, or a Hermes home"), "{e}");
         hermes::tests::database(&dir.join("state.db"), "");
-        assert!(matches!(source(&dir, None), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
-        assert!(matches!(source(&dir.join("state.db"), None), Ok(Source::Hermes(_))));
+        assert!(matches!(source(&dir, None, None), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
+        assert!(matches!(source(&dir.join("state.db"), None, None), Ok(Source::Hermes(_))));
         chats::tests::export(&dir);
-        assert!(matches!(source(&dir, None), Ok(Source::Export(p)) if p == *dir), "an export's chats/ wins over a state.db beside it");
+        assert!(matches!(source(&dir, None, None), Ok(Source::Export(p)) if p == *dir), "an export's chats/ wins over a state.db beside it");
     }
 
     /// Goal: a home's zip (a stage) reads as the folder it was: its Hermes
@@ -1329,7 +1330,7 @@ mod tests {
         let db = std::fs::read(home.join("state.db")).unwrap();
         let spool_of = |path: &Path, layout: Option<&str>| {
             let mut spool = Spool::new(BTreeSet::new()).unwrap();
-            read(source(path, layout).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
+            read(source(path, layout, None).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
             hermes::tests::spooled(&spool)
         };
         let from_folder = spool_of(&home.join("state.db"), None);
@@ -1346,7 +1347,7 @@ mod tests {
         assert_eq!(spool_of(&dir.join("home"), Some("hermes")), from_folder, "a folder named with a layout");
         let tmp_after: Vec<_> = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("fragment-home-{}-", std::process::id()))).map(|e| e.path()).collect();
         assert_eq!(tmp_before.len(), tmp_after.len(), "the copies out of the zips are gone");
-        let e = source(&staged, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let e = source(&staged, None, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("holds no state.db: name the home's layout"), "{e}");
     }
 
@@ -1368,7 +1369,7 @@ mod tests {
         crate::home::source::tests::zip_of(&their_zip, &[("state.db", &std::fs::read(&other).unwrap())]);
         let read_as_agent = |zip: &Path| {
             let mut spool = Spool::new(BTreeSet::new()).unwrap();
-            read(source(zip, None).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, Some(&mine)).map(|_| spool.entries.len())
+            read(source(zip, None, None).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, Some(&mine)).map(|_| spool.entries.len())
         };
         let e = read_as_agent(&own_zip).map_err(|e| format!("{e:#}")).unwrap_err();
         assert!(e.contains("this computer's own conversations"), "{e}");
