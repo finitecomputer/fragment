@@ -245,7 +245,11 @@ impl FragmentCell {
         let raw = serde_json::value::to_raw_value(body).expect("a JSON value serializes");
         // retention: the built-in channels keep their newest records; those
         // people may post to, their newest by count and by bytes (a post's
-        // key goes with its record)
+        // key goes with its record). Its declaration is read once, here, in
+        // the append's own step, and is all it reads of it: an install may
+        // land at any await before (a post's, or between a mutation's
+        // records), and what a record does follows what is installed as it
+        // is appended.
         let declared = if BUILTIN_CHANNELS.contains(&channel) { None } else { self.declared_channel(channel)? };
         let (kept, posted) = match &declared {
             None if BUILTIN_CHANNELS.contains(&channel) => (Some(limits::AUDIT_KEPT), false),
@@ -280,14 +284,12 @@ impl FragmentCell {
                 vec![posted_key(channel).into(), format!("{} {first} {seq}", bytes + size).into()],
             )?;
         }
-        // a message on an app channel goes to its people's search, in this
-        // turn, as its read role says (`channel_read_role`, the one source)
-        if declared.is_some() {
-            self.log_search(self.channel_read_role(channel)?, channel, seq, now, body)?;
-        }
-        // and, of a kind it lists, to its members' lists (listed.rs)
-        if let Some(listed) = declared.as_ref().and_then(|d| d.listed.as_ref()) {
-            self.list_record(channel, listed, principal, seq, now, body)?;
+        if let Some(d) = &declared {
+            // a message on an app channel goes to its people's search, in
+            // this turn, as its read role says (`channel_read_role`'s rule)
+            self.log_search(d.read, channel, seq, now, body)?;
+            // and, of a kind it lists, to its members' lists (listed.rs)
+            self.list_record(channel, d, principal, seq, now, body)?;
         }
         if let Some(kept) = kept.filter(|_| !posted) {
             assert!(kept >= 1, "a channel keeps the record just appended");
@@ -429,7 +431,8 @@ impl FragmentCell {
     /// asks here, and compares the caller's role to the answer: the channel
     /// API, `__channel`, live sockets, subscriptions (a person's and an
     /// agent's), search's fence, a run's input (`input_shown`), and the
-    /// listed records each list row carries (listed.rs).
+    /// listed records each list row carries (listed.rs). A path that holds
+    /// the declaration already reads its `read`, which is this answer.
     pub(crate) fn channel_read_role(&self, channel: &str) -> CellResult<Role> {
         if BUILTIN_CHANNELS.contains(&channel) {
             return Ok(Role::Viewer);

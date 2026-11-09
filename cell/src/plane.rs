@@ -1133,6 +1133,16 @@ impl FragmentCell {
         self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).try_gathered()
     }
 
+    /// The names of the app channels the live code declares, and nothing
+    /// else of them (what a call's meta tells the app).
+    pub(crate) fn declared_channel_names(&self) -> CellResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Name {
+            channel: String,
+        }
+        Ok(self.typed::<Name>("SELECT channel FROM code_channels ORDER BY channel", vec![])?.into_iter().map(|n| n.channel).collect())
+    }
+
     /// An app channel the live code declares (who reads it, who may post
     /// to it, and of what kind); `None` when it declares no such channel.
     pub(crate) fn declared_channel(&self, channel: &str) -> CellResult<Option<ChannelDecl>> {
