@@ -958,6 +958,34 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         waits && said.as_str().is_some_and(|t| t.contains(&title) && t.contains(&format!("{owner_name} invited you to view it")) && t.contains("Accept") && t.contains("Decline")),
         &said,
     );
+    // ---- many at once: on a phone the band keeps to its share of the page
+    // and scrolls, the page below still there (FIN-458)
+    let many: Vec<String> = (0..4).map(|i| make(&s.name(&format!("many{i}")), "todo")).collect::<Result<_>>()?;
+    for name in &many {
+        let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": member_name, "role": "viewer" })))?;
+        anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "{member_name} invited to {name}: {r}");
+    }
+    chrome.viewport(&theirs, 390, 700, true)?;
+    let rows = "#computer-notices .computer-notice[data-id^='invite:']";
+    let all = chrome.until(&theirs, &format!("document.querySelectorAll({rows:?}).length === 5"), wait);
+    let band = chrome.eval(
+        &theirs,
+        "(() => { const b = document.getElementById('computer-notices').getBoundingClientRect(), el = document.getElementById('computer-notices'); \
+         return { height: b.height, below: innerHeight - b.bottom, page: innerHeight, scrolls: el.scrollHeight > el.clientHeight + 1 }; })()",
+    )?;
+    chrome.screenshot(&theirs, &s.scratch.join("share-invites-phone.png"))?;
+    let page = band["page"].as_f64().unwrap_or(0.0);
+    s.ok(
+        "five invites on a phone: the band takes at most 40% of the page and scrolls, the page below it still shown",
+        all && band["height"].as_f64().is_some_and(|h| h <= page * 0.4 + 1.0) && band["below"].as_f64().is_some_and(|b| b >= page * 0.4) && band["scrolls"] == json!(true),
+        &band,
+    );
+    for name in &many {
+        let r = api.signed(&member, "POST", &format!("/api/invites/{name}/decline"), Some(&json!({})))?;
+        anyhow::ensure!(r.status == 200, "{member_name} declines {name}: {r}");
+    }
+    chrome.viewport(&theirs, 1280, 800, false)?;
+    let waits = waits && chrome.until(&theirs, &format!("document.querySelectorAll({rows:?}).length === 1 && !!{accept}"), wait);
     if waits {
         chrome.eval(&theirs, &format!("({accept}.click(), true)"))?;
     }
