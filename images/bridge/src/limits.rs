@@ -82,6 +82,26 @@ pub const NOTICE_TEXT_MAX_CHARS: usize = 300;
 /// one longest unused goes.
 pub const NOTICE_CHATS_MAX: usize = AGENTS_MAX * 64;
 
+/// Helpers running in one chat (one agent's there) that its set names, at
+/// most (`turn.helpers`); the rest go unrecorded, and their work still
+/// holds the computer.
+pub const HELPERS_PER_CHAT_MAX: usize = 32;
+/// Helpers the bridge's state keeps, at most: every agent's chats at once.
+pub const CHILDREN_OPEN_MAX: usize = AGENTS_MAX * HELPERS_PER_CHAT_MAX;
+/// A helper's task, at most: one line, cut as a step's arguments are.
+pub const CHILD_GOAL_MAX_CHARS: usize = STEP_ARGS_MAX_CHARS;
+/// How long a chat's helpers set holds (`turn.helpers`' `until`): a reader
+/// shows it until then. While any helper runs it is posted again
+/// `HELPERS_RENEW_BEFORE_MS` before it lapses, so a computer that crashed
+/// and sleeps shows none at most this long after its last set, and a set
+/// whose post was lost misleads no longer than this.
+pub const HELPERS_LEASE_MS: u64 = 15 * 60 * 1000;
+pub const HELPERS_RENEW_BEFORE_MS: u64 = 5 * 60 * 1000;
+const _: () = assert!(HELPERS_RENEW_BEFORE_MS < HELPERS_LEASE_MS, "a set is renewed before it lapses");
+// a whole set, each helper's goal at its bound (a char escaped as \uXXXX at
+// most), its turn and child ids and start, fits one record's body
+const _: () = assert!(HELPERS_PER_CHAT_MAX * (CHILD_GOAL_MAX_CHARS * 6 + 300) < 64 * 1024, "a chat's set is one record");
+
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;
 

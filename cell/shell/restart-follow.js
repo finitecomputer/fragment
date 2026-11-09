@@ -189,11 +189,12 @@ export function createRestartFollow({ read, ask, view, take, changed, hidden, ti
   return {
     // what is shown: null, or { asked, at, state, error }
     op: () => s && { asked: s.asked, at: s.at, state: s.name, error: s.error },
-    // Restart pressed: none runs (or the last one failed), so one begins
-    press() {
+    // Restart pressed: none runs (or the last one failed), so one begins,
+    // of the start `asked` names (a notice's action's own; else the view's)
+    press(asked) {
       const c = view();
       if (!c) return false;
-      return dispatch({ type: "press", asked: c.generation || 0, at: now(), hidden: hidden() });
+      return dispatch({ type: "press", asked: asked ?? (c.generation || 0), at: now(), hidden: hidden() });
     },
     // a view the page took from elsewhere (its list's read), while it is
     // drawing: done by it?

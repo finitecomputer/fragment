@@ -196,6 +196,14 @@ pub mod limits {
     /// till then, so an agent's turn costs a few fan-outs to its members'
     /// lists, not one a record.
     pub const LISTED_MIN_GAP_MS: i64 = 3_000;
+    /// A channel's `newest` (`ChannelDecl::newest`): the kinds whose newest
+    /// record each poster's it keeps, at most (`valid_listed_kind`).
+    pub const NEWEST_KINDS_MAX: usize = 4;
+    /// The newest records a channel keeps, at most, across its kinds and
+    /// posters: past it, the one posted longest ago goes. So its read
+    /// (`ChannelNewest`) holds at most this many, each a record's bounded
+    /// body.
+    pub const NEWEST_KEPT_MAX: usize = 32;
     /// Fragments `GET /api/access` asks for their members and invites, at
     /// most: those someone else is in or invited to, the first listed
     /// first. Past it, a fragment's row has its counts alone (its share
@@ -2023,6 +2031,13 @@ pub struct ChannelDecl {
     /// kind means: it is the template's. `None`: nothing is listed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listed: Option<ListedDecl>,
+    /// Kinds of record it keeps each poster's newest of (`"newest":
+    /// [...]`), which one read answers (`GET …/channels/{c}/newest`): the
+    /// latest state each poster says, found however far back it was said
+    /// (a chat's agents' helpers working). A kind is a body's `kind`, as
+    /// for `listed`; nothing goes to its members' lists. Empty: none kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub newest: Vec<String>,
 }
 
 /// A channel's `listed`: the kinds of record whose newest, each member's,
@@ -2148,6 +2163,21 @@ pub struct ChannelPage {
     #[serde(default)]
     pub more: bool,
 }
+
+/// `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):
+/// each poster's newest record of each kind the channel keeps the newest
+/// of (`ChannelDecl::newest`), the newest first, at most
+/// `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past
+/// its retention) is none; a channel that keeps no kind answers none.
+// no PartialEq: a record's body is raw JSON text (compare the JSON instead)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ChannelNewest {
+    pub channel: String,
+    pub records: Vec<ChannelRecord>,
+}
+
+const _: () = assert!(limits::NEWEST_KEPT_MAX * limits::RECORD_BODY_MAX_BYTES < limits::CHANNEL_HTTP_PAGE_MAX_BYTES, "a newest read fits one page's bytes");
 
 /// What a subscription's URL receives (`POST`, unsigned: the URL is the
 /// subscriber's capability): one new record of the channel it follows.
@@ -2496,6 +2526,7 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod notice;
 pub mod org;
 #[cfg(feature = "schema")]
 pub mod routes;
@@ -2704,11 +2735,11 @@ mod tests {
     fn a_channel_without_post_reads_and_writes_as_before() {
         // code stored before posts (the code row's JSON columns) decodes
         let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
-        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None });
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None, newest: vec![] });
         assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
-        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None, listed: None };
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None, listed: None, newest: vec![] };
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
-        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None };
+        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None, newest: vec![] };
         assert_eq!(serde_json::to_string(&agents).unwrap(), r#"{"read":"viewer","post":"editor","from":"agent"}"#);
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&agents).unwrap()).unwrap(), agents, "its posters' kind reads back");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
@@ -2720,7 +2751,7 @@ mod tests {
     #[test]
     fn a_listed_channel_reads_and_writes() {
         let listed = ListedDecl { kinds: vec!["turn.start".into(), "turn.asked".into()], fields: vec!["asks".into()] };
-        let work = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: Some(listed) };
+        let work = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: Some(listed), newest: vec![] };
         let text = serde_json::to_string(&work).unwrap();
         assert_eq!(text, r#"{"read":"viewer","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked"],"fields":["asks"]}}"#);
         assert_eq!(serde_json::from_str::<ChannelDecl>(&text).unwrap(), work);

@@ -207,10 +207,15 @@ struct FragmentAPI: Sendable {
     func historyPage(_ fragment: String, channel: String, after: Int64, limit: Int) async throws -> (records: [ChannelRecord], bytes: Int) {
         try await channelPage(fragment, channel: channel, query: [URLQueryItem(name: "after", value: String(after)), URLQueryItem(name: "limit", value: String(limit))])
     }
+    /// Each poster's newest record of each kind the channel keeps the newest
+    /// of (docs/api.md, Newest records): at most 32.
+    func newest(_ fragment: String, channel: String) async throws -> [ChannelRecord] {
+        try await channelPage(fragment, channel: "\(channel)/newest", query: []).records
+    }
     private func channelPage(_ fragment: String, channel: String, query: [URLQueryItem]) async throws -> (records: [ChannelRecord], bytes: Int) {
         struct Page: Decodable { let records: [ChannelRecord] }
         var components = URLComponents(url: url("api/f/\(fragment)/channels/\(channel)"), resolvingAgainstBaseURL: false)!
-        components.queryItems = query
+        components.queryItems = query.isEmpty ? nil : query
         let (data, response) = try await self.data(for: URLRequest(url: components.url!))
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard http.statusCode == 200 else { throw APIError.answer(data, status: http.statusCode) }

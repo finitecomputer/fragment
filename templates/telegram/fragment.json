@@ -7,7 +7,8 @@
       "listed": {
         "kinds": ["turn.start", "turn.step", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"],
         "fields": ["asks", "outcome"]
-      }
+      },
+      "newest": ["turn.helpers"]
     }
   },
   "inbox": { "header": "x-telegram-bot-api-secret-token", "secret": "TELEGRAM_WEBHOOK_SECRET" },

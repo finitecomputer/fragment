@@ -224,7 +224,7 @@ mod tests {
     }
 
     fn channel(post: Option<Role>, from: Option<IdentityKind>) -> ChannelDecl {
-        ChannelDecl { read: Role::Viewer, post, signed_in: false, from, listed: None }
+        ChannelDecl { read: Role::Viewer, post, signed_in: false, from, listed: None, newest: vec![] }
     }
 
     /// Valid: an hourly, a weekday and a quarter-hourly schedule, kept with

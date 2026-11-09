@@ -1093,6 +1093,10 @@ impl FragmentCell {
                 let asked = body_json(&mut req).await?;
                 self.search_asked(&caller, asked).await
             }
+            // whether the caller may read it, and no more: what a sign-in
+            // asks before it mints a member's redemption (auth.rs
+            // `mint_for`); the router maps no outside path here
+            (Method::Get, ["signin", "known"]) => json_response(&json!({ "role": self.require(&caller, false, Role::Viewer)? })),
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "address"]) => self.address(&caller).await,
             (Method::Put, ["api", "address"]) => {
@@ -1179,6 +1183,7 @@ impl FragmentCell {
                 let (after, before, limit) = crate::channels::page_query(&caller.url)?;
                 self.channel(&caller, channel, after, before, limit)
             }
+            (Method::Get, ["api", "channels", channel, "newest"]) => self.newest_api(&caller, channel),
             (Method::Post, ["api", "channels", channel]) => {
                 let body = body_json(&mut req).await?;
                 let channel = channel.to_string();

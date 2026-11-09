@@ -129,6 +129,16 @@ export async function read(channel, { after, before, limit = 1000 } = {}) {
   return page;
 }
 
+/// Reads each poster's newest record of each kind the channel keeps the
+/// newest of (fragment.json's `"newest": [kinds]`), the newest first: the
+/// latest state each poster said, however long ago. At most 32 records.
+export async function newest(channel) {
+  const response = await fetch(new URL(`__channel/${encodeURIComponent(channel)}/newest`, base), { credentials: "same-origin" });
+  const page = await response.json();
+  if (!response.ok) throw new FragmentError(response.status, page);
+  return page;
+}
+
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 /// Uploads `file` (a File or a Blob, at most 256 MiB) as one of this

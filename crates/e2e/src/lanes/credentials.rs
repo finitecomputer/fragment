@@ -77,7 +77,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "its owner sees it over the agent's chat: the key, and what it spent this hour",
     "as the hour passes, its oldest charges go: the key's calls go again, and its notice with them",
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
-    "its owner taps Allow: unconfirmed (its ask refused, the computer's read failing), the pause stays with its button and a short line; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
+    "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and a short line; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
 ];
 
@@ -508,10 +508,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "told": told, "inChat": in_chat }),
     );
     let lifted = say(s, 160, &speak(SPOKEN))?;
-    let unconfirmed = json!({ "lines": ["Couldn't confirm that. Try again."], "button": "Allow up to $20 an hour" });
+    // its countdown first, then the line (FIN-458's band: every notice's)
+    let unconfirmed = |f: &Value| {
+        let lines: Vec<&str> = f["lines"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        matches!(lines.as_slice(), [until, "Couldn't do that. Try again."] if until.starts_with("Calls resume in ")) && f["button"] == "Allow up to $20 an hour"
+    };
     s.ok(
         SWAP_CHECKS[44],
-        in_chat.as_ref().is_some_and(|(_, failed, gone)| *failed == unconfirmed && *gone) && !paused_now() && lifted.starts_with("fetched 200"),
+        in_chat.as_ref().is_some_and(|(_, failed, gone)| unconfirmed(failed) && *gone) && !paused_now() && lifted.starts_with("fetched 200"),
         json!({ "lifted": lifted, "inChat": in_chat, "notices": notices() }),
     );
     // a page still showing the $5 notice taps again: nothing changes, so
@@ -562,14 +566,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 /// words and its buttons; null while it is not shown.
 const KEY_NOTICE: &str = "(() => { const box = document.getElementById('computer-notices'); const r = box?.querySelector('.computer-notice[data-kind=\"key_paused\"]'); if (!r || box.hidden) return null; return { said: r.querySelector('strong')?.textContent ?? null, buttons: [...r.querySelectorAll('button')].map((x) => x.textContent) }; })()";
 
-/// Taps a paused key's Allow, enabled: whether it was.
-const ALLOW: &str = "(() => { const x = document.querySelector('#computer-notices [data-action=\"allow-key\"]'); if (!x || x.disabled) return false; x.click(); return true; })()";
-/// The page's asks of Allow refused (503) and its reads of the computer
-/// failing as a network fails, until `__restoreFetch()`.
-const KEY_ASKS_FAIL: &str = "(() => { const f = window.fetch; window.__restoreFetch = () => { window.fetch = f; }; window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const method = o?.method ?? 'GET'; if (method === 'POST' && path.includes('/key-caps/')) return new Response(JSON.stringify({ error: 'unavailable', message: 'refused (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); if (method === 'GET' && /^\\/api\\/computers\\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch'); return f(url, o); }; return true; })()";
+/// Taps a paused key's Allow (its notice's one action), enabled: whether it was.
+const ALLOW: &str = "(() => { const x = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"] .notice-actions button'); if (!x || x.disabled) return false; x.click(); return true; })()";
+/// The page's asks of Allow refused (503) and its reads of the computer and
+/// of its notices failing as a network fails, until `__restoreFetch()`.
+const KEY_ASKS_FAIL: &str = "(() => { const f = window.fetch; window.__restoreFetch = () => { window.fetch = f; }; window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const method = o?.method ?? 'GET'; if (method === 'POST' && path.includes('/key-caps/')) return new Response(JSON.stringify({ error: 'unavailable', message: 'refused (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); if (method === 'GET' && (/^\\/api\\/computers\\/[^/]+$/.test(path) || path === '/api/notices')) throw new TypeError('Failed to fetch'); return f(url, o); }; return true; })()";
 /// A paused key's notice whose tap went unconfirmed: its lines, and its
 /// button, enabled; null while that button is not.
-const KEY_UNCONFIRMED: &str = "(() => { const r = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"]'); const b = r?.querySelector('[data-action=\"allow-key\"]'); return r && b && !b.disabled ? { lines: [...r.querySelectorAll('.notice-copy p')].map((p) => p.textContent), button: b.textContent } : null; })()";
+const KEY_UNCONFIRMED: &str = "(() => { const r = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"]'); const b = r?.querySelector('.notice-actions button'); return r && b && !b.disabled ? { lines: [...r.querySelectorAll('.notice-copy p')].map((p) => p.textContent), button: b.textContent } : null; })()";
 /// The person's chat page in Chrome (the shell, signed in as `owner`): the
 /// paused key's notice as it shows, shot at 1280 and 390 wide, light, in
 /// the run's `key-guard/`; its Allow tapped while its ask and the
