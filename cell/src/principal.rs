@@ -795,15 +795,20 @@ impl PrincipalCell {
         let Some(fts) = query.fts() else {
             return Ok(SearchAnswer { fragments: vec![], messages: vec![] });
         };
-        // each row's name and title alone, then the whole rows of the first
-        // few they match
+        // each row's name and face alone (its title read as a list reads
+        // it: `listed`), then the whole rows of the first few they match
         #[derive(Deserialize)]
-        struct Titled {
+        struct Named {
             name: String,
-            title: Option<String>,
+            face: Option<String>,
         }
-        let titled: Vec<Titled> = self.typed("SELECT fragment AS name, json_extract(face, '$.title') AS title FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
-        let named: Vec<String> = titled.into_iter().filter(|t| query.names(&t.name, t.title.as_deref())).take(limits::SEARCH_FRAGMENTS_MAX).map(|t| t.name).collect();
+        let rows: Vec<Named> = self.typed("SELECT fragment AS name, face FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
+        let named: Vec<String> = rows
+            .into_iter()
+            .filter(|r| query.names(&r.name, r.face.as_deref().and_then(|f| crate::json_text::<Face>(f).ok()).and_then(|f| f.title).as_deref()))
+            .take(limits::SEARCH_FRAGMENTS_MAX)
+            .map(|r| r.name)
+            .collect();
         let fragments = match named.is_empty() {
             true => vec![],
             false => {
@@ -814,10 +819,10 @@ impl PrincipalCell {
             }
         };
         assert!(fragments.len() <= limits::SEARCH_FRAGMENTS_MAX, "a search answers a bounded page");
-        // the newest hits' places, then the snippets of those alone: one
-        // statement, each snippet a lookup by its hit's rowid (a column's
-        // INTEGER: a bound number reaches SQLite as a REAL, which FTS5
-        // takes as no rowid bound at all)
+        // the newest hits' places, then the snippets of those alone, in one
+        // statement (each hit's rowid comes from a column, an INTEGER: a
+        // bound number reaches SQLite as a REAL, which FTS5 takes as no
+        // rowid bound at all)
         let hits: Vec<Hit> = self.typed(
             "WITH hits AS (SELECT e.id AS id, e.fragment AS fragment, e.channel AS channel, e.seq AS seq, e.at AS at
                FROM search_text JOIN search_entries e ON e.id = search_text.rowid
