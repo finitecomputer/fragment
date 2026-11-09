@@ -106,9 +106,14 @@ CLI hold, so the app leaves it to the web until one route does both.
 
 A signed `POST /api/f/{name}/session` reuses the registry’s existing single-use
 redemption and top-level fragment session. It returns a one-fragment `__signin`
-URL, good for 60 seconds, that the sheet’s nonpersistent WKWebView opens. Only
+URL, good for 60 seconds, that the sheet’s WKWebView opens. Only
 that fragment’s cookie enters the webview. Native authorization headers and private
-keys never do. A stranger’s app asks for consent before learning the person’s
+keys never do. A fragment's pages keep what a browser keeps for them (cookies,
+localStorage, IndexedDB, caches) in a persistent store of their own, as Safari
+keeps an origin's, so an app that saves in the browser still has it the next time
+its sheet opens: one `WKWebsiteDataStore(forIdentifier:)` per launch scope,
+platform, person and fragment origin (`FragmentWebStore`), never shared between
+fragments. Disconnecting this iPhone, or removing it here, removes every one. A stranger’s app asks for consent before learning the person’s
 identity; owned/shared apps use their existing membership. General access and
 membership permissions still belong to each fragment.
 

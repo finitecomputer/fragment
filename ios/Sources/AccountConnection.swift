@@ -109,6 +109,8 @@ final class AccountConnection {
         }
         try DeviceKeychain.clear(service: scope.keychainService); account = nil; code = nil; cachedAPI = nil
         await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        // every app's pages' state and session cookie go with the account
+        try await FragmentWebStore.removeAll()
     }
 }
 

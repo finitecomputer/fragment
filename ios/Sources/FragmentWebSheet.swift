@@ -1,5 +1,42 @@
+import CryptoKit
 import SwiftUI
 import WebKit
+
+/// Where a fragment's pages keep what a browser keeps for them (cookies,
+/// localStorage, IndexedDB, caches): a persistent store of their own, one per
+/// person and fragment origin, so a page keeps its state from one visit to the
+/// next as it does in Safari. One fragment's store holds only what its own
+/// pages put there (its session cookie, from its `__signin`), native keys are
+/// in none, and disconnecting this iPhone removes them all (docs/ios.md).
+enum FragmentWebStore {
+    /// The store of `origin`'s pages for `person` of `platform`, in `scope`:
+    /// a UUID made from them by their hash (RFC 9562's version 8), the same
+    /// each time, and another for any other person, fragment or launch scope.
+    static func identifier(scope: LaunchScope = .current, platform: URL, person: String, origin: URL) -> UUID {
+        // each part length first, so no part can end where another begins
+        let parts = ["fragment-web-store/1", scope.keychainService, Self.origin(platform), person, Self.origin(origin)]
+        let named = parts.map { "\($0.utf8.count):\($0)" }.joined()
+        var bytes = Array(SHA256.hash(data: Data(named.utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x80
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return bytes.withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
+    }
+
+    /// `url`'s origin, as a browser keys its storage: scheme, host and port.
+    static func origin(_ url: URL) -> String {
+        var c = URLComponents()
+        c.scheme = url.scheme?.lowercased(); c.host = url.host?.lowercased(); c.port = url.port
+        return c.string ?? url.absoluteString
+    }
+
+    /// Removes every fragment's store, as this iPhone disconnects: no page's
+    /// state, nor its session cookie, outlives the account it was kept for.
+    @MainActor static func removeAll() async throws {
+        for id in await WKWebsiteDataStore.allDataStoreIdentifiers {
+            try await WKWebsiteDataStore.remove(forIdentifier: id)
+        }
+    }
+}
 
 /// What a web sheet shows: a fragment's one-use `__signin` URL, asked of
 /// `POST /api/f/{name}/session` (docs/ios.md), or why not. A redemption is
@@ -10,6 +47,8 @@ final class WebSheetModel {
     let fragment: FragmentSummary
     let api: FragmentAPI
     private(set) var url: URL?
+    /// The store its pages keep their state in (`FragmentWebStore`).
+    private(set) var store: UUID?
     var error: String?
     var loading = true
     private(set) var needsConsent = false
@@ -17,7 +56,7 @@ final class WebSheetModel {
     init(fragment: FragmentSummary, api: FragmentAPI) { self.fragment = fragment; self.api = api }
 
     func load(consent: Bool = false) async {
-        url = nil; error = nil; needsConsent = false
+        url = nil; store = nil; error = nil; needsConsent = false
         loading = true
         do {
             struct Status: Decodable { struct URLs: Decodable { let canonical: URL }; let urls: URLs }
@@ -46,6 +85,9 @@ final class WebSheetModel {
             guard let redemption = session.url, PlatformOrigin.same(redemption, destination),
                   redemption.user == nil, redemption.password == nil, redemption.fragment == nil,
                   redemption.path.hasSuffix("/__signin") else { throw APIError.invalidResponse }
+            // a connected account always names its person (`AccountConnection`)
+            guard let person = api.accountID else { throw APIError.invalidResponse }
+            store = FragmentWebStore.identifier(platform: api.baseURL, person: person, origin: redemption)
             url = redemption
         } catch { self.error = error.localizedDescription }
     }
@@ -79,9 +121,9 @@ struct FragmentWebSheet: View {
                     } description: { Text(error) } actions: {
                         Button("Try again") { Task { await model.load() } }
                     }
-                } else if let url = model.url {
+                } else if let url = model.url, let store = model.store {
                     // a new redemption is a new web view: one never reloads a spent one
-                    WebContent(url: url, loading: $model.loading, error: $model.error)
+                    WebContent(url: url, store: store, loading: $model.loading, error: $model.error)
                         .id(url)
                         .overlay { if model.loading { ProgressView() } }
                 } else { ProgressView() }
@@ -97,15 +139,17 @@ struct FragmentWebSheet: View {
 
 private struct WebContent: UIViewRepresentable {
     let url: URL
+    let store: UUID
     @Binding var loading: Bool
     @Binding var error: String?
 
     func makeCoordinator() -> Coordinator { Coordinator(loading: $loading, error: $error, origin: url) }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        // Each sheet has its own web storage. Native credentials never enter a
-        // fragment page; connected accounts use a scoped redemption (docs/ios.md).
-        configuration.websiteDataStore = .nonPersistent()
+        // This fragment's own store, kept as Safari keeps an origin's. Native
+        // credentials never enter a fragment page; connected accounts use a
+        // scoped redemption (docs/ios.md).
+        configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: store)
         let web = WKWebView(frame: .zero, configuration: configuration)
         web.navigationDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true

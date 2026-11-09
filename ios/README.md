@@ -163,8 +163,18 @@ Your Apps and Back (an approved account at a closed loopback port). Each launche
 a Keychain service and Application Support folder of its own, emptied as it
 starts, and loopback alone, so a simulator's own account is never read and no
 other server is ever asked (`Sources/LaunchScope.swift`;
-`--ui-test-saved-account <origin>` seeds one, to show it unused). Flows against
-a paired account on the dev stack are their own suite.
+`--ui-test-saved-account <origin>` seeds one, to show it unused).
+
+`DevStackUITests` run against a dev stack, and skip without one. The test signs a
+new person in through the WorkOS fake, makes their apps, approves the app's code
+at `/cli`, and checks that an app's page keeps its state across sheets (a page's
+localStorage, a todo's server writes) until the iPhone disconnects. Forward the
+platform and the fake to the Mac, then name the platform to the test runner:
+
+```sh
+ssh -N -L 8790:127.0.0.1:8790 -L 8794:127.0.0.1:8794 linux
+TEST_RUNNER_FRAGMENT_DEV_HOST=http://127.0.0.1:8790 xcodebuild -project ios/Fragment.xcodeproj -scheme Fragment -destination "platform=iOS Simulator,id=$FRAGMENT_IOS_SIMULATOR" -derivedDataPath target/ios test -only-testing:FragmentUITests/DevStackUITests
+```
 
 The source of the generated project is `project.yml`. If changing project
 structure, use XcodeGen 2.42+ and commit its result:

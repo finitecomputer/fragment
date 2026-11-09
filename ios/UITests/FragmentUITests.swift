@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 
 /// What the app shows with no server behind it. Flows against a real
@@ -141,5 +142,240 @@ final class FragmentUITests: XCTestCase {
         app.buttons["pairAccount"].tap()
         XCTAssertTrue(app.staticTexts["This launch reaches only this machine."].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["pairingCode"].exists)
+    }
+}
+
+/// Flows against a real platform: this machine's `cargo xtask dev`, named by
+/// `FRAGMENT_DEV_HOST` (`TEST_RUNNER_FRAGMENT_DEV_HOST=http://127.0.0.1:8790`
+/// for `xcodebuild test`), its WorkOS fake beside it. Without one they skip.
+/// The test signs a person in through the fake, makes their apps with that
+/// browser session, as the web shell would, and approves the app's pairing
+/// code at `/cli`, as the person would.
+@MainActor
+final class DevStackUITests: XCTestCase {
+    private func screenshot(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    /// An app's page keeps what it saved in the browser (localStorage) from
+    /// one opening of its sheet to the next, as it does in Safari, and a
+    /// server-backed app's writes stick as well; disconnecting this iPhone
+    /// removes what the pages kept, so pairing again finds none of it.
+    func testAnAppsPageKeepsItsStateAcrossSheetsUntilDisconnect() async throws {
+        let platform = try await DevPlatform.start()
+        let notes = try await platform.app(template: "blank", title: "Notes kept here", page: Self.notesPage)
+        let todo = try await platform.app(template: "todo", title: "Sheet todo", page: nil)
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--pair-server", platform.base.absoluteString]
+        app.launch()
+        try await pair(app, platform)
+
+        // a page that keeps its state in localStorage
+        let note = "milk \(UUID().uuidString.prefix(6))"
+        open(app, notes)
+        let field = app.webViews.textFields["note"]
+        XCTAssertTrue(field.waitForExistence(timeout: 20), "the notes page loads in its sheet")
+        field.tap(); field.typeText(note)
+        app.webViews.buttons["Save"].tap()
+        XCTAssertTrue(app.webViews.staticTexts[note].waitForExistence(timeout: 5), "the page saved the note")
+        screenshot(app, "Notes saved")
+        close(app, "Notes kept here", notes)
+        open(app, notes)
+        XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 20), "reopened, the page still has its note")
+        XCTAssertTrue(app.webViews.staticTexts[note].exists)
+        screenshot(app, "Notes reopened")
+        close(app, "Notes kept here", notes)
+
+        // a page whose writes are the server's (the todo template's operations)
+        let task = "eggs \(UUID().uuidString.prefix(6))"
+        open(app, todo)
+        let todoField = app.webViews.textFields.firstMatch
+        XCTAssertTrue(todoField.waitForExistence(timeout: 20), "the todo page loads in its sheet")
+        todoField.tap(); todoField.typeText(task)
+        app.webViews.buttons["Add"].tap()
+        XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 10), "the server took the todo")
+        close(app, "Sheet todo", todo)
+        open(app, todo)
+        XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 20), "reopened, the todo is there")
+        screenshot(app, "Todo reopened")
+        close(app, "Sheet todo", todo)
+
+        // disconnect, then pair again as the same person: nothing kept
+        app.buttons["sidebar"].tap()
+        let settings = app.buttons["sidebar-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5)); settings.tap()
+        let connection = app.buttons["accountConnection"]
+        XCTAssertTrue(connection.waitForExistence(timeout: 5)); connection.tap()
+        let disconnect = app.buttons["disconnectAccount"]
+        XCTAssertTrue(disconnect.waitForExistence(timeout: 5)); disconnect.tap()
+        try await pair(app, platform)
+        open(app, notes)
+        XCTAssertTrue(app.webViews.staticTexts["0 saved"].waitForExistence(timeout: 20), "after a disconnect, the page kept nothing")
+        XCTAssertFalse(app.webViews.staticTexts[note].exists)
+        screenshot(app, "Notes after disconnect")
+    }
+
+    /// Connect, its code approved at `/cli` by the person, then Home.
+    private func pair(_ app: XCUIApplication, _ platform: DevPlatform) async throws {
+        let connect = app.buttons["pairAccount"].firstMatch
+        XCTAssertTrue(connect.waitForExistence(timeout: 10)); connect.tap()
+        let code = app.staticTexts["pairingCode"]
+        XCTAssertTrue(code.waitForExistence(timeout: 20), "a pairing code")
+        try await platform.approve(code: code.label)
+        XCTAssertTrue(app.buttons["yourApps"].waitForExistence(timeout: 20), "approved, Home")
+    }
+
+    private func open(_ app: XCUIApplication, _ name: String) {
+        if !app.buttons["app-\(name)"].exists { app.buttons["yourApps"].tap() }
+        let row = app.buttons["app-\(name)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 20), "\(name) is in Your Apps"); row.tap()
+    }
+
+    /// Swipes its sheet away, back to Your Apps.
+    private func close(_ app: XCUIApplication, _ title: String, _ name: String) {
+        app.navigationBars[title].swipeDown(velocity: .fast)
+        XCTAssertTrue(app.buttons["app-\(name)"].waitForExistence(timeout: 10), "the sheet closed")
+        XCTAssertTrue(app.webViews.firstMatch.waitForNonExistence(timeout: 10))
+    }
+
+    /// A page that keeps its notes in localStorage, as many agents' apps do.
+    static let notesPage = """
+    <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Notes kept here</title>
+    <style>body{font:17px -apple-system,system-ui,sans-serif;margin:24px}input,button{font:inherit;padding:8px}</style></head><body>
+    <form id="f"><input id="t" aria-label="note" placeholder="A note"><button>Save</button></form>
+    <p id="count">0 saved</p><ul id="list"></ul>
+    <script>
+    const load = () => JSON.parse(localStorage.getItem("notes") || "[]");
+    function draw() {
+      document.getElementById("count").textContent = load().length + " saved";
+      document.getElementById("list").replaceChildren(...load().map(n => Object.assign(document.createElement("li"), { textContent: n })));
+    }
+    document.getElementById("f").onsubmit = (e) => {
+      e.preventDefault();
+      const t = document.getElementById("t").value.trim();
+      if (t) { localStorage.setItem("notes", JSON.stringify([...load(), t])); document.getElementById("t").value = ""; draw(); }
+    };
+    draw();
+    </script></body></html>
+    """
+}
+
+/// The dev stack, as a person's browser reaches it: signed in through its
+/// WorkOS fake (`/auth/login`), the shell's calls on that session, and
+/// `/cli`'s forms (docs/ios.md, Connect an account).
+private struct DevPlatform {
+    let base: URL
+    let email: String
+    let session: String
+    private static let http: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.httpShouldSetCookies = false; c.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: c, delegate: NoRedirects(), delegateQueue: nil)
+    }()
+
+    /// The dev stack `FRAGMENT_DEV_HOST` names, a new person signed in
+    /// there: nothing anyone kept before is theirs.
+    static func start() async throws -> DevPlatform {
+        guard let host = ProcessInfo.processInfo.environment["FRAGMENT_DEV_HOST"], let base = URL(string: host) else {
+            throw XCTSkip("no dev stack named (FRAGMENT_DEV_HOST)")
+        }
+        let email = "ios-sheet-\(UUID().uuidString.prefix(8).lowercased())@dev.test"
+        return DevPlatform(base: base, email: email, session: try await signIn(base: base, email: email))
+    }
+
+    private static func signIn(base: URL, email: String) async throws -> String {
+        var login = URLComponents(url: base.appending(path: "auth/login"), resolvingAgainstBaseURL: false)!
+        login.queryItems = [URLQueryItem(name: "return", value: "/"), URLQueryItem(name: "login_hint", value: email)]
+        let (_, start) = try await get(login.url!)
+        let bound = try cookie("fragment_login", start)
+        let (_, fake) = try await get(URL(string: try header("location", start))!)
+        let (_, done) = try await get(URL(string: try header("location", fake))!, cookie: bound)
+        return String(try cookie("fragment_session", done).dropFirst("fragment_session=".count))
+    }
+
+    /// A fragment of theirs from `template`, titled, its page `page` if
+    /// given, deployed: its name.
+    func app(template: String, title: String, page: String?) async throws -> String {
+        let made = try await shell("api/fragments", ["label": "sheet", "template": template, "title": title, "visibility": "members"])
+        guard let name = made["name"] as? String else { throw URLError(.badServerResponse) }
+        if let page {
+            _ = try await shell("api/f/\(name)/files", ["files": [["path": "site/index.html", "text": page]]])
+            _ = try await shell("api/f/\(name)/deploy", [:])
+        }
+        return name
+    }
+
+    /// Types `code` at `/cli` and approves the key it names.
+    func approve(code: String) async throws {
+        let kept = code.replacingOccurrences(of: "-", with: "").uppercased()
+        try await form("cli", ["form": token("cli"), "code": code])
+        try await form("cli/approve", ["form": token("cli-approve:\(kept)"), "code": kept])
+    }
+
+    /// A form token as `/cli`'s page holds one (`fragment_core::form`),
+    /// dated past its armed delay.
+    private func token(_ purpose: String) -> String {
+        let at = Int64(Date().timeIntervalSince1970 * 1000) - 5000
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("fragment-form/1\n\(purpose.utf8.count)\n\(purpose)\n\(at)".utf8), using: SymmetricKey(data: Data(session.utf8)))
+        return "\(at)." + mac.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func form(_ path: String, _ fields: [String: String]) async throws {
+        var body = URLComponents(); body.queryItems = fields.map { URLQueryItem(name: $0.key, value: $0.value) }
+        var request = URLRequest(url: base.appending(path: path))
+        request.httpMethod = "POST"
+        request.httpBody = Data((body.percentEncodedQuery ?? "").replacingOccurrences(of: "+", with: "%2B").utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
+        request.setValue("fragment_session=\(session)", forHTTPHeaderField: "cookie")
+        request.setValue(Self.origin(base), forHTTPHeaderField: "origin")
+        let (_, response) = try await Self.http.http(request)
+        guard response.statusCode == 200 else { throw URLError(.userAuthenticationRequired, userInfo: [NSLocalizedDescriptionKey: "POST /\(path): \(response.statusCode)"]) }
+    }
+
+    /// One of the shell's own calls on the person's session.
+    private func shell(_ path: String, _ body: [String: Any]) async throws -> [String: Any] {
+        var request = URLRequest(url: base.appending(path: path))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        for (name, value) in ["content-type": "application/json", "cookie": "fragment_session=\(session)", "x-fragment-shell": "1",
+                              "sec-fetch-site": "same-origin", "origin": Self.origin(base)] { request.setValue(value, forHTTPHeaderField: name) }
+        let (data, response) = try await Self.http.http(request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "POST /\(path): \(response.statusCode) \(String(decoding: data, as: UTF8.self))"])
+        }
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    private static func origin(_ url: URL) -> String { "\(url.scheme!)://\(url.host!)" + (url.port.map { ":\($0)" } ?? "") }
+
+    private static func get(_ url: URL, cookie: String? = nil) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        if let cookie { request.setValue(cookie, forHTTPHeaderField: "cookie") }
+        let (data, response) = try await http.http(request)
+        return (data, response)
+    }
+
+    private static func header(_ name: String, _ response: HTTPURLResponse) throws -> String {
+        guard let value = response.value(forHTTPHeaderField: name) else { throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "no \(name) (\(response.statusCode))"]) }
+        return value
+    }
+
+    /// `name=value` of a cookie `response` sets.
+    private static func cookie(_ name: String, _ response: HTTPURLResponse) throws -> String {
+        let all = HTTPCookie.cookies(withResponseHeaderFields: response.allHeaderFields as? [String: String] ?? [:], for: response.url!)
+        guard let found = all.first(where: { $0.name == name }) else { throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "no \(name) cookie (\(response.statusCode))"]) }
+        return "\(name)=\(found.value)"
+    }
+}
+
+private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? { nil }
+}
+
+private extension URLSession {
+    func http(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await data(for: request, delegate: nil)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        return (data, http)
     }
 }

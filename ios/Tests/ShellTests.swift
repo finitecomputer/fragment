@@ -297,15 +297,37 @@ struct ShellTests {
             default: return (404, "{}")
             }
         }
-        let model = WebSheetModel(fragment: FragmentSummary(name: "reading--p1", kind: "app"), api: try stub.api())
+        let model = WebSheetModel(fragment: FragmentSummary(name: "reading--p1", kind: "app"), api: try stub.api(accountID: "npub1person"))
         await model.load()
         #expect(model.url?.query == "token=t0" && model.error == nil)
+        // its pages keep their state in its own store, the person's and its origin's
+        #expect(model.store == FragmentWebStore.identifier(platform: try stub.api().baseURL, person: "npub1person", origin: URL(string: "http://reading--p1.fragment.localhost:8790/")!))
         // its page failed after the redemption was spent; Try again
         model.error = "The app could not be opened (HTTP 502)."
         await model.load()
         #expect(model.url == nil && model.error == "Try again shortly.")
         await model.load()
         #expect(model.url?.query == "token=t2" && model.error == nil)
+    }
+
+    /// A fragment's pages keep their state in a store of their own, as Safari
+    /// keeps an origin's: the same store on every visit (any page of it), and
+    /// another for any other fragment, person, platform or launch scope, so
+    /// nothing one fragment's pages kept is in another's sheet.
+    @Test func aFragmentsPagesKeepAStoreOfTheirOwn() {
+        let platform = URL(string: "https://finite.chat")!, page = URL(string: "https://notes--ab12.finite.place/__signin?token=t")!
+        let store = FragmentWebStore.identifier(scope: .app, platform: platform, person: "npub1person", origin: page)
+        #expect(store == FragmentWebStore.identifier(scope: .app, platform: platform, person: "npub1person", origin: URL(string: "https://NOTES--ab12.finite.place/week#today")!))
+        let others = [
+            FragmentWebStore.identifier(scope: .app, platform: platform, person: "npub1other", origin: page),
+            FragmentWebStore.identifier(scope: .app, platform: platform, person: "npub1person", origin: URL(string: "https://todo--cd34.finite.place/")!),
+            FragmentWebStore.identifier(scope: .app, platform: platform, person: "npub1person", origin: URL(string: "https://notes--ab12.finite.place:8443/")!),
+            FragmentWebStore.identifier(scope: .app, platform: URL(string: "https://preview.finite.chat")!, person: "npub1person", origin: page),
+            FragmentWebStore.identifier(scope: .uiTest, platform: platform, person: "npub1person", origin: page),
+        ]
+        #expect(Set(others + [store]).count == others.count + 1)
+        // a UUID made from a name by its hash (RFC 9562, version 8)
+        #expect(store.uuidString.dropFirst(14).first == "8")
     }
 
     /// A message's links are the URLs its words link, as drawn: Markdown
@@ -357,7 +379,7 @@ struct ShellTests {
             default: (404, "{}")
             }
         }
-        let api = try stub.api()
+        let api = try stub.api(accountID: "npub1person")
         let library = Library()
         await library.load(api)
         let link = URL(string: "https://sports-schedule--ugzb.finite.place/week?view=fe1f#today")!
