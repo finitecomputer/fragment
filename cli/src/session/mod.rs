@@ -294,6 +294,9 @@ fn read(source: Source, spool: &mut Spool, upload_max: u64, own: Option<&Path>) 
                     home.local(&format!("{db}{beside}"), &scratch)?;
                 }
             }
+            if let Some(home) = own {
+                hermes::refuse_shared(&local, home)?;
+            }
             hermes::read(&local, spool, own)?;
             Vec::new()
         }
@@ -1345,6 +1348,31 @@ mod tests {
         assert_eq!(tmp_before.len(), tmp_after.len(), "the copies out of the zips are gone");
         let e = source(&staged, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("holds no state.db: name the home's layout"), "{e}");
+    }
+
+    /// Goal: on a platform computer, a zip of its own Hermes home (a backup
+    /// of it, kept in its home) is refused as its own database is; another
+    /// agent's zip, kept in the same place, reads. Method: a computer's
+    /// root with a profile's database, and two zips in that profile.
+    #[test]
+    fn a_zip_of_its_own_home_is_refused() {
+        let root = tempdir();
+        let mine = root.join("profiles/juniper");
+        std::fs::create_dir_all(&mine).unwrap();
+        let row = |id: &str| format!("INSERT INTO sessions VALUES ('{id}','cli',NULL,NULL,'m',NULL,NULL,100,200,NULL,'T',NULL,NULL); INSERT INTO messages (session_id, role, content, timestamp) VALUES ('{id}','user','hi',100);");
+        hermes::tests::database(&mine.join("state.db"), &row("own-1"));
+        let other = root.join("other.db");
+        hermes::tests::database(&other, &row("theirs-1"));
+        let (own_zip, their_zip) = (mine.join("backup.zip"), mine.join("old-agent.zip"));
+        crate::home::source::tests::zip_of(&own_zip, &[("state.db", &std::fs::read(mine.join("state.db")).unwrap())]);
+        crate::home::source::tests::zip_of(&their_zip, &[("state.db", &std::fs::read(&other).unwrap())]);
+        let read_as_agent = |zip: &Path| {
+            let mut spool = Spool::new(BTreeSet::new()).unwrap();
+            read(source(zip, None).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, Some(&mine)).map(|_| spool.entries.len())
+        };
+        let e = read_as_agent(&own_zip).map_err(|e| format!("{e:#}")).unwrap_err();
+        assert!(e.contains("this computer's own conversations"), "{e}");
+        assert_eq!(read_as_agent(&their_zip).unwrap(), 1, "another agent's, in the same place, reads");
     }
 
     /// Goal: a spool holds what an import read within an archive's limits,

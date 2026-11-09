@@ -367,7 +367,9 @@ impl Scratch {
             }
         }
         let dir = tmp.join(format!("{SCRATCH_PREFIX}{}-{:016x}", std::process::id(), rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+        // its owner's alone from its making: the system's temporary folder is
+        // everyone's, and what is copied here is a person's private database
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&dir).with_context(|| format!("making {}", dir.display()))?;
         Ok(Scratch { dir })
     }
 }
@@ -434,6 +436,8 @@ pub mod tests {
         }
         assert_eq!(z.text("a/c/d.bin").unwrap(), None, "bytes with a NUL are not text");
         let scratch = Scratch::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&scratch.dir).unwrap().permissions().mode() & 0o777, 0o700, "the scratch is its owner's alone");
         let out = z.local("big.dat", &scratch).unwrap();
         assert!(out.starts_with(&scratch.dir));
         assert_eq!(std::fs::read(&out).unwrap(), vec![7u8; 70_000]);
