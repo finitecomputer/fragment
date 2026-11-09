@@ -137,16 +137,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // read it would start has started)
     let opened = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 100 && document.getElementById('scroll').dataset.watching === '1' && document.getElementById('scroll').dataset.history === 'more'");
     let reads = chrome.eval(&page, "window.__older")?;
-    // (this chat's `work` is all seconds old, its window less than the 15
-    // minutes a page reads back for the helpers working: that read-back, of
-    // the page before the window (work 1 to 5 of 1,005), is the one older
-    // read, once its `work` is ready, apart from the history's)
-    let helpers_read = json!([format!("work?before={}&limit=1000", 1005 - 1000 + 1)]);
-    s.ok(
-        "opening a chat past one page reads only its newest page: 100 messages, no older page asked for (of `work`, the helpers' 15 minutes alone)",
-        opened && (reads == json!([]) || reads == helpers_read),
-        &reads,
-    );
+    s.ok("opening a chat past one page reads only its newest page: 100 messages, no older page asked for", opened && reads == json!([]), &reads);
     s.ok("a quote outside the first page has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
     // The reader's place is the anchor's offset from the top of the scroll
     // box, so the header above it settling (the chat's agent, its name and
@@ -622,7 +613,7 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
 
 /// Goal (Codex on #1086): a turn that asks its owner something in words
 /// keeps waiting for the answer while records that do not say it went on
-/// come: a helper's start and end (`turn.child`), a kind this page does not
+/// come: its agent's helpers sets (`turn.helpers`), a kind this page does not
 /// know. The owner's answer in the chat ends the wait. Method: a quiet
 /// agent posts the records itself; read on the owner's page.
 pub(super) fn asked_outlasts_helpers(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
@@ -644,15 +635,17 @@ pub(super) fn asked_outlasts_helpers(s: &mut Suite, api: &Api, owner: &Keys, chr
     super::fit(chrome, &page, 1280, 860, false)?;
     let waits = "[...document.querySelectorAll('.msg.working.asked')].some((w) => w.textContent === 'Waiting for your answer') && !document.querySelector('.msg.working:not(.asked)')";
     anyhow::ensure!(super::shows(chrome, &page, waits), "the turn waits for its owner's answer");
-    post(&ada, "work", "wk:ask:c:h1", json!({ "kind": "turn.child", "parent": "ask", "child": "h1", "goal": "Check the venues' calendars" }))?;
-    post(&ada, "work", "wk:ask:ce:h1", json!({ "kind": "turn.child", "parent": "ask", "child": "h1", "outcome": "completed" }))?;
+    let until = crate::api::now_ms() + 15 * 60_000;
+    let one = |child: &str, goal: &str| json!({ "kind": "turn.helpers", "until": until, "helpers": [{ "child": child, "parent": "ask", "goal": goal, "since": crate::api::now_ms() }] });
+    post(&ada, "work", "hs:1", one("h1", "Check the venues' calendars"))?;
+    post(&ada, "work", "hs:2", json!({ "kind": "turn.helpers", "until": until, "helpers": [] }))?;
     post(&ada, "work", "wk:ask:later", json!({ "kind": "turn.later-kind", "turn": "ask", "what": "a later bridge's" }))?;
-    post(&ada, "work", "wk:ask:c:h2", json!({ "kind": "turn.child", "parent": "ask", "child": "h2", "goal": "Draft the poll" }))?;
+    post(&ada, "work", "hs:3", one("h2", "Draft the poll"))?;
     let helper = "document.getElementById('helpers').querySelector('.helpers-said')?.textContent === '1 helper working'";
     anyhow::ensure!(super::shows(chrome, &page, helper), "the records arrived");
     std::thread::sleep(std::time::Duration::from_millis(500));
     s.ok(
-        "a helper's start and end, and a kind the page does not know, leave the turn waiting for its owner's answer",
+        "its agent's helpers sets, and a kind the page does not know, leave the turn waiting for its owner's answer",
         chrome.eval(&page, waits)? == true,
         chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?,
     );
@@ -666,15 +659,22 @@ pub(super) fn asked_outlasts_helpers(s: &mut Suite, api: &Api, owner: &Keys, chr
     Ok(())
 }
 
-/// Goal (FIN-432): the helpers an agent's turns started (`turn.child`)
-/// show in one quiet row just above the composer while they work: how
+/// The helpers set an agent's bridge says (docs/chat-records.md,
+/// `turn.helpers`): `(child, parent, goal, since)` each, held until `until`.
+fn helpers_set(helpers: &[(&str, &str, &str, i64)], until: i64) -> Value {
+    let helpers: Vec<Value> = helpers.iter().map(|(child, parent, goal, since)| json!({ "child": child, "parent": parent, "goal": goal, "since": since })).collect();
+    json!({ "kind": "turn.helpers", "helpers": helpers, "until": until })
+}
+
+/// Goal (FIN-432): the helpers an agent has working (its newest set,
+/// `turn.helpers`) show in one quiet row just above the composer: how
 /// many, and opened, each one's task on one line (cut short) with how long
 /// it has run, at most four, then how many more. A page opened mid-work
-/// shows them (they are records). Any end takes a helper off (`lost` too);
-/// none left, the bar hides. In a chat of two agents the row names whose
-/// they are, by face; an agent's end never ends another's helper. On a
-/// phone it stays one row and the composer stays on screen. Method: two
-/// quiet agents post the records themselves; read on the owner's page.
+/// shows them. A set without a helper takes it off; none left, the bar
+/// hides. In a chat of two agents the row names whose they are, by face,
+/// each agent's set its own. On a phone it stays one row and the composer
+/// stays on screen. Method: two quiet agents post the sets themselves;
+/// read on the owner's page.
 pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
     let name = s.named(api, owner, "helpers-bar")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
@@ -695,9 +695,10 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
         "Check the train times",
         "Book a table for Friday",
     ];
-    for (i, goal) in goals.iter().enumerate() {
-        post(&ada, &format!("wk:ada-turn:c:h{i}"), json!({ "kind": "turn.child", "parent": "ada-turn", "child": format!("h{i}"), "goal": goal }))?;
-    }
+    let (now, until) = (crate::api::now_ms(), crate::api::now_ms() + 15 * 60_000);
+    let ids: Vec<String> = (0..goals.len()).map(|i| format!("h{i}")).collect();
+    let ada_set = |which: &[usize]| helpers_set(&which.iter().map(|i| (ids[*i].as_str(), "ada-turn", goals[*i], now + *i as i64)).collect::<Vec<_>>(), until);
+    post(&ada, "hs:1", ada_set(&[0, 1, 2, 3, 4]))?;
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let bar = "document.getElementById('helpers')";
@@ -713,13 +714,12 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     let opened = format!("(() => {{ const l = {lines}; const one = (n) => n.getBoundingClientRect().height <= parseFloat(getComputedStyle(n).lineHeight) + 1; return {head}.getAttribute('aria-expanded') === 'true' && l.length === 4 && l.map((n) => n.querySelector('.helper-goal').title).join('|') === {} && l.every((n) => one(n.querySelector('.helper-goal')) && n.querySelector('.helper-since').textContent === '<1 min') && l[0].querySelector('.helper-goal').scrollWidth > l[0].querySelector('.helper-goal').clientWidth && {bar}.querySelector('.helpers-more')?.textContent === 'and 1 more' && !{bar}.querySelector('.helper .face, .helper .agent-avatar'); }})()", super::js(&goals[..4].join("|")));
     s.ok("tapped, it lists each task on one line, cut short, oldest first, with how long it has run: four, then how many more", super::shows(chrome, &page, &opened), chrome.eval(&page, &format!("{lines}.map((n) => n.textContent)"))?);
     chrome.screenshot(&page, &shots.join("desktop-open.png"))?;
-    // opened mid-work: the records say so
+    // opened mid-work: the newest set says so
     chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
     s.ok("a page opened mid-work shows them, closed", super::shows(chrome, &page, &collapsed), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
-    // any end takes a helper off: done, lost
-    post(&ada, "wk:ada-turn:ce:h0", json!({ "kind": "turn.child", "parent": "ada-turn", "child": "h0", "outcome": "completed" }))?;
-    post(&ada, "wk:ada-turn:ce:h3", json!({ "kind": "turn.child", "parent": "ada-turn", "child": "h3", "outcome": "lost" }))?;
-    s.ok("a helper that ended, or was lost, leaves the bar", super::shows(chrome, &page, &format!("{said} === '3 helpers working'")), chrome.eval(&page, &said)?);
+    // a newer set without two of them takes them off
+    post(&ada, "hs:2", ada_set(&[1, 2, 4]))?;
+    s.ok("a newer set without a helper takes it off the bar", super::shows(chrome, &page, &format!("{said} === '3 helpers working'")), chrome.eval(&page, &said)?);
     // a phone: one row, the composer on screen
     super::fit(chrome, &page, 390, 844, true)?;
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
@@ -728,74 +728,64 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     chrome.screenshot(&page, &shots.join("phone-open.png"))?;
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
     chrome.screenshot(&page, &shots.join("phone-closed.png"))?;
-    // a second agent in the chat: whose helpers, by face; its end of the
-    // first's helper ends nothing
+    // a second agent in the chat: whose helpers, by face; each agent's set
+    // its own, so its empty set ends none of the first's
     let (bo, bo_id) = quiet_agent(api, owner, &name)?;
     post(&bo, "wk:bo-turn:start", json!({ "kind": "turn.start", "turn": "bo-turn", "agent": bo_id }))?;
-    post(&bo, "wk:bo-turn:c:b0", json!({ "kind": "turn.child", "parent": "bo-turn", "child": "b0", "goal": "Summarise the reviews" }))?;
-    post(&bo, "wk:ada-turn:ce:h1", json!({ "kind": "turn.child", "parent": "ada-turn", "child": "h1", "outcome": "completed" }))?;
+    post(&bo, "hs:1", helpers_set(&[("b0", "bo-turn", "Summarise the reviews", now + 9)], until))?;
+    post(&bo, "hs:0", helpers_set(&[], until))?;
+    post(&bo, "hs:2", helpers_set(&[("b0", "bo-turn", "Summarise the reviews", now + 9)], until))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let group = format!("/^.+ and .+: 4 helpers working$/.test({said} ?? '') && {head}.querySelectorAll('.faces > *').length === 2 && !{head}.querySelector('.helpers-icon')");
-    s.ok("in a chat of two agents, the row names whose helpers they are, by face, and one agent's end never ends another's helper", super::shows(chrome, &page, &group), chrome.eval(&page, &said)?);
+    s.ok("in a chat of two agents, the row names whose helpers they are, by face, each agent's newest set its own", super::shows(chrome, &page, &group), chrome.eval(&page, &said)?);
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
     s.ok("opened, each task starts with its agent's face", super::shows(chrome, &page, &format!("{lines}.length === 4 && {lines}.every((n) => n.firstElementChild.matches('.face, .agent-avatar'))")), chrome.eval(&page, &format!("{lines}.map((n) => n.innerHTML)"))?);
     chrome.screenshot(&page, &shots.join("desktop-group.png"))?;
-    for (who, turn, child) in [(&ada, "ada-turn", "h1"), (&ada, "ada-turn", "h2"), (&ada, "ada-turn", "h4"), (&bo, "bo-turn", "b0")] {
-        post(who, &format!("wk:{turn}:ce:{child}:end"), json!({ "kind": "turn.child", "parent": turn, "child": child, "outcome": "failed" }))?;
-    }
+    post(&ada, "hs:3", ada_set(&[]))?;
+    post(&bo, "hs:3", helpers_set(&[], until))?;
     s.ok("none working, the bar hides", super::shows(chrome, &page, &format!("{bar}.hidden && !{bar}.children.length")), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     println!("      (helpers bar screenshots in {})", shots.display());
     chrome.close(page)?;
     Ok(())
 }
 
-/// Goal (FIN-432, Paul's (b) of 11-07): a helper whose start is far out of
-/// what a page reads still shows as the page opens, from its newest note
-/// (`since`: how long it has run), found by reading `work` back 15 minutes
-/// past the page's window. Invalid: a note with no task, or a `since` that
-/// is no time at or before its record's, is none. Replay: notes said again
-/// count once, and a note after its helper's end starts nothing, live and
-/// on a reload. Restart: once no note has come for 15 minutes (its
-/// computer crashed), the bar clears. Method: a quiet agent posts the
-/// records itself, then more than a window of other work; the page's clock
-/// is moved on for the last.
-pub(super) fn helpers_outlast_the_window(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+/// Goal (FIN-432, Paul 11-09): a page asks once for each agent's newest
+/// helpers set, however far back it was said, and then follows `work`
+/// live, the newest of each agent winning; it shows a set until its
+/// `until`, with no clock of its own. Valid: a set far out of the page's
+/// window shows as it opens, timed from each helper's `since`. Invalid: a
+/// set whose `until` passed shows nothing. Replay: a set posted again is
+/// the same record, and a reload finds the newest. Restart: once its
+/// `until` passes with no newer set (its computer crashed), the bar
+/// clears. Method: two quiet agents post the sets themselves, then more
+/// than a window of other work; the page's clock is moved on for the last.
+pub(super) fn helpers_newest_past_the_window(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
     let name = s.named(api, owner, "helpers-window")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making the helpers' window chat: {made}");
     s.owned(&made.body, owner);
     let (ada, _) = quiet_agent(api, owner, &name)?;
+    let (bo, _) = quiet_agent(api, owner, &name)?;
     let work = format!("/api/f/{name}/channels/work");
-    let post = |id: &str, body: Value| -> Result<()> {
-        let r = api.signed(&ada, "POST", &work, Some(&json!({ "id": id, "body": body })))?;
+    let post = |who: &Keys, id: &str, body: Value| -> Result<Value> {
+        let r = api.signed(who, "POST", &work, Some(&json!({ "id": id, "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting {id}: {r}");
-        Ok(())
+        Ok(r.body)
     };
-    let now = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
-    let since = now - 40 * 60_000;
+    let now = crate::api::now_ms();
+    let (since, until) = (now - 40 * 60_000, now + 15 * 60_000);
     let goal = "Read every review of the three venues";
-    let note = |child: &str, goal: &str, since: i64| json!({ "kind": "turn.child", "parent": "long", "child": child, "goal": goal, "since": since });
-    // its start long gone from any window: its note alone
-    post("wk:long:cw:h1:4", note("h1", goal, since))?;
-    let bad = [
-        json!({ "since": "soon", "goal": "A" }),
-        json!({ "since": -5, "goal": "B" }),
-        json!({ "since": 1.5, "goal": "C" }),
-        json!({ "since": now + 3_600_000, "goal": "D" }),
-        json!({ "since": since }),
-    ];
-    for (i, fields) in bad.into_iter().enumerate() {
-        let mut body = json!({ "kind": "turn.child", "parent": "long", "child": format!("bad{i}") });
-        if let (Some(b), Some(f)) = (body.as_object_mut(), fields.as_object()) {
-            b.extend(f.clone());
-        }
-        post(&format!("wk:long:cw:bad{i}:1"), body)?;
-    }
+    // an older set, then the newest: its other helper ended
+    post(&ada, "hs:1", helpers_set(&[("h1", "long", goal, since), ("h2", "long", "Draft the poll", now)], until))?;
+    post(&ada, "hs:2", helpers_set(&[("h1", "long", goal, since)], until))?;
+    // another agent's set that lapsed (its computer crashed long ago)
+    post(&bo, "hs:1", helpers_set(&[("b1", "gone", "Check the train times", since)], now - 60_000))?;
     // then more than a page's window of other work
     for i in 0..1005 {
-        post(&format!("wk:busy:{i}"), json!({ "kind": "turn.busy", "n": i }))?;
+        post(&ada, &format!("wk:busy:{i}"), json!({ "kind": "turn.busy", "n": i }))?;
     }
-    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    let reads = "window.__newest = []; const real = window.fetch.bind(window); window.fetch = (url, o) => { const u = String(url); if (u.includes('__channel/work')) window.__newest.push(u.replace(/^.*__channel\\//, '')); return real(url, o); };";
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), reads)?;
     super::fit(chrome, &page, 1280, 860, false)?;
     let bar = "document.getElementById('helpers')";
     let head = format!("{bar}.querySelector('.helpers-head')");
@@ -803,37 +793,34 @@ pub(super) fn helpers_outlast_the_window(s: &mut Suite, api: &Api, owner: &Keys,
     let lines = format!("[...{bar}.querySelectorAll('.helper')]");
     let listed = format!("{lines}.map((n) => [n.querySelector('.helper-goal').title, n.querySelector('.helper-since').textContent])");
     s.ok(
-        "a helper whose start is far out of the window shows as the page opens, from its note; malformed notes are none",
+        "a set far out of the window shows as the page opens, its newest alone; a lapsed set shows nothing",
         super::shows(chrome, &page, &format!("{said} === '1 helper working'")),
         chrome.eval(&page, &format!("{bar}.outerHTML"))?,
     );
+    let asked = chrome.eval(&page, "window.__newest")?;
+    s.ok("the page asked once, for each agent's newest, and read no `work` back for them", asked == json!(["work/newest"]), &asked);
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
-    // (40 minutes before the records were posted, which takes a minute or two)
+    // (40 minutes before the sets were posted, which takes a minute or two)
     let since_shown = "/^4\\d min$/.test(l[0][1])";
     s.ok(
-        "opened, its task, and how long it has run since its start (the note's `since`)",
+        "opened, its task, and how long it has run (its `since`)",
         super::shows(chrome, &page, &format!("(() => {{ const l = {listed}; return l.length === 1 && l[0][0] === {} && {since_shown}; }})()", super::js(goal))),
         chrome.eval(&page, &listed)?,
     );
-    // replay: a note said again (the platform's same record), a later one,
-    // and a note after its helper's end
-    post("wk:long:cw:h1:4", note("h1", goal, since))?;
-    post("wk:long:cw:h1:5", note("h1", goal, since))?;
-    post("wk:long:c:h2", json!({ "kind": "turn.child", "parent": "long", "child": "h2", "goal": "Draft the poll" }))?;
-    post("wk:long:ce:h2", json!({ "kind": "turn.child", "parent": "long", "child": "h2", "outcome": "completed" }))?;
-    post("wk:long:cw:h2:1", note("h2", "Draft the poll", now))?;
-    post("wk:long:c:h3", json!({ "kind": "turn.child", "parent": "long", "child": "h3", "goal": "Book the train" }))?;
+    // replay: the newest posted again is the same record; a newer one lands live
+    let again = post(&ada, "hs:2", helpers_set(&[("h1", "long", goal, since)], until))?;
+    post(&ada, "hs:3", helpers_set(&[("h1", "long", goal, since), ("h3", "long", "Book the train", crate::api::now_ms())], until))?;
     let two = format!("(() => {{ const l = {listed}; return {said} === '2 helpers working' && l.length === 2 && l[0][0] === {} && {since_shown} && l[1][0] === 'Book the train'; }})()", super::js(goal));
-    s.ok("its notes again count once, and a note after a helper's end starts nothing", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
+    s.ok("a set posted again is the same record, and a newer one lands live", again["replayed"] == true && super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
     chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
     // (the page before the reload had it open: a closed bar is the new page's)
     let reloaded = format!("{said} === '2 helpers working' && {head}.getAttribute('aria-expanded') === 'false'");
     anyhow::ensure!(super::shows(chrome, &page, &reloaded), "the reloaded page's bar: {}", chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
-    s.ok("a reload finds the same: the long helper from its notes, the ended one ended", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
-    // its computer crashed: no note comes, and 15 minutes on, the bar clears
+    s.ok("a reload finds the newest", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
+    // its computer crashed: no newer set comes, and past its `until` the bar clears
     chrome.eval(&page, "(() => { const now = Date.now; Date.now = () => now() + 16 * 60_000; return true; })()")?;
-    s.ok("15 minutes with no note (its computer gone), the bar clears", super::shows(chrome, &page, &format!("{bar}.hidden && !{bar}.children.length")), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
+    s.ok("past its `until` with no newer set (its computer gone), the bar clears", super::shows(chrome, &page, &format!("{bar}.hidden && !{bar}.children.length")), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     chrome.close(page)?;
     Ok(())
 }
