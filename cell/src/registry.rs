@@ -99,9 +99,6 @@ pub struct RegistryCell {
     /// Test fleets: how many more wipes fail just after their orgs' content
     /// (`TestHook::FailWipeRows`).
     fail_wipe_rows: Cell<u32>,
-    /// Test fleets: the must-answer notices a test asked (`TestHook::Ask`),
-    /// whose they are, oldest first; in memory alone.
-    asked: RefCell<Vec<(String, fragment_proto::notice::Notice, Option<calls::Refused>)>>,
     /// CLI codes asked for this minute, by each address and in all
     /// (`POST /cli/begin`: `limits::CLI_BEGINS_PER_MINUTE_MAX`, and the
     /// fleet's `cli_begins_per_ip_minute`). In memory: a restart forgets
@@ -145,7 +142,6 @@ impl DurableObject for RegistryCell {
             skewed: Cell::new(0),
             hold_ms: Cell::new(0),
             fail_wipe_rows: Cell::new(0),
-            asked: RefCell::default(),
             cli_begins,
             finishing: RefCell::default(),
             deciding: RefCell::default(),
@@ -791,7 +787,8 @@ impl RegistryCell {
             }
             TestHook::Ask(ask) => {
                 let valid = |id: &str| !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-                if !valid(&ask.id) || ask.title.is_empty() || ask.answers.is_empty() || self.asked.borrow().len() >= calls::TEST_ASKED_MAX {
+                let mut asked = self.asked().await?;
+                if !valid(&ask.id) || ask.title.is_empty() || ask.answers.is_empty() || asked.len() >= calls::TEST_ASKED_MAX {
                     return Err(CellError::invalid(format!("ask with an id of [a-z0-9-], a title and answers, at most {} asked", calls::TEST_ASKED_MAX)));
                 }
                 let route = format!("/api/notices/asked/{}", ask.id);
@@ -806,11 +803,26 @@ impl RegistryCell {
                     actions: ask.answers.iter().map(|a| fragment_proto::notice::NoticeAction::post(a.as_str(), route.as_str(), json!({ "answer": a }))).collect(),
                     must_answer: true,
                 };
-                self.asked.borrow_mut().push((ask.person.clone(), notice, ask.refused));
+                asked.push(calls::Asked { person: ask.person.clone(), notice, refused: ask.refused });
+                self.keep_asked(&asked).await?;
                 self.tell_person(&ask.person).await;
                 Ok(json!({ "asked": ask.id }))
             }
         }
+    }
+
+    /// The must-answer notices a test asked (`TestHook::Ask`), everyone's,
+    /// oldest first: kept in this object's storage, a test fleet's alone,
+    /// as a page reads them long after the test asked (memory is gone once
+    /// the object idles).
+    pub(crate) async fn asked(&self) -> CellResult<Vec<calls::Asked>> {
+        let kept: Option<String> = self.state.storage().get(calls::ASKED_KEY).await?;
+        kept.map_or(Ok(vec![]), |k| serde_json::from_str(&k).map_err(|e| CellError::host(format!("the asked notices kept: {e}"))))
+    }
+
+    pub(crate) async fn keep_asked(&self, asked: &[calls::Asked]) -> CellResult<()> {
+        let kept = serde_json::to_string(asked).expect("asked notices serialize");
+        Ok(self.state.storage().put(calls::ASKED_KEY, kept).await?)
     }
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {

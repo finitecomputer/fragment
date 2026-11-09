@@ -273,7 +273,7 @@ impl RegistryCell {
 
     /// What the registry tells `b.person` (`NoticesOf`): their invites, in
     /// words; and on a test fleet, what a test asked them (`TestHook::Ask`).
-    fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
+    async fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
         let mut notices: Vec<fragment_proto::notice::Notice> = self
             .waiting_on(&b.person)?
             .iter()
@@ -282,7 +282,9 @@ impl RegistryCell {
                 fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
             })
             .collect();
-        notices.extend(self.asked.borrow().iter().filter(|(p, ..)| *p == b.person).map(|(_, n, _)| n.clone()));
+        if self.cfg.test_hooks {
+            notices.extend(self.asked().await?.into_iter().filter(|a| a.person == b.person).map(|a| a.notice));
+        }
         Ok(serde_json::json!({ "notices": notices }))
     }
 
@@ -290,14 +292,15 @@ impl RegistryCell {
     /// one it refuses says its words; any other ends it, and they are told.
     async fn answer_asked(&self, a: AnswerAsked) -> CellResult<serde_json::Value> {
         let id = format!("asked:{}", a.id);
-        let at = self.asked.borrow().iter().position(|(p, n, _)| *p == a.person && n.id == id && n.actions.iter().any(|x| x.label == a.answer));
-        let Some(at) = at else {
+        let mut asked = self.asked().await?;
+        let Some(at) = asked.iter().position(|x| x.person == a.person && x.notice.id == id && x.notice.actions.iter().any(|y| y.label == a.answer)) else {
             return Err(CellError::new(ErrorCode::NotFound, "That question isn't waiting for an answer any more.").because(Reason::Gone));
         };
-        if let Some(refused) = self.asked.borrow()[at].2.as_ref().filter(|r| r.answer == a.answer) {
+        if let Some(refused) = asked[at].refused.as_ref().filter(|r| r.answer == a.answer) {
             return Err(CellError::new(ErrorCode::Conflict, refused.said.clone()));
         }
-        self.asked.borrow_mut().remove(at);
+        asked.remove(at);
+        self.keep_asked(&asked).await?;
         self.tell_person(&a.person).await;
         Ok(serde_json::json!({ "answered": a.id }))
     }
@@ -374,7 +377,7 @@ impl RegistryCell {
         Some(match path {
             InviteEmail::PATH => reply::<InviteEmail>(async { self.invite(body(bytes)?).await }.await),
             InvitesFor::PATH => reply::<InvitesFor>(body(bytes).and_then(|b| self.waiting_for(b))),
-            NoticesOf::PATH => reply::<NoticesOf>(body(bytes).and_then(|b| self.notices_of(b))),
+            NoticesOf::PATH => reply::<NoticesOf>(async { self.notices_of(body(bytes)?).await }.await),
             AnswerAsked::PATH if self.cfg.test_hooks => reply::<AnswerAsked>(async { self.answer_asked(body(bytes)?).await }.await),
             AnswerInvite::PATH => reply::<AnswerInvite>(async { self.answer_invite(body(bytes)?).await }.await),
             ForgetInvite::PATH => reply::<ForgetInvite>(async { self.forget_invite(body(bytes)?).await }.await),

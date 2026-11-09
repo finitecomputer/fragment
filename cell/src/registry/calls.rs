@@ -530,6 +530,19 @@ pub(crate) struct Refused {
 /// The most must-answer notices `TestHook::Ask` holds, everyone's.
 pub(crate) const TEST_ASKED_MAX: usize = 16;
 
+/// Where the registry keeps what `TestHook::Ask` asked (its storage's
+/// key-value side: no table, a test fleet's alone).
+pub(crate) const ASKED_KEY: &str = "test-asked";
+
+/// A must-answer notice a test asked (`TestHook::Ask`): whose, as told,
+/// and the answer it refuses.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Asked {
+    pub person: String,
+    pub notice: fragment_proto::notice::Notice,
+    pub refused: Option<Refused>,
+}
+
 /// `POST /notices/asked`: `person`'s `answer` to their asked notice `id`
 /// (`TestHook::Ask`): it goes, and they are told; or 404 (none such), or
 /// 409 with its words (the answer it refuses).
