@@ -165,6 +165,18 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
+/// What a broadcast reads of a socket's attachment: its id and the
+/// channels it follows, and no more (its presence is any JSON a page set).
+#[derive(Deserialize)]
+struct Follows {
+    id: String,
+    subs: Vec<String>,
+}
+
+fn follows_of(ws: &WebSocket) -> Option<Follows> {
+    ws.deserialize_attachment::<Follows>().ok().flatten()
+}
+
 fn send(ws: &WebSocket, frame: &LiveOut) {
     let _ = ws.send_with_str(frame.encode());
 }
@@ -275,7 +287,7 @@ impl FragmentCell {
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            let Some(st) = state_of(&ws) else { continue };
+            let Some(st) = follows_of(&ws) else { continue };
             if st.subs.contains(&r.channel) {
                 let _ = ws.send_with_str(&frame);
                 found.insert(st.id);
@@ -300,7 +312,7 @@ impl FragmentCell {
         }
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if state_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
                 send(&ws, &frame);
             }
         }
@@ -321,7 +333,7 @@ impl FragmentCell {
         let mut memory = self.live.borrow_mut();
         let followers = memory.followers.get_or_insert_with(|| {
             let mut gathered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for st in self.state.get_websockets_with_tag(LIVE_TAG).iter().filter_map(state_of) {
+            for st in self.state.get_websockets_with_tag(LIVE_TAG).iter().filter_map(follows_of) {
                 for c in st.subs {
                     gathered.entry(c).or_default().insert(st.id.clone());
                 }
