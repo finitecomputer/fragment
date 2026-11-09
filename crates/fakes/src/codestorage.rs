@@ -1214,6 +1214,15 @@ impl CodeStorage {
         });
     }
 
+    /// Deletes a branch (a live branch its owner removed).
+    pub fn delete_branch(&self, repo: &str, branch: &str) {
+        self.with(|st| {
+            let url = st.url_of(repo).expect("delete_branch on a known repo");
+            st.repos.get_mut(&url).expect("a known repo").branches.remove(branch);
+            self.inner.persist(st);
+        });
+    }
+
     /// Every call waits this long before it is served, as a call to the
     /// real service travels (zero: at once, the default).
     pub fn set_latency(&self, latency: std::time::Duration) {

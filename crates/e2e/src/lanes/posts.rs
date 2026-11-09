@@ -646,6 +646,17 @@ fn newest(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         lever.status == 200 && a3.status == 200 && x2.status == 200 && said(&r) == vec![(ada_id, 7)],
         &r,
     );
+
+    // live deleted (no code: no channel keeps anything), then deployed again
+    // as it was: keeping starts from its next record (Codex on this read)
+    if !s.hosted() {
+        s.undeploy(&c);
+        let gone = s.eventually(Duration::from_secs(30), || read(&viewer, "wall").is_ok_and(|r| r.status == 404));
+        s.deploy(&c);
+        let back = s.eventually(Duration::from_secs(30), || read(&viewer, "wall").is_ok_and(|r| r.status == 200));
+        let r = read(&viewer, "wall")?;
+        s.ok("with live deleted and deployed again, what was kept before is gone: keeping starts from the next record", gone && back && said(&r).is_empty(), &r);
+    }
     Ok(())
 }
 
