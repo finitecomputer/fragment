@@ -72,9 +72,12 @@ pub const BROWSER_MS_PER: u64 = 3_600_000;
 pub const IMAGES_PER: u64 = 1_000;
 
 /// What happened, in a meter's own unit (decision 24). The quantities are
-/// exactly what the source counted; the book prices them.
+/// exactly what the source counted; the book prices them. Written tagged by
+/// `kind`; read as its fields (`UsageFields`), not as serde's internally
+/// tagged reading, which buffers each usage to find its kind: about 30 KB
+/// more of the cell's Wasm. Both read every form a release has written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", try_from = "UsageFields")]
 pub enum Usage {
     /// A model's tokens through AI Gateway, by its catalog id. `input`
     /// excludes cached tokens (OpenAI-shaped usage counts them in
@@ -104,6 +107,92 @@ pub enum Usage {
     /// An operator key's use (decision 37), in the key's own unit: a call,
     /// unless its price counts something else.
     Key { key: String, units: u64 },
+}
+
+/// A `Usage` as it is read: every kind's fields, flat, none unknown.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageFields {
+    kind: UsageKind,
+    model: Option<String>,
+    input: Option<u64>,
+    cached_input: Option<u64>,
+    cache_write: Option<u64>,
+    output: Option<u64>,
+    milli: Option<u64>,
+    instance: Option<String>,
+    ms: Option<u64>,
+    class: Option<StorageClass>,
+    byte_hours: Option<u64>,
+    count: Option<u64>,
+    key: Option<String>,
+    units: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UsageKind {
+    Tokens,
+    Neurons,
+    Awake,
+    Storage,
+    Requests,
+    DynamicWorkers,
+    Browser,
+    Images,
+    Key,
+}
+
+impl TryFrom<UsageFields> for Usage {
+    type Error = String;
+
+    /// The kind its `kind` names, with each of that kind's fields and no
+    /// other kind's, as the tagged reading refused one.
+    fn try_from(f: UsageFields) -> Result<Usage, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
+        }
+        let named = [
+            f.model.is_some(),
+            f.input.is_some(),
+            f.cached_input.is_some(),
+            f.cache_write.is_some(),
+            f.output.is_some(),
+            f.milli.is_some(),
+            f.instance.is_some(),
+            f.ms.is_some(),
+            f.class.is_some(),
+            f.byte_hours.is_some(),
+            f.count.is_some(),
+            f.key.is_some(),
+            f.units.is_some(),
+        ];
+        let (usage, fields) = match f.kind {
+            UsageKind::Tokens => (
+                Usage::Tokens {
+                    model: need(f.model, "model")?,
+                    input: need(f.input, "input")?,
+                    cached_input: need(f.cached_input, "cached_input")?,
+                    cache_write: need(f.cache_write, "cache_write")?,
+                    output: need(f.output, "output")?,
+                },
+                5,
+            ),
+            UsageKind::Neurons => (Usage::Neurons { milli: need(f.milli, "milli")? }, 1),
+            UsageKind::Awake => (Usage::Awake { instance: need(f.instance, "instance")?, ms: need(f.ms, "ms")? }, 2),
+            UsageKind::Storage => (Usage::Storage { class: need(f.class, "class")?, byte_hours: need(f.byte_hours, "byte_hours")? }, 2),
+            UsageKind::Requests => (Usage::Requests { count: need(f.count, "count")? }, 1),
+            UsageKind::DynamicWorkers => (Usage::DynamicWorkers { count: need(f.count, "count")? }, 1),
+            UsageKind::Browser => (Usage::Browser { ms: need(f.ms, "ms")? }, 1),
+            UsageKind::Images => (Usage::Images { count: need(f.count, "count")? }, 1),
+            UsageKind::Key => (Usage::Key { key: need(f.key, "key")?, units: need(f.units, "units")? }, 2),
+        };
+        // each of its own fields is there, so any more is another kind's
+        match named.iter().filter(|n| **n).count() == fields {
+            true => Ok(usage),
+            false => Err("unknown field: a usage names its own kind's fields alone".into()),
+        }
+    }
 }
 
 /// Where sampled bytes are held.
@@ -1689,5 +1778,26 @@ mod tests {
         assert!(serde_json::from_value::<Usage>(serde_json::json!({ "kind": "requests", "count": -1 })).is_err(), "quantities are unsigned");
         let billed = serde_json::json!({ "kind": "billed", "vendor": "openrouter", "micros": 1 });
         assert!(serde_json::from_value::<Usage>(billed).is_err(), "a vendor's own bill went with OpenRouter: every meter is Cloudflare's");
+    }
+
+    /// Read as its fields, a usage is as strict as the tagged reading was:
+    /// its kind's every field, no other kind's, in any order, from bytes.
+    #[test]
+    fn a_usage_reads_as_its_kinds_fields_alone() {
+        let read = |text: &str| serde_json::from_slice::<Usage>(text.as_bytes()).map_err(|e| e.to_string());
+        assert_eq!(read(r#"{"ms":5,"instance":"standard-1","kind":"awake"}"#), Ok(Usage::Awake { instance: "standard-1".into(), ms: 5 }), "the tag anywhere");
+        assert_eq!(read(r#"{"kind":"key","key":"brave","units":2}"#), Ok(Usage::Key { key: "brave".into(), units: 2 }));
+        for (text, says) in [
+            (r#"{"kind":"requests","count":1,"ms":2}"#, "unknown field"),
+            (r#"{"kind":"browser","ms":1,"instance":"standard-1"}"#, "unknown field"),
+            (r#"{"kind":"tokens","model":"m","input":1,"cached_input":0,"cache_write":0}"#, "missing field `output`"),
+            (r#"{"kind":"awake","ms":5}"#, "missing field `instance`"),
+            (r#"{"count":1}"#, "missing field `kind`"),
+            (r#"{"kind":"storage","class":"disk","byte_hours":1}"#, "unknown variant `disk`"),
+            (r#"{"kind":"images","count":null}"#, "missing field `count`"),
+        ] {
+            let e = read(text).expect_err(text);
+            assert!(e.contains(says), "{text}: {e}");
+        }
     }
 }
