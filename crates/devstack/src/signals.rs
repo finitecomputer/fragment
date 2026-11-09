@@ -217,17 +217,30 @@ mod tests {
     /// the process early, which would leave them stopped for good, holding
     /// their memory and ports, deaf to another SIGTERM. Method: a child that
     /// started a tree (a process that detaches another, as miniflare starts
-    /// Chrome) is sent SIGTERM, then SIGTERM again once the tree's first
-    /// process is seen stopped; none of the tree is left, stopped or not.
+    /// Chrome) is sent SIGTERM; a `ps` of its own sends it the second from
+    /// inside the walk, once the tree's root is stopped (its second call:
+    /// the first found the root). None of the tree is left, stopped or not,
+    /// and the child ends as the first signal would have it.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_second_signal_while_the_started_are_killed_leaves_none() {
         const TEST: &str = "signals::tests::a_second_signal_while_the_started_are_killed_leaves_none";
+        // the child's `ps`, which counts its calls: named for the parent
+        let shim = |parent: u32| std::env::temp_dir().join(format!("devstack-second-signal-{parent}"));
         if std::env::var(CHILD).as_deref() == Ok("tree") {
             let script = "setsid sh -c 'sleep 60 & echo $$ $!; wait' & wait";
             let mut tree = Command::new("sh").args(["-c", script]).stdout(Stdio::piped()).stdin(Stdio::null()).spawn().expect("the tree starts");
             let mut line = String::new();
             BufReader::new(tree.stdout.take().expect("its stdout")).read_line(&mut line).expect("its pids");
+            let path = std::env::var_os("PATH").expect("a PATH");
+            let real = std::env::split_paths(&path).map(|d| d.join("ps")).find(|p| p.is_file()).expect("a ps");
+            let dir = shim(std::os::unix::process::parent_id());
+            std::fs::create_dir_all(&dir).expect("the shim's directory");
+            let ps = format!("#!/bin/sh\nn=$(($(cat '{d}/calls' 2>/dev/null || echo 0) + 1))\necho $n > '{d}/calls'\n[ $n = 2 ] && kill -TERM $PPID\nexec '{real}' \"$@\"\n", d = dir.display(), real = real.display());
+            std::fs::write(dir.join("ps"), ps).expect("the shim");
+            std::fs::set_permissions(dir.join("ps"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("the shim runs");
+            // the walk's `ps` (tree.rs) is the shim from here on
+            std::env::set_var("PATH", std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(&path))).expect("a PATH"));
             on_termination(|_| {}).expect("handled");
             println!("ready; {} {}", tree.id(), line.trim());
             std::thread::sleep(WAIT);
@@ -240,21 +253,16 @@ mod tests {
         let tree: Vec<u32> = ready.trim_start_matches("ready; ").split_whitespace().map(|p| p.parse().expect("a pid")).collect();
         assert_eq!(tree.len(), 3, "{ready}");
         signal(&c, libc::SIGTERM);
-        let t0 = Instant::now();
-        // bounded: WAIT; the tree's root is stopped for a few `ps` walks
-        // (milliseconds), read from /proc in microseconds
-        while state(tree[0]) != Some('T') {
-            assert!(state(tree[0]).is_some_and(|s| s != 'Z'), "the tree's root ended before it was seen stopped");
-            assert!(t0.elapsed() < WAIT, "the tree's root was never stopped");
-        }
-        signal(&c, libc::SIGTERM);
         let (status, rest) = ended(c, out);
+        let calls = std::fs::read_to_string(shim(std::process::id()).join("calls")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(shim(std::process::id()));
         let left: Vec<(u32, char)> = tree.iter().filter_map(|&pid| state(pid).filter(|s| *s != 'Z').map(|s| (pid, s))).collect();
         for &(pid, _) in &left {
             // SAFETY: kill(2) on a process this test's child started, still there
             unsafe { libc::kill(libc::pid_t::try_from(pid).expect("a pid"), libc::SIGKILL) };
         }
         assert!(left.is_empty(), "left behind (pid, state): {left:?}; the child: {status:?} {rest}");
+        assert!(calls.trim().parse::<u32>().is_ok_and(|n| n >= 2), "the second signal was sent from inside the walk: {calls:?}");
         assert_eq!(status.code(), Some(128 + libc::SIGTERM), "it ended as the first signal, after the kill: {rest}");
     }
 }

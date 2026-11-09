@@ -46,8 +46,8 @@ fn signal(pid: u32, signal: libc::c_int) {
 /// yet reaped, whose pid the kernel cannot have given another. Returns how
 /// many it killed (`root` among them). A walk cut short (`ps` failed, or
 /// past `TREE_MAX`) still kills what it stopped: none is left stopped. Each
-/// dies after every process found below it, so none it stopped is ever
-/// handed, stopped, to init.
+/// is sent its SIGKILL after every process found below it is sent theirs,
+/// so none is left stopped below one already gone.
 pub fn kill(root: u32) -> io::Result<usize> {
     let me = std::process::id();
     let mut tree = BTreeSet::from([root]);
