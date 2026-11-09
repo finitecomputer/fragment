@@ -511,6 +511,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 | `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
 | `kind` | `string` | required | What it is about (`key_paused`), for tests and logs. No client reads it to decide what to draw. |
 | `level` | [`NoticeLevel`](#noticelevel) | required |  |
+| `mustAnswer` | `boolean` | optional | It must be answered (FIN-458): a client shows it alone, over everything, until one of its actions goes through, and the read after no longer has it. The first such in the list first: its owner lists its own oldest first. A client from before it shows it as any other. |
 | `text` | `string` or `null` | optional | A sentence or two under it. |
 | `title` | `string` | required | One short line. |
 | `until` | [`Until`](#until) or `null` | optional | When what it tells ends by the clock alone (a paused key resumes). |

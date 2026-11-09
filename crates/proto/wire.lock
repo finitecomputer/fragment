@@ -64,6 +64,7 @@ bound MessageHit.at range i64
 bound MessageHit.seq range i64
 bound Notice.actions default []
 bound Notice.detail default null
+bound Notice.mustAnswer default false
 bound Notice.text default null
 bound Notice.until default null
 bound NoticeAction.body default null
@@ -265,6 +266,7 @@ field Notice.detail optional string|null
 field Notice.id required string
 field Notice.kind required string
 field Notice.level required NoticeLevel
+field Notice.mustAnswer optional boolean
 field Notice.text optional string|null
 field Notice.title required string
 field Notice.until optional Until|null

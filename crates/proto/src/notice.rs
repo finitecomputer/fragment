@@ -50,7 +50,7 @@ pub struct Notice {
     /// after no longer has it. The first such in the list first: its
     /// owner lists its own oldest first. A client from before it shows it
     /// as any other.
-    #[serde(default, rename = "mustAnswer", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, rename = "mustAnswer", skip_serializing_if = "crate::is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub must_answer: bool,
 }
