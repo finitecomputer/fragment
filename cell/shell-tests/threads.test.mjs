@@ -13,6 +13,7 @@ const ANN = { identity: "npub1ann", fragment: "ann--abcd" };
 const BOB = { identity: "npub1bob", fragment: "bob--efgh" };
 const ASKING = "ann-chat--wxyz";
 const PAIR = "ann-bob--k2m3";
+const CHANNEL_PAGE = 1000;
 
 // `cut`: the records a page holds at most, as a page cut at its bytes
 // (docs/api.md) holds fewer than asked; `legacy`: pages as an older
@@ -45,12 +46,14 @@ function world({ cut = Infinity, legacy = false } = {}) {
   };
   // a page, as the platform answers it: ascending; backwards, its `next`
   // the first seq, forwards its last; `more` whether records remain past
-  // it. `read` counts the pages asked for and the records they hold.
+  // it; at most `CHANNEL_PAGE` (crates/proto, 1000 in every release; an
+  // older release's pages, with no `more`, were never cut at their bytes).
+  // `read` counts the pages asked for and the records they hold.
   const read = { pages: 0, records: 0 };
   const api = async (method, path) => {
     const m = path.match(/^\/api\/f\/([^/]+)\/channels\/([a-z]+)\?(before|after)=(\d+)&limit=(\d+)$/);
     assert.ok(method === "GET" && m, `${method} ${path}`);
-    const [cursor, limit] = [Number(m[4]), Math.min(Number(m[5]), 100, cut)];
+    const [cursor, limit] = [Number(m[4]), Math.min(Number(m[5]), CHANNEL_PAGE, cut)];
     const all = records.get(`${m[1]}/${m[2]}`) ?? [];
     const past = m[3] === "before" ? all.filter((r) => r.seq < cursor) : all.filter((r) => r.seq > cursor);
     const page = m[3] === "before" ? past.slice(-limit) : past.slice(0, limit);
@@ -293,3 +296,25 @@ test("a burst past what a read keeps is read back from the newest", async () => 
     mock.timers.reset();
   }
 });
+
+// Alex's review of #1133: a hundred records past the newest held, read
+// forward in one page an older release answers (no `more`) or in pages cut
+// at their bytes, the held one among them first: the new question shows.
+for (const [how, options] of [["pages with no more", { legacy: true }], ["pages cut at their bytes", { cut: 7 }]]) {
+  test(`a hundred records come since the last read, in ${how}, and the newest shows`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const w = world(options);
+      w.post(PAIR, "chat", BOB.identity, { text: "hello" });
+      w.publish(PAIR);
+      w.publish(ASKING);
+      assert.deepEqual(await w.lines(), []);
+      for (let i = 0; i < 99; i++) w.post(PAIR, "chat", BOB.identity, { text: `reply ${i}` });
+      w.ask("look it up");
+      w.publish(PAIR);
+      assert.deepEqual(await w.lines(), ["asked"]);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+}
