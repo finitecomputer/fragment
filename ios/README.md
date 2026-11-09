@@ -168,8 +168,9 @@ other server is ever asked (`Sources/LaunchScope.swift`;
 `DevStackUITests` run against a dev stack, and skip without one. The test signs a
 new person in through the WorkOS fake, makes their apps, and approves the app's
 code at `/cli`. It checks that an app's page keeps what it saved (localStorage)
-when it is closed and opened again and after a relaunch, that a todo's server
-write sticks, and that disconnecting clears what pages kept. Forward the platform
+when it is closed and opened again and after a relaunch (`--ui-test-keep`, Debug
+only, keeps the test's account as a relaunch does), that a todo's server write
+sticks, and that a new key's approval or a disconnect clears what pages kept. Forward the platform
 and the fake to the Mac, then name the platform to the test runner:
 
 ```sh

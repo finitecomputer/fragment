@@ -159,8 +159,8 @@ final class DevStackUITests: XCTestCase {
 
     /// An app's page keeps what it saved in the browser (localStorage) from
     /// one opening of it to the next, and across a relaunch, as it does in
-    /// Safari, and a server-backed app's writes stick as well; disconnecting
-    /// this iPhone removes what the pages kept, so pairing again finds none.
+    /// Safari, and a server-backed app's writes stick as well. A new key's
+    /// approval, or disconnecting this iPhone, removes what pages kept.
     func testAnAppsPageKeepsItsStateAcrossSheetsUntilDisconnect() async throws {
         let platform = try await DevPlatform.start()
         let notes = try await platform.app(template: "blank", title: "Notes kept here", page: Self.notesPage)
@@ -202,14 +202,30 @@ final class DevStackUITests: XCTestCase {
         screenshot(app, "Todo reopened")
         close(app, "Sheet todo", todo)
 
-        // relaunched (a test launch pairs again: its account starts empty)
+        // relaunched, its account kept as an app's relaunch keeps it
         app.terminate()
+        app.launchArguments.append("--ui-test-keep")
         app.launch()
-        try await pair(app, platform)
+        XCTAssertTrue(app.buttons["yourApps"].waitForExistence(timeout: 20), "relaunched, Home")
         open(app, notes)
         XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 20), "relaunched, the page still has its note")
         XCTAssertTrue(app.webViews.staticTexts[note].exists)
         screenshot(app, "Notes after relaunch")
+        close(app, "Notes kept here", notes)
+
+        // a new key without a Disconnect (as after a key revoked on the web):
+        // its approval clears what pages kept, whoever it names
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "--ui-test-keep" }
+        app.launch()
+        try await pair(app, platform)
+        open(app, notes)
+        XCTAssertTrue(app.webViews.staticTexts["0 saved"].waitForExistence(timeout: 20), "a new key's pages start with nothing kept")
+        XCTAssertFalse(app.webViews.staticTexts[note].exists)
+        let again = app.webViews.textFields["note"]
+        again.tap(); again.typeText("bread")
+        app.webViews.buttons["Save"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 5))
         close(app, "Notes kept here", notes)
 
         // disconnect, then pair again as the same person: nothing kept
@@ -226,7 +242,7 @@ final class DevStackUITests: XCTestCase {
         try await pair(app, platform)
         open(app, notes)
         XCTAssertTrue(app.webViews.staticTexts["0 saved"].waitForExistence(timeout: 20), "after a disconnect, the page kept nothing")
-        XCTAssertFalse(app.webViews.staticTexts[note].exists)
+        XCTAssertFalse(app.webViews.staticTexts["bread"].exists)
         screenshot(app, "Notes after disconnect")
     }
 

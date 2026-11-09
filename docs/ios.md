@@ -128,9 +128,11 @@ error a status or redemption answers. It validates the redemption against the
 fragment’s canonical origin, then presents Safari's view full screen (never
 embedded or covered, as Apple asks); a sheet asks once, and each opening is a new
 sheet and a new redemption. Safari's view handles the page: its links, a
-page's errors, and other origins. Disconnecting this iPhone, or removing it here,
-clears this app's Safari data with `SFSafariViewController.DataStore`
-(iOS 16+), which clears all of it: no one app's data alone. Add is a
+page's errors, and other origins. This app's Safari data is the person's it was
+kept for: disconnecting this iPhone, removing it here, or an approval that names
+another person (a new key, or this key approved by someone else) clears it, before
+that person can open an app, with `SFSafariViewController.DataStore` (iOS 16+),
+which clears all of it: no one app's data alone. Add is a
 native prompt sheet, matching the web shell’s built-in Add hand; there is no real
 server fragment named `add-app`.
 

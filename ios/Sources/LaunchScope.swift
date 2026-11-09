@@ -31,10 +31,11 @@ struct LaunchScope: Sendable {
     /// Before anything reads the store: a UI test's starts empty, or holding
     /// only the account its `--ui-test-saved-account <origin>` names
     /// (approved, with a fresh key), so a test can show that one past
-    /// loopback is never used.
+    /// loopback is never used. `--ui-test-keep` keeps what the test's last
+    /// launch saved, as an app's relaunch does.
     static func start() {
         #if DEBUG
-        guard current.loopbackOnly else { return }
+        guard current.loopbackOnly, !ProcessInfo.processInfo.arguments.contains("--ui-test-keep") else { return }
         try? DeviceKeychain.clear()
         if let support = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false) {
             try? FileManager.default.removeItem(at: support.appending(path: current.supportFolder, directoryHint: .isDirectory))
