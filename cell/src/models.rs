@@ -136,7 +136,6 @@ pub struct ModelCall<'a> {
     /// The tier its caller runs on (its `x-fragment-tier`): whose route's
     /// `vision` and `fallback` it runs (`Models::route_for`).
     pub tier: Option<Tier>,
-    /// Its body, as `route` read it: at most `MODEL_BODY_MAX_BYTES`.
     pub body: Value,
     pub stream: bool,
 }
@@ -249,6 +248,24 @@ async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InF
     })
 }
 
+/// The bytes `body` encodes to, counted as it is written, not kept: a body
+/// `route` read within the cap may write longer (`1e-5` is `0.00001`).
+fn encoded_len(body: &Value) -> usize {
+    struct Counted(usize);
+    impl std::io::Write for Counted {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Counted(0);
+    serde_json::to_writer(&mut n, body).expect("a JSON value writes");
+    n.0
+}
+
 /// A refusal of the model's, passed on as it came: the call used nothing,
 /// and is charged nothing.
 fn passed(status: u16, text: String) -> CellResult<Response> {
@@ -263,6 +280,10 @@ fn passed(status: u16, text: String) -> CellResult<Response> {
 /// end).
 pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) -> CellResult<Response> {
     let cfg = Config::from_env(env);
+    let body_bytes = encoded_len(&call.body);
+    if body_bytes > MODEL_BODY_MAX_BYTES {
+        return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
+    }
     let model = cfg.models.capped_for(call.named, call.tier).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str(), after).await?;
