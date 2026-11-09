@@ -65,12 +65,12 @@ final class Library {
     var answered: FragmentSummary?
     @ObservationIgnored private var loadID = UUID()
     /// Reads begun (`load`), and a page an action's answer named with the
-    /// number of the first read begun after the answer: the first such
-    /// read to take its list, or fail to, decides it there and then, once
-    /// (`decide`; `load` lets the newest read begun win, so the action's own
-    /// may give way to a newer one); a read after that never opens it, the
-    /// person maybe elsewhere by then. It goes with this library, and so
-    /// with the account it was asked in.
+    /// number of the first read begun after the answer: the first list
+    /// read of those to come back, or to fail, decides it there and then,
+    /// once (`decide`), newest or not (`load` lets the newest read begun win
+    /// what is shown, which says nothing of when a list was read); a read
+    /// after that never opens it, the person maybe elsewhere by then. It
+    /// goes with this library, and so with the account it was asked in.
     @ObservationIgnored private var begun = 0
     @ObservationIgnored private var held: (page: URL, after: Int)?
     @ObservationIgnored private var settle: Task<Void, Never>?
@@ -110,8 +110,10 @@ final class Library {
     /// The fragment of the person's list a link is a page of (the web's
     /// "Open" for one: templates/chat/site/chat.js `openBeside`), opening at
     /// that page; none for another's or any other address, which Safari opens.
-    func fragment(linkedBy url: URL) -> FragmentSummary? {
-        guard let name = MessageLinks.fragmentName(url, pages: pages), var found = fragments.first(where: { $0.name == name }) else { return nil }
+    func fragment(linkedBy url: URL) -> FragmentSummary? { fragment(linkedBy: url, in: fragments) }
+    /// The same, in `list` (a list read, not yet shown: `decide`).
+    func fragment(linkedBy url: URL, in list: [FragmentSummary]) -> FragmentSummary? {
+        guard let name = MessageLinks.fragmentName(url, pages: pages), var found = list.first(where: { $0.name == name }) else { return nil }
         if found.kind != "chat" { found.link = url }
         return found
     }
@@ -226,20 +228,17 @@ final class Library {
         defer { if loadID == requestID { loading = false } }
         do {
             var response = try await api.fragments()
-            guard loadID == requestID, !Task.isCancelled else {
-                // cancelled while the newest: no list, and so no page opened
-                if loadID == requestID { decide(number, listed: false) }
-                return
-            }
             for index in response.indices {
                 if let picture = response[index].picture { response[index].picture = URL(string: picture, relativeTo: api.baseURL)?.absoluteString }
             }
+            // the first list after an answer decides its page, there and then,
+            // newest or not (a newer read only reads later); cancelled, as none
+            decide(number, in: Task.isCancelled ? nil : response)
+            guard loadID == requestID, !Task.isCancelled else { return }
             // A list read again that says the same changes nothing: what a
             // chat's view draws from it (its agents, their faces) is not
             // drawn again for each message the list is told of.
             if fragments != response { fragments = response }
-            // its list taken, it decides a page held for it, there and then
-            decide(number, listed: true)
             await loadComputer(api, requestID)
             for agent in agents.prefix(32) where identities[agent.name] == nil {
                 let status: FragmentStatus = try await api.request("api/f/\(agent.name)/status")
@@ -248,8 +247,8 @@ final class Library {
             if loadID == requestID { error = nil }
         } catch {
             if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription }
-            // its list not read: a page held for it opens never
-            if loadID == requestID { decide(number, listed: false) }
+            // its list not read, newest or not: a page held for it opens never
+            decide(number, in: nil)
         }
         await loadNotices(api, requestID)
         await loadImported(api, requestID)
@@ -257,13 +256,13 @@ final class Library {
         await titleUntitled(api)
     }
     /// A page held for the read numbered `number` or an older one
-    /// (`held`), decided once as that read takes its list (`listed`) or
-    /// fails to: listed, the page is `answered`; else nothing opens, now
-    /// or after.
-    private func decide(_ number: Int, listed: Bool) {
+    /// (`held`), decided once by the first list read after its answer
+    /// (`list`; none: that read failed or was cancelled): listed there, the
+    /// page is `answered`; else nothing opens, now or after.
+    private func decide(_ number: Int, in list: [FragmentSummary]?) {
         guard let page = held, number >= page.after else { return }
         held = nil
-        if listed { answered = fragment(linkedBy: page.page) }
+        if let list { answered = fragment(linkedBy: page.page, in: list) }
     }
     /// The person's agents in their computer's order (`ComputerView.agents`,
     /// docs/api.md), as the web's sidebar takes them (cell/shell/chat-list.js
