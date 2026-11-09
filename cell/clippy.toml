@@ -1,8 +1,13 @@
 # The cell's Wasm holds one serde_json decoder per type: from bytes
 # (`SliceRead`). A decode from `&str` (`StrRead`) compiles a second copy of
 # each type's decoder (about 44 KB across the cell when it had both), so
-# text goes through the bytes decoder instead (cell/src/lib.rs).
+# text goes through the bytes decoder instead (cell/src/lib.rs). Nor is
+# a type read again from a `serde_json::Value` (a third copy of its
+# decoder, and a second walk of what was read once): a route reads its own
+# type from the call's bytes, a caller its answer's (FIN-453 M7), and what
+# a layer only passes on stays bytes (`RawValue`).
 disallowed-methods = [
     { path = "serde_json::from_str", reason = "use crate::json_text, the bytes decoder each type already has" },
     { path = "worker::Response::json", reason = "use crate::ReadJson::read_json, the bytes decoder each type already has" },
+    { path = "serde_json::from_value", reason = "read the type from its bytes, once (crate::json_body, routed::ask_object's answer); pass on what is not read as RawValue" },
 ]

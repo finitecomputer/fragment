@@ -357,7 +357,7 @@ pub(crate) async fn webhook(mut req: Request, env: &Env, cfg: &Config) -> CellRe
     let deployment = cfg.stripe_deployment();
     let handled = match event.kind.as_str() {
         "checkout.session.completed" => {
-            let session: CheckoutSession = serde_json::from_value(event.data.object).map_err(|e| CellError::invalid(format!("a session: {e}")))?;
+            let session: CheckoutSession = serde_json::from_slice(event.data.object.get().as_bytes()).map_err(|e| CellError::invalid(format!("a session: {e}")))?;
             match core_stripe::ours(&session.metadata, deployment) {
                 true => {
                     let stripe = crate::stripe::client(env, cfg).await?;
@@ -373,7 +373,7 @@ pub(crate) async fn webhook(mut req: Request, env: &Env, cfg: &Config) -> CellRe
                 #[serde(default)]
                 metadata: std::collections::BTreeMap<String, String>,
             }
-            let named: Named = serde_json::from_value(event.data.object).map_err(|e| CellError::invalid(format!("a subscription: {e}")))?;
+            let named: Named = serde_json::from_slice(event.data.object.get().as_bytes()).map_err(|e| CellError::invalid(format!("a subscription: {e}")))?;
             match (core_stripe::ours(&named.metadata, deployment), named.metadata.get(META_ORG)) {
                 (true, Some(org)) => {
                     let stripe = crate::stripe::client(env, cfg).await?;
