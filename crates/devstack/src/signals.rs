@@ -29,15 +29,19 @@ fn ignored(signal: libc::c_int) -> bool {
     now.sa_sigaction == libc::SIG_IGN
 }
 
-/// Runs `then` with the signal's number on a thread of its own when the
-/// process gets one of the termination signals it does not ignore, then
-/// exits as that signal would have it (128 + its number). A second signal
-/// meanwhile ends the process at once, by that signal's own default.
-/// Once per process.
+/// When the process gets one of the termination signals it does not
+/// ignore, on a thread of its own: kills everything the process started
+/// (`kill_started`), deaf to further signals until that is done, then runs
+/// `then` with the signal's number and exits as that signal would have it
+/// (128 + its number). A second signal during `then` ends the process at
+/// once, by that signal's own default; one during the kill could not, as
+/// the kill stops each process before it kills them all (tree.rs), and an
+/// exit between the two would leave them stopped for good. Once per process.
 pub fn on_termination(then: impl FnOnce(i32) + Send + 'static) -> Result<()> {
     ensure!(!HANDLED.swap(true, Ordering::SeqCst), "termination is handled once per process");
     let handled: Vec<libc::c_int> = TERMINATION.into_iter().filter(|&signal| !ignored(signal)).collect();
-    // set as the first arrives: from then on each takes its default action
+    // set once what the process started is killed: from then on each takes
+    // its default action
     let ending = Arc::new(AtomicBool::new(false));
     for &signal in &handled {
         signal_hook::flag::register_conditional_default(signal, Arc::clone(&ending))?;
@@ -48,6 +52,7 @@ pub fn on_termination(then: impl FnOnce(i32) + Send + 'static) -> Result<()> {
     std::thread::Builder::new().name("termination".into()).spawn(move || {
         // nothing closes the iterator: this returns on a signal
         let Some(signal) = signals.forever().next() else { return };
+        crate::kill_started();
         ending.store(true, Ordering::SeqCst);
         then(signal);
         std::process::exit(128 + signal);
@@ -197,5 +202,67 @@ mod tests {
         let (status, rest) = ended(c, out);
         assert_eq!(status.signal(), Some(libc::SIGTERM), "the second ended it by the signal itself: {status:?} {rest}");
         assert!(t0.elapsed() < WAIT / 2, "at once, not after the work");
+    }
+
+    /// A process's state letter from /proc (`T` stopped, `Z` a zombie), or
+    /// `None` once it is gone.
+    #[cfg(target_os = "linux")]
+    fn state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat[stat.rfind(')')? + 2..].chars().next()
+    }
+
+    /// Goal (FIN-457): a second signal while what the process started is
+    /// being killed (each stopped, then SIGKILLed: tree.rs) does not end
+    /// the process early, which would leave them stopped for good, holding
+    /// their memory and ports, deaf to another SIGTERM. Method: a child that
+    /// started a tree (a process that detaches another, as miniflare starts
+    /// Chrome) is sent SIGTERM; a `ps` of its own sends it the second from
+    /// inside the walk, once the tree's root is stopped (its second call:
+    /// the first found the root). None of the tree is left, stopped or not,
+    /// and the child ends as the first signal would have it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_second_signal_while_the_started_are_killed_leaves_none() {
+        const TEST: &str = "signals::tests::a_second_signal_while_the_started_are_killed_leaves_none";
+        // the child's `ps`, which counts its calls: named for the parent
+        let shim = |parent: u32| std::env::temp_dir().join(format!("devstack-second-signal-{parent}"));
+        if std::env::var(CHILD).as_deref() == Ok("tree") {
+            let script = "setsid sh -c 'sleep 60 & echo $$ $!; wait' & wait";
+            let mut tree = Command::new("sh").args(["-c", script]).stdout(Stdio::piped()).stdin(Stdio::null()).spawn().expect("the tree starts");
+            let mut line = String::new();
+            BufReader::new(tree.stdout.take().expect("its stdout")).read_line(&mut line).expect("its pids");
+            let path = std::env::var_os("PATH").expect("a PATH");
+            let real = std::env::split_paths(&path).map(|d| d.join("ps")).find(|p| p.is_file()).expect("a ps");
+            let dir = shim(std::os::unix::process::parent_id());
+            std::fs::create_dir_all(&dir).expect("the shim's directory");
+            let ps = format!("#!/bin/sh\nn=$(($(cat '{d}/calls' 2>/dev/null || echo 0) + 1))\necho $n > '{d}/calls'\n[ $n = 2 ] && kill -TERM $PPID\nexec '{real}' \"$@\"\n", d = dir.display(), real = real.display());
+            std::fs::write(dir.join("ps"), ps).expect("the shim");
+            std::fs::set_permissions(dir.join("ps"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("the shim runs");
+            // the walk's `ps` (tree.rs) is the shim from here on
+            std::env::set_var("PATH", std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(&path))).expect("a PATH"));
+            on_termination(|_| {}).expect("handled");
+            println!("ready; {} {}", tree.id(), line.trim());
+            std::thread::sleep(WAIT);
+            // no signal came: the tree is this child's to end
+            let _ = tree.kill();
+            let _ = tree.wait();
+            return;
+        }
+        let (c, out, ready) = spawn(TEST, "tree", false);
+        let tree: Vec<u32> = ready.trim_start_matches("ready; ").split_whitespace().map(|p| p.parse().expect("a pid")).collect();
+        assert_eq!(tree.len(), 3, "{ready}");
+        signal(&c, libc::SIGTERM);
+        let (status, rest) = ended(c, out);
+        let calls = std::fs::read_to_string(shim(std::process::id()).join("calls")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(shim(std::process::id()));
+        let left: Vec<(u32, char)> = tree.iter().filter_map(|&pid| state(pid).filter(|s| *s != 'Z').map(|s| (pid, s))).collect();
+        for &(pid, _) in &left {
+            // SAFETY: kill(2) on a process this test's child started, still there
+            unsafe { libc::kill(libc::pid_t::try_from(pid).expect("a pid"), libc::SIGKILL) };
+        }
+        assert!(left.is_empty(), "left behind (pid, state): {left:?}; the child: {status:?} {rest}");
+        assert!(calls.trim().parse::<u32>().is_ok_and(|n| n >= 2), "the second signal was sent from inside the walk: {calls:?}");
+        assert_eq!(status.code(), Some(128 + libc::SIGTERM), "it ended as the first signal, after the kill: {rest}");
     }
 }
