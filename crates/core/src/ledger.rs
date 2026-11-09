@@ -310,8 +310,12 @@ pub struct Swept {
 }
 
 /// Why a mutation or a question was refused. A refusal changes nothing.
+/// Written tagged by `refused`; read as its fields (`RefusedFields`), not
+/// as serde's internally tagged reading, which buffers each refusal to find
+/// its tag: about 20 KB more of the cell's Wasm. Both read every form a
+/// release has written (a batch's stored answer holds its rows' refusals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "refused", rename_all = "snake_case")]
+#[serde(tag = "refused", rename_all = "snake_case", try_from = "RefusedFields")]
 pub enum Refused {
     /// The request breaks a rule of its shape.
     Invalid { what: Invalid },
@@ -355,6 +359,71 @@ pub enum Refused {
     /// the cell answers it for a ledger it emptied, so a row still on its
     /// way (a meter batch in the queue) is acknowledged, not retried.
     Wiped,
+}
+
+/// A `Refused` as it is read: every kind's fields, flat. A field it does
+/// not name is passed over, as the tagged reading passed it over.
+#[derive(Deserialize)]
+struct RefusedFields {
+    refused: RefusedKind,
+    what: Option<Invalid>,
+    current: Option<u64>,
+    why: Option<Why>,
+    cap: Option<i64>,
+    spent: Option<i64>,
+    budget: Option<i64>,
+}
+
+/// A refusal's `refused`: read as an identifier, a string alone, as the
+/// tagged reading read its tag (a derived enum also takes `{"<kind>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "snake_case")]
+enum RefusedKind {
+    Invalid,
+    ConflictingBody,
+    StaleBook,
+    StaleSeat,
+    NoPrice,
+    TooLarge,
+    Stale,
+    GuestPayer,
+    GuestCreates,
+    AgentsStopped,
+    ReadOnly,
+    CapReached,
+    PersonsOnly,
+    OrgsOnly,
+    BudgetReached,
+    Wiped,
+}
+
+impl TryFrom<RefusedFields> for Refused {
+    type Error = String;
+
+    /// The refusal its `refused` names, with each of its fields.
+    fn try_from(f: RefusedFields) -> Result<Refused, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
+        }
+        Ok(match f.refused {
+            RefusedKind::Invalid => Refused::Invalid { what: need(f.what, "what")? },
+            RefusedKind::ConflictingBody => Refused::ConflictingBody,
+            RefusedKind::StaleBook => Refused::StaleBook { current: u32::try_from(need(f.current, "current")?).map_err(|_| "a book's version is a u32".to_string())? },
+            RefusedKind::StaleSeat => Refused::StaleSeat { current: need(f.current, "current")? },
+            RefusedKind::NoPrice => Refused::NoPrice,
+            RefusedKind::TooLarge => Refused::TooLarge,
+            RefusedKind::Stale => Refused::Stale,
+            RefusedKind::GuestPayer => Refused::GuestPayer,
+            RefusedKind::GuestCreates => Refused::GuestCreates,
+            RefusedKind::AgentsStopped => Refused::AgentsStopped { why: need(f.why, "why")? },
+            RefusedKind::ReadOnly => Refused::ReadOnly { why: need(f.why, "why")? },
+            RefusedKind::CapReached => Refused::CapReached { cap: need(f.cap, "cap")?, spent: need(f.spent, "spent")? },
+            RefusedKind::PersonsOnly => Refused::PersonsOnly,
+            RefusedKind::OrgsOnly => Refused::OrgsOnly,
+            RefusedKind::BudgetReached => Refused::BudgetReached { budget: need(f.budget, "budget")?, spent: need(f.spent, "spent")? },
+            RefusedKind::Wiped => Refused::Wiped,
+        })
+    }
 }
 
 /// The rule a request broke.

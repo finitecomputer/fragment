@@ -1292,7 +1292,86 @@ fn a_queued_batch_missing_or_malformed_is_still_refused() {
         let (text, e) = refused(from, to);
         assert!(e.contains(says), "{text}: {e}");
     }
+    // a usage's kind an object, not its name, for every kind the outbox carries
+    let mut kinds = 0;
+    for kind in ["tokens", "neurons", "awake", "storage", "requests", "dynamic_workers", "browser", "images", "key"] {
+        let named = format!(r#""kind":"{kind}""#);
+        if OUTBOX.contains(&named) {
+            kinds += 1;
+            let (text, e) = refused(&named, &format!(r#""kind":{{"{kind}":null}}"#));
+            assert!(e.contains("invalid type: map"), "{text}: {e}");
+        }
+    }
+    assert_eq!(kinds, 9, "the outbox carries every kind");
     assert!(MeterBatch::from_queue(b"{}").is_err());
     assert!(MeterBatch::from_queue(br#"{"meter":7,"payer":"p","seq":0,"source":""}"#).is_err());
     assert!(MeterBatch::from_queue(b"not json").is_err());
+}
+
+/// What a ledger has stored and answered, byte for byte as the releases
+/// before reading a usage and a refusal as their fields wrote it (FIN-453
+/// M7), in `stored/`: `entries.jsonl`, `entries.entry` rows from a local
+/// e2e run (the ledger, billing, computers, keys and icons lanes; each
+/// identity in them that run's own); `answers.jsonl`, `batches.answer`
+/// from that run and from `Ledger::meter` refusing a row each way it does,
+/// then those answers as the ledger's route sends them (`to_value`: keys
+/// sorted, a tag no longer first); `refused.jsonl`, every refusal as an
+/// answer stores it; and `refusals.jsonl`, each as the ledger's refusal
+/// body carries it. Each reads, and writes back, as it was.
+#[test]
+fn what_a_ledger_stored_and_answered_reads_back_byte_for_byte() {
+    fn lines(text: &str) -> impl Iterator<Item = &str> {
+        text.lines().filter(|l| !l.is_empty())
+    }
+    fn read<'a, T: Deserialize<'a>>(line: &'a str) -> T {
+        serde_json::from_slice(line.as_bytes()).unwrap_or_else(|e| panic!("{line}: {e}"))
+    }
+    let entries: Vec<Entry> = lines(include_str!("stored/entries.jsonl")).map(read).collect();
+    for (line, entry) in lines(include_str!("stored/entries.jsonl")).zip(&entries) {
+        assert!(matches!(entry, Entry::Row { .. }), "{line}");
+        assert_eq!(serde_json::to_string(entry).unwrap(), line, "an entry is stored as it was");
+    }
+    let kinds: std::collections::BTreeSet<String> = entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Row { row, .. } => serde_json::to_value(&row.usage).ok().and_then(|u| u["kind"].as_str().map(str::to_string)),
+            Entry::Before { .. } => None,
+        })
+        .collect();
+    assert_eq!(kinds.len(), 9, "every kind of usage is among the stored rows: {kinds:?}");
+    for line in lines(include_str!("stored/answers.jsonl")) {
+        let answer: Metered = read(line);
+        let (stored, sent) = (serde_json::to_string(&answer).unwrap(), serde_json::to_value(&answer).unwrap().to_string());
+        assert!(line == stored || line == sent, "an answer reads back as it was stored or sent: {line}");
+    }
+    let refused: Vec<Refused> = lines(include_str!("stored/refused.jsonl")).map(read).collect();
+    for (line, why) in lines(include_str!("stored/refused.jsonl")).zip(&refused) {
+        assert_eq!(serde_json::to_string(why).unwrap(), line, "a refusal is stored as it was");
+    }
+    #[derive(Deserialize)]
+    struct Body {
+        error: ErrorCode,
+        message: String,
+        refused: Refused,
+    }
+    for (line, why) in lines(include_str!("stored/refusals.jsonl")).zip(&refused) {
+        let body: Body = read(line);
+        assert_eq!((body.refused, body.error, body.message.as_str()), (*why, why.code(), why.message().as_str()), "{line}");
+        assert_eq!(serde_json::json!({ "error": body.error, "message": body.message, "refused": body.refused }).to_string(), line);
+    }
+    assert_eq!(refused.len(), 23, "every refusal, each `Invalid` its own");
+}
+
+/// A refusal's `refused` is a name, a string, as the tagged reading's tag
+/// was: an object (`{"no_price": null}`) is no refusal, for every one
+/// (FIN-453 M7, review).
+#[test]
+fn a_refusal_is_named_by_a_string_alone() {
+    for line in include_str!("stored/refused.jsonl").lines().filter(|l| !l.is_empty()) {
+        let kind = serde_json::from_str::<serde_json::Value>(line).unwrap()["refused"].as_str().unwrap().to_string();
+        let object = line.replacen(&format!("\"refused\":\"{kind}\""), &format!("\"refused\":{{\"{kind}\":null}}"), 1);
+        assert_ne!(object, line);
+        let e = serde_json::from_slice::<Refused>(object.as_bytes()).map(|r| format!("{r:?}")).expect_err(&object).to_string();
+        assert!(e.contains("invalid type: map"), "{object}: {e}");
+    }
 }
