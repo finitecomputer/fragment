@@ -5305,6 +5305,7 @@ mod tests {
                             reached[10] += 1;
                         }
                         ComputerNotice::DiskFilling { total, free } => assert!(!disk_clear(*total, *free), "a disk told filling has no clear room (seed {seed0}): {n:?}"),
+                        ComputerNotice::KeyPaused { .. } => panic!("a lifecycle tells no key's pause (seed {seed0})"),
                     }
                 }
                 // its owner puts an update off, now and then

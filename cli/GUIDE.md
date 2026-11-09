@@ -898,6 +898,11 @@ why: replay it after a top-up or next month.
   edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
+- Each of the platform's shared keys (ElevenLabs, xAI, …) pauses once your
+  agents' calls on it spend $5 in an hour (429 `rate_limited`, reason
+  `key_paused`); nothing else does. Its calls resume as the hour passes,
+  or at once when you allow more: the notice in your agent's chat has a
+  button, or `fragment ledger key-cap`. Only you can, never your agents.
 
 Before a job that spends (speech, images, searches, many model calls),
 quote it: `fragment quote` prices a plan with the same book your ledger
@@ -919,6 +924,7 @@ fragment quote cheap 2000in 500out 40x        # 40 turns on the cheap tier
 fragment quote                                # what you have left, alone
 fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
+fragment ledger key-cap elevenlabs 20   # a shared key's cap on your computer: $20 an hour (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
@@ -1113,7 +1119,7 @@ it gets no share link, no one else, and no invite (403
 fragment login [--force] [--no-wait] [--no-browser]
 fragment whoami                          fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W [--id ID]]
+fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive

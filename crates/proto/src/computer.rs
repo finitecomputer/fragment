@@ -607,6 +607,19 @@ pub enum ComputerNotice {
     /// that fills stops its agents from saving their work, so its owner is
     /// told well before.
     DiskFilling { total: u64, free: u64 },
+    /// A shared key its agents call is paused (FIN-448): its owner's calls
+    /// on `provider` were charged `spent_micros` this last hour, its cap
+    /// `cap_micros`, until `resumes_at` as the hour passes, or its owner
+    /// lifts the cap to `allow_micros` (none: the most already).
+    #[serde(rename_all = "camelCase")]
+    KeyPaused {
+        provider: String,
+        spent_micros: i64,
+        cap_micros: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_micros: Option<i64>,
+        resumes_at: i64,
+    },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as
@@ -624,6 +637,20 @@ pub struct RestartAsk {
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeen {
     pub life: u64,
+}
+
+/// `POST /api/computers/{id}/key-caps/{provider}`: its owner's hourly cap on
+/// a shared key (FIN-448). `from`, the cap a pause's notice showed: lifted
+/// one step, worked out by the computer, while it is still that one (a
+/// stale page changes nothing). Else `micros`, that cap, or none for the
+/// default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyCapAsk {
+    #[serde(default)]
+    pub from: Option<i64>,
+    #[serde(default)]
+    pub micros: Option<i64>,
 }
 
 /// `POST /api/computers/{id}/notices/later`: its owner put off the update
