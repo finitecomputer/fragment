@@ -293,13 +293,22 @@ impl FragmentCell {
             if req.method() != Method::Get {
                 return Err(CellError::invalid("read a channel with GET"));
             }
+            // `__channel/<c>`: a page; `__channel/<c>/newest`: its posters' newest
+            let (channel, newest) = match channel.strip_suffix("/newest") {
+                Some(c) => (c, true),
+                None => (channel, false),
+            };
             if !fragment_proto::valid_channel_name(channel) {
                 return Err(CellError::invalid("invalid channel name"));
             }
             let read = self.channel_read_role(channel)?;
             self.reader(&mut facts, caller, link, read).await?;
-            let (after, before, limit) = crate::channels::page_query(&url)?;
-            json_response(&self.channel_page(channel, after, before, limit)?)?
+            if newest {
+                json_response(&self.channel_newest(channel)?)?
+            } else {
+                let (after, before, limit) = crate::channels::page_query(&url)?;
+                json_response(&self.channel_page(channel, after, before, limit)?)?
+            }
         } else if path == "__members" {
             // who is in it, for a page (a chat's agents, its lead the first
             // added): viewers and up, as the API's list

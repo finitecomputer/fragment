@@ -169,7 +169,7 @@ struct Timeline {
     /// turn's steps outgrow: whether a turn runs (and Stop shows) never
     /// depends on how much of it is on screen.
     private(set) var turns: [TurnKey: TurnState] = [:]
-    /// The helpers its agents' turns started and that have not ended (HelpersBar.swift).
+    /// Each of its agents' newest helpers set (HelpersBar.swift).
     private(set) var helpers = Helpers()
     /// The oldest `work` record read (its seq and time): where reading
     /// earlier work goes on from, and how far back it reached.
@@ -195,9 +195,9 @@ struct Timeline {
     /// start was read, so no earlier page holds it to begin one again.
     static let maximumTurns = 4_096
 
-    /// A `work` record read back for the helpers working alone
-    /// (`ChatSession.recentHelpers`): what it says of a helper, and nothing
-    /// of the window, the turns or where earlier work goes on from.
+    /// A helpers set asked for alone (`ChatSession.newestHelpers`): what it
+    /// says of an agent's helpers, and nothing of the window, the turns or
+    /// where earlier work goes on from.
     mutating func learnHelper(_ record: ChannelRecord) {
         guard record.channel == "work" else { return }
         if helpers.learn(record) { revision &+= 1 }

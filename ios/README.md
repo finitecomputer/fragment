@@ -71,7 +71,7 @@ A physical phone reaches a platform over HTTPS; Release builds take nothing else
 - The launcher's one action records a voice memo until something is typed, then
   sends. A finished memo sends itself, there and in a chat, with any words typed;
   its chat is made as it records. A soft haptic tap marks a reply's new words.
-- Dismissible app sheets leave the conversation in place; a bounded in-memory
+- Dismissible app sheets (Reload, Share) leave the conversation in place; a bounded in-memory
   session cache retains composer drafts, pending post ids and cursors across navigation.
 - Native message author identities, Markdown, timestamps, long-press Reply/Copy/
   Share, quoted replies, file import, and AAC voice memos (five minutes maximum).
@@ -159,12 +159,25 @@ written by hand from docs/api.md.
 
 `FragmentUITests` drive what needs no server: Connect, an unreachable server,
 a server past loopback refused, and Home's composer above the keyboard after
-Your Apps and Back (an approved account at a closed loopback port). Each launches with `--ui-test` (Debug only):
+Your Apps and Back, with or without a sheet opened from Your Apps (an approved
+account at a closed loopback port). Each launches with `--ui-test` (Debug only):
 a Keychain service and Application Support folder of its own, emptied as it
 starts, and loopback alone, so a simulator's own account is never read and no
 other server is ever asked (`Sources/LaunchScope.swift`;
-`--ui-test-saved-account <origin>` seeds one, to show it unused). Flows against
-a paired account on the dev stack are their own suite.
+`--ui-test-saved-account <origin>` seeds one, to show it unused).
+
+`DevStackUITests` run against a dev stack, and skip without one. The test signs a
+new person in through the WorkOS fake, makes their apps, and approves the app's
+code at `/cli`. It checks that an app's page keeps what it saved (localStorage)
+when it is closed and opened again and after a relaunch (`--ui-test-keep`, Debug
+only, keeps the test's account as a relaunch does), that a todo's server write
+sticks, and that a new key's approval or a disconnect clears what pages kept. Forward the platform
+and the fake to the Mac, then name the platform to the test runner:
+
+```sh
+ssh -N -L 8790:127.0.0.1:8790 -L 8794:127.0.0.1:8794 linux
+TEST_RUNNER_FRAGMENT_DEV_HOST=http://127.0.0.1:8790 xcodebuild -project ios/Fragment.xcodeproj -scheme Fragment -destination "platform=iOS Simulator,id=$FRAGMENT_IOS_SIMULATOR" -derivedDataPath target/ios test -only-testing:FragmentUITests/DevStackUITests
+```
 
 The source of the generated project is `project.yml`. If changing project
 structure, use XcodeGen 2.42+ and commit its result:
