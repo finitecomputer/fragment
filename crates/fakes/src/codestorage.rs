@@ -145,6 +145,9 @@ struct State {
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
+    /// what each sabotaging commit writes (none: `competitor.txt`)
+    #[serde(skip)]
+    competitor: Option<Vec<(String, Option<Vec<u8>>)>>,
     /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
     #[serde(skip)]
     sabotage_after: u32,
@@ -744,7 +747,7 @@ impl Inner {
         } else if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
-            let competitor = [("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))];
+            let competitor = st.competitor.clone().unwrap_or_else(|| vec![("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))]);
             let (_, tip) = st.commit(url, Write { branch: "main", message: "competitor", author: "competitor", changes: &competitor, from: None });
             return cas_failed("main", &tip);
         }
@@ -1261,6 +1264,12 @@ impl CodeStorage {
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// `sabotage_commit_packs(n)`, each competitor's commit writing `files`
+    /// (path, bytes; `None` deletes) instead of `competitor.txt`.
+    pub fn sabotage_commit_packs_with(&self, n: u32, files: Vec<(String, Option<Vec<u8>>)>) {
+        self.with(|st| (st.sabotage, st.competitor) = (n, Some(files)));
     }
 
     /// Every commit pack answers 503 and lands nothing while `on`: a
