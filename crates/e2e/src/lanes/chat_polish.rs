@@ -1,5 +1,6 @@
 //! Rendering and history on a quiet chat, so pagination fixtures start no
-//! agent turns. Uses real channel writes, blobs, and the released page.
+//! agent turns. Uses real channel writes (its fixtures of hundreds or more
+//! through the `records` lever, `fill`), blobs, and the released page.
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -7,6 +8,7 @@ use crate::api::{Api, Call};
 use crate::browser::Browser;
 use crate::Suite;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 
 /// The PDF the media message attaches.
 const PREVIEW_PDF: &[u8] = include_bytes!("../../fixtures/chat-preview.pdf");
@@ -104,21 +106,21 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // More than the initial 400 records, then a fresh page: the browser's
     // live cursor keeps its end while a separate cursor pages backwards.
     chrome.close(page)?;
-    for i in 0..1005 {
+    let work = (0..1005).map(|i| {
         let body = match i {
             0 => json!({ "kind": "turn.start", "turn": "old-progress", "agent": agent }),
             1 => json!({ "kind": "turn.end", "turn": "old-progress", "agent": agent, "outcome": "stopped" }),
             _ => json!({ "kind": "history.marker", "turn": "work-marker", "agent": agent }),
         };
-        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("work-history-{i}"), "body": body })))?;
-        anyhow::ensure!(r.status == 200, "posting work history {i}: {r}");
-    }
-    for i in 0..415 {
+        (format!("work-history-{i}"), body)
+    });
+    fill(api, &name, agent, "work", work)?;
+    let history = (0..415).map(|i| {
         let mut body = json!({ "text": format!("History {i:03}") });
         if i == 414 { body["reply_to"] = json!(2); }
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("history-{i}"), "body": body })))?;
-        anyhow::ensure!(r.status == 200, "posting history {i}: {r}");
-    }
+        (format!("history-{i}"), body)
+    });
+    fill(api, &name, &api.identity(owner)?, "chat", history)?;
     let backwards = api.signed(owner, "GET", &format!("/api/f/{name}/channels/chat?before=20&limit=3"), None)?;
     let seqs: Vec<_> = backwards.body["records"].as_array().into_iter().flatten().filter_map(|r| r["seq"].as_i64()).collect();
     s.ok("backwards channel reads are exclusive, nearest first, returned in ascending display order", backwards.status == 200 && seqs == [17, 18, 19] && backwards.body["next"] == 17, &backwards);
@@ -385,6 +387,20 @@ fn quiet_agent(api: &Api, owner: &Keys, name: &str) -> Result<(Keys, String)> {
     let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })))?;
     anyhow::ensure!(r.status == 200, "adding the quiet agent to {name}: {r}");
     Ok((keys, id))
+}
+
+/// Posts on `channel` of chat `name`, `(id, body)` each, as `by` (an
+/// identity, a member) would post them, `limits::RECORDS_FILL_MAX` a call
+/// (the `records` lever, cell channels.rs `fill_records`: appended and
+/// published as a post is). A fixture of thousands of records then takes a
+/// few calls, where a post each took minutes (FIN-452).
+fn fill(api: &Api, name: &str, by: &str, channel: &str, posts: impl IntoIterator<Item = (String, Value)>) -> Result<()> {
+    let posts: Vec<Value> = posts.into_iter().map(|(id, body)| json!({ "id": id, "body": body })).collect();
+    for chunk in posts.chunks(limits::RECORDS_FILL_MAX) {
+        let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "records", "channel": channel, "principal": by, "records": chunk })))?;
+        anyhow::ensure!(r.status == 200, "filling {} records on {channel}: {r}", chunk.len());
+    }
+    Ok(())
 }
 
 /// Audit M7: an editor once re-posted an agent's pending approval card
@@ -864,25 +880,8 @@ pub(super) fn work_backfill(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     post(owner, "chat", "first".into(), json!({ "text": "The first message" }))?;
     post(&hand, "work", "deep-start".into(), json!({ "kind": "turn.start", "turn": "deep-progress", "agent": agent }))?;
     post(&hand, "work", "deep-end".into(), json!({ "kind": "turn.end", "turn": "deep-progress", "agent": agent, "outcome": "stopped" }))?;
-    // 11,100 more, eight posters at once
-    let filled: Vec<Result<()>> = std::thread::scope(|scope| {
-        let posters: Vec<_> = (0..8)
-            .map(|t| {
-                let post = &post;
-                let (hand, agent) = (&hand, &agent);
-                scope.spawn(move || -> Result<()> {
-                    for i in (t..11_100).step_by(8) {
-                        post(hand, "work", format!("filler-{i}"), json!({ "kind": "history.marker", "turn": "filler", "agent": agent }))?;
-                    }
-                    Ok(())
-                })
-            })
-            .collect();
-        posters.into_iter().map(|p| p.join().expect("a poster's thread")).collect()
-    });
-    for r in filled {
-        r?;
-    }
+    // 11,100 more
+    fill(api, &name, &agent, "work", (0..11_100).map(|i| (format!("filler-{i}"), json!({ "kind": "history.marker", "turn": "filler", "agent": agent }))))?;
     post(owner, "chat", "second".into(), json!({ "text": "The second message" }))?;
     post(owner, "chat", "third".into(), json!({ "text": "The third message" }))?;
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
@@ -938,10 +937,7 @@ pub(super) fn history_recovers(s: &mut Suite, api: &Api, owner: &Keys, session: 
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making the retry chat: {made}");
     s.owned(&made.body, owner);
-    for i in 0..500 {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("line-{i}"), "body": { "text": format!("Line {i:03}") } })))?;
-        anyhow::ensure!(r.status == 200, "posting line {i}: {r}");
-    }
+    fill(api, &name, &api.identity(owner)?, "chat", (0..500).map(|i| (format!("line-{i}"), json!({ "text": format!("Line {i:03}") }))))?;
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let fail = "if (window === window.top) { window.__failOlder = true; const real = window.fetch.bind(window); \
         window.fetch = (url, o) => { const u = String(url); if (window.__failOlder && u.includes('__channel/chat') && u.includes('before=')) { window.__failOlder = false; return Promise.reject(new TypeError('Failed to fetch')); } return real(url, o); }; }";
@@ -999,10 +995,7 @@ pub(super) fn window(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chro
     s.owned(&made.body, owner);
     let (hand, agent) = quiet_agent(api, owner, &name)?;
     let me = api.identity(owner)?;
-    for i in 0..800 {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("line-{i}"), "body": { "text": format!("Line {i:03}") } })))?;
-        anyhow::ensure!(r.status == 200, "posting line {i}: {r}");
-    }
+    fill(api, &name, &me, "chat", (0..800).map(|i| (format!("line-{i}"), json!({ "text": format!("Line {i:03}") }))))?;
     let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "long", "body": { "kind": "turn.start", "turn": "long", "agent": agent, "asker": me } })))?;
     anyhow::ensure!(r.status == 200, "starting a turn: {r}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
@@ -1204,29 +1197,11 @@ fn history_fixture(s: &mut Suite, api: &Api, owner: &Keys) -> Result<String> {
         post(&hand, "work", format!("{id}-start"), json!({ "kind": "turn.start", "turn": id, "agent": agent }))?;
         post(&hand, "work", format!("{id}-end"), json!({ "kind": "turn.end", "turn": id, "agent": agent, "outcome": "stopped" }))
     };
-    let filler = |from: usize, n: usize| -> Result<()> {
-        let posted: Vec<Result<()>> = std::thread::scope(|scope| {
-            let posters: Vec<_> = (0..8)
-                .map(|t| {
-                    let (post, hand, agent) = (&post, &hand, &agent);
-                    scope.spawn(move || -> Result<()> {
-                        for i in (from + t..from + n).step_by(8) {
-                            post(hand, "work", format!("filler-{i}"), json!({ "kind": "history.marker", "turn": "filler", "agent": agent }))?;
-                        }
-                        Ok(())
-                    })
-                })
-                .collect();
-            posters.into_iter().map(|p| p.join().expect("a poster's thread")).collect()
-        });
-        posted.into_iter().collect()
-    };
+    let filler = |from: usize, n: usize| fill(api, &name, &agent, "work", (from..from + n).map(|i| (format!("filler-{i}"), json!({ "kind": "history.marker", "turn": "filler", "agent": agent }))));
     post(owner, "chat", "m1".into(), json!({ "text": "Message 1" }))?;
     turn("deep-progress")?;
     filler(0, 1500)?;
-    for i in 2..=60 {
-        post(owner, "chat", format!("m{i}"), json!({ "text": format!("Message {i}") }))?;
-    }
+    fill(api, &name, &api.identity(owner)?, "chat", (2..=60).map(|i| (format!("m{i}"), json!({ "text": format!("Message {i}") }))))?;
     post(owner, "chat", "m61".into(), json!({ "text": "Message 61" }))?;
     turn("near-progress")?;
     filler(1500, 9)?;
@@ -1339,25 +1314,11 @@ fn blocks_fixture(s: &mut Suite, api: &Api, owner: &Keys, label: &str, plan: &[(
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making {label}: {made}");
     s.owned(&made.body, owner);
+    let me = api.identity(owner)?;
     let mut at = 0;
     for (kind, n) in plan {
-        let posted: Vec<Result<()>> = std::thread::scope(|scope| {
-            let posters: Vec<_> = (0..8)
-                .map(|t| {
-                    let (name, kind) = (&name, *kind);
-                    scope.spawn(move || -> Result<()> {
-                        for i in (at + t..at + n).step_by(8) {
-                            let body = if kind == "m" { json!({ "text": format!("Line {i}") }) } else { json!({ "kind": "prompt_response", "prompt": format!("p{i}"), "option": "c0" }) };
-                            let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("b{i}"), "body": body })))?;
-                            anyhow::ensure!(r.status == 200, "posting b{i}: {r}");
-                        }
-                        Ok(())
-                    })
-                })
-                .collect();
-            posters.into_iter().map(|p| p.join().expect("a poster's thread")).collect()
-        });
-        posted.into_iter().collect::<Result<Vec<()>>>()?;
+        let body = |i: usize| if *kind == "m" { json!({ "text": format!("Line {i}") }) } else { json!({ "kind": "prompt_response", "prompt": format!("p{i}"), "option": "c0" }) };
+        fill(api, &name, &me, "chat", (at..at + n).map(|i| (format!("b{i}"), body(i))))?;
         at += n;
     }
     Ok(name)

@@ -67,6 +67,7 @@
 use fragment_proto::{valid_channel_name, valid_op_id, Tier, BUILTIN_CHANNELS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 
 use crate::price::{ModelPrice, PriceBook, TokenPrices, Usage};
 use crate::steps::AiText;
@@ -297,18 +298,21 @@ pub const CLIENT_KEYS: [&str; 14] = [
     "messages", "tools", "tool_choice", "temperature", "top_p", "max_tokens", "max_completion_tokens", "stop", "response_format", "seed", "reasoning_effort", "parallel_tool_calls", "stream", "stream_options",
 ];
 
-/// The body a call to an OpenAI-compatible API sends: the bounded `input`'s
-/// fields of `CLIENT_KEYS` and no other, the slot's `body` fields over them,
-/// and the model's `id`.
-pub fn openai_request(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> Value {
+/// The body a call to an OpenAI-compatible API sends, as JSON: the bounded
+/// `input`'s fields of `CLIENT_KEYS` and no other, the slot's `body` fields
+/// over them, and the model's `id`. Written from the input's own values
+/// (a prompt is up to `MODEL_BODY_MAX_BYTES`), their keys sorted as a
+/// `Map`'s are.
+pub fn openai_request(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> String {
     let input = input.as_object().expect("a bounded input is an object");
-    let mut request: Map<String, Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).gathered();
+    let model = Value::from(id);
+    let mut request: BTreeMap<&str, &Value> = input.iter().filter(|(k, _)| CLIENT_KEYS.contains(&k.as_str())).map(|(k, v)| (k.as_str(), v)).gathered();
     for (k, v) in body.into_iter().flatten() {
         assert!(!ROUTE_KEYS.contains(&k.as_str()), "a slot's body names none of the route's keys (`check`)");
-        request.insert(k.clone(), v.clone());
+        request.insert(k, v);
     }
-    request.insert("model".into(), json!(id));
-    Value::Object(request)
+    request.insert("model", &model);
+    serde_json::to_string(&request).expect("a JSON value serializes")
 }
 
 impl Upstream {
@@ -2956,7 +2960,7 @@ mod tests {
             let capped = routed.capped(Named::Tier(Tier::Cheap)).unwrap();
             let Upstream::Openai { model, body, .. } = capped.model.upstream.clone() else { panic!("OpenRouter's tier is an OpenAI-compatible API's") };
             let b = bound(capped, call(asked), true).unwrap();
-            assert_eq!(openai_request(&b.input, &model, body.as_ref())["reasoning_effort"], sent, "OpenRouter, asked {asked:?}");
+            assert_eq!(sent_json(&b.input, &model, body.as_ref())["reasoning_effort"], sent, "OpenRouter, asked {asked:?}");
         }
     }
 
@@ -3450,7 +3454,7 @@ mod tests {
             asked.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
         }
         let b = bound(tier, asked, true).unwrap();
-        let sent = openai_request(&b.input, model, body.as_ref());
+        let sent = sent_json(&b.input, model, body.as_ref());
         let mut want = kept.as_object().cloned().unwrap();
         want.extend([("max_tokens".into(), json!(99)), ("reasoning_effort".into(), json!("low")), ("stream".into(), json!(true)), ("stream_options".into(), json!({ "include_usage": true }))]);
         want.insert("provider".into(), routing()["provider"].clone());
@@ -3458,7 +3462,7 @@ mod tests {
         assert_eq!(sent, Value::Object(want.clone()), "the client's chat fields, the route's bounds, the deployment's routing");
         assert_eq!(sent["provider"]["max_price"], json!({ "prompt": 0.15, "completion": 0.5 }));
         // no body: the same fields, no routing, and still none of the client's extras
-        let plain = openai_request(&b.input, FINITE_PRIVATE_FLASH, None);
+        let plain = sent_json(&b.input, FINITE_PRIVATE_FLASH, None);
         want.remove("provider");
         want.insert("model".into(), json!(FINITE_PRIVATE_FLASH));
         assert_eq!(plain, Value::Object(want));
@@ -3470,9 +3474,39 @@ mod tests {
         // a job's text step, through the same bound and request
         let t: AiText = serde_json::from_value(json!({ "prompt": "the notes", "tier": "medium" })).unwrap();
         let step = bound(models.capped(Named::Tier(Tier::Medium)).unwrap(), text_body(&t).unwrap(), true).unwrap();
-        let sent = openai_request(&step.input, OPENROUTER_FLASH, body.as_ref());
+        let sent = sent_json(&step.input, OPENROUTER_FLASH, body.as_ref());
         assert_eq!((sent["provider"].clone(), sent["messages"][0]["content"].clone(), sent["model"].clone()), (routing()["provider"].clone(), json!("the notes"), json!(OPENROUTER_FLASH)));
         assert_eq!(sent.as_object().unwrap().len(), step.input.as_object().unwrap().len() + 2, "a step sends nothing the allowlist drops");
+    }
+
+    /// What `openai_request` sends, read back.
+    fn sent_json(input: &Value, id: &str, body: Option<&Map<String, Value>>) -> Value {
+        serde_json::from_str(&openai_request(input, id, body)).expect("a request is JSON")
+    }
+
+    /// Goal: the bytes a call to an OpenAI-compatible API sends are pinned:
+    /// its fields in their order, numbers, escapes and other scripts as
+    /// they are written. Method: a call with a picture, a float, a newline
+    /// and a quote in its words, bounded on OpenRouter's tier, with its
+    /// slot's body and without.
+    #[test]
+    fn a_calls_request_bytes_are_pinned() {
+        let models = openrouter();
+        let tier = models.capped(Named::Tier(Tier::Cheap)).unwrap();
+        let Upstream::Openai { model, body, .. } = tier.model.upstream else { panic!("OpenRouter's tier is an OpenAI-compatible API's") };
+        let asked = json!({
+            "model": "cheap", "temperature": 0.7, "seed": 7, "provider": { "order": ["dear"] },
+            "messages": [
+                { "role": "system", "content": "say \"hi\"\nthen stop" },
+                { "role": "user", "content": [{ "type": "text", "text": "héllo, 世界 \u{1F600}" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }] },
+            ],
+            "tools": [{ "type": "function", "function": { "name": "terminal", "parameters": { "type": "object", "properties": { "command": { "type": "string" } } } } }],
+        });
+        let b = bound(tier, asked, true).unwrap();
+        let routed = r#"{"max_tokens":16384,"messages":[{"content":"say \"hi\"\nthen stop","role":"system"},{"content":[{"text":"héllo, 世界 😀","type":"text"},{"image_url":{"url":"data:image/png;base64,iVBORw0KGgo="},"type":"image_url"}],"role":"user"}],"model":"z-ai/glm-5.3-flash","provider":{"max_price":{"completion":0.5,"prompt":0.15},"quantizations":["fp8","bf16"],"require_parameters":true,"sort":"throughput","zdr":true},"reasoning_effort":"low","seed":7,"stream":true,"stream_options":{"include_usage":true},"temperature":0.7,"tools":[{"function":{"name":"terminal","parameters":{"properties":{"command":{"type":"string"}},"type":"object"}},"type":"function"}]}"#;
+        assert_eq!(openai_request(&b.input, model, body.as_ref()), routed);
+        let plain = openai_request(&b.input, FINITE_PRIVATE_FLASH, None);
+        assert!(plain.contains(&format!(r#""model":{}"#, json!(FINITE_PRIVATE_FLASH))) && !plain.contains("provider"), "{plain}");
     }
 
     /// Goal: OpenRouter's stream meters as any OpenAI-compatible API's: its
