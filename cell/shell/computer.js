@@ -203,7 +203,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     } else if (kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else {
-      copy.append(el("strong", null, computerFailed() ? "Couldn't refresh your computer" : "Couldn't refresh your apps"));
+      copy.append(el("strong", null, computerFailed() || reads().noticesFailed ? "Couldn't refresh your computer" : "Couldn't refresh your apps"));
       const again = el("button", "primary", "Try again");
       again.type = "button";
       again.dataset.action = "refresh";
@@ -228,7 +228,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     // a notice a restart answers waits while it runs; one whose time passed is gone
     const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
     counting = [];
-    const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed ? ["refresh"] : [];
+    // a read that failed, its notices' too: what the last said stays, under its line
+    const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
     const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.map(noticeRow)];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;

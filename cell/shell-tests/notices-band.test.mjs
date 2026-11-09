@@ -65,8 +65,8 @@ function page(t, first, c = clock(Date.now())) {
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => (id === "computer-notices" ? box : null) };
   const calls = [];
   const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok: (v) => ok(v), fail: (e) => fail(e) }));
-  const reads = { asked: 0, shown: 0, updating: false, listFailed: false };
-  const shell = { notices: first, computer: { computer: COMPUTER, phase: "awake", generation: 3, notices: [] } };
+  const reads = { asked: 0, shown: 0, updating: false, listFailed: false, noticesFailed: false };
+  const shell = { notices: first, reads, computer: { computer: COMPUTER, phase: "awake", generation: 3, notices: [] } };
   let ui = null;
   // shell.js `load`, as far as the notices: an older read's answer that
   // comes after a newer one's is not shown
@@ -207,4 +207,16 @@ test("the computer's Restart is its restart, followed where the notice was, and 
   assert.deepEqual([p.calls[0].method, p.calls[0].path, p.calls[0].body], ["POST", RESTART, { generation: 3 }], "the restart's own ask, of the start shown");
   assert.deepEqual(p.shown().map((r) => r.id ?? r.words[0]), ["Restarting your computer", "disk_filling"], "its progress where the update was; the disk's notice stays");
   assert.deepEqual(p.shown()[0].words, ["Restarting your computer"]);
+});
+
+test("the notices' read failing: what it last said stays, under the page's own Couldn't refresh line with Try again", async (t) => {
+  const update = { id: "update:abc", kind: "update", level: "info", title: "An update is ready", actions: [] };
+  const p = page(t, [update]);
+  p.ui.renderComputer();
+  assert.deepEqual(p.shown().map((r) => r.id), ["update:abc"]);
+  // shell.js `load`: its notices read failed (a blip, a 5xx), the others answered
+  p.shell.reads.noticesFailed = true;
+  p.ui.renderComputer();
+  assert.deepEqual(p.shown().map((r) => r.id ?? r.words[0]), ["Couldn't refresh your computer", "update:abc"]);
+  assert.deepEqual(p.shown()[0].actions, [{ label: "Try again", enabled: true }]);
 });

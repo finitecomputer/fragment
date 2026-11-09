@@ -1902,7 +1902,7 @@ const { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirst
 // Retry only a confirmed release mismatch, at 3, 6, 12, 24, then 30s,
 // bounded by eight minutes; other failures keep their usual Try again.
 const READ_DEPLOY_WAIT_MS = 8 * 60_000;
-const reads = { asked: 0, shown: 0, since: null, wait: 3000, timer: null, updating: false, listFailed: false };
+const reads = { asked: 0, shown: 0, since: null, wait: 3000, timer: null, updating: false, listFailed: false, noticesFailed: false };
 async function shellRead(path) {
   try { return { value: await api("GET", path) }; }
   catch (error) { return { error, deploying: error.status === 503 && error.code === "deploying" }; }
@@ -1954,7 +1954,9 @@ async function load(changed = false) {
     }
     state.support = computers.support ?? null;
   }
-  // what they are told (FIN-458): failed, what the last read said stays
+  // what they are told (FIN-458): failed, what the last read said stays,
+  // and the band says it couldn't refresh, with Try again (computer.js)
+  reads.noticesFailed = !noticesRead.value;
   if (noticesRead.value) state.notices = noticesRead.value.notices ?? [];
   renderChats();
   threads.refresh().catch(() => {});
