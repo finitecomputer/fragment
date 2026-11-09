@@ -105,6 +105,8 @@ pub fn hold(doc: &Value, lock: &str) -> Result<BTreeSet<String>> {
                 }
                 each.push(("the frames it sends", receives.round_trip, op.pointer("/x-fragment-socket/receives")));
             }
+            // bytes: no JSON, so no default to hold
+            Answer::Bytes { .. } => {}
         }
         for (what, round_trip, schema) in each {
             let label = format!("{} {what}", route.operation);

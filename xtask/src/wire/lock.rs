@@ -157,6 +157,11 @@ pub fn project_with(doc: &Value, extra: &[String]) -> Result<String> {
                 let t = p.render(body, &format!("{name}.response"), Direction::Out)?;
                 p.lines.insert(format!("route {name} response {t}"));
             }
+            if let Some(media) = op.get("x-fragment-bytes") {
+                let media = media.as_str().context("a bytes answer names its media type")?;
+                anyhow::ensure!(!media.is_empty() && !media.contains(char::is_whitespace), "{name}: a media type is one word, not {media:?}");
+                p.lines.insert(format!("route {name} bytes {media}"));
+            }
             if let Some(socket) = op.get("x-fragment-socket") {
                 if !socket["sends"].is_null() {
                     let t = p.render(&socket["sends"], &format!("{name}.sends"), Direction::In)?;
@@ -888,7 +893,7 @@ pub fn breaches(base: &Facts, head: &Facts, retired: &BTreeSet<String>) -> Vec<B
         for scheme in was.accepts.difference(&now.accepts) {
             breach(format!("route {op} accepts {scheme}"), "the route no longer takes this credential: an older client still sends it");
         }
-        for slot in ["path", "query", "request", "response", "sends", "receives"] {
+        for slot in ["path", "query", "request", "response", "bytes", "sends", "receives"] {
             match (was.shapes.get(slot), now.shapes.get(slot)) {
                 (Some(a), Some(b)) if a == b => {}
                 (Some(a), _) => breach(format!("route {op} {slot} {a}"), "the route's shape changed: an older client sends or reads the one it had"),

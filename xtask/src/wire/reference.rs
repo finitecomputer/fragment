@@ -96,6 +96,9 @@ pub fn render(doc: &Value) -> Result<String> {
             if let Some(answer) = op.pointer("/responses/200/content/application~1json/schema") {
                 let _ = writeln!(md, "- Answer: {}", linked(&type_of(answer, id), schemas));
             }
+            if let Some(media) = op.get("x-fragment-bytes").and_then(Value::as_str) {
+                let _ = writeln!(md, "- Answer: bytes (`{media}`); a `Range` asked is answered 206, that range alone");
+            }
             if let Some(socket) = op.get("x-fragment-socket") {
                 if !socket["sends"].is_null() {
                     let _ = writeln!(md, "- A WebSocket; sends: {}", linked(&type_of(&socket["sends"], id), schemas));

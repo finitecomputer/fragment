@@ -1955,6 +1955,24 @@ then. Their pages are told when notices change (`watch`'s `changed`).
 | --- | --- | --- |
 | `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`; none while they have no computer |
 
+## The finite.computer move (docs/migrations.md)
+
+Removable, with the move (the debt ledger). Its shapes are
+`fragment_proto::migrations`; what each route means, and the state
+machine behind them, are docs/migrations.md. Without the deployment's
+`migrations`, each is 404.
+
+| method & path | who | answer |
+| --- | --- | --- |
+| `PUT /api/migrations/mover/roster` | the mover (NIP-98 by `migrations.mover`'s key; anyone else 403) | `Roster` → `RosterTaken {bound, withdrawn, replay}` |
+| `GET /api/migrations/mover/mailbox` | the mover | → `Mailbox {commands}`, at most `MAILBOX_MAX` |
+| `POST /api/migrations/mover/agents/{old}/report` | the mover | `Report {command, seq, event}` → `Reported {state, attempt, taken}`; another than the current command 409 |
+| `POST /api/migrations/stages/{stage}/open` | the agent the move is bound to, while it imports (NIP-98) | → `StageOpened {stage, manifest}` |
+| `GET /api/migrations/stages/{stage}/zip` | the same | the zip; `Range` → 206 |
+| `POST /api/migrations/stages/{stage}/done` | the same | `StageDone {ok, report_sha256?, why?}` → `MoveAt {state}` |
+| `GET /api/admin/migrations` | an operator | → `AdminMoves {moves, next?}` (`?after=<old>`) |
+| `POST /api/admin/migrations/{old}/retry\|restart-old\|retire\|withdraw` | an operator | → `AdminMove` |
+
 ## Computers (docs/computers.md)
 
 A person's computer runs an image and the agent fragments assigned to it;
