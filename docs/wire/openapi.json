@@ -18,6 +18,15 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "BasicHalf": {
+        "description": "Which half of HTTP basic auth (`user:password`) a secret is.",
+        "enum": [
+          "user",
+          "password"
+        ],
+        "type": "string",
+        "x-fragment-direction": "both"
+      },
       "ChannelNewest": {
         "description": "`GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):\neach poster's newest record of each kind the channel keeps the newest\nof (`ChannelDecl::newest`), the newest first, at most\n`limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past\nits retention) is none; a channel that keeps no kind answers none.",
         "properties": {
@@ -1757,6 +1766,58 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Place": {
+        "additionalProperties": false,
+        "description": "Where a secret goes on a request: one of a header in a format\n(`{\"header\": \"authorization\", \"format\": \"Bearer {}\"}`), a query\nparameter (`{\"query\": \"key\"}`), a half of basic auth (`{\"basic\":\n\"password\"}`), or a NIP-98 signature over the request (`{\"sign\":\n\"nip98\"}`: the Vault signs, its key never leaves it). None of them,\n`Authorization: Bearer {}`.",
+        "properties": {
+          "basic": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BasicHalf"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "format": {
+            "default": null,
+            "description": "The header's value, `{}` the secret; with `header` alone, `{}`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "header": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sign": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Signing"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object",
+        "x-fragment-direction": "both"
+      },
       "PostRecord": {
         "additionalProperties": false,
         "description": "`POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a\nrecord the platform appends as the poster. `id` is the poster's own\n(`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the\nrecord it appended and appends nothing; with another body it is 409.",
@@ -1832,6 +1893,42 @@
         "type": "object",
         "x-fragment-direction": "in"
       },
+      "PutSecret": {
+        "additionalProperties": false,
+        "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Its\nhosts, place and agents are set only with its value, so no one who\ncannot read a value sends it anywhere its setter did not mean. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
+        "properties": {
+          "agents": {
+            "description": "The agents that may use it, each by its fragment's name: at least\none (Paul, 2026-11-09: per agent).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hosts": {
+            "description": "The only hosts it is ever sent to (exact DNS names); none, it is\nparked and fills nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "place": {
+            "$ref": "#/components/schemas/Place",
+            "default": {},
+            "description": "Where it goes on a request; none, `Authorization: Bearer {}`."
+          },
+          "value": {
+            "description": "The value: a printable token, or, for `place.sign`, a Nostr secret\nkey as 64 hex.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "hosts",
+          "agents"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
       "Reason": {
         "description": "A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.",
         "enum": [
@@ -1898,6 +1995,76 @@
         "required": [
           "fragments",
           "messages"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Secret": {
+        "description": "A secret as its person reads it: everything but its value.",
+        "properties": {
+          "agents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "place": {
+            "$ref": "#/components/schemas/Place"
+          },
+          "setAt": {
+            "description": "When its value was set, in ms since the epoch.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "hosts",
+          "place",
+          "agents",
+          "setAt"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "SecretList": {
+        "description": "`GET /api/vault`: the person's secrets, by name.",
+        "properties": {
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/Secret"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "SecretRemoved": {
+        "description": "`DELETE /api/vault/{secret}`: whether there was one to remove.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "removed"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -1999,6 +2166,17 @@
         ],
         "type": "object",
         "x-fragment-direction": "out"
+      },
+      "Signing": {
+        "description": "A signature a secret makes over a request.",
+        "oneOf": [
+          {
+            "const": "nip98",
+            "description": "NIP-98 HTTP auth (kind 27235) over the request's URL, method and\nbody, in `Authorization: Nostr …`.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "both"
       },
       "Until": {
         "description": "A time a notice counts down to: a client shows `said`, then how long\nuntil `at` (\" in 23 min\"), live, and drops the notice once it passes.",
@@ -3754,6 +3932,292 @@
         ]
       }
     },
+    "/api/vault": {
+      "get": {
+        "operationId": "vault.list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The signer's secrets, by name, each with its hosts, place and agents: never a value.",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
+    "/api/vault/{secret}": {
+      "delete": {
+        "operationId": "vault.remove",
+        "parameters": [
+          {
+            "description": "The secret's name: 1 to 32 of a-z, 0-9 and -.",
+            "in": "path",
+            "name": "secret",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretRemoved"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Removes a secret: its agents' next use of it is refused.",
+        "tags": [
+          "vault"
+        ]
+      },
+      "put": {
+        "operationId": "vault.put",
+        "parameters": [
+          {
+            "description": "The secret's name: 1 to 32 of a-z, 0-9 and -.",
+            "in": "path",
+            "name": "secret",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutSecret"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Secret"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
     "/f/{name}/__live": {
       "get": {
         "operationId": "live.open",
@@ -3892,6 +4356,10 @@
     {
       "description": "A fragment's live socket: records as they are appended, presence, drafts and queries.",
       "name": "live"
+    },
+    {
+      "description": "A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.",
+      "name": "vault"
     }
   ]
 }

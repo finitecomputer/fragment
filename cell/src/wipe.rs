@@ -266,9 +266,12 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                 false => Ok(Did { done: false, note: Some(rules::cleanup_note(&busy)), cleaning: shown(busy), ..Did::default() }),
             }
         }
+        // their ledger, and their Vault's secrets with it (vault.rs): each
+        // a person's object of one row's worth once wiped
         Step::Ledger => {
             let v = routed::ask_object(env, "LEDGER", person, "wipe/end", &json!({})).await?;
-            Ok(Did::finished(u64::from(v["held"] == true)))
+            let vault = routed::ask_object(env, "VAULT", person, "wipe/end", &json!({})).await?;
+            Ok(Did::finished(u64::from(v["held"] == true) + u64::from(vault["held"] == true)))
         }
         Step::Lists => {
             // their export first: its upload aborted and its archive deleted,
@@ -404,6 +407,7 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
     let computer = fragment_core::computer::default_computer_of(&facts.identity);
     let c = crate::computer::ask(env, &computer, "computer/wipe-view", &json!({})).await?;
     let ledger = routed::ask_object(env, "LEDGER", &facts.identity, "wipe/view", &json!({})).await?;
+    let vault = routed::ask_object(env, "VAULT", &facts.identity, "wipe/view", &json!({})).await?;
     Ok(Found {
         sign_ins: facts.sign_ins,
         keys: facts.keys,
@@ -422,6 +426,7 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
             snapshot: c["snapshot"] == true,
         }),
         ledger: ledger["held"] == true,
+        vault: vault["held"] == true,
         lists,
         orgs: facts.orgs.clone(),
     })

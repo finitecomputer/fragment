@@ -76,6 +76,7 @@ mod schema;
 mod search;
 mod searchable;
 mod search_index;
+mod vault;
 mod runs_on;
 mod serve;
 mod share;
@@ -1404,6 +1405,13 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
             connections::route(&req, env, &url, &who, method, &rest, &body).await
+        }
+        // a person's Vault (vault.rs): theirs alone, never an agent's
+        (method, ["api", "vault", rest @ ..]) => {
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            let who = signer(env, &req, &url, &body).await?;
+            let rest = rest.to_vec();
+            vault::route(env, &who, method, &rest, &body).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

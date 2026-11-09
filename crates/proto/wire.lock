@@ -75,7 +75,14 @@ bound OpDecl.input default null
 bound PageError.source default null
 bound PageReport.at range i64
 bound PageReport.dropped range u32
+bound Place.basic default null
+bound Place.format default null
+bound Place.header default null
+bound Place.query default null
+bound Place.sign default null
 bound PutDraft.text default null
+bound PutSecret.place default {}
+bound Secret.setAt range i64
 bound Seen.unread range u32
 bound Sharing.guests range u64
 bound Sharing.invites default null
@@ -289,6 +296,11 @@ field Pinned.name required string
 field Pinned.pinned required boolean
 field Pins.live required string|null
 field Pins.main required string|null
+field Place.basic optional BasicHalf|null
+field Place.format optional string|null
+field Place.header optional string|null
+field Place.query optional string|null
+field Place.sign optional Signing|null
 field PostRecord.body required any
 field PostRecord.id required string
 field Posted.record required ChannelRecord
@@ -298,8 +310,20 @@ field Present.id required string
 field Present.principal required string
 field PutDraft.text optional string|null
 field PutDraft.turn required string
+field PutSecret.agents required array<string>
+field PutSecret.hosts required array<string>
+field PutSecret.place optional Place
+field PutSecret.value required string
 field SearchAnswer.fragments required array<ListedFragment>
 field SearchAnswer.messages required array<MessageHit>
+field Secret.agents required array<string>
+field Secret.hosts required array<string>
+field Secret.name required string
+field Secret.place required Place
+field Secret.setAt required integer
+field SecretList.secrets required array<Secret>
+field SecretRemoved.name required string
+field SecretRemoved.removed required boolean
 field Seen.name required string
 field Seen.unread required integer
 field SetArchived.archived required boolean
@@ -336,6 +360,8 @@ field fragments.status.path.name required string
 field live.open.path.name required string
 field members.list.path.name required string
 field search.find.query.q required string
+field vault.put.path.secret required string
+field vault.remove.path.secret required string
 other FragmentKind other
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft
 route channels.draft accepts nip98
@@ -436,7 +462,27 @@ route search.find accepts session
 route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
+route vault.list GET /api/vault
+route vault.list accepts nip98
+route vault.list accepts session
+route vault.list path vault.list.path
+route vault.list query vault.list.query
+route vault.list response SecretList
+route vault.put PUT /api/vault/{secret}
+route vault.put accepts nip98
+route vault.put accepts session
+route vault.put path vault.put.path
+route vault.put query vault.put.query
+route vault.put request PutSecret
+route vault.put response Secret
+route vault.remove DELETE /api/vault/{secret}
+route vault.remove accepts nip98
+route vault.remove accepts session
+route vault.remove path vault.remove.path
+route vault.remove query vault.remove.query
+route vault.remove response SecretRemoved
 type Archived out object
+type BasicHalf both enum
 type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
@@ -516,18 +562,24 @@ type PageErrorKind out enum
 type PageReport out object
 type Pinned out object
 type Pins out object
+type Place both object closed
 type PostRecord in object closed
 type Posted out object
 type Present out object
 type PutDraft in object
+type PutSecret in object closed
 type Reason out enum open
 type Role out enum
 type SearchAnswer out object
+type Secret out object
+type SecretList out object
+type SecretRemoved out object
 type Seen out object
 type SetArchived in object
 type SetDock in object
 type SetPinned in object
 type Sharing out object
+type Signing both enum
 type Until out object
 type UploadLimits out object
 type Urls out object
@@ -562,6 +614,14 @@ type notices.list.path in object
 type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
+type vault.list.path in object
+type vault.list.query in object
+type vault.put.path in object
+type vault.put.query in object
+type vault.remove.path in object
+type vault.remove.query in object
+value BasicHalf password
+value BasicHalf user
 value ErrorCode already_exists
 value ErrorCode app_failed
 value ErrorCode budget_used_up
@@ -690,6 +750,7 @@ value Role editor
 value Role owner
 value Role public
 value Role viewer
+value Signing nip98
 value Visibility link
 value Visibility members
 value Visibility public

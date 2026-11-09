@@ -163,6 +163,35 @@ A fragment's live socket: records as they are appended, presence, drafts and que
 - A WebSocket; receives: [`LiveOut`](#liveout)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
 
+### vault
+
+A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
+
+#### `vault.list`
+
+`GET /api/vault`: The signer's secrets, by name, each with its hosts, place and agents: never a value.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretList`](#secretlist)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.put`
+
+`PUT /api/vault/{secret}`: Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`PutSecret`](#putsecret)
+- Answer: [`Secret`](#secret)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.remove`
+
+`DELETE /api/vault/{secret}`: Removes a secret: its agents' next use of it is refused.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretRemoved`](#secretremoved)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
 ## Shapes
 
 Each says who writes it: the cell (out: a client reads it), a client
@@ -177,6 +206,12 @@ out. Its answer: the fragment, and whether it is archived now.
 | --- | --- | --- | --- |
 | `archived` | `boolean` | required |  |
 | `name` | `string` | required |  |
+
+### `BasicHalf`
+
+both. Which half of HTTP basic auth (`user:password`) a secret is.
+
+Values: `user`, `password`.
 
 ### `ChannelNewest`
 
@@ -603,6 +638,18 @@ out. Where its refs point (`PINNED_REFS`).
 | `live` | `string` or `null` | required | The commit installed as `live`; none before the first deploy. |
 | `main` | `string` or `null` | required | The commit `main` points at; none before its first. |
 
+### `Place`
+
+both, closed. Where a secret goes on a request: one of a header in a format (`{"header": "authorization", "format": "Bearer {}"}`), a query parameter (`{"query": "key"}`), a half of basic auth (`{"basic": "password"}`), or a NIP-98 signature over the request (`{"sign": "nip98"}`: the Vault signs, its key never leaves it). None of them, `Authorization: Bearer {}`.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `basic` | [`BasicHalf`](#basichalf) or `null` | optional |  |
+| `format` | `string` or `null` | optional | The header's value, `{}` the secret; with `header` alone, `{}`. |
+| `header` | `string` or `null` | optional |  |
+| `query` | `string` or `null` | optional |  |
+| `sign` | [`Signing`](#signing) or `null` | optional |  |
+
 ### `PostRecord`
 
 in, closed. `POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a record the platform appends as the poster. `id` is the poster's own (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the record it appended and appends nothing; with another body it is 409.
@@ -640,6 +687,17 @@ in. `PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post there: a r
 | `text` | `string` or `null` | optional | At most `limits::RECORD_BODY_MAX_BYTES`. |
 | `turn` | `string` | required |  |
 
+### `PutSecret`
+
+in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Its hosts, place and agents are set only with its value, so no one who cannot read a value sends it anywhere its setter did not mean. Its `Debug` shows the value, as the wire's checker needs: never print one.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
+| `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
+| `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
+| `value` | `string` | required | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. |
+
 ### `Reason`
 
 out, open. A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.
@@ -660,6 +718,35 @@ out. `GET /api/search?q=` (any signer): the signer's fragments whose title or na
 | --- | --- | --- | --- |
 | `fragments` | `array` of [`ListedFragment`](#listedfragment) | required |  |
 | `messages` | `array` of [`MessageHit`](#messagehit) | required |  |
+
+### `Secret`
+
+out. A secret as its person reads it: everything but its value.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of `string` | required |  |
+| `hosts` | `array` of `string` | required |  |
+| `name` | `string` | required |  |
+| `place` | [`Place`](#place) | required |  |
+| `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
+
+### `SecretList`
+
+out. `GET /api/vault`: the person's secrets, by name.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `secrets` | `array` of [`Secret`](#secret) | required |  |
+
+### `SecretRemoved`
+
+out. `DELETE /api/vault/{secret}`: whether there was one to remove.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `name` | `string` | required |  |
+| `removed` | `boolean` | required |  |
 
 ### `Seen`
 
@@ -705,6 +792,12 @@ out. A fragment's sharing, in its owner's list (the platform's page): who may op
 | `members` | `integer` | required |  |
 | `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
+
+### `Signing`
+
+both. A signature a secret makes over a request.
+
+Values: `nip98`.
 
 ### `Until`
 
