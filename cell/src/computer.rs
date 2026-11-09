@@ -258,7 +258,7 @@ const STOP_STEPS_MS: i64 = {
         MARK_EXEC_MS
     }
 };
-/// An owner's sleep (`POST /api/computers/{id}/sleep`, `computer/sleep`)
+/// An owner's sleep (`POST /api/computers/{id}/sleep`)
 /// answers within the sum of its steps' bounds (docs/api.md), beside the
 /// Durable Objects it tells (its owner's ledger, their open pages).
 const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
@@ -634,12 +634,6 @@ struct UsedAsk {
 struct Used {
     provider: String,
     micros: i64,
-}
-
-/// `computer/uses`' body: a month (`YYYY-MM`), or this one.
-#[derive(Deserialize)]
-struct UsesAsk {
-    month: Option<String>,
 }
 
 /// `computer/own-key`'s body: the owner's own key for `provider`, or none.
@@ -2571,6 +2565,7 @@ impl ComputerCell {
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
             Some("port") => return self.port(req).await,
+            Some("api") => return self.api(req).await,
             _ => {}
         }
         if req.headers().get(INTERNAL_HEADER)?.is_none() {
@@ -2633,16 +2628,6 @@ impl ComputerCell {
                 self.wake(b.why).await?;
                 json_response(&self.view()?)
             }
-            "computer/sleep" => {
-                self.must(MetaKey::Id)?;
-                self.drive(Event::Sleep).await?;
-                json_response(&self.view()?)
-            }
-            "computer/restart" => {
-                let b: RestartAsk = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                json_response(&self.restart(b.generation.unwrap_or(0)).await?)
-            }
             "computer/notices-seen" => {
                 let b: NoticeSeen = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
@@ -2695,21 +2680,10 @@ impl ComputerCell {
                 )?;
                 json_response(&self.view()?)
             }
+            // an operator's pin (orgs.rs); its owner's is `PUT …/image`
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
-                // its owner's, or an operator's: a computer made, never one
-                // a pin would leave half made
-                self.must(MetaKey::Id)?;
-                let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
-                if !images.as_array().is_some_and(|names| names.iter().any(|n| n == b.image.as_str())) {
-                    return Err(CellError::invalid(format!("no image {:?} on this deployment (its images: {images})", b.image)));
-                }
-                // the next start takes it: a snapshot of the old image no longer
-                // matches, so it starts from this one and restores /data (decision
-                // 19); awake on another, its owner is told an update is ready
-                self.set_meta(MetaKey::Image, &b.image)?;
-                self.look_and_tell().await;
-                json_response(&self.view()?)
+                json_response(&self.pin(&b.image).await?)
             }
             "computer/unassign" => {
                 let b: Unassign = body_json(&mut req).await?;
@@ -2792,14 +2766,6 @@ impl ComputerCell {
                     self.tell_owner().await;
                 }
                 json_response(&json!({ "ok": true }))
-            }
-            "computer/uses" => {
-                let b: UsesAsk = body_json(&mut req).await?;
-                let month = match b.month.as_deref() {
-                    Some(label) => Month::parse(label).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?,
-                    None => Month::of(js::now_ms() + self.offset_ms()?),
-                };
-                json_response(&self.uses(month)?)
             }
             "computer/own-key" => {
                 let b: OwnKeyAsk = body_json(&mut req).await?;
@@ -2952,6 +2918,59 @@ impl ComputerCell {
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
+    }
+
+    /// `/api/computers/{id}/…`, as the router forwards it (`forward`): its
+    /// owner's routes (docs/api.md, Computers). Anyone else finds no
+    /// computer, as they would one never made. Each begins as its owner's
+    /// read does: a deploy since its last look is news.
+    async fn api(&self, mut req: Request) -> CellResult<Response> {
+        let who = req.headers().get(SIGNER_HEADER)?.ok_or_else(|| CellError::host("no signer from the router"))?;
+        let path = req.path();
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        // the router found this computer by the id it names
+        let ["api", "computers", _, rest @ ..] = segments.as_slice() else {
+            return Err(CellError::host(format!("the router forwards /api/computers/{{id}}/… here, not {path}")));
+        };
+        self.owned_by(&who)?;
+        self.look_and_tell().await;
+        match (req.method(), rest) {
+            (Method::Get, []) => json_response(&self.view()?),
+            (Method::Post, ["wake"]) => {
+                self.wake(Wake::Owner).await?;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["sleep"]) => {
+                self.drive(Event::Sleep).await?;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["restart"]) => {
+                // no body restarts whatever runs; a start named is restarted once
+                let body = req.bytes().await?;
+                let asked: RestartAsk = if body.iter().all(u8::is_ascii_whitespace) { RestartAsk::default() } else { serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+                json_response(&self.restart(asked.generation.unwrap_or(0)).await?)
+            }
+            (Method::Put, ["image"]) => json_response(&self.pin(&image_named(&req.bytes().await?)?).await?),
+            (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
+            (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
+            (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
+        }
+    }
+
+    /// Pins `image`, its owner's or an operator's: the next start takes it.
+    async fn pin(&self, image: &str) -> CellResult<ComputerView> {
+        // a computer made, never one a pin would leave half made
+        self.must(MetaKey::Id)?;
+        let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
+        if !images.as_array().is_some_and(|names| names.iter().any(|n| n == image)) {
+            return Err(CellError::invalid(format!("no image {image:?} on this deployment (its images: {images})")));
+        }
+        // a snapshot of the old image no longer matches, so it starts from
+        // this one and restores /data (decision 19); awake on another, its
+        // owner is told an update is ready
+        self.set_meta(MetaKey::Image, image)?;
+        self.look_and_tell().await;
+        self.view()
     }
 
     /// The secrets to swap in for a request's placeholders (`b`, a request
@@ -3264,21 +3283,6 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let cfg = Config::from_env(env);
             json_response(&json!({ "computers": list, "support": cfg.support_url }))
         }
-        (Method::Get, [id]) => json_response(&owned(env, who, id).await?),
-        (Method::Post, [id, "wake"]) => {
-            owned(env, who, id).await?;
-            json_response(&view_of(ask(env, id, "computer/wake", &json!({ "why": Wake::Owner })).await?)?)
-        }
-        (Method::Post, [id, "sleep"]) => {
-            owned(env, who, id).await?;
-            json_response(&view_of(ask(env, id, "computer/sleep", &json!({})).await?)?)
-        }
-        (Method::Post, [id, "restart"]) => {
-            owned(env, who, id).await?;
-            // no body restarts whatever runs; a start named is restarted once
-            let asked: RestartAsk = if body.iter().all(u8::is_ascii_whitespace) { RestartAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
-            json_response(&view_of(ask(env, id, "computer/restart", &json!(asked)).await?)?)
-        }
         (Method::Post, [id, "notices", "seen"]) => {
             owned(env, who, id).await?;
             let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -3293,10 +3297,6 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             owned(env, who, id).await?;
             let later: UpdateLater = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_response(&view_of(ask(env, id, "computer/notices-later", &json!(later)).await?)?)
-        }
-        (Method::Put, [id, "image"]) => {
-            owned(env, who, id).await?;
-            json_response(&view_of(ask(env, id, "computer/pin", &json!({ "image": image_named(body)? })).await?)?)
         }
         (Method::Put, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
@@ -3359,17 +3359,6 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let asked = json!({ "computer": id, "owner": who, "door": v["door"], "act": v["act"] });
             json_response(&crate::fragment::ask(env, fragment, "computer/door-ticket", &asked).await?)
         }
-        (Method::Get, [id, "uses"]) => {
-            owned(env, who, id).await?;
-            json_response(&ask(env, id, "computer/uses", &json!({ "month": null })).await?)
-        }
-        (Method::Get, [id, "uses", month]) => {
-            owned(env, who, id).await?;
-            if Month::parse(month).is_none() {
-                return Err(CellError::invalid("a month is YYYY-MM"));
-            }
-            json_response(&ask(env, id, "computer/uses", &json!({ "month": month })).await?)
-        }
         (Method::Delete, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
             // an agent fragment gone (deleted: its own delete unassigns it,
@@ -3396,8 +3385,33 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let url = format!("{}/__ticket?t={ticket}&next={next}", v.origin);
             json_response(&PortTicket { url, expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
         }
+        // the rest are the computer's to answer, and to check who asks
+        (method, [id, ..]) => forward(env, who, method, id, rest, body).await,
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), rest.join("/")))),
     }
+}
+
+/// Hands `/api/computers/{rest}` to computer `id`, as `/api/f/{name}/…` is
+/// handed to its fragment: the computer checks who is asking
+/// (`ComputerCell::api`). Asked again while it refuses this release (it
+/// did nothing), as any call into it is.
+async fn forward(env: &Env, who: &str, method: Method, id: &str, rest: &[&str], body: &[u8]) -> CellResult<Response> {
+    if !valid_computer_id(id) {
+        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
+    }
+    let url = format!("https://computer.internal/{}", ["api", "computers"].iter().chain(rest).copied().collect::<Vec<_>>().join("/"));
+    crate::routed::send_again(env, "COMPUTER", id, || {
+        let headers = Headers::new();
+        headers.set(KIND_HEADER, "api")?;
+        headers.set(SIGNER_HEADER, who)?;
+        let mut init = RequestInit::new();
+        init.with_method(method.clone()).with_headers(headers);
+        if !body.is_empty() {
+            init.with_body(Some(js_sys::Uint8Array::from(body).into()));
+        }
+        Ok(Request::new_with_init(&url, &init)?)
+    })
+    .await
 }
 
 /// A request to a computer's own origin: `/__ticket` signs a browser in
