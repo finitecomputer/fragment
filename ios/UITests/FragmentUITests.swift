@@ -175,6 +175,54 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["This launch reaches only this machine."].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["pairingCode"].exists)
     }
+
+    /// What the person is told (FIN-458), against a real platform: a dev
+    /// stack (`cargo xtask dev`, its port forwarded to this Mac) whose
+    /// person's computer has an update ready and saves that fail, signed as
+    /// that person by a key it approved ahead. Its notices show over Home in
+    /// the server's words, the warning saying when it stops and the platform's
+    /// own words, each with its actions; Later is the update's, and the
+    /// update goes. Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
+    /// `TEST_RUNNER_FRAGMENT_UITEST_KEY` (the key's 64 hex); skipped without.
+    func testTheComputersNoticesShowAndTheirActionsWork() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"] else {
+            throw XCTSkip("no dev stack named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        // a new simulator's first keyboard offers its tip, over Home
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let notice = { (id: String) in app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:\(id)")).firstMatch }
+        let update = notice("update:"), unsaved = notice("unsaved")
+        XCTAssertTrue(update.waitForExistence(timeout: 30), "the update ready is told")
+        XCTAssertTrue(unsaved.waitForExistence(timeout: 10), "and the saves failing")
+        XCTAssertTrue(app.staticTexts["An update is ready for your computer"].exists)
+        XCTAssertTrue(app.staticTexts["Your computer can't save right now"].exists)
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "If it still can't, it stops in about")).firstMatch.exists, "when it stops, in the server's words")
+        XCTAssertTrue(update.buttons["Restart"].exists && update.buttons["Later"].exists)
+        XCTAssertTrue(unsaved.buttons["Restart now"].exists)
+        screenshot(app, "Notices, light")
+        // the system's appearance applies a moment after it is set: the shot waits for it
+        XCUIDevice.shared.appearance = .dark
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "dark, drawn")], timeout: 2)
+        screenshot(app, "Notices, dark")
+        XCUIDevice.shared.appearance = .light
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "light, drawn")], timeout: 2)
+        // over a page pushed on Home too (Codex on #1151): Your Apps
+        app.buttons["yourApps"].tap()
+        XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
+        XCTAssertTrue(unsaved.waitForExistence(timeout: 5), "the notices stay over a pushed page")
+        screenshot(app, "Over Your Apps")
+        app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(update.waitForExistence(timeout: 5), "and back on Home")
+        update.buttons["Later"].tap()
+        XCTAssertTrue(update.waitForNonExistence(timeout: 20), "Later: the update is told no more")
+        XCTAssertTrue(unsaved.exists, "the other stays")
+        screenshot(app, "After Later")
+    }
 }
 
 /// Flows against a real platform: this machine's `cargo xtask dev`, named by
