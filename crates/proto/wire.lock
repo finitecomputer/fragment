@@ -62,6 +62,13 @@ bound Member.kind default null
 bound Member.owner default null
 bound MessageHit.at range i64
 bound MessageHit.seq range i64
+bound Notice.actions default []
+bound Notice.detail default null
+bound Notice.text default null
+bound Notice.until default null
+bound NoticeAction.body default null
+bound NoticeAction.open default null
+bound NoticeAction.post default null
 bound OpDecl.description default null
 bound OpDecl.ephemeral default false
 bound OpDecl.input default null
@@ -75,6 +82,7 @@ bound Sharing.invites default null
 bound Sharing.invites range u64
 bound Sharing.members range u64
 bound Sharing.reach default false
+bound Until.at range i64
 bound UploadLimits.filesPerMessage range u32
 bound UploadLimits.uploadMaxBytes range u64
 bound Urls.platform default ""
@@ -88,6 +96,8 @@ extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
 field Archived.archived required boolean
 field Archived.name required string
+field ChannelNewest.channel required string
+field ChannelNewest.records required array<ChannelRecord>
 field ChannelPage.channel required string
 field ChannelPage.more required boolean
 field ChannelPage.next required integer
@@ -250,6 +260,19 @@ field MessageHit.channel required string
 field MessageHit.fragment required string
 field MessageHit.seq required integer
 field MessageHit.snippet required string
+field Notice.actions required array<NoticeAction>
+field Notice.detail optional string|null
+field Notice.id required string
+field Notice.kind required string
+field Notice.level required NoticeLevel
+field Notice.text optional string|null
+field Notice.title required string
+field Notice.until optional Until|null
+field NoticeAction.body optional any
+field NoticeAction.label required string
+field NoticeAction.open optional string|null
+field NoticeAction.post optional string|null
+field NoticeList.notices required array<Notice>
 field OpDecl.description optional string|null
 field OpDecl.ephemeral optional boolean
 field OpDecl.input optional any
@@ -287,12 +310,16 @@ field Sharing.invites optional integer|null
 field Sharing.members required integer
 field Sharing.reach optional boolean
 field Sharing.visibility required Visibility
+field Until.at required integer
+field Until.said required string
 field UploadLimits.filesPerMessage required integer
 field UploadLimits.uploadMaxBytes required integer
 field Urls.canonical required string
 field Urls.platform required string
 field channels.draft.path.channel required string
 field channels.draft.path.name required string
+field channels.newest.path.channel required string
+field channels.newest.path.name required string
 field channels.post.path.channel required string
 field channels.post.path.name required string
 field channels.read.path.channel required string
@@ -317,6 +344,12 @@ route channels.draft path channels.draft.path
 route channels.draft query channels.draft.query
 route channels.draft request PutDraft
 route channels.draft response Done
+route channels.newest GET /api/f/{name}/channels/{channel}/newest
+route channels.newest accepts nip98
+route channels.newest accepts session
+route channels.newest path channels.newest.path
+route channels.newest query channels.newest.query
+route channels.newest response ChannelNewest
 route channels.post POST /api/f/{name}/channels/{channel}
 route channels.post accepts nip98
 route channels.post accepts session
@@ -391,6 +424,12 @@ route members.list accepts session
 route members.list path members.list.path
 route members.list query members.list.query
 route members.list response MemberList
+route notices.list GET /api/notices
+route notices.list accepts nip98
+route notices.list accepts session
+route notices.list path notices.list.path
+route notices.list query notices.list.query
+route notices.list response NoticeList
 route search.find GET /api/search
 route search.find accepts nip98
 route search.find accepts session
@@ -398,6 +437,7 @@ route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
 type Archived out object
+type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
 type CodeStatus out object
@@ -465,6 +505,10 @@ type LiveOut.subscribed out object
 type Member out object
 type MemberList out object
 type MessageHit out object
+type Notice out object
+type NoticeAction out object
+type NoticeLevel out enum open
+type NoticeList out object
 type OpDecl out object
 type OpKind out enum
 type PageError out object
@@ -484,11 +528,14 @@ type SetArchived in object
 type SetDock in object
 type SetPinned in object
 type Sharing out object
+type Until out object
 type UploadLimits out object
 type Urls out object
 type Visibility out enum
 type channels.draft.path in object
 type channels.draft.query in object
+type channels.newest.path in object
+type channels.newest.query in object
 type channels.post.path in object
 type channels.post.query in object
 type channels.read.path in object
@@ -511,6 +558,8 @@ type live.open.path in object
 type live.open.query in object
 type members.list.path in object
 type members.list.query in object
+type notices.list.path in object
+type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
 value ErrorCode already_exists
@@ -600,6 +649,8 @@ value LiveOut.result.#1.503.error node_full
 value LiveOut.result.#1.503.error registry_unavailable
 value LiveOut.result.#1.503.error wont_wake
 value LiveOut.result.#1.507.error storage_full
+value NoticeLevel info
+value NoticeLevel warn
 value OpKind job
 value OpKind mutation
 value OpKind query

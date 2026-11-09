@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
+use crate::notice::NoticeList;
 use crate::{
-    Archived, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
+    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
 };
 use ErrorCode::{BudgetUsedUp, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
@@ -148,8 +149,9 @@ pub struct Route {
 pub const ANY_ROUTE: [ErrorCode; 2] = [ErrorCode::Deploying, ErrorCode::SchemaRefused];
 
 /// Each group's tag: its name and what its routes are about.
-pub const TAGS: [(&str, &str); 5] = [
+pub const TAGS: [(&str, &str); 6] = [
     ("fragments", "A signer's list of the fragments they hold a role on, and their own view of each."),
+    ("notices", "What the platform tells a person, each in its own words, with what they may do about it."),
     ("search", "A signer's search over their own list."),
     ("members", "Who is in a fragment."),
     ("channels", "A fragment's channels: its records, read, posted and drafted."),
@@ -196,6 +198,17 @@ pub const ROUTES: &[Route] = &[
         request: None,
         answer: Answer::Socket { sends: None, receives: ty::<ListWatchFrame>() },
         errors: &[Unauthenticated, InvalidRequest, RateLimited],
+    },
+    Route {
+        operation: "notices.list",
+        method: Method::Get,
+        path: "/api/notices",
+        summary: "What the signer is told now, the most pressing first: each owner's notices, in the server's words, with their actions.",
+        auth: SIGNED,
+        params: &[],
+        request: None,
+        answer: Answer::Json(ty::<NoticeList>()),
+        errors: &[Unauthenticated, Forbidden],
     },
     Route {
         operation: "fragments.archive",
@@ -295,6 +308,17 @@ pub const ROUTES: &[Route] = &[
         ],
         request: None,
         answer: Answer::Json(ty::<ChannelPage>()),
+        errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound],
+    },
+    Route {
+        operation: "channels.newest",
+        method: Method::Get,
+        path: "/api/f/{name}/channels/{channel}/newest",
+        summary: "Each poster's newest record of each kind the channel keeps the newest of, the newest first.",
+        auth: SIGNED,
+        params: &[NAME, CHANNEL],
+        request: None,
+        answer: Answer::Json(ty::<ChannelNewest>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound],
     },
     Route {

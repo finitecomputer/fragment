@@ -158,6 +158,9 @@ struct HomeView: View {
     @State private var searching = false
     @State private var searchError: String?
     @State private var focused = false
+    /// Whether Home is on screen: a page pushed over it (Your Apps) takes it
+    /// off, so a sheet closing there never hands Home the keyboard unseen.
+    @State private var shown = false
     @State private var logoY: CGFloat?
     @State private var cardY: CGFloat?
     private var home: HomeDraft { library.home }
@@ -233,8 +236,10 @@ struct HomeView: View {
             }
             .animation(.snappy(duration: 0.25), value: expanded)
         }
-        .onAppear { focused = !covered }
-        .onChange(of: covered) { _, covered in focused = !covered }
+        // the keyboard is Home's while it is on screen and nothing covers it
+        .onAppear { shown = true; focused = !covered }
+        .onDisappear { shown = false; focused = false }
+        .onChange(of: covered) { _, covered in focused = shown && !covered }
         .task(id: query) {
             results = SearchResults(); searchError = nil; searching = false
             guard !query.isEmpty else { return }

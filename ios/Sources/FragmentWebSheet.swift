@@ -51,12 +51,58 @@ final class WebSheetModel {
     }
 }
 
+
+/// Where a navigation in a fragment's sheet goes. The sheet holds that
+/// fragment's pages alone; everything else leaves it, and nothing goes
+/// silently nowhere (docs/ios.md).
+enum WebLinks {
+    enum Route: Equatable {
+        /// A page of this fragment: it stays in the sheet.
+        case stay
+        /// The platform's own page, where a page goes when its sign-in has
+        /// ended (a fragment's refusal sends it there): the sheet says so.
+        case signedOut
+        /// Any other address: a fragment of the person's opens in the app,
+        /// anything else in the system's browser.
+        case leave
+    }
+    static func route(_ url: URL, fragment: URL, platform: URL, clicked: Bool) -> Route {
+        if url.scheme == "about" || PlatformOrigin.same(url, fragment) { return .stay }
+        if !clicked, PlatformOrigin.same(url, platform) { return .signedOut }
+        return .leave
+    }
+
+    /// The address of `page` that may be shared: this fragment's page alone,
+    /// with nothing that is the person's. No query and no hash (a session
+    /// key `s=`, a redemption's token, or anything else a page put there),
+    /// no user or password, and the redemption itself is the app's front.
+    static func shareable(_ page: URL, fragment: URL) -> URL? {
+        guard PlatformOrigin.same(page, fragment), var parts = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return nil }
+        parts.query = nil; parts.fragment = nil; parts.user = nil; parts.password = nil
+        if parts.path.hasSuffix("/__signin") || parts.path.isEmpty { parts.path = "/" }
+        return parts.url
+    }
+}
+
+/// The page a sheet shows, for its toolbar: the web view, and the address
+/// it is at now (a page's own history changes count).
+@MainActor @Observable
+final class WebPage {
+    @ObservationIgnored weak var view: WKWebView?
+    var url: URL?
+}
+
 struct FragmentWebSheet: View {
     @Environment(\.dismiss) private var dismiss
     let fragment: FragmentSummary
+    /// Opens another fragment of the person's from a link to it, as a link in
+    /// a chat opens one (`Library.fragment(linkedBy:)`); false if it is none.
+    let openLink: (URL) -> Bool
     @State private var model: WebSheetModel
-    init(fragment: FragmentSummary, api: FragmentAPI) {
+    @State private var page = WebPage()
+    init(fragment: FragmentSummary, api: FragmentAPI, openLink: @escaping (URL) -> Bool = { _ in false }) {
         self.fragment = fragment
+        self.openLink = openLink
         _model = State(initialValue: WebSheetModel(fragment: fragment, api: api))
     }
 
@@ -81,51 +127,94 @@ struct FragmentWebSheet: View {
                     }
                 } else if let url = model.url {
                     // a new redemption is a new web view: one never reloads a spent one
-                    WebContent(url: url, loading: $model.loading, error: $model.error)
+                    WebContent(url: url, platform: model.api.baseURL, page: page, openLink: openLink, loading: $model.loading, error: $model.error)
                         .id(url)
                         .overlay { if model.loading { ProgressView() } }
                 } else { ProgressView() }
             }
             .navigationTitle(fragment.displayTitle).navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let url = model.url, model.error == nil, !model.needsConsent {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button("Reload", systemImage: "arrow.clockwise") { reload() }.accessibilityIdentifier("reloadApp")
+                        if let shared = page.url.flatMap({ WebLinks.shareable($0, fragment: url) }) {
+                            // titled by the app: the system's own look at the address would
+                            // see a page for someone signed out (a sign-in's title)
+                            ShareLink(item: shared, preview: SharePreview(fragment.displayTitle)) {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                            }.accessibilityIdentifier("shareApp")
+                        }
+                    }
+                }
+            }
             .task { await model.load() }
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .accessibilityAction(.escape) { dismiss() }
     }
+
+    /// The page it is at, again; never the spent redemption (a page not yet
+    /// past it asks for a new one).
+    private func reload() {
+        if let web = page.view, let at = web.url, !at.path.hasSuffix("/__signin") { web.reload() }
+        else { Task { await model.load() } }
+    }
 }
 
 private struct WebContent: UIViewRepresentable {
     let url: URL
+    let platform: URL
+    let page: WebPage
+    let openLink: (URL) -> Bool
     @Binding var loading: Bool
     @Binding var error: String?
 
-    func makeCoordinator() -> Coordinator { Coordinator(loading: $loading, error: $error, origin: url) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(origin: url, platform: platform, page: page, openLink: openLink, loading: $loading, error: $error)
+    }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        // Each sheet has its own web storage. Native credentials never enter a
-        // fragment page; connected accounts use a scoped redemption (docs/ios.md).
-        configuration.websiteDataStore = .nonPersistent()
+        // The app's own web data, kept as Safari keeps an origin's, so a page
+        // has what it saved the next time it opens; cleared whenever the
+        // person changes (`AccountConnection`). Native credentials never
+        // enter a fragment page; it signs in by a scoped redemption (docs/ios.md).
+        configuration.websiteDataStore = .default()
         let web = WKWebView(frame: .zero, configuration: configuration)
         web.navigationDelegate = context.coordinator
+        web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
+        context.coordinator.watch(web)
         web.load(URLRequest(url: url))
         return web
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
-    @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
+    @MainActor final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        let origin: URL
+        let platform: URL
+        let page: WebPage
+        let openLink: (URL) -> Bool
         @Binding var loading: Bool
         @Binding var error: String?
-        let origin: URL
-        init(loading: Binding<Bool>, error: Binding<String?>, origin: URL) {
-            _loading = loading; _error = error; self.origin = origin
+        private var watching: NSKeyValueObservation?
+        init(origin: URL, platform: URL, page: WebPage, openLink: @escaping (URL) -> Bool, loading: Binding<Bool>, error: Binding<String?>) {
+            self.origin = origin; self.platform = platform; self.page = page; self.openLink = openLink
+            _loading = loading; _error = error
+        }
+        /// The toolbar's page: this web view, and the address it is at.
+        func watch(_ web: WKWebView) {
+            page.view = web
+            watching = web.observe(\.url, options: [.initial, .new]) { [weak self] web, _ in
+                MainActor.assumeIsolated { self?.page.url = web.url }
+            }
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             self.error = error.localizedDescription; loading = false
         }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if (error as NSError).code == NSURLErrorCancelled { return }   // one the sheet sent elsewhere
             self.error = error.localizedDescription; loading = false
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
@@ -136,18 +225,64 @@ private struct WebContent: UIViewRepresentable {
             }
             return .allow
         }
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
-            guard let url = navigationAction.request.url else { return .cancel }
-            guard ["http", "https", "about"].contains(url.scheme) else { return .cancel }
-            if url.scheme != "about", (url.host != origin.host || url.port != origin.port || url.scheme != origin.scheme) {
-                if navigationAction.navigationType == .linkActivated { _ = await UIApplication.shared.open(url) }
-                return .cancel
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+            guard let url = action.request.url else { return .cancel }
+            let main = action.targetFrame?.isMainFrame ?? true
+            let clicked = action.navigationType == .linkActivated
+            switch WebLinks.route(url, fragment: origin, platform: platform, clicked: clicked) {
+            case .stay:
+                // a new window of its own (target=_blank) opens in its place
+                if action.targetFrame == nil { webView.load(URLRequest(url: url)); return .cancel }
+                return .allow
+            case .signedOut where main:
+                error = "This app’s sign-in ended. Try again to open it."
+                loading = false
+            case .signedOut, .leave:
+                // another site framed in a page stays out, as before; a page of
+                // its own, or a click, leaves the sheet as a person would expect
+                if main || clicked { leave(url) }
             }
-            if navigationAction.targetFrame == nil, navigationAction.navigationType == .linkActivated {
-                webView.load(URLRequest(url: url))
-                return .cancel
+            return .cancel
+        }
+        /// `window.open`: no new web view; where it goes is decided as a link's.
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            guard let url = action.request.url else { return nil }
+            if WebLinks.route(url, fragment: origin, platform: platform, clicked: true) == .stay { webView.load(URLRequest(url: url)) }
+            else { leave(url) }
+            return nil
+        }
+        // A page's alert, confirm and prompt are the app's own alerts: a page
+        // that asks before it acts (a document's Delete) acts once its person says.
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo) async {
+            _ = await ask(webView, message, from: frame, cancel: false)
+        }
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo) async -> Bool {
+            await ask(webView, message, from: frame, cancel: true).ok
+        }
+        func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                     initiatedByFrame frame: WKFrameInfo) async -> String? {
+            let answer = await ask(webView, prompt, from: frame, cancel: true, field: defaultText ?? "")
+            return answer.ok ? answer.text : nil
+        }
+        /// An alert over the sheet, titled by the page's host; it always
+        /// answers (a page waits on it): with no window to show in, as dismissed.
+        private func ask(_ web: WKWebView, _ message: String, from frame: WKFrameInfo, cancel: Bool, field: String? = nil) async -> (ok: Bool, text: String?) {
+            guard var top = web.window?.rootViewController else { return (false, nil) }
+            while let shown = top.presentedViewController, !shown.isBeingDismissed { top = shown }
+            return await withCheckedContinuation { reply in
+                let alert = UIAlertController(title: frame.securityOrigin.host, message: message, preferredStyle: .alert)
+                if let field { alert.addTextField { $0.text = field } }
+                if cancel { alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in reply.resume(returning: (false, nil)) }) }
+                alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in reply.resume(returning: (true, alert?.textFields?.first?.text)) })
+                top.present(alert, animated: true)
             }
-            return .allow
+        }
+        /// Out of the sheet: a fragment of the person's opens in the app, any
+        /// other address in the system's own browser (or app, for `mailto:`).
+        private func leave(_ url: URL) {
+            if ["http", "https"].contains(url.scheme), openLink(url) { return }
+            UIApplication.shared.open(url)
         }
     }
 }
