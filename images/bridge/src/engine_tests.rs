@@ -551,13 +551,23 @@ fn a_chats_helpers_are_one_set_said_whole() {
     assert!(posts(&ev(&mut e, end("s-1"), T0 + 3)).is_empty(), "ended once");
     let s = ev(&mut e, end("s-2"), T0 + 4);
     assert_eq!(sets(&s).iter().map(|(_, b)| b["helpers"].clone()).collect::<Vec<_>>(), vec![json!([])], "none working: an empty set");
+    // the last ends and another starts in the same ms (a queued child taking
+    // its place): each set its own id, though the set was empty between
+    // (Codex on #1086: a reused id is a 409, and the new helper unshown)
+    let t1 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "one at a time" }), T0 + 5)).expect("started").turn;
+    let (first, emptied, next) = (ev(&mut e, start(&t1, "q-1"), T0 + 5), ev(&mut e, end("q-1"), T0 + 6), ev(&mut e, start(&t1, "q-2"), T0 + 6));
+    let ids: Vec<String> = [&first, &emptied, &next].iter().flat_map(|s| sets(s)).map(|(id, _)| id).collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.windows(2).all(|w| w[0] != w[1]), "{ids:?}");
+    ev(&mut e, end("q-2"), T0 + 7);
+    ev(&mut e, Event::End { turn: t1, outcome: Outcome::Idle }, T0 + 7);
     // the bound, a chat's
-    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "many" }), T0 + 5)).expect("started").turn;
+    let t2 = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "many" }), T0 + 8)).expect("started").turn;
     for n in 0..limits::HELPERS_PER_CHAT_MAX {
-        assert_eq!(sets(&ev(&mut e, start(&t2, &format!("m-{n}")), T0 + 6)).len(), 1);
+        assert_eq!(sets(&ev(&mut e, start(&t2, &format!("m-{n}")), T0 + 9)).len(), 1);
     }
-    assert!(posts(&ev(&mut e, start(&t2, "one-too-many"), T0 + 6)).is_empty(), "at most {} a chat", limits::HELPERS_PER_CHAT_MAX);
-    assert!(posts(&ev(&mut e, end("one-too-many"), T0 + 6)).is_empty(), "unrecorded, so nothing to end");
+    assert!(posts(&ev(&mut e, start(&t2, "one-too-many"), T0 + 9)).is_empty(), "at most {} a chat", limits::HELPERS_PER_CHAT_MAX);
+    assert!(posts(&ev(&mut e, end("one-too-many"), T0 + 9)).is_empty(), "unrecorded, so nothing to end");
     // a state that contradicts itself
     let mut twice = e.state().clone();
     twice.children[1].child = twice.children[0].child.clone();

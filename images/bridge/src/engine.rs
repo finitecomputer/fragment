@@ -683,11 +683,16 @@ pub struct Engine {
     /// life, and a notice no turn of this life's is there for goes unposted.
     noticed: VecDeque<Noticed>,
     /// Each chat's helpers set this life posted last that names any, by
-    /// (agent, chat): its id's number and its `until`, posted again before
-    /// it lapses (`tick`). One that names none goes. Never written to
-    /// `/data`: a new life tells each chat none run. At most
-    /// `CHILDREN_OPEN_MAX`.
-    helpers_said: BTreeMap<(String, String), HelpersSaid>,
+    /// (agent, chat): its `until`, posted again before it lapses (`tick`).
+    /// One that names none goes. Never written to `/data`: a new life tells
+    /// each chat none run. At most `CHILDREN_OPEN_MAX`.
+    helpers_said: BTreeMap<(String, String), u64>,
+    /// The number of the last helpers set this life posted, in any chat
+    /// (`records::helpers_id`): each set's is this life's clock, or one
+    /// past the last, so no two sets of a chat share an id however its sets
+    /// come and go. A new life starts from its clock, past every number an
+    /// earlier life used (at most its sets of one ms past that ms).
+    helpers_n: u64,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
@@ -705,14 +710,6 @@ struct RuntimeOf {
     /// Work it still owns outside its parent chat turns. A restart runs
     /// none of that process's children.
     working: bool,
-}
-
-/// A chat's helpers set as this life last posted it (`post_helpers`): its
-/// id's number, and when it lapses.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct HelpersSaid {
-    n: u64,
-    until: u64,
 }
 
 /// The turn an agent's notices in a chat belong to, and how many it posted.
@@ -780,6 +777,7 @@ impl Engine {
             relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
             helpers_said: BTreeMap::new(),
+            helpers_n: 0,
             out: Vec::new(),
             dirty: false,
             now: 0,
@@ -2332,12 +2330,11 @@ impl Engine {
     /// The agent's helpers set in a chat (`turn.helpers`): every helper it
     /// has running there, held until `HELPERS_LEASE_MS` from now. Each set
     /// is a record of its own, newest last on `work` (its lane posts in
-    /// order), whose id's number rises across lives (this life's clock, or
-    /// one past its last). A set lost on the way misleads until its
+    /// order), whose id's number rises (`helpers_n`). A set lost on the way
+    /// misleads until its
     /// `until` at most. An agent no longer on this computer posts none.
     fn post_helpers(&mut self, agent: &str, fragment: &str) {
         let key = (agent.to_string(), fragment.to_string());
-        let n = self.helpers_said.get(&key).map_or(self.now, |s| self.now.max(s.n + 1));
         if self.agent(agent).is_none() {
             self.helpers_said.remove(&key);
             return;
@@ -2354,8 +2351,10 @@ impl Engine {
         if running.is_empty() {
             self.helpers_said.remove(&key);
         } else {
-            self.helpers_said.insert(key, HelpersSaid { n, until });
+            self.helpers_said.insert(key, until);
         }
+        let n = self.now.max(self.helpers_n + 1);
+        self.helpers_n = n;
         assert!(self.helpers_said.len() <= limits::CHILDREN_OPEN_MAX, "a chat's set is said only while it names a helper");
         self.post(agent, fragment, records::WORK, records::helpers_id(n), body, Vec::new());
     }
@@ -2548,7 +2547,7 @@ impl Engine {
         let now = self.now;
         // each chat's set while it names a helper, posted again before it
         // lapses (ticks missed, once)
-        let renew: Vec<(String, String)> = self.helpers_said.iter().filter(|(_, s)| s.until <= now + limits::HELPERS_RENEW_BEFORE_MS).map(|(k, _)| k.clone()).collect();
+        let renew: Vec<(String, String)> = self.helpers_said.iter().filter(|(_, until)| **until <= now + limits::HELPERS_RENEW_BEFORE_MS).map(|(k, _)| k.clone()).collect();
         for (agent, fragment) in renew {
             self.post_helpers(&agent, &fragment);
         }
