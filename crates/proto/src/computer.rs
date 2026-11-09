@@ -214,6 +214,11 @@ pub struct ProviderPrice {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderView {
     pub provider: String,
+    /// What people call it (`fragment_core::notice::provider_name`: xAI,
+    /// Google Places): the one source of every client's words for it.
+    /// Add-only: an answer from before it names none.
+    #[serde(default)]
+    pub name: String,
     pub kind: ProviderKind,
     pub state: ProviderState,
     pub hosts: Vec<String>,
