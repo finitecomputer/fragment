@@ -94,8 +94,8 @@ impl FragmentCell {
     pub(crate) fn searched_channels(&self) -> CellResult<Vec<String>> {
         let mut out = vec![];
         // bounded by the manifest's channels
-        for (channel, _) in self.declared_channels()? {
-            if searched(self.channel_read_role(&channel)?) {
+        for (channel, decl) in self.declared_channels()? {
+            if searched(decl.read) {
                 out.push(channel);
             }
         }
