@@ -150,7 +150,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     } catch {
       failed.add(n.id);
     }
-    await load().catch(() => {});
+    // as a change told this page: only the cards whose rows it touched read again
+    await load(true).catch(() => {});
   }
   // The countdowns, live: each line said again as its minute changes (in
   // place: a button under the person's finger stays), and the band drawn
