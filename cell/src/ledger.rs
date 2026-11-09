@@ -243,8 +243,10 @@ pub struct OrgStatus {}
 /// before it takes them (`fail-grants {times}`, at most
 /// `TEST_FAIL_GRANTS_MAX`, 0 to end it: a ledger not reached once the
 /// router recorded an org's grant, which its retry completes).
+/// Read as its fields (`TestHookFields`), not as serde's internally tagged
+/// reading, which buffers each to find its `op`: about 17 KB of the cell's Wasm.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "kebab-case")]
+#[serde(tag = "op", rename_all = "kebab-case", try_from = "TestHookFields")]
 pub enum TestHook {
     #[serde(rename_all = "camelCase")]
     Clock { offset_ms: i64 },
@@ -264,6 +266,66 @@ pub enum TestHook {
     FailGrants {
         times: u32,
     },
+}
+
+/// A `TestHook` as it is read: every op's fields, flat, and the lever's
+/// `identity`, whose ledger it is (levers.rs, which reads both at once).
+/// A field it does not name is passed over, as the tagged reading did.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestHookFields {
+    pub identity: Option<String>,
+    op: TestOp,
+    offset_ms: Option<i64>,
+    prefix: Option<String>,
+    max: Option<u64>,
+    seat: Option<SeatState>,
+    seq: Option<u64>,
+    ms: Option<u64>,
+    times: Option<u32>,
+}
+
+/// A hook's `op`: read as an identifier, a string alone, as the tagged
+/// reading read its tag (a derived enum also takes `{"<op>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "kebab-case")]
+enum TestOp {
+    Clock,
+    Sweep,
+    Entries,
+    Book,
+    Totals,
+    PaidCalls,
+    LegacySeat,
+    Schema,
+    Slow,
+    ForgetGate,
+    GateHeard,
+    FailGrants,
+}
+
+impl TryFrom<TestHookFields> for TestHook {
+    type Error = String;
+
+    fn try_from(f: TestHookFields) -> Result<TestHook, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
+        }
+        Ok(match f.op {
+            TestOp::Clock => TestHook::Clock { offset_ms: need(f.offset_ms, "offsetMs")? },
+            TestOp::Sweep => TestHook::Sweep,
+            TestOp::Entries => TestHook::Entries { prefix: need(f.prefix, "prefix")? },
+            TestOp::Book => TestHook::Book,
+            TestOp::Totals => TestHook::Totals,
+            TestOp::PaidCalls => TestHook::PaidCalls { max: f.max },
+            TestOp::LegacySeat => TestHook::LegacySeat { seat: need(f.seat, "seat")?, seq: need(f.seq, "seq")? },
+            TestOp::Schema => TestHook::Schema,
+            TestOp::Slow => TestHook::Slow { ms: need(f.ms, "ms")? },
+            TestOp::ForgetGate => TestHook::ForgetGate,
+            TestOp::GateHeard => TestHook::GateHeard,
+            TestOp::FailGrants => TestHook::FailGrants { times: need(f.times, "times")? },
+        })
+    }
 }
 
 impl Route for core::Meter {
