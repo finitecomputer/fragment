@@ -280,6 +280,21 @@ mod tests {
         }
     }
 
+    /// The hashes as Hermes computes them: Python's own `_dir_hash` (MD5,
+    /// in `pathlib`'s order, folder by folder) and the hub's
+    /// `_content_digest` (SHA-256, in the paths' text order), run on these
+    /// files with python3, are these.
+    #[test]
+    fn hashes_as_hermes_computes_them() {
+        let t = Temp::new();
+        put(&t.0, &[("skill/a/b", "one"), ("skill/a.b", "two"), ("skill/a-b", "three"), ("skill/SKILL.md", "---\nname: s\n---\n"), ("skill/__pycache__/x.pyc", "pyc"), ("skill/refs/Z.md", "four")]);
+        let src = Source::open(&t.0).unwrap();
+        assert_eq!(dir_hash(&src, "skill", false).unwrap(), "6da99e4082eaf7a8bc176b92694b23d0");
+        assert_eq!(dir_hash(&src, "skill", true).unwrap(), "26ca2f102e7fa0c2a3256d7fd8ef65f6");
+        assert_eq!(hub_hash(&src, "skill", false).unwrap(), "ceb637ef95c00793859883734ce39c67025b6e0b0a96f21f806c5cd5d593938e");
+        assert_eq!(hub_hash(&src, "skill", true).unwrap(), "9b8f87a49a7f370b78d468d38d1984eded9f4d3201a2bcb9b36ea027247f0f2d");
+    }
+
     #[test]
     fn each_skill_by_its_content() {
         let t = Temp::new();

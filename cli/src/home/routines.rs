@@ -268,6 +268,11 @@ fn to_utc(expr: &str, offset: i64) -> Option<String> {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let field = |days: &Option<BTreeSet<i64>>| days.as_ref().map_or("*".to_string(), day_names);
     if hour == "*" {
+        // every hour of some days: in another zone, a day's hours straddle
+        // two of UTC's, which no one cron says
+        if offset != 0 && (dom != "*" || month != "*" || dow != "*") {
+            return None;
+        }
         let minute = match (offset % 60 == 0, digits(minute)) {
             (true, _) => minute.to_string(),
             (false, true) => (minute.parse::<i64>().ok()? - offset).rem_euclid(60).to_string(),
@@ -353,6 +358,10 @@ mod tests {
         assert_eq!(to_utc("0 1 15 * *", 540), None);
         // India, UTC+5:30: a minute moves with it
         assert_eq!(to_utc("15 * * * *", 330).as_deref(), Some("45 * * * *"));
+        // every hour of Tokyo's Mondays is Sunday 15:00 to Monday 14:00 UTC
+        assert_eq!(to_utc("0 * * * mon", 540), None);
+        assert_eq!(to_utc("0 * 1 * *", -300), None);
+        assert_eq!(to_utc("0 * * * mon", 0).as_deref(), Some("0 * * * mon"), "in UTC, as it was");
         assert_eq!(to_utc("*/15 * * * *", 330), None);
         assert_eq!(to_utc("0 9,13 * * *", 120).as_deref(), Some("0 7,11 * * *"));
         assert_eq!(to_utc("0 */2 * * *", 60), None, "a step of hours");
