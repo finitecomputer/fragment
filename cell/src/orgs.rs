@@ -438,7 +438,7 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
 /// learns whether it stays awake (a push before it was made found none, and
 /// counted as done). The computer is made whatever this answers; a push
 /// not queued fails the making, so its caller makes it again (the same
-/// one: `computer/init` is idempotent), which asks again.
+/// one: `POST /api/computers` is idempotent), which asks again.
 pub(crate) async fn computer_made(env: &Env, person: &str) -> CellResult<()> {
     ask_registry(env, &SyncSeat { person: person.to_string() }).await.inspect_err(|e| {
         console_error!("{}", serde_json::json!({ "seat-sync": person, "failed": e.message }));
