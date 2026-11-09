@@ -281,6 +281,9 @@ times as they are; don't convert them yourself.
   home.
 - **Its time.** When `routines.dst` is true, a routine fires an hour
   earlier or later in your owner's time across the year. Say so.
+- **No time zone.** When the survey has no `config` time zone,
+  `routines.zone` is UTC: the old times were read as UTC. Say so in the
+  report, and offer to move them once your owner tells you their zone.
 
 ## 8. Tell your owner
 
