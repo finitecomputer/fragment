@@ -942,28 +942,30 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "{member_name} invited again: {r}");
     chrome.close(shown)?;
 
-    // ---- the member's shell: the invite waits in their sidebar, with
-    // Accept and Decline (decision 63); their Accept opens it
+    // ---- the member's shell: the invite is told them as a notice, with
+    // Accept and Decline (decision 63; FIN-458); their Accept opens it, its
+    // answer naming its page
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &member_session)?;
     let theirs = chrome.open(&format!("{platform}/settings"))?;
     chrome.viewport(&theirs, 1280, 800, false)?;
-    let invite = format!("#invites .invite[data-invite={chat:?}]");
-    let waits = chrome.until(&theirs, &format!("{} && !document.getElementById('invites').hidden && !document.querySelector({row:?})", settled(&format!("{invite} .invite-accept"))), wait);
+    let invite = format!("#computer-notices:not([hidden]) .computer-notice[data-id=\"invite:{chat}\"]");
+    let accept = format!("[...(document.querySelector({invite:?})?.querySelectorAll('.notice-actions button') ?? [])].find((x) => x.textContent === 'Accept')");
+    let waits = chrome.until(&theirs, &format!("!!{accept} && !document.querySelector({row:?})"), wait);
     let said = chrome.eval(&theirs, &format!("document.querySelector({invite:?})?.innerText ?? ''"))?;
-    chrome.screenshot(&theirs, &s.scratch.join("share-invite-sidebar.png"))?;
+    chrome.screenshot(&theirs, &s.scratch.join("share-invite-notice.png"))?;
     s.ok(
-        "their shell shows the invite in the sidebar, above their chats: its title, who invited them and as what, with Accept and Decline; it is in no list yet",
+        "their shell tells them the invite, over their page: its title, who invited them and as what, with Accept and Decline; it is in no list yet",
         waits && said.as_str().is_some_and(|t| t.contains(&title) && t.contains(&format!("{owner_name} invited you to view it")) && t.contains("Accept") && t.contains("Decline")),
         &said,
     );
     if waits {
-        chrome.click(&theirs, &format!("{invite} .invite-accept"))?;
+        chrome.eval(&theirs, &format!("({accept}.click(), true)"))?;
     }
     // (their Accept opens its window on the desktop)
     let more = "#stack button[aria-label='More']";
     let listed = waits && chrome.until(&theirs, &format!("{} && {} && !document.querySelector({invite:?})", settled(&row), settled(more)), wait);
     s.ok(
-        "their Accept makes them a member, and opens it: it is in their dock, its window open, and the invite gone from the sidebar",
+        "their Accept makes them a member, and opens it: it is in their dock, its window open, and the invite told no more",
         listed && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty(),
         chrome.eval(&theirs, "document.getElementById('sidebar').innerText")?,
     );
