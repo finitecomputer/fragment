@@ -527,13 +527,6 @@ fn wiped_computer() -> CellError {
     CellError::new(ErrorCode::NotFound, "no such computer (its owner was wiped)")
 }
 
-/// `computer/init`'s body.
-#[derive(Deserialize)]
-struct Init {
-    id: String,
-    owner: String,
-}
-
 #[derive(Deserialize)]
 struct WakeBody {
     why: Wake,
@@ -657,12 +650,6 @@ struct JoinedAsk {
 #[derive(Deserialize)]
 struct Pin {
     image: String,
-}
-
-#[derive(Deserialize)]
-struct TicketAsk {
-    port: u16,
-    identity: String,
 }
 
 #[derive(Deserialize)]
@@ -2548,24 +2535,6 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
         }
         match path.trim_start_matches('/') {
-            "computer/init" => {
-                let b: Init = body_json(&mut req).await?;
-                if !valid_computer_id(&b.id) {
-                    return Err(CellError::invalid("a computer's id is computer:<24 hex>"));
-                }
-                match self.meta(MetaKey::Owner)? {
-                    Some(owner) if owner != b.owner => return Err(CellError::new(ErrorCode::Forbidden, "this computer is someone else's")),
-                    Some(_) => {}
-                    None => {
-                        let image = self.cfg.computer_image.clone().ok_or_else(|| CellError::host("this deployment makes no computers (FRAGMENT_COMPUTER_IMAGE)"))?;
-                        self.set_meta(MetaKey::Id, &b.id)?;
-                        self.set_meta(MetaKey::Owner, &b.owner)?;
-                        self.set_meta(MetaKey::Image, &image)?;
-                        self.set_meta(MetaKey::CreatedAt, &js::now_ms().to_string())?;
-                    }
-                }
-                json_response(&self.view()?)
-            }
             "computer/view" => {
                 // its owner reading it (the shell, as it opens): a deploy since its last look is news
                 self.look_and_tell().await;
@@ -2686,20 +2655,6 @@ impl ComputerCell {
                 let b: JoinedAsk = body_json(&mut req).await?;
                 json_response(&self.joined(b).await?)
             }
-            "computer/ticket" => {
-                let b: TicketAsk = body_json(&mut req).await?;
-                if b.identity != self.must(MetaKey::Owner)? {
-                    return Err(CellError::new(ErrorCode::Forbidden, "only the computer's owner opens its ports"));
-                }
-                let token = js::random_hex::<24>();
-                let expires = js::now_ms() + TICKET_TTL_MS;
-                self.exec(
-                    "INSERT INTO tickets (hash, port, identity, expires_at) VALUES (?, ?, ?, ?)",
-                    vec![sha_hex(&token).into(), i64::from(b.port).into(), b.identity.as_str().into(), expires.into()],
-                )?;
-                self.trim("tickets", TICKETS_MAX)?;
-                json_response(&json!({ "ticket": token, "port": b.port, "expiresAt": expires }))
-            }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
                 let now = js::now_ms();
@@ -2799,9 +2754,25 @@ impl ComputerCell {
         let who = req.headers().get(SIGNER_HEADER)?.ok_or_else(|| CellError::host("no signer from the router"))?;
         let path = req.path();
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        // the router found this computer by the id it names
-        let ["api", "computers", _, rest @ ..] = segments.as_slice() else {
-            return Err(CellError::host(format!("the router forwards /api/computers/{{id}}/… here, not {path}")));
+        let rest = match (req.method(), segments.as_slice()) {
+            // the person's own computer (the router found it by them): made
+            (Method::Post, ["api", "computers"]) => return self.make(&who).await,
+            // listed: theirs, or none yet
+            (Method::Get, ["api", "computers"]) => {
+                let list = match self.owned_by(&who) {
+                    Ok(()) => {
+                        self.look_and_tell().await;
+                        vec![self.view()?]
+                    }
+                    Err(e) if e.code == ErrorCode::NotFound => vec![],
+                    Err(e) => return Err(e),
+                };
+                // where its owner gets help when it will not start
+                return json_response(&json!({ "computers": list, "support": self.cfg.support_url }));
+            }
+            // the router found this computer by the id it names
+            (_, ["api", "computers", _, rest @ ..]) => rest,
+            (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments.get(2..).unwrap_or_default().join("/")))),
         };
         self.owned_by(&who)?;
         self.look_and_tell().await;
@@ -2945,10 +2916,53 @@ impl ComputerCell {
                 self.tell_owner().await;
                 json_response(&self.view()?)
             }
+            (Method::Post, ["ports", port, "ticket"]) => {
+                let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
+                // where on the port it lands: a path and query the image reads
+                // (an agent's screen: `/?agent=<agent>`), carried, never read
+                let body = req.bytes().await?;
+                let asked: PortTicketAsk = if body.iter().all(u8::is_ascii_whitespace) { PortTicketAsk::default() } else { serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+                let path = asked.path.unwrap_or_else(|| "/".into());
+                if !valid_port_path(&path) {
+                    return Err(CellError::invalid(format!("a ticket's path is a path on its port: `/`, then at most {PORT_PATH_MAX_BYTES} visible characters, no `//`, `#`, `\\`, `.` or `..`")));
+                }
+                let id = self.must(MetaKey::Id)?;
+                let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
+                let ticket = js::random_hex::<24>();
+                let expires_at = js::now_ms() + TICKET_TTL_MS;
+                self.exec(
+                    "INSERT INTO tickets (hash, port, identity, expires_at) VALUES (?, ?, ?, ?)",
+                    vec![sha_hex(&ticket).into(), i64::from(port).into(), who.as_str().into(), expires_at.into()],
+                )?;
+                self.trim("tickets", TICKETS_MAX)?;
+                let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
+                json_response(&PortTicket { url: format!("{origin}/__ticket?t={ticket}&next={next}"), expires_at })
+            }
             (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
             (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
         }
+    }
+
+    /// Made, for `who`, whose computer this is (`default_computer_of`):
+    /// asleep on the deployment's image, its view; made again, the same.
+    async fn make(&self, who: &str) -> CellResult<Response> {
+        let id = fragment_core::computer::default_computer_of(who);
+        match self.meta(MetaKey::Owner)? {
+            Some(owner) if owner != who => return Err(CellError::new(ErrorCode::Forbidden, "this computer is someone else's")),
+            Some(_) => {}
+            None => {
+                let image = self.cfg.computer_image.clone().ok_or_else(|| CellError::host("this deployment makes no computers (FRAGMENT_COMPUTER_IMAGE)"))?;
+                self.set_meta(MetaKey::Id, &id)?;
+                self.set_meta(MetaKey::Owner, who)?;
+                self.set_meta(MetaKey::Image, &image)?;
+                self.set_meta(MetaKey::CreatedAt, &js::now_ms().to_string())?;
+            }
+        }
+        let made = self.view()?;
+        // its seat's push asked for, or the making failed (made again, it asks again)
+        crate::orgs::computer_made(&self.env, who).await?;
+        json_response(&made)
     }
 
     /// Runs `fragment` no more (only while its agent is `identity`, when
@@ -3259,71 +3273,21 @@ pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String
     Ok(verifier)
 }
 
-fn view_of(v: Value) -> CellResult<ComputerView> {
-    serde_json::from_value(v).map_err(|e| CellError::host(format!("the computer's view: {e}")))
-}
-
-/// `/api/computers…` (the router has resolved the signer `who`, a person).
-/// Computer `id`'s view, when `who` owns it (anyone else finds none).
-async fn owned(env: &Env, who: &str, id: &str) -> CellResult<ComputerView> {
-    if !valid_computer_id(id) {
-        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
-    }
-    let v = view_of(ask(env, id, "computer/view", &json!({})).await?)?;
-    if v.owner != who {
-        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
-    }
-    Ok(v)
-}
-
 /// `{image}` from a body.
 pub(crate) fn image_named(body: &[u8]) -> CellResult<String> {
     let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
     v["image"].as_str().filter(|i| fragment_core::price::printable(i, 64)).map(str::to_string).ok_or_else(|| CellError::invalid("name an image"))
 }
 
+/// `/api/computers…` (the router has resolved the signer `who`): found
+/// and forwarded. The list and the making ask the person's own computer.
 pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     if kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "computers are people's: an agent runs on its owner's"));
     }
-    match (method, rest) {
-        (Method::Post, []) => {
-            let id = fragment_core::computer::default_computer_of(who);
-            let made = view_of(ask(env, &id, "computer/init", &json!({ "id": id, "owner": who })).await?)?;
-            // its seat's push asked for, or the making failed (made again, it asks again)
-            crate::orgs::computer_made(env, who).await?;
-            json_response(&made)
-        }
-        (Method::Get, []) => {
-            let id = fragment_core::computer::default_computer_of(who);
-            let list = match ask(env, &id, "computer/view", &json!({})).await {
-                Ok(v) => vec![view_of(v)?],
-                Err(e) if e.code == ErrorCode::NotFound => vec![],
-                Err(e) => return Err(e),
-            };
-            // where its owner gets help when it will not start
-            let cfg = Config::from_env(env);
-            json_response(&json!({ "computers": list, "support": cfg.support_url }))
-        }
-        (Method::Post, [id, "ports", port, "ticket"]) => {
-            let v = owned(env, who, id).await?;
-            let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
-            // where on the port it lands: a path and query the image reads
-            // (an agent's screen: `/?agent=<agent>`), carried, never read
-            let asked: PortTicketAsk = if body.iter().all(u8::is_ascii_whitespace) { PortTicketAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
-            let path = asked.path.unwrap_or_else(|| "/".into());
-            if !valid_port_path(&path) {
-                return Err(CellError::invalid(format!("a ticket's path is a path on its port: `/`, then at most {PORT_PATH_MAX_BYTES} visible characters, no `//`, `#`, `\\`, `.` or `..`")));
-            }
-            let t = ask(env, id, "computer/ticket", &json!({ "port": port, "identity": who })).await?;
-            let ticket = t["ticket"].as_str().ok_or_else(|| CellError::host("the computer minted no ticket"))?;
-            let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
-            let url = format!("{}/__ticket?t={ticket}&next={next}", v.origin);
-            json_response(&PortTicket { url, expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
-        }
-        // the rest are the computer's to answer, and to check who asks
-        (method, [id, ..]) => forward(env, who, method, id, rest, body).await,
-        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), rest.join("/")))),
+    match rest {
+        [] => forward(env, who, method, &fragment_core::computer::default_computer_of(who), rest, body).await,
+        [id, ..] => forward(env, who, method, id, rest, body).await,
     }
 }
 
