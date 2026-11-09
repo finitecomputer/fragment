@@ -1011,6 +1011,8 @@ layout file a platform's import skill carries.
 fragment home survey ~/old-home --json                         # what an import would bring, and what stays
 fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read through a platform's layout
 fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
 ```
 
 The survey lists the chats' database (`fragment session import` brings
@@ -1022,6 +1024,13 @@ routine in UTC (weekdays by name), and its files: what an import brings
 up to 10 GiB) and what stays behind, and why. A home holding a file that
 may hold a password or key (`.env`, `auth.json`, a private key) is
 refused whole: leave those out of it.
+
+`fragment home files` brings the home's own files (its layout's work
+folder) into a fragment you edit, under `files/`, each file of 1 MiB or
+more as a blob, and writes `left-behind.md` beside them: every file or
+folder left out, its size, and why. A fragment with no `fragment.json`
+gets one whose page is the files view (`fragment deploy` shows it).
+Running it again sends only what is missing.
 
 ## Agents
 
@@ -1148,6 +1157,7 @@ fragment export [--out FILE]             fragment channel <name> [<channel>] [--
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
+fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

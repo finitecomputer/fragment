@@ -34,6 +34,7 @@ mod governance;
 mod frames;
 mod icons;
 pub mod hermes;
+mod home;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -128,6 +129,7 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     sessions::sessions,
     sessions::sessions_ui,
+    home::home,
     notes::notes,
     brain::brain,
     brain::brain_release,
@@ -195,7 +197,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["shell-ui"],
     &[
         "lockdown", "templates", "faces", "public", "facet-cap", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels",
-        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
+        "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
