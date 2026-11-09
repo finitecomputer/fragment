@@ -46,10 +46,19 @@ fn one(n: &ComputerNotice, f: &Facts) -> Notice {
             actions: [Some(restart("Restart")), f.support.map(|url| NoticeAction::open("Get help", url))].into_iter().flatten().collect(),
             ..notice("wont_wake".into(), "wont_wake", NoticeLevel::Warn, "Your computer won't start".into())
         },
+        // its stop in words, never as `until`: a stop's own save may run on
+        // past that time, and the warning holds until the computer says so
         ComputerNotice::Unsaved { since, why, stops_at, .. } => Notice {
-            text: Some(format!("It hasn't saved for {}, so what its agents did since isn't kept yet. It keeps trying, and Restart tries to save first.", span(f.now_ms - since))),
+            text: Some(format!(
+                "It hasn't saved for {}, so what its agents did since isn't kept yet. It keeps trying, and Restart tries to save first.{}",
+                span(f.now_ms - since),
+                match stops_at {
+                    Some(at) if *at > f.now_ms => format!(" If it still can't, it stops in about {}.", span(at - f.now_ms)),
+                    Some(_) => " If it still can't, it stops soon.".to_string(),
+                    None => String::new(),
+                }
+            )),
             detail: Some(why.clone()),
-            until: stops_at.map(|at| Until { at, said: "If it still can't save, it stops".into() }),
             actions: vec![restart("Restart now")],
             ..notice("unsaved".into(), "unsaved", NoticeLevel::Warn, "Your computer can't save right now".into())
         },
@@ -145,8 +154,12 @@ mod tests {
         assert_eq!(no_help[0].actions.len(), 1, "no support link, no Get help");
 
         let unsaved = &said(&[ComputerNotice::Unsaved { since: 88 * MIN, save: Some(3), failing_since: 90 * MIN, failures: 3, why: "R2 is down".into(), stops_at: Some(130 * MIN) }], &f)[0];
-        assert_eq!(unsaved.text.as_deref(), Some("It hasn't saved for 12 minutes, so what its agents did since isn't kept yet. It keeps trying, and Restart tries to save first."));
-        assert_eq!(unsaved.until, Some(Until { at: 130 * MIN, said: "If it still can't save, it stops".into() }));
+        assert_eq!(unsaved.text.as_deref(), Some("It hasn't saved for 12 minutes, so what its agents did since isn't kept yet. It keeps trying, and Restart tries to save first. If it still can't, it stops in about 30 minutes."));
+        // its stop is no end of what it tells: a stop's own save may run on
+        // past it, so the notice keeps no expiry (`until`: ends by the clock)
+        assert_eq!(unsaved.until, None);
+        let past = &said(&[ComputerNotice::Unsaved { since: 88 * MIN, save: Some(3), failing_since: 90 * MIN, failures: 3, why: "R2 is down".into(), stops_at: Some(99 * MIN) }], &f)[0];
+        assert!(past.text.as_deref().is_some_and(|t| t.ends_with("If it still can't, it stops soon.")), "{:?}", past.text);
         assert_eq!(post(unsaved), vec![("Restart now".into(), format!("{at}/restart"), json!({ "generation": 7 }))]);
 
         let back = |pending, save: Option<u64>, ended_at: Option<i64>| {

@@ -220,3 +220,13 @@ test("the notices' read failing: what it last said stays, under the page's own C
   assert.deepEqual(p.shown().map((r) => r.id ?? r.words[0]), ["Couldn't refresh your computer", "update:abc"]);
   assert.deepEqual(p.shown()[0].actions, [{ label: "Try again", enabled: true }]);
 });
+
+test("a notice's Restart restarts the start it named, never a newer one: a stale row's press changes nothing (its generation)", (t) => {
+  // the notices read older than the computer's: the update was told of start 3, the computer is on 4 now
+  const stale = { id: "update:abc", kind: "update", level: "info", title: "An update is ready", actions: [{ label: "Restart", post: RESTART, body: { generation: 3 } }] };
+  const p = page(t, [stale]);
+  p.shell.computer = { ...p.shell.computer, generation: 4 };
+  p.ui.renderComputer();
+  p.tap("update:abc", "Restart");
+  assert.deepEqual([p.calls[0].method, p.calls[0].path, p.calls[0].body], ["POST", RESTART, { generation: 3 }], "the action's own precondition, as the server wrote it");
+});

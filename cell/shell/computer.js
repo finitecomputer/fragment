@@ -142,7 +142,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // decides what shows whatever the post answered. Failed, the notice says
   // so, as that read finds it, its button back to tap again.
   async function act(n, a, button) {
-    if (restarts(a)) return restartComputer();
+    // the start the server named, so a stale row's press restarts nothing newer
+    if (restarts(a)) return restartComputer(a.body?.generation);
     button.disabled = true;
     try {
       await api("POST", a.post, a.body ?? {});
@@ -259,11 +260,12 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     button.disabled = false;
   }
   // Restart: the computer saves if it can, then starts fresh from its newest
-  // good save. It names the start the person saw, so pressed twice (or in two
-  // tabs) it restarts once. Its progress shows where its notice was
-  // (`follow`), and so does its ask's failure, with Try again.
-  function restartComputer() {
-    follow.press();
+  // good save. It names the start the person saw (`asked`: a notice's own,
+  // else the view's), so pressed twice (or in two tabs, or on a stale row)
+  // it restarts once. Its progress shows where its notice was (`follow`),
+  // and so does its ask's failure, with Try again.
+  function restartComputer(asked) {
+    follow.press(asked);
   }
 
   function computerSection(c) {

@@ -3275,7 +3275,7 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let _ = b.screenshot(page, &shots.join("computer-unsaved.png"));
     s.ok(
         "a sleep whose save fails is shown at once, with no reload: since when its work is unsaved, when it stops, and Restart",
-        failing.status == 200 && answered && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved for") && t.contains("If it still can't save, it stops in ")),
+        failing.status == 200 && answered && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved for") && t.contains("If it still can't, it stops in about ")),
         &said,
     );
     // Restart, in the notice: its save fails too, so it goes back, and says so
