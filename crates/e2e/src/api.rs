@@ -3,7 +3,7 @@
 //! sending the node the right `Host` header; a hosted run's, at their own
 //! names over https (`Target::Hosted`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -360,8 +360,23 @@ impl Api {
 
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
+        Api::hosted_with(preview, run, client(Pool::Idle(POOL_IDLE)))
+    }
+
+    /// `hosted` for a dry run's plan, which sends nothing: every plan's
+    /// lanes share one client. A client reads its TLS roots as it is built,
+    /// the system's too where the CLI's `rustls-tls-native-roots` joins
+    /// this crate's reqwest (a workspace build: `cargo xtask check`'s),
+    /// about 40 ms in debug; one per lane made each plan cost 1.7 s, and
+    /// the plan's tests 10 s of the check (FIN-452).
+    pub fn planned(preview: &Preview, run: &Arc<Run>) -> Api {
+        static UNSENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+        Api::hosted_with(preview, run, UNSENT.get_or_init(|| client(Pool::Fresh)).clone())
+    }
+
+    fn hosted_with(preview: &Preview, run: &Arc<Run>, http: reqwest::blocking::Client) -> Api {
         let (base, label_suffix) = (preview.platform(), String::new());
-        Api { http: client(Pool::Idle(POOL_IDLE)), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+        Api { http, base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
     }
 
     /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
