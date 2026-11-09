@@ -431,6 +431,8 @@ struct FragmentRoot: View {
     @State private var sidebar = false
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
+    /// The page's height, of which the notices take at most a share.
+    @State private var pageHeight: CGFloat = 800
 
     var body: some View {
         Group {
@@ -464,7 +466,7 @@ struct FragmentRoot: View {
                     NavigationStack {
                         content(api)
                             // what they are told, over every page (as the web's band)
-                            .safeAreaInset(edge: .top, spacing: 0) { NoticesBand(library: library, api: api) }
+                            .safeAreaInset(edge: .top, spacing: 0) { NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4) }
                             .navigationTitle(title)
                             .navigationBarTitleDisplayMode(.inline)
                             .toolbar {
@@ -488,6 +490,7 @@ struct FragmentRoot: View {
                     }
             }
             .accessibilityHidden(sidebar)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
                 page = destination; showingApps = false; toggleSidebar()
             }

@@ -67,6 +67,10 @@ struct Notice: Decodable, Identifiable, Equatable, Sendable {
 struct NoticesBand: View {
     let library: Library
     let api: FragmentAPI
+    /// The most of the page it takes (`FragmentRoot`'s share of its
+    /// height): past it, it scrolls, so the page and its toolbar stay.
+    let maxHeight: CGFloat
+    @State private var height: CGFloat = 0
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -75,11 +79,18 @@ struct NoticesBand: View {
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
             let shown = library.notices.filter { $0.shown(at: now) }
             if library.noticesFailed || !shown.isEmpty {
-                VStack(spacing: 8) {
-                    if library.noticesFailed { refresh }
-                    ForEach(shown) { notice in row(notice, now: now) }
+                ScrollView {
+                    VStack(spacing: 8) {
+                        if library.noticesFailed { refresh }
+                        ForEach(shown) { notice in row(notice, now: now) }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                 }
-                .padding(.horizontal, 12).padding(.vertical, 6)
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(height: min(height, maxHeight))
+                // never under the toolbar, however it was scrolled when a notice went
+                .clipped()
             }
         }
     }
@@ -89,7 +100,7 @@ struct NoticesBand: View {
             HStack {
                 Text("Couldn't refresh your computer").font(.subheadline.weight(.semibold))
                 Spacer()
-                Button("Try again") { Task { await library.load(api) } }
+                Button { Task { await library.load(api) } } label: { Text("Try again").foregroundStyle(Color(.systemBackground)) }
                     .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
             }
         }
@@ -128,7 +139,9 @@ struct NoticesBand: View {
             else { Task { await library.act(notice, action, api: api) } }
         }
         if main {
-            Button(action.label, action: tap).buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
+            // its words in the page's own colour, on the app's primary tint (dark: white on white otherwise)
+            Button(action: tap) { Text(action.label).foregroundStyle(Color(.systemBackground)) }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
         } else {
             Button(action.label, action: tap).buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).disabled(pressed)
         }
