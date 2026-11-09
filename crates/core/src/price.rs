@@ -109,24 +109,45 @@ pub enum Usage {
     Key { key: String, units: u64 },
 }
 
-/// A `Usage` as it is read: every kind's fields, flat, none unknown.
+/// A `Usage` as it is read: every kind's fields, flat, none unknown, and
+/// none `null` (`named`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UsageFields {
     kind: UsageKind,
+    #[serde(default, deserialize_with = "named")]
     model: Option<String>,
+    #[serde(default, deserialize_with = "named")]
     input: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     cached_input: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     cache_write: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     output: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     milli: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     instance: Option<String>,
+    #[serde(default, deserialize_with = "named")]
     ms: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     class: Option<StorageClass>,
+    #[serde(default, deserialize_with = "named")]
     byte_hours: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     count: Option<u64>,
+    #[serde(default, deserialize_with = "named")]
     key: Option<String>,
+    #[serde(default, deserialize_with = "named")]
     units: Option<u64>,
+}
+
+/// A field `UsageFields` names: its value, never `null`. An `Option`'s
+/// `null` would read as absent, so a field of another kind's, `null`, would
+/// pass where the tagged reading refused it as unknown.
+fn named<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -1794,7 +1815,9 @@ mod tests {
             (r#"{"kind":"awake","ms":5}"#, "missing field `instance`"),
             (r#"{"count":1}"#, "missing field `kind`"),
             (r#"{"kind":"storage","class":"disk","byte_hours":1}"#, "unknown variant `disk`"),
-            (r#"{"kind":"images","count":null}"#, "missing field `count`"),
+            (r#"{"kind":"images","count":null}"#, "invalid type: null"),
+            (r#"{"kind":"requests","count":1000000,"ms":null}"#, "invalid type: null"),
+            (r#"{"kind":"key","key":"brave","units":1,"model":null}"#, "invalid type: null"),
         ] {
             let e = read(text).expect_err(text);
             assert!(e.contains(says), "{text}: {e}");
