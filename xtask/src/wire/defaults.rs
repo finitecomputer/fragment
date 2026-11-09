@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Context, Result};
-use fragment_proto::routes::{ty, Answer, RoundTrip, ROUTES};
+use fragment_proto::routes::{ty, Answer, Body, RoundTrip, ROUTES};
 use fragment_proto::ErrorBody;
 use serde_json::{json, Map, Value};
 
@@ -94,7 +94,8 @@ pub fn hold(doc: &Value, lock: &str) -> Result<BTreeSet<String>> {
     for route in ROUTES {
         let op = ops.get(route.operation).with_context(|| format!("{} is in the document", route.operation))?;
         let mut each: Vec<(&str, RoundTrip, Option<&Value>)> = vec![];
-        if let Some(t) = route.request {
+        // bytes: no JSON, so no default to hold
+        if let Some(Body::Json(t)) = route.request {
             each.push(("its body", t.round_trip, op.pointer("/requestBody/content/application~1json/schema")));
         }
         match route.answer {

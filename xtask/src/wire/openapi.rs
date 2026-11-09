@@ -7,7 +7,7 @@
 //! (deserialize). A type both ways must be one schema both ways.
 
 use anyhow::{bail, Result};
-use fragment_proto::routes::{Answer, Auth, ParamAt, Route, ANY_ROUTE, ROUTES, TAGS};
+use fragment_proto::routes::{Answer, Auth, Body, ParamAt, Route, ANY_ROUTE, ROUTES, TAGS};
 use fragment_proto::{ErrorBody, ErrorCode};
 use schemars::generate::SchemaSettings;
 use schemars::SchemaGenerator;
@@ -157,8 +157,15 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
             .collect();
         op["parameters"] = Value::Array(params);
     }
-    if let Some(request) = route.request {
-        op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": (request.schema)(inn).to_value() } } });
+    match route.request {
+        Some(Body::Json(request)) => {
+            op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": (request.schema)(inn).to_value() } } });
+        }
+        Some(Body::Bytes { media }) => {
+            op["requestBody"] = json!({ "required": true, "content": { media: { "schema": { "type": "string", "contentMediaType": media } } } });
+            op["x-fragment-takes"] = json!(media);
+        }
+        None => {}
     }
     let mut responses = Map::new();
     match route.answer {

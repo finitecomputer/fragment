@@ -5,7 +5,7 @@
         "description": "What a command asks.\n\nOpen (`x-fragment-open`, docs/wire): the mover leaves a command it\ndoes not know in the mailbox, done by no one, and the move is held\nwhen its deadline passes.",
         "oneOf": [
           {
-            "description": "Stop the old agent, then stage it under `prefix` (`stage_prefix`),\nthe manifest last, and hand on the secrets named (none until the\nvault: FIN-466).",
+            "description": "Stop the old agent, then upload its zip as `stage` (`stage_id`), in\nparts, and complete it (the manifest last); and hand on the secrets\nnamed (none until the vault: FIN-466).",
             "properties": {
               "kind": {
                 "const": "stop_and_stage",
@@ -14,21 +14,21 @@
               "phase": {
                 "$ref": "#/components/schemas/Phase"
               },
-              "prefix": {
-                "type": "string"
-              },
               "secrets": {
                 "default": [],
                 "items": {
                   "$ref": "#/components/schemas/SecretKind"
                 },
                 "type": "array"
+              },
+              "stage": {
+                "type": "string"
               }
             },
             "required": [
               "kind",
               "phase",
-              "prefix"
+              "stage"
             ],
             "type": "object"
           },
@@ -494,7 +494,7 @@
             "type": "object"
           },
           {
-            "description": "The zip and its manifest are written; the manifest's SHA-256 (hex)\nis what the platform checks it read.",
+            "description": "The stage is complete (`POST …/complete`); the manifest's SHA-256\n(hex), as that answered, is what the platform checks it reads.",
             "properties": {
               "bytes": {
                 "format": "uint64",
@@ -801,7 +801,7 @@
           "why"
         ],
         "type": "object",
-        "x-fragment-direction": "out"
+        "x-fragment-direction": "both"
       },
       "ListWatchFrame": {
         "description": "A frame of `GET /api/fragments/watch`, the socket that follows a\nsigner's list. Frames name nothing: on `changed` or `invited` the page\nreads its list, or its invites, again with its own credential. The\ncell writes these as constant text (cell/src/principal.rs).\n\nOpen (`x-fragment-open`, docs/wire): a reader ignores a frame it does\nnot know (the shell's list, the iOS app).",
@@ -1663,11 +1663,14 @@
             "type": "array"
           },
           "left_more": {
-            "default": 0,
-            "description": "Paths left behind past the list.",
+            "default": null,
+            "description": "Paths left behind past the list, if any.",
             "format": "uint64",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "old": {
             "type": "string"
@@ -1694,11 +1697,10 @@
           "zip_bytes",
           "zip_sha256",
           "bytes",
-          "files",
-          "left_more"
+          "files"
         ],
         "type": "object",
-        "x-fragment-direction": "out"
+        "x-fragment-direction": "both"
       },
       "Mark": {
         "description": "How a retired old agent is marked on the old platform.",
@@ -2215,7 +2217,7 @@
           "p2"
         ],
         "type": "string",
-        "x-fragment-direction": "out"
+        "x-fragment-direction": "both"
       },
       "Pinned": {
         "description": "Its answer: the fragment, and whether it is pinned now.",
@@ -2743,6 +2745,38 @@
         "type": "object",
         "x-fragment-direction": "in"
       },
+      "StageComplete": {
+        "description": "`POST …/complete`: the stage's manifest, for its zip made of parts\n1 to n (each but the last at least `PART_MIN_BYTES`, `zip_bytes` in\nall). The same complete again answers the same.",
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/Manifest"
+          }
+        },
+        "required": [
+          "manifest"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "StageCompleted": {
+        "description": "The manifest as written, by its SHA-256 (hex): what the mover's\n`staged` report names.",
+        "properties": {
+          "manifest_sha256": {
+            "type": "string"
+          },
+          "zip_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manifest_sha256",
+          "zip_bytes"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
       "StageDone": {
         "description": "`POST /api/migrations/stages/{stage}/done`: the import ended, well or\nnot. The same `ok` again changes nothing.",
         "properties": {
@@ -2785,6 +2819,53 @@
         "required": [
           "stage",
           "manifest"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "StagePart": {
+        "description": "One part taken (`PUT …/parts/{n}`), and each part `GET …/parts` lists.",
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "etag": {
+            "description": "R2's etag for it.",
+            "type": "string"
+          },
+          "n": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sha256": {
+            "description": "Its SHA-256 (hex), as its bytes came.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "n",
+          "bytes",
+          "sha256",
+          "etag"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "StageParts": {
+        "description": "`GET …/parts`: the parts taken so far, by number.",
+        "properties": {
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/StagePart"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "parts"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -4701,12 +4782,399 @@
         ]
       }
     },
+    "/api/migrations/mover/stages/{stage}/complete": {
+      "post": {
+        "operationId": "migrations.complete",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StageComplete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageCompleted"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The stage's zip made whole from its parts, then its manifest written, last.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/stages/{stage}/parts": {
+      "get": {
+        "operationId": "migrations.parts",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageParts"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The stage's parts taken so far, to resume an upload: their numbers, sizes, hashes and etags, never their bytes.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/stages/{stage}/parts/{n}": {
+      "put": {
+        "operationId": "migrations.part",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The part's number, 1 to `PARTS_MAX`.",
+            "in": "path",
+            "name": "n",
+            "required": true,
+            "schema": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The part's SHA-256 (hex): its bytes are held to it as they arrive.",
+            "in": "query",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "contentMediaType": "application/octet-stream",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StagePart"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "One part of the stage's zip, streamed into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.",
+        "tags": [
+          "migrations"
+        ],
+        "x-fragment-takes": "application/octet-stream"
+      }
+    },
     "/api/migrations/stages/{stage}/done": {
       "post": {
         "operationId": "migrations.done",
         "parameters": [
           {
-            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its routine names it.",
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
             "in": "path",
             "name": "stage",
             "required": true,
@@ -4844,7 +5312,7 @@
         "operationId": "migrations.open",
         "parameters": [
           {
-            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its routine names it.",
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
             "in": "path",
             "name": "stage",
             "required": true,
@@ -4972,7 +5440,7 @@
         "operationId": "migrations.zip",
         "parameters": [
           {
-            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its routine names it.",
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
             "in": "path",
             "name": "stage",
             "required": true,

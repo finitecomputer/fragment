@@ -167,6 +167,15 @@ A fragment's live socket: records as they are appended, presence, drafts and que
 
 The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move.
 
+#### `migrations.complete`
+
+`POST /api/migrations/mover/stages/{stage}/complete`: The stage's zip made whole from its parts, then its manifest written, last.
+
+- Credentials: NIP-98
+- Body: [`StageComplete`](#stagecomplete)
+- Answer: [`StageCompleted`](#stagecompleted)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
 #### `migrations.done`
 
 `POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.
@@ -191,6 +200,24 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Credentials: NIP-98
 - Answer: [`StageOpened`](#stageopened)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.part`
+
+`PUT /api/migrations/mover/stages/{stage}/parts/{n}`: One part of the stage's zip, streamed into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.
+
+- Credentials: NIP-98
+- Query `sha256` (`string`, required): The part's SHA-256 (hex): its bytes are held to it as they arrive.
+- Body: bytes (`application/octet-stream`), streamed
+- Answer: [`StagePart`](#stagepart)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.parts`
+
+`GET /api/migrations/mover/stages/{stage}/parts`: The stage's parts taken so far, to resume an upload: their numbers, sizes, hashes and etags, never their bytes.
+
+- Credentials: NIP-98
+- Answer: [`StageParts`](#stageparts)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
 #### `migrations.report`
 
@@ -228,13 +255,13 @@ value they do not know; a closed object refuses a field it does not know.
 
 out, open. What a command asks. Open (`x-fragment-open`, docs/wire): the mover leaves a command it does not know in the mailbox, done by no one, and the move is held when its deadline passes.
 
-`kind: "stop_and_stage"`. Stop the old agent, then stage it under `prefix` (`stage_prefix`), the manifest last, and hand on the secrets named (none until the vault: FIN-466).
+`kind: "stop_and_stage"`. Stop the old agent, then upload its zip as `stage` (`stage_id`), in parts, and complete it (the manifest last); and hand on the secrets named (none until the vault: FIN-466).
 
 | field | type | | |
 | --- | --- | --- | --- |
 | `phase` | [`Phase`](#phase) | required |  |
-| `prefix` | `string` | required |  |
 | `secrets` | `array` of [`SecretKind`](#secretkind) | optional |  |
+| `stage` | `string` | required |  |
 
 `kind: "retire"`. Retire it (a verified backup first) and mark it moved, as `mark`.
 
@@ -365,7 +392,7 @@ in.
 | `bytes` | `integer` | required |  |
 | `files` | `integer` | required |  |
 
-`kind: "staged"`. The zip and its manifest are written; the manifest's SHA-256 (hex) is what the platform checks it read.
+`kind: "staged"`. The stage is complete (`POST …/complete`); the manifest's SHA-256 (hex), as that answered, is what the platform checks it reads.
 
 | field | type | | |
 | --- | --- | --- | --- |
@@ -446,7 +473,7 @@ Values: `person`, `agent`.
 
 ### `LeftBehind`
 
-out. 
+both. 
 
 | field | type | | |
 | --- | --- | --- | --- |
@@ -619,7 +646,7 @@ out. `GET /api/migrations/mover/mailbox`: what the mover is told to do, oldest f
 
 ### `Manifest`
 
-out. `manifest.json`, as the mover writes it beside the zip (last).
+both. `manifest.json`, as the mover writes it beside the zip (last).
 
 | field | type | | |
 | --- | --- | --- | --- |
@@ -629,7 +656,7 @@ out. `manifest.json`, as the mover writes it beside the zip (last).
 | `format` | `string` | required | `STAGE_FORMAT`. |
 | `layout` | `string` | required | How the folder is laid out, for the importer: `finite-computer`. |
 | `left` | `array` of [`LeftBehind`](#leftbehind) | optional | What stayed behind, and why (`MANIFEST_LEFT_MAX` of them). |
-| `left_more` | `integer` | required | Paths left behind past the list. |
+| `left_more` | `integer` or `null` | optional | Paths left behind past the list, if any. |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) | required |  |
 | `zip_bytes` | `integer` | required | The zip's size and SHA-256 (hex). |
@@ -794,7 +821,7 @@ out. The errors a page reported as the platform loaded it for its preview card, 
 
 ### `Phase`
 
-out. Which phase a stage is of: one the person asked for (`p1`), or one we made at the cutoff for someone who never answered (`p2`).
+both. Which phase a stage is of: one the person asked for (`p1`), or one we made at the cutoff for someone who never answered (`p2`).
 
 Values: `p1`, `p2`.
 
@@ -1002,6 +1029,23 @@ in. An old agent's bytes by class, as the one classifier counts them (the staged
 | `total` | `integer` | required |  |
 | `work` | `integer` | required |  |
 
+### `StageComplete`
+
+in. `POST …/complete`: the stage's manifest, for its zip made of parts 1 to n (each but the last at least `PART_MIN_BYTES`, `zip_bytes` in all). The same complete again answers the same.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `manifest` | [`Manifest`](#manifest) | required |  |
+
+### `StageCompleted`
+
+out. The manifest as written, by its SHA-256 (hex): what the mover's `staged` report names.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `manifest_sha256` | `string` | required |  |
+| `zip_bytes` | `integer` | required |  |
+
 ### `StageDone`
 
 in. `POST /api/migrations/stages/{stage}/done`: the import ended, well or not. The same `ok` again changes nothing.
@@ -1020,6 +1064,25 @@ out. `POST /api/migrations/stages/{stage}/open`: the stage's manifest. Then `GET
 | --- | --- | --- | --- |
 | `manifest` | [`Manifest`](#manifest) | required |  |
 | `stage` | `string` | required |  |
+
+### `StagePart`
+
+out. One part taken (`PUT …/parts/{n}`), and each part `GET …/parts` lists.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `etag` | `string` | required | R2's etag for it. |
+| `n` | `integer` | required |  |
+| `sha256` | `string` | required | Its SHA-256 (hex), as its bytes came. |
+
+### `StageParts`
+
+out. `GET …/parts`: the parts taken so far, by number.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `parts` | `array` of [`StagePart`](#stagepart) | required |  |
 
 ### `Until`
 

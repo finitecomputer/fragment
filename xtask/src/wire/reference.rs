@@ -93,6 +93,9 @@ pub fn render(doc: &Value) -> Result<String> {
             if let Some(body) = op.pointer("/requestBody/content/application~1json/schema") {
                 let _ = writeln!(md, "- Body: {}", linked(&type_of(body, id), schemas));
             }
+            if let Some(media) = op.get("x-fragment-takes").and_then(Value::as_str) {
+                let _ = writeln!(md, "- Body: bytes (`{media}`), streamed");
+            }
             if let Some(answer) = op.pointer("/responses/200/content/application~1json/schema") {
                 let _ = writeln!(md, "- Answer: {}", linked(&type_of(answer, id), schemas));
             }

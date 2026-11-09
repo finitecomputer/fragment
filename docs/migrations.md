@@ -16,7 +16,7 @@ admin route is.
 | Actor | Owns | Does |
 |---|---|---|
 | `Migrations` (one object, `migrations`) | The roster's rows, each old agent's state, its attempts and deadlines, the mover's mailbox | Decides every transition. Its alarm is the only clock. |
-| The mover (finite-mono's `finite-mover`) | Nothing here | Pushes the roster, pulls its mailbox, does what a command says, reports. Never acts unasked. |
+| The mover (finite-mono's `finite-mover`) | Nothing here | Pushes the roster, pulls its mailbox, does what a command says (a stage it uploads through the platform), reports. Never acts unasked. Holds no bucket credential, and reads no stage. |
 | The new agent | Its own fragment | Opens its stage, reads the zip by ranges, imports with the `import-agent-home` skill, says it is done. |
 | Operators | Nothing | List moves; retry, restart the old agent, retire, withdraw. |
 
@@ -27,6 +27,10 @@ admin route is.
   `/api/migrations/mover/*`. It is the operators' check
   (`FRAGMENT_OPERATORS`), but the mover is no operator. Fragment holds no
   secret for it: rotating it is a new npub in the config and a deploy.
+- **The old platform holds no bucket credential.** R2 has no write-only
+  object permission, so a token on the old hosts could read every stage.
+  The mover uploads through the platform instead, which writes the
+  `STAGE` bucket through its binding alone.
 - **The new agent** signs with its own key, through its computer's
   egress. Its stage's routes answer only the agent the move is bound to,
   and only while the move is `importing`.
@@ -39,6 +43,15 @@ admin route is.
 | `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is. A person already known here (their WorkOS id among the registry's subjects) is bound at once. Pushed every 10 minutes. |
 | `GET /api/migrations/mover/mailbox` | → `Mailbox` | Each command stays until a report on it is taken, so reading again is the retry. Polled every 10 seconds. |
 | `POST /api/migrations/mover/agents/{old}/report` | `Report` → `Reported` | Taken only for the old agent's current command. Any other command id is 409 `conflict`, changing nothing. `seq` grows per command: a `seq` taken already is a 200 with `taken: false`. |
+| `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>` | the part's bytes → `StagePart {n, bytes, sha256, etag}` | One part of the zip (1 to `PARTS_MAX`, at most `PART_MAX_BYTES`, each but the last at least `PART_MIN_BYTES`), streamed unread into the stage's multipart upload in `STAGE` and held to its SHA-256 as it arrives (400 otherwise, nothing kept). The same part again replaces it. |
+| `GET /api/migrations/mover/stages/{stage}/parts` | → `StageParts {parts}` | The parts taken so far: their numbers, sizes, hashes and etags, never their bytes. What a resumed upload sends next. |
+| `POST /api/migrations/mover/stages/{stage}/complete` | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` | The zip made whole from parts 1 to n (none missing, `zip_bytes` theirs in all), then `manifest.json` written, last. Then the mover reports `staged` with that SHA-256. The same complete again answers the same. |
+
+The three stage routes take only the stage its old agent's current
+`stop_and_stage` names (any other stage is 403), and only while it stages:
+`staging` after `stopped`, or phase 2's `archiving` (409 otherwise). No
+route gives a stage's bytes to the mover. The platform keeps the
+multipart upload's id and each part taken in `Migrations`.
 
 A command's id is `<old>:<attempt>:<kind>` (`command_id`). Each old
 agent has at most one command at a time: a new one replaces the last.
@@ -48,7 +61,7 @@ same keys again.
 
 | Command (`do.kind`) | The mover | Reports |
 |---|---|---|
-| `stop_and_stage {phase, prefix, secrets}` | Stops the old agent, then writes `<prefix>stage.zip` and, last, `<prefix>manifest.json` to the `STAGE` bucket. `secrets` is empty until the vault (FIN-466). | `stopped`, `progress`, then `staged {manifest_sha256, bytes, files}`, or `failed {step, why}` |
+| `stop_and_stage {phase, stage, secrets}` | Stops the old agent, then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. `secrets` is empty until the vault (FIN-466). | `stopped`, `progress`, then `staged {manifest_sha256, bytes, files}`, or `failed {step, why}` |
 | `retire {as: migrated \| archived}` | Retires it (a verified backup first) and marks it moved | `retired {receipt}` |
 | `restart` | Starts it again (staff gave it back) | `restarted` |
 
@@ -93,9 +106,28 @@ p2/…                               the same, for phase 2
 - `manifest.json` is `Manifest`: `format` (`finite-stage/1`), the old
   agent, phase and attempt, the `layout` (`finite-computer`), the zip's
   size and SHA-256, the files inside, and `left`.
-- The new agent reads the zip only through the platform. The mover
-  writes it with a token scoped to the bucket. Nothing else reads it:
-  no public bucket, no presigned URL.
+- Only the platform touches the bucket, through its binding: the mover
+  uploads through its routes, and the bound agent reads through its own.
+  No public bucket (`xtask deploy` refuses one with an r2.dev URL or a
+  custom domain), no presigned URL, no token.
+
+### Who may read a stage
+
+Only the one person's bound agent: the agent Migrations bound at their
+Yes, for that person's own stage, while it is `importing`. Everyone else
+is refused, and the e2e lanes prove each:
+
+- a stranger, another person's agent, and the same person's other agent
+  (403);
+- the bound agent before the move imports, and after it is done (409);
+- an operator: no operator route answers a stage's bytes, only states
+  and sizes;
+- the mover: no route answers it a stage's bytes, and it uploads only to
+  the stage it was told to.
+
+A phase 2 stage (`archived`) is readable only once its person signs up,
+says Yes, and so binds their agent. Staff's Cloudflare access to the
+bucket is accepted (Paul, 11-09).
 
 ## The state machine
 
@@ -142,7 +174,7 @@ by hand), and `withdraw` (out of the move).
 |---|---|
 | `done`, either way | that attempt's prefix: its routes refuse at once, its objects go from the alarm, at most 1,000 a pass |
 | 14 days after `staged` (phase 1, done or not) | the same |
-| a superseded attempt | its prefix |
+| a superseded attempt | its prefix, and its unfinished upload aborted |
 | Never | nothing: Never only stops the asking |
 | 90 days after the cutoff (phase 2) | the same |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |

@@ -45,15 +45,23 @@ pub const STAGE_FORMAT: &str = "finite-stage/1";
 /// The stage's zip and its manifest, under its prefix.
 pub const STAGE_ZIP: &str = "stage.zip";
 pub const STAGE_MANIFEST: &str = "manifest.json";
+/// A part of a stage's zip, at most: under a request's body limit (100 MB
+/// on Cloudflare's Free and Pro plans), streamed into R2 unread.
+pub const PART_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// R2's least part, every part but the last.
+pub const PART_MIN_BYTES: u64 = 5 * 1024 * 1024;
+/// Parts of one stage, at most (R2's): 640 GB at `PART_MAX_BYTES`.
+pub const PARTS_MAX: u32 = 10_000;
 
 /// Whether `id` is an old agent's id (`OLD_ID_MAX_BYTES`).
 pub fn valid_old(id: &str) -> bool {
     !id.is_empty() && id.len() <= OLD_ID_MAX_BYTES && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// The prefix of an attempt's stage in the `STAGE` bucket:
+/// The prefix of an attempt's stage in the platform's `STAGE` bucket:
 /// `p1/<old>/<attempt>/`. Each attempt has its own, so a retry never mixes
-/// with a half-written one.
+/// with a half-written one. Only the platform names it: the mover uploads
+/// by the stage's id.
 pub fn stage_prefix(phase: Phase, old: &str, attempt: u32) -> String {
     assert!(valid_old(old), "an old agent's id is checked before a prefix names it");
     format!("{}/{old}/{attempt}/", phase.as_str())
@@ -377,12 +385,12 @@ pub struct Command {
 #[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Act {
-    /// Stop the old agent, then stage it under `prefix` (`stage_prefix`),
-    /// the manifest last, and hand on the secrets named (none until the
-    /// vault: FIN-466).
+    /// Stop the old agent, then upload its zip as `stage` (`stage_id`), in
+    /// parts, and complete it (the manifest last); and hand on the secrets
+    /// named (none until the vault: FIN-466).
     StopAndStage {
         phase: Phase,
-        prefix: String,
+        stage: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
         secrets: Vec<SecretKind>,
@@ -437,8 +445,8 @@ pub enum Event {
     Stopped,
     /// Staging goes on: bytes and files written so far.
     Progress { bytes: u64, files: u64 },
-    /// The zip and its manifest are written; the manifest's SHA-256 (hex)
-    /// is what the platform checks it read.
+    /// The stage is complete (`POST …/complete`); the manifest's SHA-256
+    /// (hex), as that answered, is what the platform checks it reads.
     Staged { manifest_sha256: String, bytes: u64, files: u64 },
     /// A step failed (`TEXT_MAX_BYTES` each); the platform decides whether
     /// to try again.
@@ -506,6 +514,47 @@ pub struct HandedOff {
     pub handed: Vec<SecretKind>,
 }
 
+// ---- The mover's upload (`/api/migrations/mover/stages/{stage}/…`), for the
+// stage its old agent's current `stop_and_stage` names, while it stages. The
+// old platform holds no bucket credential: R2 has no write-only one.
+
+/// One part taken (`PUT …/parts/{n}`), and each part `GET …/parts` lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StagePart {
+    pub n: u32,
+    pub bytes: u64,
+    /// Its SHA-256 (hex), as its bytes came.
+    pub sha256: String,
+    /// R2's etag for it.
+    pub etag: String,
+}
+
+/// `GET …/parts`: the parts taken so far, by number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageParts {
+    pub parts: Vec<StagePart>,
+}
+
+/// `POST …/complete`: the stage's manifest, for its zip made of parts
+/// 1 to n (each but the last at least `PART_MIN_BYTES`, `zip_bytes` in
+/// all). The same complete again answers the same.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageComplete {
+    pub manifest: Manifest,
+}
+
+/// The manifest as written, by its SHA-256 (hex): what the mover's
+/// `staged` report names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageCompleted {
+    pub manifest_sha256: String,
+    pub zip_bytes: u64,
+}
+
 // ---- The new agent's routes (`/api/migrations/stages/{stage}/…`), each
 // for the agent the move is bound to, while it imports
 
@@ -530,10 +579,10 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub left: Vec<LeftBehind>,
-    /// Paths left behind past the list.
-    #[serde(default)]
-    #[cfg_attr(feature = "schema", schemars(extend("default" = 0)))]
-    pub left_more: u64,
+    /// Paths left behind past the list, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub left_more: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,9 +688,9 @@ mod tests {
     /// The mailbox on the wire: `do` tagged by `kind`, `as` its mark.
     #[test]
     fn a_command_on_the_wire() {
-        let act = Act::StopAndStage { phase: Phase::P1, prefix: stage_prefix(Phase::P1, "o", 1), secrets: vec![] };
+        let act = Act::StopAndStage { phase: Phase::P1, stage: stage_id(Phase::P1, "o", 1), secrets: vec![] };
         let c = Command { id: command_id("o", 1, &act), old: "o".into(), attempt: 1, act };
-        assert_eq!(serde_json::to_value(&c).unwrap(), json!({ "id": "o:1:stop_and_stage", "old": "o", "attempt": 1, "do": { "kind": "stop_and_stage", "phase": "p1", "prefix": "p1/o/1/" } }));
+        assert_eq!(serde_json::to_value(&c).unwrap(), json!({ "id": "o:1:stop_and_stage", "old": "o", "attempt": 1, "do": { "kind": "stop_and_stage", "phase": "p1", "stage": "o.p1.1" } }));
         let retire = Command { id: "o:1:retire".into(), old: "o".into(), attempt: 1, act: Act::Retire { mark: Mark::Migrated } };
         let v = serde_json::to_value(&retire).unwrap();
         assert_eq!(v["do"], json!({ "kind": "retire", "as": "migrated" }));

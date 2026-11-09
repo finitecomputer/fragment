@@ -68,7 +68,7 @@ bound Manifest.attempt range u32
 bound Manifest.bytes range u64
 bound Manifest.files range u64
 bound Manifest.left default []
-bound Manifest.left_more default 0
+bound Manifest.left_more default null
 bound Manifest.left_more range u64
 bound Manifest.zip_bytes range u64
 bound Member.addedAt range i64
@@ -112,8 +112,11 @@ bound Sizes.history range u64
 bound Sizes.move range u64
 bound Sizes.total range u64
 bound Sizes.work range u64
+bound StageCompleted.zip_bytes range u64
 bound StageDone.report_sha256 default null
 bound StageDone.why default null
+bound StagePart.bytes range u64
+bound StagePart.n range u32
 bound Until.at range i64
 bound UploadLimits.filesPerMessage range u32
 bound UploadLimits.uploadMaxBytes range u64
@@ -121,6 +124,7 @@ bound Urls.platform default ""
 bound channels.read.query.after range i64
 bound channels.read.query.before range i64
 bound channels.read.query.limit range u64
+bound migrations.part.path.n range u32
 branches LiveIn.subscribe oneOf
 branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
@@ -131,8 +135,8 @@ field Act.retire.as required Mark
 field Act.retire.kind required "retire"
 field Act.stop_and_stage.kind required "stop_and_stage"
 field Act.stop_and_stage.phase required Phase
-field Act.stop_and_stage.prefix required string
 field Act.stop_and_stage.secrets optional array<SecretKind>
+field Act.stop_and_stage.stage required string
 field Archived.archived required boolean
 field Archived.name required string
 field ChannelNewest.channel required string
@@ -318,7 +322,7 @@ field Manifest.files required integer
 field Manifest.format required string
 field Manifest.layout required string
 field Manifest.left optional array<LeftBehind>
-field Manifest.left_more required integer
+field Manifest.left_more optional integer|null
 field Manifest.old required string
 field Manifest.phase required Phase
 field Manifest.zip_bytes required integer
@@ -419,11 +423,19 @@ field Sizes.history required integer
 field Sizes.move required integer
 field Sizes.total required integer
 field Sizes.work required integer
+field StageComplete.manifest required Manifest
+field StageCompleted.manifest_sha256 required string
+field StageCompleted.zip_bytes required integer
 field StageDone.ok required boolean
 field StageDone.report_sha256 optional string|null
 field StageDone.why optional string|null
 field StageOpened.manifest required Manifest
 field StageOpened.stage required string
+field StagePart.bytes required integer
+field StagePart.etag required string
+field StagePart.n required integer
+field StagePart.sha256 required string
+field StageParts.parts required array<StagePart>
 field Until.at required integer
 field Until.said required string
 field UploadLimits.filesPerMessage required integer
@@ -449,8 +461,13 @@ field fragments.seen.path.name required string
 field fragments.status.path.name required string
 field live.open.path.name required string
 field members.list.path.name required string
+field migrations.complete.path.stage required string
 field migrations.done.path.stage required string
 field migrations.open.path.stage required string
+field migrations.part.path.n required integer
+field migrations.part.path.stage required string
+field migrations.part.query.sha256 required string
+field migrations.parts.path.stage required string
 field migrations.report.path.old required string
 field migrations.zip.path.stage required string
 field search.find.query.q required string
@@ -542,6 +559,12 @@ route members.list accepts session
 route members.list path members.list.path
 route members.list query members.list.query
 route members.list response MemberList
+route migrations.complete POST /api/migrations/mover/stages/{stage}/complete
+route migrations.complete accepts nip98
+route migrations.complete path migrations.complete.path
+route migrations.complete query migrations.complete.query
+route migrations.complete request StageComplete
+route migrations.complete response StageCompleted
 route migrations.done POST /api/migrations/stages/{stage}/done
 route migrations.done accepts nip98
 route migrations.done path migrations.done.path
@@ -558,6 +581,17 @@ route migrations.open accepts nip98
 route migrations.open path migrations.open.path
 route migrations.open query migrations.open.query
 route migrations.open response StageOpened
+route migrations.part PUT /api/migrations/mover/stages/{stage}/parts/{n}
+route migrations.part accepts nip98
+route migrations.part path migrations.part.path
+route migrations.part query migrations.part.query
+route migrations.part response StagePart
+route migrations.part takes application/octet-stream
+route migrations.parts GET /api/migrations/mover/stages/{stage}/parts
+route migrations.parts accepts nip98
+route migrations.parts path migrations.parts.path
+route migrations.parts query migrations.parts.query
+route migrations.parts response StageParts
 route migrations.report POST /api/migrations/mover/agents/{old}/report
 route migrations.report accepts nip98
 route migrations.report path migrations.report.path
@@ -614,7 +648,7 @@ type FragmentList out object
 type FragmentStatus out object
 type Has in object
 type IdentityKind out enum
-type LeftBehind out object
+type LeftBehind both object
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -668,7 +702,7 @@ type LiveOut.result.#1.507 out object
 type LiveOut.result.#1.507.error out enum open
 type LiveOut.subscribed out object
 type Mailbox out object
-type Manifest out object
+type Manifest both object
 type Mark out enum
 type Member out object
 type MemberList out object
@@ -686,7 +720,7 @@ type OpKind out enum
 type PageError out object
 type PageErrorKind out enum
 type PageReport out object
-type Phase out enum
+type Phase both enum
 type Pinned out object
 type Pins out object
 type PostRecord in object closed
@@ -709,8 +743,12 @@ type SetDock in object
 type SetPinned in object
 type Sharing out object
 type Sizes in object
+type StageComplete in object
+type StageCompleted out object
 type StageDone in object
 type StageOpened out object
+type StagePart out object
+type StageParts out object
 type Until out object
 type UploadLimits out object
 type Urls out object
@@ -741,12 +779,18 @@ type live.open.path in object
 type live.open.query in object
 type members.list.path in object
 type members.list.query in object
+type migrations.complete.path in object
+type migrations.complete.query in object
 type migrations.done.path in object
 type migrations.done.query in object
 type migrations.mailbox.path in object
 type migrations.mailbox.query in object
 type migrations.open.path in object
 type migrations.open.query in object
+type migrations.part.path in object
+type migrations.part.query in object
+type migrations.parts.path in object
+type migrations.parts.query in object
 type migrations.report.path in object
 type migrations.report.query in object
 type migrations.roster.path in object

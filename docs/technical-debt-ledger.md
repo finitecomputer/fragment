@@ -673,8 +673,9 @@ unfinished design, not debt.
   their keys, its database role, Core's `moved` column and two CLI
   subcommands.
 - **Risk:** Wasm while it lives; one more global object asked by
-  `GET /api/notices` (with F4); the mover's key and its bucket token can
-  stage content into a consenting person's new agent.
+  `GET /api/notices` (with F4); the mover's key can upload a stage for
+  an old agent it was told to stage, into a consenting person's new
+  agent. It holds no bucket credential and reads no stage.
 - **Delete when:** every roster agent is `moved`, `withdrawn` or
   `expired`, phase 2's 90 days have passed, and no move is `held`. Then,
   in order:

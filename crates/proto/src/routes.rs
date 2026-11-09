@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
-use crate::migrations::{Mailbox, MoveAt, Report, Reported, Roster, RosterTaken, StageDone, StageOpened};
+use crate::migrations::{Mailbox, MoveAt, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
 use crate::{
     Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
@@ -118,6 +118,16 @@ pub struct Param {
     pub doc: &'static str,
 }
 
+/// What a route takes as its body.
+#[derive(Clone, Copy)]
+pub enum Body {
+    /// JSON of this type.
+    Json(Ty),
+    /// Bytes of this media type, streamed (`x-fragment-takes`): the signed
+    /// URL names their SHA-256 (NIP-98's streamed payload).
+    Bytes { media: &'static str },
+}
+
 /// What a route answers.
 #[derive(Clone, Copy)]
 pub enum Answer {
@@ -142,8 +152,8 @@ pub struct Route {
     pub summary: &'static str,
     pub auth: &'static [Auth],
     pub params: &'static [Param],
-    /// Its JSON body, if it takes one.
-    pub request: Option<Ty>,
+    /// Its body, if it takes one.
+    pub request: Option<Body>,
     pub answer: Answer,
     /// The refusals it answers with (`ErrorBody`), beside `ANY_ROUTE`'s.
     pub errors: &'static [ErrorCode],
@@ -177,7 +187,8 @@ const VISITOR: &[Auth] = &[Auth::Nip98, Auth::Site, Auth::Frame, Auth::Link, Aut
 
 const NAME: Param = Param { name: "name", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The fragment's name, in full." };
 const OLD: Param = Param { name: "old", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The old agent's id (Core's project id)." };
-const STAGE: Param = Param { name: "stage", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The stage's id, `<old>.<phase>.<attempt>`, as its routine names it." };
+const STAGE: Param = Param { name: "stage", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it." };
+const PART: Param = Param { name: "n", at: ParamAt::Path, required: true, schema: shape::<u32>, doc: "The part's number, 1 to `PARTS_MAX`." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
 
 pub const ROUTES: &[Route] = &[
@@ -227,7 +238,7 @@ pub const ROUTES: &[Route] = &[
         summary: "Archive or unarchive a fragment in the signer's own list.",
         auth: SIGNED,
         params: &[NAME],
-        request: Some(ty::<SetArchived>()),
+        request: Some(Body::Json(ty::<SetArchived>())),
         answer: Answer::Json(ty::<Archived>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
@@ -238,7 +249,7 @@ pub const ROUTES: &[Route] = &[
         summary: "Put a fragment on the signer's dock, or take it off.",
         auth: SIGNED,
         params: &[NAME],
-        request: Some(ty::<SetDock>()),
+        request: Some(Body::Json(ty::<SetDock>())),
         answer: Answer::Json(ty::<Docked>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
@@ -249,7 +260,7 @@ pub const ROUTES: &[Route] = &[
         summary: "Pin or unpin a fragment in the signer's sidebar.",
         auth: SIGNED,
         params: &[NAME],
-        request: Some(ty::<SetPinned>()),
+        request: Some(Body::Json(ty::<SetPinned>())),
         answer: Answer::Json(ty::<Pinned>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
@@ -338,7 +349,7 @@ pub const ROUTES: &[Route] = &[
         summary: "Append a `message` record as the poster.",
         auth: SIGNED,
         params: &[NAME, CHANNEL],
-        request: Some(ty::<PostRecord>()),
+        request: Some(Body::Json(ty::<PostRecord>())),
         answer: Answer::Json(ty::<Posted>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, ConflictingBody, TooLarge, BudgetUsedUp],
     },
@@ -349,7 +360,7 @@ pub const ROUTES: &[Route] = &[
         summary: "Show a record as it is written to the channel's live readers; never stored.",
         auth: SIGNED,
         params: &[NAME, CHANNEL],
-        request: Some(ty::<PutDraft>()),
+        request: Some(Body::Json(ty::<PutDraft>())),
         answer: Answer::Json(ty::<Done>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, TooLarge, RateLimited],
     },
@@ -371,7 +382,7 @@ pub const ROUTES: &[Route] = &[
         summary: "The mover's roster, whole: every live old agent and its owner. Rows not yet asked that it leaves out are withdrawn.",
         auth: SIGNATURE,
         params: &[],
-        request: Some(ty::<Roster>()),
+        request: Some(Body::Json(ty::<Roster>())),
         answer: Answer::Json(ty::<RosterTaken>()),
         errors: &[Unauthenticated, Forbidden, InvalidRequest, TooLarge, RegistryUnavailable],
     },
@@ -393,9 +404,46 @@ pub const ROUTES: &[Route] = &[
         summary: "What happened on an old agent's current command: a stale command's report is 409 and changes nothing.",
         auth: SIGNATURE,
         params: &[OLD],
-        request: Some(ty::<Report>()),
+        request: Some(Body::Json(ty::<Report>())),
         answer: Answer::Json(ty::<Reported>()),
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.part",
+        method: Method::Put,
+        path: "/api/migrations/mover/stages/{stage}/parts/{n}",
+        summary: "One part of the stage's zip, streamed into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.",
+        auth: SIGNATURE,
+        params: &[
+            STAGE,
+            PART,
+            Param { name: "sha256", at: ParamAt::Query, required: true, schema: shape::<String>, doc: "The part's SHA-256 (hex): its bytes are held to it as they arrive." },
+        ],
+        request: Some(Body::Bytes { media: "application/octet-stream" }),
+        answer: Answer::Json(ty::<StagePart>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, Conflict, TooLarge],
+    },
+    Route {
+        operation: "migrations.parts",
+        method: Method::Get,
+        path: "/api/migrations/mover/stages/{stage}/parts",
+        summary: "The stage's parts taken so far, to resume an upload: their numbers, sizes, hashes and etags, never their bytes.",
+        auth: SIGNATURE,
+        params: &[STAGE],
+        request: None,
+        answer: Answer::Json(ty::<StageParts>()),
+        errors: &[Unauthenticated, Forbidden, Conflict],
+    },
+    Route {
+        operation: "migrations.complete",
+        method: Method::Post,
+        path: "/api/migrations/mover/stages/{stage}/complete",
+        summary: "The stage's zip made whole from its parts, then its manifest written, last.",
+        auth: SIGNATURE,
+        params: &[STAGE],
+        request: Some(Body::Json(ty::<StageComplete>())),
+        answer: Answer::Json(ty::<StageCompleted>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, Conflict],
     },
     Route {
         operation: "migrations.open",
@@ -426,7 +474,7 @@ pub const ROUTES: &[Route] = &[
         summary: "The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.",
         auth: SIGNATURE,
         params: &[STAGE],
-        request: Some(ty::<StageDone>()),
+        request: Some(Body::Json(ty::<StageDone>())),
         answer: Answer::Json(ty::<MoveAt>()),
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
     },
