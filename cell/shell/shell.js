@@ -1281,9 +1281,12 @@ addEventListener("message", async (e) => {
   if (isChat(name)) openChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
-// A page an action's answer names (FIN-458: an invite's app, a checkout):
-// one of theirs (its host this deployment's for a fragment, `ORIGIN`)
-// opens here as its row would; any other address, this page goes to.
+// A page an action's answer names (FIN-458: an invite's app, a checkout),
+// an http(s) address alone: one of this deployment's fragments (its host
+// `ORIGIN`'s) opens here as its row would, once their list has it, by
+// whichever read lists it (`opening`: the read after the action may lose
+// to a newer one, as `load` lets the newest win); any other, this page goes to.
+let opening = null;
 function openPage(href) {
   let url;
   try {
@@ -1291,10 +1294,20 @@ function openPage(href) {
   } catch {
     return;
   }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return;
   const [before, after] = ORIGIN.split("{name}");
   const name = url.origin.startsWith(before) && url.origin.endsWith(after) ? url.origin.slice(before.length, url.origin.length - after.length) : null;
-  if (name && FRAGMENT_NAME.test(name) && byName(name)) return isChat(name) ? openChat(name) : openApp(name, `${url.pathname}${url.search}${url.hash}`);
-  location.assign(url.href);
+  if (!name || !FRAGMENT_NAME.test(name)) return location.assign(url.href);
+  opening = { name, path: `${url.pathname}${url.search}${url.hash}` };
+  openListed();
+}
+// the page `openPage` holds, opened once their list has its fragment
+function openListed() {
+  if (!opening || !byName(opening.name)) return;
+  const { name, path } = opening;
+  opening = null;
+  if (isChat(name)) openChat(name);
+  else openApp(name, path);
 }
 // A fragment's name, when `url` is a page of one on this deployment: its
 // host is the asking fragment's (`sender`, at `origin`, its status's
@@ -1957,6 +1970,8 @@ async function load(changed = false) {
   if (list) state.limits = list.limits ?? null;
   // a chat being made, made, opens once the list has it (making.js `listed`)
   if (list && stepMaking({ type: "listed", has: (name) => !!byName(name) })) leaveSidebar();
+  // so does a page an action's answer named (an invite accepted: `openPage`)
+  if (list) openListed();
   // failed, it is not "no computer": what was read before stays, and is said to be old
   const unknown = state.computerFailed && !state.computer;
   state.computerFailed = !computers;
