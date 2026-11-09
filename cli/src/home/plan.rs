@@ -128,7 +128,13 @@ pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize) -> 
     let ignores = gitignores(src, &files);
 
     let mut folders: BTreeMap<String, Left> = BTreeMap::new();
-    let mut left: Vec<Left> = Vec::new();
+    // what the source left out unread for its name (`home::open`), named
+    let mut left: Vec<Left> = src
+        .skipped
+        .iter()
+        .filter_map(|e| Some((if skip == 0 { e.path.as_str() } else { e.path.strip_prefix(&format!("{work}/"))? }, e.size)))
+        .map(|(rel, bytes)| Left { path: rel.to_string(), files: 1, bytes, why: Why::Secret, kind: None })
+        .collect();
     let mut candidates: Vec<(&Entry, &str, Kind)> = Vec::new();
     for (e, rel) in &files {
         if parts.iter().any(|p| rel.starts_with(p.as_str())) {
