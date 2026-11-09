@@ -321,7 +321,7 @@ impl FragmentCell {
                     "principal": npub::display(inv.asker.unwrap_or(inv.principal)),
                     "agent": agent,
                     "role": inv.role,
-                    "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    "channels": self.declared_channel_names()?,
                 });
                 self.mutate(&facet, &inv, &input_sha, &input_text, meta).await
             }

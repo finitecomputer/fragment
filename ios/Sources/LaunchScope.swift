@@ -34,9 +34,11 @@ struct LaunchScope: Sendable {
     /// loopback is never used; or, with `--ui-test-key <64 hex>`, that key,
     /// one a dev stack at that loopback origin approved ahead, so a test
     /// signs as its person (a real platform's flows, never a stand-in).
+    /// `--ui-test-keep` keeps what the test's last launch saved, as an
+    /// app's relaunch does.
     static func start() {
         #if DEBUG
-        guard current.loopbackOnly else { return }
+        guard current.loopbackOnly, !ProcessInfo.processInfo.arguments.contains("--ui-test-keep") else { return }
         try? DeviceKeychain.clear()
         if let support = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false) {
             try? FileManager.default.removeItem(at: support.appending(path: current.supportFolder, directoryHint: .isDirectory))

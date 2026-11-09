@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -258,7 +258,7 @@ const STOP_STEPS_MS: i64 = {
         MARK_EXEC_MS
     }
 };
-/// An owner's sleep (`POST /api/computers/{id}/sleep`, `computer/sleep`)
+/// An owner's sleep (`POST /api/computers/{id}/sleep`)
 /// answers within the sum of its steps' bounds (docs/api.md), beside the
 /// Durable Objects it tells (its owner's ledger, their open pages).
 const SLEEP_STEPS_MS: i64 = HOLD_STEPS_MS + SAVE_STEPS_MS + STOP_STEPS_MS;
@@ -527,13 +527,6 @@ fn wiped_computer() -> CellError {
     CellError::new(ErrorCode::NotFound, "no such computer (its owner was wiped)")
 }
 
-/// `computer/init`'s body.
-#[derive(Deserialize)]
-struct Init {
-    id: String,
-    owner: String,
-}
-
 #[derive(Deserialize)]
 struct WakeBody {
     why: Wake,
@@ -562,13 +555,6 @@ struct AlwaysOnBody {
     on: bool,
 }
 
-#[derive(Deserialize)]
-struct Assign {
-    fragment: String,
-    identity: String,
-    owner: String,
-}
-
 /// `computer/unassign`'s body: the agent fragment it runs no more, and,
 /// from that fragment's ended life (ended.rs), its agent: only that life's
 /// row goes, never one a life made again under the name was assigned.
@@ -578,23 +564,6 @@ struct Unassign {
     fragment: String,
     #[serde(default)]
     identity: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SetConnections {
-    fragment: String,
-    /// `None`: every provider the owner has (decision 44).
-    connections: Option<Vec<String>>,
-}
-
-/// `computer/account`'s body: which of its owner's accounts at `provider`
-/// (a connection that takes several) the agent `fragment` uses, by its id
-/// (one the owner's list named: the router checked), or `None`, the default.
-#[derive(Deserialize)]
-struct SetAccount {
-    fragment: String,
-    provider: String,
-    account: Option<String>,
 }
 
 /// What an agent may have swapped in, as `agents.connections` keeps it.
@@ -634,12 +603,6 @@ struct UsedAsk {
 struct Used {
     provider: String,
     micros: i64,
-}
-
-/// `computer/uses`' body: a month (`YYYY-MM`), or this one.
-#[derive(Deserialize)]
-struct UsesAsk {
-    month: Option<String>,
 }
 
 /// `computer/own-key`'s body: the owner's own key for `provider`, or none.
@@ -687,12 +650,6 @@ struct JoinedAsk {
 #[derive(Deserialize)]
 struct Pin {
     image: String,
-}
-
-#[derive(Deserialize)]
-struct TicketAsk {
-    port: u16,
-    identity: String,
 }
 
 #[derive(Deserialize)]
@@ -940,6 +897,13 @@ impl ComputerCell {
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
         self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// What its owner is told now, in words (FIN-458, `GET /api/notices`).
+    fn said(&self) -> CellResult<Vec<fragment_proto::notice::Notice>> {
+        let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
+        let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
+        Ok(said::said(&self.with_keys(notices(&life, &self.saves()?, &self.images()?, &self.rules()))?, &facts))
     }
 
     /// `told`, and a notice of each shared key its owner's cap pauses now,
@@ -2571,30 +2535,13 @@ impl ComputerCell {
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
             Some("port") => return self.port(req).await,
+            Some("api") => return self.api(req).await,
             _ => {}
         }
         if req.headers().get(INTERNAL_HEADER)?.is_none() {
             return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
         }
         match path.trim_start_matches('/') {
-            "computer/init" => {
-                let b: Init = body_json(&mut req).await?;
-                if !valid_computer_id(&b.id) {
-                    return Err(CellError::invalid("a computer's id is computer:<24 hex>"));
-                }
-                match self.meta(MetaKey::Owner)? {
-                    Some(owner) if owner != b.owner => return Err(CellError::new(ErrorCode::Forbidden, "this computer is someone else's")),
-                    Some(_) => {}
-                    None => {
-                        let image = self.cfg.computer_image.clone().ok_or_else(|| CellError::host("this deployment makes no computers (FRAGMENT_COMPUTER_IMAGE)"))?;
-                        self.set_meta(MetaKey::Id, &b.id)?;
-                        self.set_meta(MetaKey::Owner, &b.owner)?;
-                        self.set_meta(MetaKey::Image, &image)?;
-                        self.set_meta(MetaKey::CreatedAt, &js::now_ms().to_string())?;
-                    }
-                }
-                json_response(&self.view()?)
-            }
             "computer/view" => {
                 // its owner reading it (the shell, as it opens): a deploy since its last look is news
                 self.look_and_tell().await;
@@ -2633,39 +2580,6 @@ impl ComputerCell {
                 self.wake(b.why).await?;
                 json_response(&self.view()?)
             }
-            "computer/sleep" => {
-                self.must(MetaKey::Id)?;
-                self.drive(Event::Sleep).await?;
-                json_response(&self.view()?)
-            }
-            "computer/restart" => {
-                let b: RestartAsk = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                json_response(&self.restart(b.generation.unwrap_or(0)).await?)
-            }
-            "computer/notices-seen" => {
-                let b: NoticeSeen = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                if !self.update_saves(|s| s.saw(b.life))? {
-                    return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
-                }
-                // its owner's other pages read it again, and tell it no more
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
-            "computer/notices-later" => {
-                let b: UpdateLater = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                if !valid_version(&b.version) {
-                    return Err(CellError::invalid(format!("a version is {} hex digits, as an update notice names it", fragment_core::computer::VERSION_HEX)));
-                }
-                if !self.update_images(|i| i.later(&b.version))? {
-                    return Err(CellError::invalid(format!("no update to {} here: read the computer again", b.version)));
-                }
-                // its owner's other pages read it again, and tell it no more
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
             // its owner's seat, as the registry pushes it (registry/orgs.rs)
             "computer/always-on" => {
                 let b: AlwaysOnBody = body_json(&mut req).await?;
@@ -2678,111 +2592,18 @@ impl ComputerCell {
                 }
                 json_response(&self.view()?)
             }
-            "computer/assign" => {
-                let b: Assign = body_json(&mut req).await?;
-                if self.must(MetaKey::Owner)? != b.owner {
-                    return Err(CellError::new(ErrorCode::Forbidden, "an agent runs on its owner's computer"));
-                }
-                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![b.fragment.as_str().into()])?;
-                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
-                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
-                }
-                // a new agent may use every connection its owner has (decision
-                // 44); assigned again, it keeps what its owner narrowed it to
-                self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
-                    vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into()],
-                )?;
-                json_response(&self.view()?)
-            }
+            // an operator's pin (orgs.rs); its owner's is `PUT …/image`
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
-                // its owner's, or an operator's: a computer made, never one
-                // a pin would leave half made
-                self.must(MetaKey::Id)?;
-                let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
-                if !images.as_array().is_some_and(|names| names.iter().any(|n| n == b.image.as_str())) {
-                    return Err(CellError::invalid(format!("no image {:?} on this deployment (its images: {images})", b.image)));
-                }
-                // the next start takes it: a snapshot of the old image no longer
-                // matches, so it starts from this one and restores /data (decision
-                // 19); awake on another, its owner is told an update is ready
-                self.set_meta(MetaKey::Image, &b.image)?;
-                self.look_and_tell().await;
-                json_response(&self.view()?)
+                json_response(&self.pin(&b.image).await?)
             }
             "computer/unassign" => {
                 let b: Unassign = body_json(&mut req).await?;
-                let gone = match &b.identity {
-                    Some(identity) => self.rows("DELETE FROM agents WHERE fragment = ? AND identity = ? RETURNING fragment", vec![b.fragment.as_str().into(), identity.as_str().into()])?,
-                    None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
-                };
-                assert!(gone.len() <= 1, "a computer runs a fragment once");
-                if !gone.is_empty() {
-                    self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![b.fragment.as_str().into()])?;
-                }
-                let view = self.view()?;
-                if !gone.is_empty() {
-                    // its owner's pages read its agents again (an agent
-                    // fragment's delete unassigns it unseen: ended.rs)
-                    self.tell_owner().await;
-                }
-                json_response(&view)
-            }
-            "computer/connections" => {
-                let mut b: SetConnections = body_json(&mut req).await?;
-                if let Some(list) = b.connections.as_mut() {
-                    list.sort_unstable();
-                    list.dedup();
-                    if let Some(c) = list.iter().find(|c| self.cfg.providers.get(c).is_none()) {
-                        let offered: Vec<&str> = self.cfg.providers.providers().iter().map(|p| p.name.as_str()).collect();
-                        return Err(CellError::invalid(format!("no provider {c:?} on this deployment (its providers: {offered:?})")));
-                    }
-                }
-                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
-                }
-                let text = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
-                assert_eq!(stored_connections(&text, &b.fragment)?, b.connections, "connections read back as they are written");
-                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
-                // its owner's other pages read it again (the agent's page:
-                // which model it runs)
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
-            "computer/account" => {
-                let b: SetAccount = body_json(&mut req).await?;
-                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
-                    return Err(CellError::invalid(format!("{:?} is no connection here that takes several accounts", b.provider)));
-                }
-                if b.account.as_deref().is_some_and(|a| !fragment_core::connection_accounts::valid_account_id(a)) {
-                    return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
-                }
-                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
-                }
-                match &b.account {
-                    Some(account) => self.exec(
-                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
-                        vec![b.fragment.as_str().into(), b.provider.as_str().into(), account.as_str().into()],
-                    )?,
-                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![b.fragment.as_str().into(), b.provider.as_str().into()])?,
-                }
-                // its owner's other pages read it again
-                self.tell_owner().await;
-                json_response(&self.view()?)
+                json_response(&self.unassign(&b.fragment, b.identity.as_deref()).await?)
             }
             "computer/credentials" => {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
-            }
-            "computer/key-cap" => {
-                // `{provider, from, micros}`: the router's, from a `KeyCapAsk`
-                let b: Value = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                let ask = KeyCapAsk { from: b["from"].as_i64(), micros: b["micros"].as_i64() };
-                self.set_key_cap(b["provider"].as_str().unwrap_or_default(), ask).await?;
-                json_response(&self.view()?)
             }
             "computer/used" => {
                 let b: UsedAsk = body_json(&mut req).await?;
@@ -2792,14 +2613,6 @@ impl ComputerCell {
                     self.tell_owner().await;
                 }
                 json_response(&json!({ "ok": true }))
-            }
-            "computer/uses" => {
-                let b: UsesAsk = body_json(&mut req).await?;
-                let month = match b.month.as_deref() {
-                    Some(label) => Month::parse(label).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?,
-                    None => Month::of(js::now_ms() + self.offset_ms()?),
-                };
-                json_response(&self.uses(month)?)
             }
             "computer/own-key" => {
                 let b: OwnKeyAsk = body_json(&mut req).await?;
@@ -2848,20 +2661,6 @@ impl ComputerCell {
             "computer/joined" => {
                 let b: JoinedAsk = body_json(&mut req).await?;
                 json_response(&self.joined(b).await?)
-            }
-            "computer/ticket" => {
-                let b: TicketAsk = body_json(&mut req).await?;
-                if b.identity != self.must(MetaKey::Owner)? {
-                    return Err(CellError::new(ErrorCode::Forbidden, "only the computer's owner opens its ports"));
-                }
-                let token = js::random_hex::<24>();
-                let expires = js::now_ms() + TICKET_TTL_MS;
-                self.exec(
-                    "INSERT INTO tickets (hash, port, identity, expires_at) VALUES (?, ?, ?, ?)",
-                    vec![sha_hex(&token).into(), i64::from(b.port).into(), b.identity.as_str().into(), expires.into()],
-                )?;
-                self.trim("tickets", TICKETS_MAX)?;
-                json_response(&json!({ "ticket": token, "port": b.port, "expiresAt": expires }))
             }
             "computer/redeem" => {
                 let b: Redeem = body_json(&mut req).await?;
@@ -2952,6 +2751,282 @@ impl ComputerCell {
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
+    }
+
+    /// `/api/computers/{id}/…`, as the router forwards it (`forward`): its
+    /// owner's routes (docs/api.md, Computers). Anyone else finds no
+    /// computer, as they would one never made. Each begins as its owner's
+    /// read does: a deploy since its last look is news.
+    async fn api(&self, mut req: Request) -> CellResult<Response> {
+        let who = req.headers().get(SIGNER_HEADER)?.ok_or_else(|| CellError::host("no signer from the router"))?;
+        let path = req.path();
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        let rest = match (req.method(), segments.as_slice()) {
+            // the person's own computer (the router found it by them): made
+            (Method::Post, ["api", "computers"]) => return self.make(&who).await,
+            // what its owner is told, in words (`notices::route`): theirs,
+            // or none while it is not made, a deploy since its last look news
+            (Method::Get, ["api", "notices"]) => {
+                let notices = match self.owned_by(&who) {
+                    Ok(()) => {
+                        self.look_and_tell().await;
+                        self.said()?
+                    }
+                    Err(e) if e.code == ErrorCode::NotFound => vec![],
+                    Err(e) => return Err(e),
+                };
+                return json_response(&fragment_proto::notice::NoticeList { notices });
+            }
+            // listed: theirs, or none yet
+            (Method::Get, ["api", "computers"]) => {
+                let list = match self.owned_by(&who) {
+                    Ok(()) => {
+                        self.look_and_tell().await;
+                        vec![self.view()?]
+                    }
+                    Err(e) if e.code == ErrorCode::NotFound => vec![],
+                    Err(e) => return Err(e),
+                };
+                // where its owner gets help when it will not start
+                return json_response(&json!({ "computers": list, "support": self.cfg.support_url }));
+            }
+            // the router found this computer by the id it names
+            (_, ["api", "computers", _, rest @ ..]) => rest,
+            (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments.get(2..).unwrap_or_default().join("/")))),
+        };
+        self.owned_by(&who)?;
+        self.look_and_tell().await;
+        match (req.method(), rest) {
+            (Method::Get, []) => json_response(&self.view()?),
+            (Method::Post, ["wake"]) => {
+                self.wake(Wake::Owner).await?;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["sleep"]) => {
+                self.drive(Event::Sleep).await?;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["restart"]) => {
+                // no body restarts whatever runs; a start named is restarted once
+                let body = req.bytes().await?;
+                let asked: RestartAsk = if body.iter().all(u8::is_ascii_whitespace) { RestartAsk::default() } else { serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+                json_response(&self.restart(asked.generation.unwrap_or(0)).await?)
+            }
+            (Method::Put, ["image"]) => json_response(&self.pin(&image_named(&req.bytes().await?)?).await?),
+            (Method::Post, ["notices", "seen"]) => {
+                let b: NoticeSeen = body_json(&mut req).await?;
+                if !self.update_saves(|s| s.saw(b.life))? {
+                    return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
+                }
+                // its owner's other pages read it again, and tell it no more
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["notices", "later"]) => {
+                let b: UpdateLater = body_json(&mut req).await?;
+                if !valid_version(&b.version) {
+                    return Err(CellError::invalid(format!("a version is {} hex digits, as an update notice names it", fragment_core::computer::VERSION_HEX)));
+                }
+                if !self.update_images(|i| i.later(&b.version))? {
+                    return Err(CellError::invalid(format!("no update to {} here: read the computer again", b.version)));
+                }
+                // its owner's other pages read it again, and tell it no more
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["key-caps", provider]) => {
+                self.set_key_cap(provider, body_json(&mut req).await?).await?;
+                json_response(&self.view()?)
+            }
+            (Method::Put, ["agents", fragment]) => {
+                // the agent fragment takes the computer first (its owner must
+                // be the computer's), and its key becomes the agent's identity
+                let took = crate::fragment::ask(&self.env, fragment, "computer/assign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await?;
+                let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
+                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
+                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
+                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
+                }
+                // a new agent may use every connection its owner has (decision
+                // 44); assigned again, it keeps what its owner narrowed it to
+                self.exec(
+                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
+                    vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into()],
+                )?;
+                let view = self.view()?;
+                // it comes in where its person is (decision 64), once both the
+                // fragment and the computer hold it, so its computer hears each
+                // join; a replay joins nothing twice
+                crate::members::agent_made(&self.env, &who, identity).await;
+                json_response(&view)
+            }
+            (Method::Delete, ["agents", fragment]) => {
+                // an agent fragment gone (deleted: its own delete unassigns it,
+                // ended.rs) has nothing to say: its computer runs it no more
+                match crate::fragment::ask(&self.env, fragment, "computer/unassign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await {
+                    Err(e) if e.code != ErrorCode::NotFound => return Err(e),
+                    _ => {}
+                }
+                json_response(&self.unassign(fragment, None).await?)
+            }
+            (Method::Post, ["agents", fragment, "door"]) => {
+                // a ticket to link or unlink the agent's door, its owner's alone
+                // (fragment_core::door): the agent fragment makes and signs it
+                let v: Value = body_json(&mut req).await?;
+                let asked = json!({ "computer": self.must(MetaKey::Id)?, "owner": who, "door": v["door"], "act": v["act"] });
+                json_response(&crate::fragment::ask(&self.env, fragment, "computer/door-ticket", &asked).await?)
+            }
+            (Method::Put, ["agents", fragment, "connections"]) => {
+                let v: Value = body_json(&mut req).await?;
+                // a body that forgot the field is not a reset to every provider
+                if v.get("connections").is_none() {
+                    return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
+                }
+                let AgentConnections { mut connections } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                if let Some(list) = connections.as_mut() {
+                    if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
+                        return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
+                    }
+                    list.sort_unstable();
+                    list.dedup();
+                    if let Some(c) = list.iter().find(|c| self.cfg.providers.get(c).is_none()) {
+                        let offered: Vec<&str> = self.cfg.providers.providers().iter().map(|p| p.name.as_str()).collect();
+                        return Err(CellError::invalid(format!("no provider {c:?} on this deployment (its providers: {offered:?})")));
+                    }
+                }
+                self.runs(fragment)?;
+                let text = serde_json::to_string(&connections).map_err(|e| CellError::host(e.to_string()))?;
+                assert_eq!(stored_connections(&text, fragment)?, connections, "connections read back as they are written");
+                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), (*fragment).into()])?;
+                // its owner's other pages read it again (the agent's page:
+                // which model it runs)
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Put, ["agents", fragment, "accounts", provider]) => {
+                let v: Value = body_json(&mut req).await?;
+                // a body that forgot the field is not a reset to the default
+                if v.get("account").is_none() {
+                    return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
+                }
+                let AgentAccount { account } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
+                    return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
+                }
+                if let Some(account) = &account {
+                    // one of the owner's accounts there, as their list names it
+                    let mut listed = BTreeMap::new();
+                    crate::connections::connection_states(&self.env, self.cfg, self.workos_user(&who), Some(&mut listed)).await?;
+                    if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| !a.fenced && a.id.as_deref() == Some(account.as_str()))) {
+                        return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
+                    }
+                    if !fragment_core::connection_accounts::valid_account_id(account) {
+                        return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
+                    }
+                }
+                self.runs(fragment)?;
+                match &account {
+                    Some(account) => self.exec(
+                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
+                        vec![(*fragment).into(), (*provider).into(), account.as_str().into()],
+                    )?,
+                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![(*fragment).into(), (*provider).into()])?,
+                }
+                // its owner's other pages read it again
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["ports", port, "ticket"]) => {
+                let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
+                // where on the port it lands: a path and query the image reads
+                // (an agent's screen: `/?agent=<agent>`), carried, never read
+                let body = req.bytes().await?;
+                let asked: PortTicketAsk = if body.iter().all(u8::is_ascii_whitespace) { PortTicketAsk::default() } else { serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+                let path = asked.path.unwrap_or_else(|| "/".into());
+                if !valid_port_path(&path) {
+                    return Err(CellError::invalid(format!("a ticket's path is a path on its port: `/`, then at most {PORT_PATH_MAX_BYTES} visible characters, no `//`, `#`, `\\`, `.` or `..`")));
+                }
+                let id = self.must(MetaKey::Id)?;
+                let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
+                let ticket = js::random_hex::<24>();
+                let expires_at = js::now_ms() + TICKET_TTL_MS;
+                self.exec(
+                    "INSERT INTO tickets (hash, port, identity, expires_at) VALUES (?, ?, ?, ?)",
+                    vec![sha_hex(&ticket).into(), i64::from(port).into(), who.as_str().into(), expires_at.into()],
+                )?;
+                self.trim("tickets", TICKETS_MAX)?;
+                let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
+                json_response(&PortTicket { url: format!("{origin}/__ticket?t={ticket}&next={next}"), expires_at })
+            }
+            (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
+            (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
+            (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
+        }
+    }
+
+    /// Made, for `who`, whose computer this is (`default_computer_of`):
+    /// asleep on the deployment's image, its view; made again, the same.
+    async fn make(&self, who: &str) -> CellResult<Response> {
+        let id = fragment_core::computer::default_computer_of(who);
+        match self.meta(MetaKey::Owner)? {
+            Some(owner) if owner != who => return Err(CellError::new(ErrorCode::Forbidden, "this computer is someone else's")),
+            Some(_) => {}
+            None => {
+                let image = self.cfg.computer_image.clone().ok_or_else(|| CellError::host("this deployment makes no computers (FRAGMENT_COMPUTER_IMAGE)"))?;
+                self.set_meta(MetaKey::Id, &id)?;
+                self.set_meta(MetaKey::Owner, who)?;
+                self.set_meta(MetaKey::Image, &image)?;
+                self.set_meta(MetaKey::CreatedAt, &js::now_ms().to_string())?;
+            }
+        }
+        let made = self.view()?;
+        // its seat's push asked for, or the making failed (made again, it asks again)
+        crate::orgs::computer_made(&self.env, who).await?;
+        json_response(&made)
+    }
+
+    /// Runs `fragment` no more (only while its agent is `identity`, when
+    /// named): its view after.
+    async fn unassign(&self, fragment: &str, identity: Option<&str>) -> CellResult<ComputerView> {
+        let gone = match identity {
+            Some(identity) => self.rows("DELETE FROM agents WHERE fragment = ? AND identity = ? RETURNING fragment", vec![fragment.into(), identity.into()])?,
+            None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![fragment.into()])?,
+        };
+        assert!(gone.len() <= 1, "a computer runs a fragment once");
+        if !gone.is_empty() {
+            self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![fragment.into()])?;
+        }
+        let view = self.view()?;
+        if !gone.is_empty() {
+            // its owner's pages read its agents again (an agent
+            // fragment's delete unassigns it unseen: ended.rs)
+            self.tell_owner().await;
+        }
+        Ok(view)
+    }
+
+    /// Refuses an agent fragment that does not run here.
+    fn runs(&self, fragment: &str) -> CellResult<()> {
+        if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![fragment.into()])?.is_empty() {
+            return Err(CellError::new(ErrorCode::NotFound, format!("{fragment} does not run on this computer")));
+        }
+        Ok(())
+    }
+
+    /// Pins `image`, its owner's or an operator's: the next start takes it.
+    async fn pin(&self, image: &str) -> CellResult<ComputerView> {
+        // a computer made, never one a pin would leave half made
+        self.must(MetaKey::Id)?;
+        let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
+        if !images.as_array().is_some_and(|names| names.iter().any(|n| n == image)) {
+            return Err(CellError::invalid(format!("no image {image:?} on this deployment (its images: {images})")));
+        }
+        // a snapshot of the old image no longer matches, so it starts from
+        // this one and restores /data (decision 19); awake on another, its
+        // owner is told an update is ready
+        self.set_meta(MetaKey::Image, image)?;
+        self.look_and_tell().await;
+        self.view()
     }
 
     /// The secrets to swap in for a request's placeholders (`b`, a request
@@ -3218,186 +3293,56 @@ pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String
     Ok(verifier)
 }
 
-fn view_of(v: Value) -> CellResult<ComputerView> {
-    serde_json::from_value(v).map_err(|e| CellError::host(format!("the computer's view: {e}")))
-}
-
-/// `/api/computers…` (the router has resolved the signer `who`, a person).
-/// Computer `id`'s view, when `who` owns it (anyone else finds none).
-async fn owned(env: &Env, who: &str, id: &str) -> CellResult<ComputerView> {
-    if !valid_computer_id(id) {
-        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
-    }
-    let v = view_of(ask(env, id, "computer/view", &json!({})).await?)?;
-    if v.owner != who {
-        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
-    }
-    Ok(v)
-}
-
 /// `{image}` from a body.
 pub(crate) fn image_named(body: &[u8]) -> CellResult<String> {
     let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
     v["image"].as_str().filter(|i| fragment_core::price::printable(i, 64)).map(str::to_string).ok_or_else(|| CellError::invalid("name an image"))
 }
 
+/// `/api/computers…` (the router has resolved the signer `who`): found
+/// and forwarded. The list and the making ask the person's own computer.
 pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     if kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "computers are people's: an agent runs on its owner's"));
     }
-    match (method, rest) {
-        (Method::Post, []) => {
-            let id = fragment_core::computer::default_computer_of(who);
-            let made = view_of(ask(env, &id, "computer/init", &json!({ "id": id, "owner": who })).await?)?;
-            // its seat's push asked for, or the making failed (made again, it asks again)
-            crate::orgs::computer_made(env, who).await?;
-            json_response(&made)
-        }
-        (Method::Get, []) => {
-            let id = fragment_core::computer::default_computer_of(who);
-            let list = match ask(env, &id, "computer/view", &json!({})).await {
-                Ok(v) => vec![view_of(v)?],
-                Err(e) if e.code == ErrorCode::NotFound => vec![],
-                Err(e) => return Err(e),
-            };
-            // where its owner gets help when it will not start
-            let cfg = Config::from_env(env);
-            json_response(&json!({ "computers": list, "support": cfg.support_url }))
-        }
-        (Method::Get, [id]) => json_response(&owned(env, who, id).await?),
-        (Method::Post, [id, "wake"]) => {
-            owned(env, who, id).await?;
-            json_response(&view_of(ask(env, id, "computer/wake", &json!({ "why": Wake::Owner })).await?)?)
-        }
-        (Method::Post, [id, "sleep"]) => {
-            owned(env, who, id).await?;
-            json_response(&view_of(ask(env, id, "computer/sleep", &json!({})).await?)?)
-        }
-        (Method::Post, [id, "restart"]) => {
-            owned(env, who, id).await?;
-            // no body restarts whatever runs; a start named is restarted once
-            let asked: RestartAsk = if body.iter().all(u8::is_ascii_whitespace) { RestartAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
-            json_response(&view_of(ask(env, id, "computer/restart", &json!(asked)).await?)?)
-        }
-        (Method::Post, [id, "notices", "seen"]) => {
-            owned(env, who, id).await?;
-            let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_response(&view_of(ask(env, id, "computer/notices-seen", &json!(seen)).await?)?)
-        }
-        (Method::Post, [id, "key-caps", provider]) => {
-            owned(env, who, id).await?;
-            let cap: KeyCapAsk = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_response(&view_of(ask(env, id, "computer/key-cap", &json!({ "provider": provider, "from": cap.from, "micros": cap.micros })).await?)?)
-        }
-        (Method::Post, [id, "notices", "later"]) => {
-            owned(env, who, id).await?;
-            let later: UpdateLater = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_response(&view_of(ask(env, id, "computer/notices-later", &json!(later)).await?)?)
-        }
-        (Method::Put, [id, "image"]) => {
-            owned(env, who, id).await?;
-            json_response(&view_of(ask(env, id, "computer/pin", &json!({ "image": image_named(body)? })).await?)?)
-        }
-        (Method::Put, [id, "agents", fragment]) => {
-            owned(env, who, id).await?;
-            // the agent fragment takes the computer first (its owner must be the
-            // computer's), and its key becomes the agent's identity
-            let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
-            let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-            let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
-            let view = view_of(ask(env, id, "computer/assign", &body).await?)?;
-            // it comes in where its person is (decision 64), once both the
-            // fragment and the computer hold it, so its computer hears each
-            // join; a replay joins nothing twice
-            crate::members::agent_made(env, who, identity).await;
-            json_response(&view)
-        }
-        (Method::Put, [id, "agents", fragment, "connections"]) => {
-            owned(env, who, id).await?;
-            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            // a body that forgot the field is not a reset to every provider
-            if v.get("connections").is_none() {
-                return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
-            }
-            let b: AgentConnections = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            if let Some(list) = &b.connections {
-                if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
-                    return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
-                }
-            }
-            let set = json!({ "fragment": fragment, "connections": b.connections });
-            json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
-        }
-        (Method::Put, [id, "agents", fragment, "accounts", provider]) => {
-            owned(env, who, id).await?;
-            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            // a body that forgot the field is not a reset to the default
-            if v.get("account").is_none() {
-                return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
-            }
-            let b: AgentAccount = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let cfg = Config::from_env(env);
-            if cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
-                return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
-            }
-            if let Some(account) = &b.account {
-                // one of the owner's accounts there, as their list names it
-                let mut listed = BTreeMap::new();
-                crate::connections::connection_states(env, cfg, crate::connections::workos_user(env, cfg, who), Some(&mut listed)).await?;
-                if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| !a.fenced && a.id.as_deref() == Some(account.as_str()))) {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
-                }
-            }
-            let set = json!({ "fragment": fragment, "provider": provider, "account": b.account });
-            json_response(&view_of(ask(env, id, "computer/account", &set).await?)?)
-        }
-        (Method::Post, [id, "agents", fragment, "door"]) => {
-            // a ticket to link or unlink the agent's door, its owner's alone
-            // (fragment_core::door): the agent fragment makes and signs it
-            owned(env, who, id).await?;
-            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let asked = json!({ "computer": id, "owner": who, "door": v["door"], "act": v["act"] });
-            json_response(&crate::fragment::ask(env, fragment, "computer/door-ticket", &asked).await?)
-        }
-        (Method::Get, [id, "uses"]) => {
-            owned(env, who, id).await?;
-            json_response(&ask(env, id, "computer/uses", &json!({ "month": null })).await?)
-        }
-        (Method::Get, [id, "uses", month]) => {
-            owned(env, who, id).await?;
-            if Month::parse(month).is_none() {
-                return Err(CellError::invalid("a month is YYYY-MM"));
-            }
-            json_response(&ask(env, id, "computer/uses", &json!({ "month": month })).await?)
-        }
-        (Method::Delete, [id, "agents", fragment]) => {
-            owned(env, who, id).await?;
-            // an agent fragment gone (deleted: its own delete unassigns it,
-            // ended.rs) has nothing to say: its computer runs it no more
-            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await {
-                Err(e) if e.code != ErrorCode::NotFound => return Err(e),
-                _ => {}
-            }
-            json_response(&view_of(ask(env, id, "computer/unassign", &json!({ "fragment": fragment })).await?)?)
-        }
-        (Method::Post, [id, "ports", port, "ticket"]) => {
-            let v = owned(env, who, id).await?;
-            let port: u16 = port.parse().ok().filter(|p| (1..=PORT_MAX).contains(p)).ok_or_else(|| CellError::invalid("a port is 1-65535"))?;
-            // where on the port it lands: a path and query the image reads
-            // (an agent's screen: `/?agent=<agent>`), carried, never read
-            let asked: PortTicketAsk = if body.iter().all(u8::is_ascii_whitespace) { PortTicketAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
-            let path = asked.path.unwrap_or_else(|| "/".into());
-            if !valid_port_path(&path) {
-                return Err(CellError::invalid(format!("a ticket's path is a path on its port: `/`, then at most {PORT_PATH_MAX_BYTES} visible characters, no `//`, `#`, `\\`, `.` or `..`")));
-            }
-            let t = ask(env, id, "computer/ticket", &json!({ "port": port, "identity": who })).await?;
-            let ticket = t["ticket"].as_str().ok_or_else(|| CellError::host("the computer minted no ticket"))?;
-            let next: String = url::form_urlencoded::byte_serialize(format!("/p/{port}{path}").as_bytes()).collect();
-            let url = format!("{}/__ticket?t={ticket}&next={next}", v.origin);
-            json_response(&PortTicket { url, expires_at: t["expiresAt"].as_i64().unwrap_or(0) })
-        }
-        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), rest.join("/")))),
+    match rest {
+        [] => forward(env, who, method, &fragment_core::computer::default_computer_of(who), rest, body).await,
+        [id, ..] => forward(env, who, method, id, rest, body).await,
     }
+}
+
+/// `GET /api/notices`, the computer's part (`notices::route`): handed to
+/// the person's own computer, which answers what it tells them.
+pub(crate) async fn notices_for(env: &Env, who: &str) -> CellResult<Response> {
+    send_api(env, who, Method::Get, &fragment_core::computer::default_computer_of(who), "https://computer.internal/api/notices".into(), &[]).await
+}
+
+/// Hands `/api/computers/{rest}` to computer `id`, as `/api/f/{name}/…` is
+/// handed to its fragment: the computer checks who is asking
+/// (`ComputerCell::api`). Asked again while it refuses this release (it
+/// did nothing), as any call into it is.
+async fn forward(env: &Env, who: &str, method: Method, id: &str, rest: &[&str], body: &[u8]) -> CellResult<Response> {
+    if !valid_computer_id(id) {
+        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
+    }
+    let url = format!("https://computer.internal/{}", ["api", "computers"].iter().chain(rest).copied().collect::<Vec<_>>().join("/"));
+    send_api(env, who, method, id, url, body).await
+}
+
+/// `url` asked of computer `id` as `who` (its `api`), with `body`.
+async fn send_api(env: &Env, who: &str, method: Method, id: &str, url: String, body: &[u8]) -> CellResult<Response> {
+    crate::routed::send_again(env, "COMPUTER", id, || {
+        let headers = Headers::new();
+        headers.set(KIND_HEADER, "api")?;
+        headers.set(SIGNER_HEADER, who)?;
+        let mut init = RequestInit::new();
+        init.with_method(method.clone()).with_headers(headers);
+        if !body.is_empty() {
+            init.with_body(Some(js_sys::Uint8Array::from(body).into()));
+        }
+        Ok(Request::new_with_init(&url, &init)?)
+    })
+    .await
 }
 
 /// A request to a computer's own origin: `/__ticket` signs a browser in

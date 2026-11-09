@@ -49,6 +49,7 @@ pub mod media;
 pub mod models;
 pub mod multipart;
 pub mod names;
+pub mod notice;
 pub mod npub;
 pub mod own_signin;
 pub mod connection_accounts;

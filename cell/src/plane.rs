@@ -128,6 +128,12 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
                 vec![channel.as_str().into(), names(&listed.kinds).into(), names(&listed.fields).into()],
             )?;
         }
+        // the kinds it keeps each poster's newest of, and a table of its own
+        if !d.newest.is_empty() {
+            assert!(d.newest.len() <= limits::NEWEST_KINDS_MAX, "a checked manifest keeps a bounded number of kinds");
+            let kinds = serde_json::to_string(&d.newest).expect("names serialize");
+            sql.exec("INSERT INTO code_channel_newest (channel, kinds) VALUES (?, ?)", vec![channel.as_str().into(), kinds.into()])?;
+        }
     }
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
@@ -135,6 +141,12 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let from = t.from.map_or(SqlStorageValue::Null, |k| k.as_str().into());
         sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into(), from])?;
     }
+    // what is kept of a kind no channel keeps now goes (one kept again
+    // starts from its next record): bounded, `NEWEST_KEPT_MAX` a channel
+    sql.exec(
+        "DELETE FROM newest WHERE NOT EXISTS (SELECT 1 FROM code_channel_newest c, json_each(c.kinds) k WHERE c.channel = newest.channel AND k.value = newest.kind)",
+        None,
+    )?;
     let count = |table: &str| -> Result<usize> {
         let rows: Vec<Value> = sql.exec(&format!("SELECT COUNT(*) AS n FROM {table}"), None)?.to_array()?;
         Ok(rows.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row") as usize)
@@ -144,12 +156,13 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     assert_eq!(count("code_channels")?, code.channels.len(), "every channel is stored");
     assert_eq!(count("code_channel_from")?, code.channels.values().filter(|d| d.from.is_some()).count(), "every channel's posters' kind is stored");
     assert_eq!(count("code_channel_listed")?, code.channels.values().filter(|d| d.listed.is_some()).count(), "every channel's listed is stored");
+    assert_eq!(count("code_channel_newest")?, code.channels.values().filter(|d| !d.newest.is_empty()).count(), "every channel's newest is stored");
     assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
     Ok(())
 }
 
 fn clear_installed(sql: &SqlStorage) -> Result<()> {
-    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_triggers"] {
+    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_channel_newest", "code_triggers"] {
         sql.exec(&format!("DELETE FROM {table}"), None)?;
     }
     Ok(())
@@ -197,12 +210,15 @@ struct ChannelRow {
     /// From `code_channel_listed`, joined (`CHANNELS`): JSON arrays of names.
     listed_kinds: Option<String>,
     listed_fields: Option<String>,
+    /// From `code_channel_newest`, joined (`CHANNELS`): a JSON array of kinds.
+    newest_kinds: Option<String>,
 }
 
 /// The installed channels' rows, each with its posters' kind and what its
 /// members' lists show of it (tables of their own: crates/core/migrations/fragment).
-const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind, l.kinds AS listed_kinds, l.fields AS listed_fields
-  FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel LEFT JOIN code_channel_listed l ON l.channel = c.channel";
+const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind, l.kinds AS listed_kinds, l.fields AS listed_fields, n.kinds AS newest_kinds
+  FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel LEFT JOIN code_channel_listed l ON l.channel = c.channel
+  LEFT JOIN code_channel_newest n ON n.channel = c.channel";
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let role = |key: &str, text: &str| Role::parse(text).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("{key} {text:?}")));
@@ -230,7 +246,18 @@ fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
         }
         _ => return Err(stored(&format!("channel {}", row.channel), "listed holds kinds without fields, or fields without kinds")),
     };
-    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from, listed }))
+    let newest = match row.newest_kinds.as_deref() {
+        None => vec![],
+        Some(text) => {
+            let kinds = crate::json_text::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("newest: {e}")))?;
+            // written from a checked manifest: anything else is corruption
+            if kinds.is_empty() || kinds.len() > limits::NEWEST_KINDS_MAX || !kinds.iter().all(|k| valid_listed_kind(k)) {
+                return Err(stored(&format!("channel {}", row.channel), "its newest kinds"));
+            }
+            kinds
+        }
+    };
+    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from, listed, newest }))
 }
 
 #[derive(Deserialize)]
@@ -459,7 +486,9 @@ impl FragmentCell {
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
-            clear_installed(&self.sql())?;
+            // none installed, through the one path every install takes (so
+            // what was kept of a kind goes too: `newest`)
+            store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &BTreeMap::new(), triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::FilesLive)?;
@@ -1131,6 +1160,16 @@ impl FragmentCell {
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
         self.typed::<ChannelRow>(&format!("{CHANNELS} ORDER BY c.channel"), vec![])?.into_iter().map(channel_decl).try_gathered()
+    }
+
+    /// The names of the app channels the live code declares, and nothing
+    /// else of them (what a call's meta tells the app).
+    pub(crate) fn declared_channel_names(&self) -> CellResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Name {
+            channel: String,
+        }
+        Ok(self.typed::<Name>("SELECT channel FROM code_channels ORDER BY channel", vec![])?.into_iter().map(|n| n.channel).collect())
     }
 
     /// An app channel the live code declares (who reads it, who may post

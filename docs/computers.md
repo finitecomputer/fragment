@@ -213,15 +213,19 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
 - `key_paused`: a shared key's charges this last hour reached its owner's
   cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
   calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
-  until `resumesAt`, when the shell draws again. Worked out on read from
+  until `resumesAt`, which the notice counts down to. Worked out on read from
   the computer's `key_hour`, and told as a charge reaches the cap. Its
   button lifts the cap a step (`allowMicros`, `key_hour::next_lift`),
   worked out by the computer from the cap it holds, so a stale page
   changes nothing; at the most it says so.
 
 The platform posts none of them in a chat: a chat's records are its
-people's and agents' (docs/chat-records.md). The shell shows them over
-every chat and Settings.
+people's and agents' (docs/chat-records.md). Its owner reads them in words
+with the rest of what they are told (`GET /api/notices`, docs/api.md,
+Notices): the computer says each one itself (`fragment_core::computer::said`),
+with its actions' routes (Restart, OK `…/notices/seen`, Later
+`…/notices/later`, Allow `…/key-caps/{provider}`, Get help), and the shell
+draws them over every chat and Settings with no code of its own for any.
 
 - **One way back: Restart** (`POST /api/computers/{id}/restart`): the
   sleep and fresh start above. It names the start its owner saw, so
@@ -251,8 +255,8 @@ every chat and Settings.
 - **The agent** is told what a cut or a rollback lost, in its next turn
   in each chat (docs/bridge.md, "The turn after a cut one is told" and
   "What a rollback forgot").
-- **Getting help**: a deployment may name `support_url`, which the shell
-  links once a restart has failed too.
+- **Getting help**: a deployment may name `support_url`, which a
+  `wont_wake` notice offers beside Restart.
 
 ## Preview and production
 
