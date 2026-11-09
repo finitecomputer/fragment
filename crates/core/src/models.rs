@@ -253,8 +253,10 @@ struct UpstreamFields {
     price: Option<Map<String, Value>>,
 }
 
+/// A slot's `provider`: read as an identifier, a string alone, as the
+/// tagged reading read its tag (a derived enum also takes `{"<name>": null}`).
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(variant_identifier, rename_all = "snake_case")]
 enum Provider {
     WorkersAi,
     Openai,
@@ -2128,6 +2130,9 @@ mod tests {
         refused(r#"{"high": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.high: the high tier is off (decision 23)");
         refused(r#"{"cheapest": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.cheapest: no slot names it, as its fallback or a tier's vision");
         refused(&slot(json!({ "provider": "anthropic", "model": "glm-5-3-flash" })), "unknown variant `anthropic`");
+        // a provider is its name, a string, as the tagged reading's tag was
+        refused(&slot(json!({ "provider": { "workers_ai": null }, "model": GLM_FLASH })), "invalid type: map");
+        refused(&slot(json!({ "provider": { "openai": null }, "base_url": "https://a.example/v1", "model": "glm-5-3-flash" })), "invalid type: map");
         refused(&slot(json!({ "model": "glm-5-3-flash" })), "missing field `provider`");
         refused(&slot(json!({ "provider": "openai", "model": "glm-5-3-flash" })), "missing field `base_url`");
         refused(&slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "glm-5-3-flash", "key": "fragment-finite-private-key" })), "unknown field `key`");

@@ -285,8 +285,10 @@ pub struct TestHookFields {
     times: Option<u32>,
 }
 
+/// A hook's `op`: read as an identifier, a string alone, as the tagged
+/// reading read its tag (a derived enum also takes `{"<op>": null}`).
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(variant_identifier, rename_all = "kebab-case")]
 enum TestOp {
     Clock,
     Sweep,
