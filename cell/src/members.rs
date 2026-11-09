@@ -236,11 +236,12 @@ impl FragmentCell {
         let roles = serde_json::to_string(&roles).expect("names serialize");
         // its owner's row and each such member's (at most MEMBERS_MAX): one
         // statement for their changes, one for their search cursors
-        let readers = "SELECT ? AS principal, ? AS role UNION ALL
-                       SELECT principal, role FROM members WHERE principal != ? AND role IN (SELECT value FROM json_each(?))";
-        let binds = || vec![owner.as_str().into(), Role::Owner.as_str().into(), owner.as_str().into(), roles.as_str().into()];
-        self.index_rows(readers, binds())?;
-        self.search_follow_rows(readers, binds())
+        self.index_rows(
+            "SELECT ? AS principal, ? AS role UNION ALL
+             SELECT principal, role FROM members WHERE principal != ? AND role IN (SELECT value FROM json_each(?))",
+            vec![owner.as_str().into(), Role::Owner.as_str().into(), owner.as_str().into(), roles.as_str().into()],
+        )?;
+        self.search_follow_rows("principal = ? OR role IN (SELECT value FROM json_each(?))", vec![owner.as_str().into(), roles.as_str().into()])
     }
 
     /// Who is in, or who may open it, changed: the owner's row in their
