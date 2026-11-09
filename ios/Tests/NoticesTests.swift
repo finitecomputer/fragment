@@ -145,4 +145,65 @@ struct NoticesTests {
         #expect(library.fragments.contains { $0.name == "garden--k3x9" }, "the newer read's list is shown")
         #expect(library.answered == nil, "decided by the read after the answer, which did not list it: nothing opens")
     }
+
+    /// The stale-navigation case (Alex on #1162): invite A accepted, the read
+    /// after it loses to a newer one or fails, the person goes elsewhere, and
+    /// a later read lists A: A must not open over them. The first list read
+    /// after the answer decides it, newest or not; a failed one, as not listed.
+    @MainActor @Test func aLaterReadNeverOpensAnAnswersPage() async throws {
+        final class Shared: Sendable {
+            let listed = Mutex(false); let failing = Mutex(false)
+            let gates = Mutex<[Int: Gate]>([:]); let lists = Mutex(0)
+        }
+        let shared = Shared()
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments":
+                let n = shared.lists.withLock { $0 += 1; return $0 }
+                let answer: (Int, String) = shared.failing.withLock { $0 } ? (503, #"{"error":"unavailable","message":"Try again shortly."}"#) : {
+                    let garden = shared.listed.withLock { $0 } ? #",{"name":"garden--k3x9","kind":"app","role":"editor","title":"Garden plans"}"# : ""
+                    return (200, #"{"fragments":[{"name":"juniper--a2","kind":"agent","role":"owner","title":"Juniper"}"# + garden + "]}")
+                }()
+                shared.gates.withLock { $0[n] }?.pass()
+                return answer
+            case "GET /api/f/juniper--a2/status": return (200, #"{"npub":"npub1juniper","urls":{"canonical":"https://juniper--a2.finite.test/"}}"#)
+            case "POST /api/invites/garden--k3x9/accept": return (200, #"{"fragment":"garden--k3x9","role":"editor","open":"https://garden--k3x9.finite.test/"}"#)
+            default: return (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+        let api = try stub.api()
+        let notice = try #require(try read(#"{"notices":[{"id":"invite:garden--k3x9","kind":"invite","level":"info","title":"Garden plans","actions":[{"label":"Accept","post":"/api/invites/garden--k3x9/accept","body":{}}]}]}"#).first)
+        let lists = { shared.lists.withLock { $0 } }
+
+        // loses: the read after the answer (2) is still out when a newer one
+        // (3) begins; 2's list, behind, lacks A; the person goes elsewhere;
+        // then 3 lists A
+        let library = Library()
+        await library.load(api)
+        let (behind, later) = (Gate(), Gate())
+        shared.gates.withLock { $0 = [2: behind, 3: later] }
+        let acting = Task { await library.act(notice, notice.actions[0], api: api) }
+        try await waitUntil("the read after the answer is out") { lists() == 2 }
+        shared.listed.withLock { $0 = true }
+        let newer = Task { await library.load(api) }
+        try await waitUntil("a newer read is out") { lists() == 3 }
+        behind.open()
+        #expect(await acting.value == nil)
+        later.open()
+        await newer.value
+        #expect(library.fragments.contains { $0.name == "garden--k3x9" }, "A is listed now")
+        #expect(library.answered == nil, "a later read never opens it")
+
+        // fails: the read after the answer fails; a later read lists A
+        let other = Library()
+        shared.listed.withLock { $0 = false }
+        await other.load(api)
+        shared.failing.withLock { $0 = true }
+        #expect(await other.act(notice, notice.actions[0], api: api) == nil)
+        shared.failing.withLock { $0 = false }
+        shared.listed.withLock { $0 = true }
+        await other.load(api)
+        #expect(other.fragments.contains { $0.name == "garden--k3x9" })
+        #expect(other.answered == nil, "nor after a failed one")
+    }
 }
