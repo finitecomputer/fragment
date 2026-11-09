@@ -1019,11 +1019,11 @@ where it came from (its own come over; a platform's are replaced by
 this one's, and an edit to one is kept), each scheduled job as a
 routine in UTC (weekdays by name), and its files: what an import brings
 (photos, video, audio and documents first, newest first, then the rest,
-up to 10 GiB) and what stays behind, and why. A home holding a file that
-may hold a password or key (`.env`, `auth.json`, a private key) is
-refused whole: leave those out of it. So is a zip naming a file by a
-path that is not plain (`..`, `a/./b`). `extract` copies into a folder
-apart from the home, never through a link.
+up to 10 GiB) and what stays behind, and why. A file that may hold a
+password or key (`.env`, `auth.json`, a private key) is left out unread,
+and named: nothing an import makes holds it. A zip naming a file by a
+path that is not plain (`..`, `a/./b`) is refused whole. `extract`
+copies into a folder apart from the home, never through a link.
 
 ## Agents
 
