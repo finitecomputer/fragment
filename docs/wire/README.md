@@ -475,6 +475,7 @@ out.
 | --- | --- | --- | --- |
 | `addedAt` | `integer` | required |  |
 | `addedBy` | `string` | required | Who granted it: the owner, or their agent for them (an invite's maker). |
+| `email` | `string` or `null` | optional | A person member's email, as the share sheet shows it (decision 48): in `GET members` to the owner and their agent for them, and in no other list (add-only: absent from an older platform). |
 | `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`. |
 | `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads. |
 | `principal` | `string` | required | The member's identity (an npub). |

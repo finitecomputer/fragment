@@ -58,6 +58,7 @@ bound LiveOut.result.status default null
 bound LiveOut.result.status range u16
 bound LiveOut.subscribed.next range i64
 bound Member.addedAt range i64
+bound Member.email default null
 bound Member.kind default null
 bound Member.owner default null
 bound MessageHit.at range i64
@@ -250,6 +251,7 @@ field LiveOut.subscribed.next required integer
 field LiveOut.subscribed.type required "subscribed"
 field Member.addedAt required integer
 field Member.addedBy required string
+field Member.email optional string|null
 field Member.kind optional IdentityKind|null
 field Member.owner optional string|null
 field Member.principal required string
