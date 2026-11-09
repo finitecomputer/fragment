@@ -720,6 +720,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &page,
         "(() => { window.__drafts = []; new MutationObserver(() => { for (const d of document.querySelectorAll('.msg.agent.streaming .md')) { const t = d.textContent; if (t && window.__drafts[window.__drafts.length - 1] !== t) window.__drafts.push(t); } }).observe(document.getElementById('messages'), { childList: true, subtree: true, characterData: true }); return true; })()",
     )?;
+    // and, for each draft frame that changed a shown draft's text, what it
+    // wrote anywhere else on the page (Untangle M4, FIN-453: a draft's next
+    // text is drawn in its own node alone)
+    chrome.eval(
+        &page,
+        "(() => { window.__draftWrites = []; new MutationObserver((records) => { const d = document.querySelector('.msg.agent.streaming'); if (!d) return; const inside = records.filter((r) => d.contains(r.target)).length; if (inside) window.__draftWrites.push(records.length - inside); }).observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true }); return true; })()",
+    )?;
     let say = |chrome: &mut Browser, text: &str| -> Result<()> {
         chrome.click(&page, "#text")?;
         chrome.type_text(&page, text)?;
@@ -758,6 +765,11 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let reply = reply.as_str().unwrap_or("").to_string();
     let drafts = chrome.eval(&page, "window.__drafts")?;
     s.ok("the agent's draft shows live, as it writes", streamed(&drafts, &reply), json!({ "drafts": drafts, "reply": reply }));
+    // the stub's slow reply: twenty drafts, 40 ms apart, sent at most every 250 ms
+    let partials = drafts.as_array().into_iter().flatten().filter_map(Value::as_str).filter(|t| t.len() < reply.len()).count();
+    let writes = chrome.eval(&page, "window.__draftWrites")?;
+    s.ok("each draft frame shows its text, growing", partials >= 2, json!({ "drafts": drafts, "reply": reply }));
+    s.ok("and writes nothing outside the draft's own node", writes.as_array().is_some_and(|w| !w.is_empty() && w.iter().all(|n| n == 0)), &writes);
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 

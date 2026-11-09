@@ -723,8 +723,8 @@ export function mount(root) {
       }
       // unanswered, one known already stays as it was
       for (const id of batch) profiles.set(id, found ? (found[id] ?? {}) : (profiles.get(id) ?? {}));
+      schedule();
     }
-    schedule();
   }
   const inRoster = (principal) => state.roster.find((r) => r.identity === principal) ?? null;
   function isAgent(principal) {
@@ -1070,13 +1070,19 @@ export function mount(root) {
     schedule();
   }
 
+  // A draft's next text is drawn in its own node alone (`redrawDrafts`); a
+  // draft come or gone changes the timeline, drawn whole.
   function onDraft(d) {
     if (typeof d.turn !== "string" || typeof d.principal !== "string") return;
     const key = turnKey(d.principal, d.turn);
+    const had = state.drafts.has(key);
     if (typeof d.text !== "string") state.drafts.delete(key);
     else state.drafts.set(key, { principal: d.principal, turn: d.turn, text: d.text, at: Date.now() });
     want(d.principal);
-    schedule();
+    if (had && typeof d.text === "string") {
+      drafted.add(key);
+      drawNext();
+    } else schedule();
   }
 
   // A card's expiry shows without a record: the page looks again then.
@@ -1206,14 +1212,26 @@ export function mount(root) {
     return node;
   }
 
+  // What the next frame draws: the whole timeline (`schedule`), or only the
+  // drafts whose text alone changed (`drafted`).
   let scheduled = false;
-  function schedule() {
-    if (scheduled) return;
-    scheduled = true;
+  let drawAsked = false;
+  const drafted = new Set();
+  function drawNext() {
+    if (drawAsked) return;
+    drawAsked = true;
     requestAnimationFrame(() => {
+      drawAsked = false;
+      const whole = scheduled;
+      const drafts = [...drafted];
       scheduled = false;
-      render();
+      drafted.clear();
+      if (whole || !redrawDrafts(drafts)) render();
     });
+  }
+  function schedule() {
+    scheduled = true;
+    drawNext();
   }
 
   function itemNode(it) {
@@ -1308,6 +1326,29 @@ export function mount(root) {
     }
     showLatest();
     animateSentMessages();
+  }
+
+  // Drafts whose text alone changed, each drawn in its node: a draft's place
+  // is its turn's, which its text does not move. One not shown, or made
+  // anew (its poster's name changed), another gone stale (`timeline` drops
+  // it), or earlier messages loading (their place is `render`'s): false,
+  // and the whole timeline is drawn.
+  function redrawDrafts(keys) {
+    const now = Date.now();
+    if (history.anchor || history.watch || [...state.drafts.values()].some((d) => now - d.at > DRAFT_STALE_MS)) return false;
+    const { node: anchor, top } = !stuck ? visibleAnchor() : {};
+    for (const key of keys) {
+      const d = state.drafts.get(key);
+      const shown = nodes.get(`d:${key}`)?.node;
+      if (!d || !shown?.isConnected || draftNode(key, d)[1] !== shown) return false;
+    }
+    if (stuck) toEnd();
+    else if (anchor?.isConnected) {
+      $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+      held = { node: anchor, top };
+    }
+    showLatest();
+    return true;
   }
 
   // A message sent from this page rises from the composer into the thread
@@ -2242,9 +2283,11 @@ export function mount(root) {
   // A reader who moves while an older page is in flight chooses a new
   // position. Automatic scroll events from restoring the anchor do not.
   for (const event of ["wheel", "touchmove", "keydown"]) $("scroll").addEventListener(event, () => { history.anchor = null; }, { passive: true });
+  // (written only when it changed: a draft's frame writes nothing else)
   function showLatest() {
-    $("latest").hidden = stuck;
-    $("latest").textContent = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+    const said = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+    if ($("latest").hidden !== stuck) $("latest").hidden = stuck;
+    if ($("latest").textContent !== said) $("latest").textContent = said;
   }
   const toEnd = () => {
     const s = $("scroll");
