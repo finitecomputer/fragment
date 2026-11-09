@@ -580,23 +580,6 @@ struct Unassign {
     identity: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct SetConnections {
-    fragment: String,
-    /// `None`: every provider the owner has (decision 44).
-    connections: Option<Vec<String>>,
-}
-
-/// `computer/account`'s body: which of its owner's accounts at `provider`
-/// (a connection that takes several) the agent `fragment` uses, by its id
-/// (one the owner's list named: the router checked), or `None`, the default.
-#[derive(Deserialize)]
-struct SetAccount {
-    fragment: String,
-    provider: String,
-    account: Option<String>,
-}
-
 /// What an agent may have swapped in, as `agents.connections` keeps it.
 fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
     crate::json_text(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
@@ -2680,49 +2663,6 @@ impl ComputerCell {
                 }
                 json_response(&view)
             }
-            "computer/connections" => {
-                let mut b: SetConnections = body_json(&mut req).await?;
-                if let Some(list) = b.connections.as_mut() {
-                    list.sort_unstable();
-                    list.dedup();
-                    if let Some(c) = list.iter().find(|c| self.cfg.providers.get(c).is_none()) {
-                        let offered: Vec<&str> = self.cfg.providers.providers().iter().map(|p| p.name.as_str()).collect();
-                        return Err(CellError::invalid(format!("no provider {c:?} on this deployment (its providers: {offered:?})")));
-                    }
-                }
-                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
-                }
-                let text = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
-                assert_eq!(stored_connections(&text, &b.fragment)?, b.connections, "connections read back as they are written");
-                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
-                // its owner's other pages read it again (the agent's page:
-                // which model it runs)
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
-            "computer/account" => {
-                let b: SetAccount = body_json(&mut req).await?;
-                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
-                    return Err(CellError::invalid(format!("{:?} is no connection here that takes several accounts", b.provider)));
-                }
-                if b.account.as_deref().is_some_and(|a| !fragment_core::connection_accounts::valid_account_id(a)) {
-                    return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
-                }
-                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
-                }
-                match &b.account {
-                    Some(account) => self.exec(
-                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
-                        vec![b.fragment.as_str().into(), b.provider.as_str().into(), account.as_str().into()],
-                    )?,
-                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![b.fragment.as_str().into(), b.provider.as_str().into()])?,
-                }
-                // its owner's other pages read it again
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
             "computer/credentials" => {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
@@ -2945,10 +2885,78 @@ impl ComputerCell {
                 self.set_key_cap(provider, body_json(&mut req).await?).await?;
                 json_response(&self.view()?)
             }
+            (Method::Put, ["agents", fragment, "connections"]) => {
+                let v: Value = body_json(&mut req).await?;
+                // a body that forgot the field is not a reset to every provider
+                if v.get("connections").is_none() {
+                    return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
+                }
+                let AgentConnections { mut connections } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                if let Some(list) = connections.as_mut() {
+                    if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
+                        return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
+                    }
+                    list.sort_unstable();
+                    list.dedup();
+                    if let Some(c) = list.iter().find(|c| self.cfg.providers.get(c).is_none()) {
+                        let offered: Vec<&str> = self.cfg.providers.providers().iter().map(|p| p.name.as_str()).collect();
+                        return Err(CellError::invalid(format!("no provider {c:?} on this deployment (its providers: {offered:?})")));
+                    }
+                }
+                self.runs(fragment)?;
+                let text = serde_json::to_string(&connections).map_err(|e| CellError::host(e.to_string()))?;
+                assert_eq!(stored_connections(&text, fragment)?, connections, "connections read back as they are written");
+                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), (*fragment).into()])?;
+                // its owner's other pages read it again (the agent's page:
+                // which model it runs)
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Put, ["agents", fragment, "accounts", provider]) => {
+                let v: Value = body_json(&mut req).await?;
+                // a body that forgot the field is not a reset to the default
+                if v.get("account").is_none() {
+                    return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
+                }
+                let AgentAccount { account } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
+                    return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
+                }
+                if let Some(account) = &account {
+                    // one of the owner's accounts there, as their list names it
+                    let mut listed = BTreeMap::new();
+                    crate::connections::connection_states(&self.env, self.cfg, self.workos_user(&who), Some(&mut listed)).await?;
+                    if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| !a.fenced && a.id.as_deref() == Some(account.as_str()))) {
+                        return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
+                    }
+                    if !fragment_core::connection_accounts::valid_account_id(account) {
+                        return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
+                    }
+                }
+                self.runs(fragment)?;
+                match &account {
+                    Some(account) => self.exec(
+                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
+                        vec![(*fragment).into(), (*provider).into(), account.as_str().into()],
+                    )?,
+                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![(*fragment).into(), (*provider).into()])?,
+                }
+                // its owner's other pages read it again
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
             (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
             (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
         }
+    }
+
+    /// Refuses an agent fragment that does not run here.
+    fn runs(&self, fragment: &str) -> CellResult<()> {
+        if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![fragment.into()])?.is_empty() {
+            return Err(CellError::new(ErrorCode::NotFound, format!("{fragment} does not run on this computer")));
+        }
+        Ok(())
     }
 
     /// Pins `image`, its owner's or an operator's: the next start takes it.
@@ -3290,45 +3298,6 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             // join; a replay joins nothing twice
             crate::members::agent_made(env, who, identity).await;
             json_response(&view)
-        }
-        (Method::Put, [id, "agents", fragment, "connections"]) => {
-            owned(env, who, id).await?;
-            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            // a body that forgot the field is not a reset to every provider
-            if v.get("connections").is_none() {
-                return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
-            }
-            let b: AgentConnections = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            if let Some(list) = &b.connections {
-                if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
-                    return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
-                }
-            }
-            let set = json!({ "fragment": fragment, "connections": b.connections });
-            json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
-        }
-        (Method::Put, [id, "agents", fragment, "accounts", provider]) => {
-            owned(env, who, id).await?;
-            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            // a body that forgot the field is not a reset to the default
-            if v.get("account").is_none() {
-                return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
-            }
-            let b: AgentAccount = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let cfg = Config::from_env(env);
-            if cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
-                return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
-            }
-            if let Some(account) = &b.account {
-                // one of the owner's accounts there, as their list names it
-                let mut listed = BTreeMap::new();
-                crate::connections::connection_states(env, cfg, crate::connections::workos_user(env, cfg, who), Some(&mut listed)).await?;
-                if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| !a.fenced && a.id.as_deref() == Some(account.as_str()))) {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
-                }
-            }
-            let set = json!({ "fragment": fragment, "provider": provider, "account": b.account });
-            json_response(&view_of(ask(env, id, "computer/account", &set).await?)?)
         }
         (Method::Post, [id, "agents", fragment, "door"]) => {
             // a ticket to link or unlink the agent's door, its owner's alone
