@@ -1,12 +1,26 @@
 # Profile: finite.computer
 
 Read this with `SKILL.md` when the layout is `finite-computer`: an agent
-your owner kept on finite.computer (the old Finite), staged for you by
-the platform. Its layout file is `finite-computer.layout.json` beside
-this one.
+your owner kept on finite.computer (the old Finite), exported as a zip of
+its home. Its layout file is `finite-computer.layout.json` beside this
+one.
 
-The old agent is stopped and its copy is read-only. Its old sites keep
-serving at their old addresses until they are turned off.
+You only read the copy. The old agent and its sites keep running on the
+old Finite until your owner turns them off.
+
+**What the zip may hold beside the home.** The export adds a few small
+files of facts. Each is optional; when one is missing, take the safer
+choice.
+- `agent/profile.json`: the old agent's `name`, and its `picture_url`.
+- `workspace/finitebrain/<id>.json`: a brain's `name`.
+- `sites/<site>.json`: a site's old address (`url`), whether it was
+  public (`visibility`), the folder it served (`path`), and whether it was
+  a single-page app (`spa`).
+
+**Name and picture.** Take the old name only if your owner's answers say
+to keep it, from `agent/profile.json`. Fetch its picture only if it is
+there too; leave it if it doesn't download as an image of at most
+256 KiB.
 
 ## What its parts become
 
@@ -28,8 +42,8 @@ mkdir -p ~/home-import/work/brains/<id> && cd ~/home-import/work/brains/<id>
 fragment sync <its name> --dir .
 ```
 
-Its name is in your owner's answers, or else in the first heading of its
-`index.md`. Copy its files in (`~/home-import/home/workspace/finitebrain/<id>/`),
+Its name is in `workspace/finitebrain/<id>.json`, or else the first
+heading of its `index.md`, or else its id. Copy its files in (`~/home-import/home/workspace/finitebrain/<id>/`),
 leaving out what the old brain made for itself:
 - `AGENTS.md`, `_index.md` and `.keep` in each folder;
 - `_wiki/` folders;
@@ -60,9 +74,9 @@ teammates once those teammates have moved.
 ### Sites, as apps
 
 Each `sites/<site>/` is the site's files, as its repository held them.
-Make each app once, as `SKILL.md`'s rules say.
-If its `finite.toml` names a `path`, that folder is the one served; `.`
-or none means the whole folder. Leave out `finite.toml` itself.
+Make each app once, as `SKILL.md`'s rules say. The folder served is
+`sites/<site>.json`'s `path`, else its `finite.toml`'s `path`, else the
+whole folder (`.`). Leave out `finite.toml` itself.
 
 ```sh
 fragment home extract <source> sites/<site> --to ~/home-import/home --layout <L>
@@ -99,11 +113,14 @@ fragment deploy <its name> --dir .
 fragment status <its name>
 ```
 
-**Public.** Make a site public only if your owner's answers say to keep
-it public: `fragment visibility <its name> public`. Then open its
-address and check it.
+**Public.** Make a site public only if its `sites/<site>.json` says
+`"visibility": "public"` and your owner's answers say to keep public
+sites public: `fragment visibility <its name> public`. Then open its
+address and check it. With no `.json`, keep it private, and name it in
+the report so your owner can make it public.
 
-Write each old address with its new one into
+Write each old address (`sites/<site>.json`'s `url`, else
+`https://<site>.finite.site`) with its new one into
 `~/home-import/site-map.json` (`{"https://garden.finite.site":
 "https://garden--k3x9.finite.place"}`). Steps 4 and 5 use it.
 
