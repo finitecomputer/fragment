@@ -973,10 +973,13 @@ from Hermes' own `state.db` (or the Hermes home holding it), read-only:
 fragment session import ~/finite-import/export              # the old Finite's export, unpacked
 fragment session import ~/.hermes                           # a Hermes home, or its state.db
 fragment session import ~/.hermes --kind chat               # only chats (also: cron, subagent)
+fragment session import stage.zip --layout ./layouts/x.json  # an agent's home, zipped: its Hermes home where its layout says
 ```
 
 A `state.db` copied from elsewhere needs its `state.db-wal` beside it, or
-its newest messages are not in it. On an agent's computer here, its own
+its newest messages are not in it. A zip of an agent's home (`fragment
+home`) is read in place: its database, and its WAL, are copied out to a
+temporary folder for the read and deleted after. On an agent's computer here, its own
 Hermes databases are refused: their conversations are your chats here
 already.
 
@@ -1154,7 +1157,7 @@ fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|default]
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
-fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
+fragment session import <path> [--kind K] [--layout L]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
 fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files

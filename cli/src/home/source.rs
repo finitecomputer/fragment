@@ -1,7 +1,9 @@
 //! Where an agent's home is read from (`fragment home`): a folder, or a
 //! zip of one, read in place (an old agent's stage is one zip64 file,
 //! FIN-463). Every reader works on either: the survey, the files it
-//! brings, and the files it copies out.
+//! brings, and the databases it reads. A database is a file SQLite opens,
+//! so a zip's is copied out first (`local`), into a scratch folder of the
+//! import's own that goes with it (`Scratch`).
 //!
 //! **Paths.** Every file is named by its path relative to the root,
 //! `/`-separated, as text. A zip entry that would leave the root (`..`, an
@@ -106,6 +108,12 @@ pub fn said(names: &[String]) -> String {
     out
 }
 
+/// Whether the file at `path` is a zip (by its first bytes).
+pub fn is_zip(path: &Path) -> bool {
+    let mut head = [0u8; 4];
+    std::fs::metadata(path).is_ok_and(|m| m.is_file()) && File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && (head == *b"PK\x03\x04" || head == *b"PK\x05\x06")
+}
+
 impl Source {
     /// The source a person names: a folder, or a zip file.
     pub fn open(path: &Path) -> Result<Source> {
@@ -113,9 +121,7 @@ impl Source {
         if meta.is_dir() {
             return Source::dir(path);
         }
-        let mut head = [0u8; 4];
-        let is_zip = File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && (head == *b"PK\x03\x04" || head == *b"PK\x05\x06");
-        if !meta.is_file() || !is_zip {
+        if !is_zip(path) {
             bail!(usage(format!("{} is no folder and no zip: name an agent's home, or a zip of one", path.display())));
         }
         Source::zip(path)
@@ -281,12 +287,72 @@ impl Source {
         }
         Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
+
+    /// One file as a file on this computer, for what opens a file by its
+    /// path (SQLite): a folder's own, or a zip's copied into `scratch`.
+    pub fn local(&self, path: &str, scratch: &Scratch) -> Result<PathBuf> {
+        match &self.backing {
+            Backing::Dir(root) => {
+                self.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
+                Ok(root.join(path))
+            }
+            Backing::Zip(_) => {
+                let to = scratch.dir.join(path);
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
+                }
+                let size = self.get(path).map(|e| e.size).unwrap_or(0);
+                let copied = self.with_reader(path, |r| {
+                    let mut out = File::create(&to).with_context(|| format!("writing {}", to.display()))?;
+                    io::copy(r, &mut out).with_context(|| format!("copying {path} out of the zip"))
+                })?;
+                if copied != size {
+                    bail!("{path} came out of the zip as {copied} bytes, not the {size} listed");
+                }
+                Ok(to)
+            }
+        }
+    }
 }
 
 /// A zip's time of a file (no zone), as seconds since 1970 in UTC.
 fn dos_seconds(t: zip::DateTime) -> Option<i64> {
     let civil = jiff::civil::DateTime::new(t.year() as i16, t.month() as i8, t.day() as i8, t.hour() as i8, t.minute() as i8, t.second() as i8, 0).ok()?;
     civil.to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_second())
+}
+
+/// A folder of an import's own for files copied out of a zip, under the
+/// system's temporary folder, removed with it (a crash's is cleared by the
+/// next import's, a day on).
+pub struct Scratch {
+    pub dir: PathBuf,
+}
+
+const SCRATCH_PREFIX: &str = "fragment-home-";
+const SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+impl Scratch {
+    pub fn new() -> Result<Scratch> {
+        let tmp = std::env::temp_dir();
+        if let Ok(dir) = std::fs::read_dir(&tmp) {
+            for e in dir.flatten() {
+                let stale = e.file_name().to_str().is_some_and(|n| n.starts_with(SCRATCH_PREFIX))
+                    && e.metadata().is_ok_and(|m| m.is_dir() && m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SCRATCH_STALE)));
+                if stale {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        let dir = tmp.join(format!("{SCRATCH_PREFIX}{}-{:016x}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+        Ok(Scratch { dir })
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 #[cfg(test)]
@@ -322,7 +388,7 @@ pub mod tests {
     }
 
     /// A folder and the zip of it read the same: the same files, sizes and
-    /// bytes.
+    /// bytes, and a database copied out of the zip opens as a file.
     #[test]
     fn a_folder_and_its_zip_read_the_same() {
         let t = Temp::new();
@@ -344,6 +410,14 @@ pub mod tests {
             assert_eq!(z.read(path).unwrap(), *bytes, "{path} out of the zip");
         }
         assert_eq!(z.text("a/c/d.bin").unwrap(), None, "bytes with a NUL are not text");
+        let scratch = Scratch::new().unwrap();
+        let out = z.local("big.dat", &scratch).unwrap();
+        assert!(out.starts_with(&scratch.dir));
+        assert_eq!(std::fs::read(&out).unwrap(), vec![7u8; 70_000]);
+        assert_eq!(d.local("big.dat", &scratch).unwrap(), dir.join("big.dat"), "a folder's file is its own");
+        let held = scratch.dir.clone();
+        drop(scratch);
+        assert!(!held.exists(), "the scratch goes with the import");
         assert_eq!(z.under("a").map(|e| e.path.as_str()).collect::<Vec<_>>(), ["a/b.txt", "a/c/d.bin"]);
         assert!(z.has_folder("a/c") && !z.has_folder("a/b"));
         assert!(z.get("a").is_none(), "a folder is not a file");

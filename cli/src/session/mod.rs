@@ -47,6 +47,11 @@ pub enum SessionCmd {
         /// job's runs), subagent (side tasks). All of them unless named
         #[arg(long = "kind", value_name = "KIND")]
         kinds: Vec<String>,
+        /// Where the agent's home keeps its Hermes home, when PATH is a
+        /// whole home or a zip of one (`fragment home`): `hermes` (the
+        /// home is its Hermes home, the default for a zip), or a layout file
+        #[arg(long)]
+        layout: Option<String>,
     },
 }
 
@@ -240,7 +245,7 @@ fn clear_stale_spools(tmp: &Path) {
 
 /// `fragment session import`.
 pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
-    let SessionCmd::Import { path, kinds } = sub;
+    let SessionCmd::Import { path, kinds, layout } = sub;
     let kinds: BTreeSet<Kind> = kinds.iter().map(|k| Kind::known(k).ok_or_else(|| usage(format!("--kind is chat, cron or subagent, not {k:?}")))).collect::<Result<_>>()?;
     if let Some(mode) = c.agent() {
         if mode.acting_for.is_none() {
@@ -253,17 +258,10 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     let mut spool = Spool::new(kinds)?;
     let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
     let upload_max = upload_max(&list, c.agent().is_some());
-    let problems = match source(&path)? {
-        Source::Export(root) => chats::read(&root, &mut spool, upload_max)?,
-        Source::Hermes(db) => {
-            // on a platform computer (as its agent), its own Hermes home's
-            // databases are its chats here already; a person's own Hermes is theirs
-            let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
-            // a conversation it cannot read whole is refused, in the spool
-            hermes::read(&db, &mut spool, own.as_deref())?;
-            Vec::new()
-        }
-    };
+    // on a platform computer (as its agent), its own Hermes home's
+    // databases are its chats here already; a person's own Hermes is theirs
+    let own = c.agent().and(std::env::var_os("HERMES_HOME")).filter(|h| !h.is_empty()).map(PathBuf::from);
+    let problems = read(source(&path, layout.as_deref())?, &mut spool, upload_max, own.as_deref())?;
     let (archive, made) = archive(c, &list)?;
     let written = write(c, &archive, &spool)?;
     let mut holds: BTreeMap<String, usize> = Kind::KNOWN.iter().map(|k| (k.as_str().to_string(), 0)).collect();
@@ -273,6 +271,33 @@ pub fn run(c: &Client, sub: SessionCmd) -> Result<Imported> {
     let search = search::sync(c, &archive, &spool);
     let refused = std::mem::take(&mut spool.refused);
     Ok(Imported { archive, made, added: written.added, updated: written.updated, unchanged: written.unchanged, refused, problems, holds, search })
+}
+
+/// What `source` names, read into `spool`; what could not be read at all,
+/// each in a sentence. `own`: this platform computer's Hermes home, whose
+/// databases are refused.
+fn read(source: Source, spool: &mut Spool, upload_max: u64, own: Option<&Path>) -> Result<Vec<String>> {
+    Ok(match source {
+        Source::Export(root) => chats::read(&root, spool, upload_max)?,
+        Source::Hermes(db) => {
+            // a conversation it cannot read whole is refused, in the spool
+            hermes::read(&db, spool, own)?;
+            Vec::new()
+        }
+        Source::Home(home, db) => {
+            // a zip's database is copied out with what SQLite reads beside
+            // it, into a folder of the import's own that goes with it
+            let scratch = crate::home::source::Scratch::new()?;
+            let local = home.local(&db, &scratch)?;
+            for beside in ["-wal", "-shm"] {
+                if home.get(&format!("{db}{beside}")).is_some() {
+                    home.local(&format!("{db}{beside}"), &scratch)?;
+                }
+            }
+            hermes::read(&local, spool, own)?;
+            Vec::new()
+        }
+    })
 }
 
 /// One file's bytes this import may send, at most: what the platform's
@@ -292,11 +317,25 @@ fn upload_max(list: &FragmentList, agent: bool) -> u64 {
 enum Source {
     Export(PathBuf),
     Hermes(PathBuf),
+    /// An agent's home (`fragment home`: a zip of one, or a folder read
+    /// through a layout), and its Hermes database's path in it.
+    Home(crate::home::source::Source, String),
 }
 
-/// The old Finite's export (its `chats/`, or the folder holding it), else
-/// Hermes' database (a file, or a Hermes home holding `state.db`).
-fn source(path: &std::path::Path) -> Result<Source> {
+/// An agent's home (a zip, or any path named with a layout), read as its
+/// layout says; else the old Finite's export (its `chats/`, or the folder
+/// holding it), else Hermes' database (a file, or a Hermes home holding
+/// `state.db`).
+fn source(path: &std::path::Path, layout: Option<&str>) -> Result<Source> {
+    if layout.is_some() || crate::home::source::is_zip(path) {
+        let layout = crate::home::Layout::named(layout.unwrap_or("hermes"))?;
+        let home = crate::home::source::Source::open(path)?;
+        let db = layout.in_home("state.db");
+        if home.get(&db).is_none() {
+            bail!(usage(format!("{} holds no {db}: name the home's layout (--layout), or its Hermes home", path.display())));
+        }
+        return Ok(Source::Home(home, db));
+    }
     if let Some(root) = chats::root_of(path) {
         return Ok(Source::Export(root));
     }
@@ -1265,13 +1304,47 @@ mod tests {
     #[test]
     fn a_path_names_a_store_or_says_what_to_name() {
         let dir = tempdir();
-        let e = source(&dir).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let e = source(&dir, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("name the old Finite's export, Hermes' state.db, or a Hermes home"), "{e}");
         hermes::tests::database(&dir.join("state.db"), "");
-        assert!(matches!(source(&dir), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
-        assert!(matches!(source(&dir.join("state.db")), Ok(Source::Hermes(_))));
+        assert!(matches!(source(&dir, None), Ok(Source::Hermes(p)) if p == dir.join("state.db")));
+        assert!(matches!(source(&dir.join("state.db"), None), Ok(Source::Hermes(_))));
         chats::tests::export(&dir);
-        assert!(matches!(source(&dir), Ok(Source::Export(p)) if p == *dir), "an export's chats/ wins over a state.db beside it");
+        assert!(matches!(source(&dir, None), Ok(Source::Export(p)) if p == *dir), "an export's chats/ wins over a state.db beside it");
+    }
+
+    /// Goal: a home's zip (a stage) reads as the folder it was: its Hermes
+    /// database copied out of it into a scratch folder that goes after the
+    /// read; through a layout, at the layout's path. Invalid: a zip with no
+    /// database where its layout says.
+    #[test]
+    fn a_homes_zip_reads_as_its_folder() {
+        let dir = tempdir();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        rusqlite::Connection::open(home.join("state.db")).unwrap().execute_batch(&format!("PRAGMA foreign_keys = OFF;\n{}", include_str!("hermes-v0.21.7.sql"))).unwrap();
+        let db = std::fs::read(home.join("state.db")).unwrap();
+        let spool_of = |path: &Path, layout: Option<&str>| {
+            let mut spool = Spool::new(BTreeSet::new()).unwrap();
+            read(source(path, layout).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
+            hermes::tests::spooled(&spool)
+        };
+        let from_folder = spool_of(&home.join("state.db"), None);
+        assert!(from_folder.len() >= 6, "the fixture's conversations: {}", from_folder.len());
+        let bare = dir.join("bare.zip");
+        crate::home::source::tests::zip_of(&bare, &[("state.db", &db), ("SOUL.md", b"me")]);
+        let staged = dir.join("stage.zip");
+        crate::home::source::tests::zip_of(&staged, &[("workspace/notes.md", b"n"), ("agent/hermes-home/state.db", &db)]);
+        let layout = dir.join("layout.json");
+        std::fs::write(&layout, r#"{"format":"fragment-home-layout/1","name":"x","hermes_home":"agent/hermes-home"}"#).unwrap();
+        let tmp_before: Vec<_> = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("fragment-home-{}-", std::process::id()))).map(|e| e.path()).collect();
+        assert_eq!(spool_of(&bare, None), from_folder, "a bare Hermes home's zip");
+        assert_eq!(spool_of(&staged, Some(layout.to_str().unwrap())), from_folder, "a stage, through its layout");
+        assert_eq!(spool_of(&dir.join("home"), Some("hermes")), from_folder, "a folder named with a layout");
+        let tmp_after: Vec<_> = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("fragment-home-{}-", std::process::id()))).map(|e| e.path()).collect();
+        assert_eq!(tmp_before.len(), tmp_after.len(), "the copies out of the zips are gone");
+        let e = source(&staged, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("holds no state.db: name the home's layout"), "{e}");
     }
 
     /// Goal: a spool holds what an import read within an archive's limits,
