@@ -730,14 +730,6 @@ pub async fn email_send(env: &JsValue, message: &serde_json::Value) -> Result<St
     }
 }
 
-/// A stream as two that read the same bytes (`ReadableStream.tee`): one
-/// may be read while the other is dropped.
-pub fn tee(stream: &ReadableStream) -> CellResult<(ReadableStream, ReadableStream)> {
-    let pair = stream.tee();
-    let branch = |i: u32| pair.get(i).dyn_into::<ReadableStream>().map_err(|_| CellError::host("tee answered no stream"));
-    Ok((branch(0)?, branch(1)?))
-}
-
 pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
 }

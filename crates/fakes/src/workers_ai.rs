@@ -34,7 +34,7 @@
 //!
 //! An icon (fragment_core::icon) is made of three calls here:
 //! - its subject, GLM-5.3 Flash asked with the icon's own system message
-//!   (`icon::subject_input`): named as its maker's hint asked, else
+//!   (`icon::subject_input`, with a hint or without): named as its maker's hint asked, else
 //!   `ICON_SUBJECT` (`icon_subject`), unstreamed with its usage;
 //! - its drawings, FLUX.2 [klein] 4B (`ICON_MODEL`), `{prompt, width,
 //!   height, seed}` as JSON (the cell sends the binding a form): `{"image":
@@ -851,14 +851,14 @@ fn image_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id)
 }
 
-/// The subject named when `body` asks an icon's (its system message
-/// `icon::subject_input`'s): the hint its maker asked for (the user
-/// message's "Its maker asks for: …"), else `ICON_SUBJECT`. `None` for any
-/// other chat.
+/// The subject named when `body` asks an icon's (its system message one
+/// of `icon::subject_input`'s, with a hint or without): the hint its maker
+/// asked for (the user message's "Its maker asks for: …"), else
+/// `ICON_SUBJECT`. `None` for any other chat.
 pub fn icon_subject(body: &Value) -> Option<String> {
-    let asked = fragment_core::icon::subject_input("", None, None);
     let messages = body["messages"].as_array()?;
-    if messages.first() != Some(&asked["messages"][0]) {
+    let system = messages.first()?;
+    if ![None, Some("x")].iter().any(|hint| fragment_core::icon::subject_input("", None, *hint)["messages"][0] == *system) {
         return None;
     }
     let said = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();

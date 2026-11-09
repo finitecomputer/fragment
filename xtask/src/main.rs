@@ -38,11 +38,17 @@
 //!                    markup (xtask/src/html_sinks.rs), no runtime code runs
 //!                    a string as script (xtask/src/eval_sinks.rs), the
 //!                    schema lock is what the Durable Objects' steps make
-//!                    (xtask/src/schema_lock.rs), then host tests and
+//!                    (xtask/src/schema_lock.rs), the wire's files are what
+//!                    crates/proto makes and its lock breaks nothing
+//!                    master's holds (xtask/src/wire/), then host tests and
 //!                    clippy, warnings denied
 //!   schema-lock      appends the Durable Objects' new schema steps to
 //!                    crates/core/migrations/schema.lock, refusing to change
 //!                    or drop a locked one (crates/core/src/migrate.rs)
+//!   wire             writes the wire's OpenAPI document and reference
+//!                    (docs/wire) and its lock (crates/proto/wire.lock) from
+//!                    crates/proto, then says what it breaks of master's
+//!                    (xtask/src/wire/)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -60,13 +66,11 @@
 //!                    rather than keeping it at its digest
 //!                    --preview-image-digest requires --branch preview
 //!                    --pinned-only, and changes only its in-memory pins
-//!   image preview --output <file> [--build | --queue | --dry-run] [--summary <file>]
-//!                    resolve master's input-keyed Hermes image, or copy the
-//!                    merge queue's build to it, or build it, and prepare it
-//!                    (--build); write its input key and digest for CI's
-//!                    preview deploy. --queue builds and prepares the merge
-//!                    queue's ahead (queue-<key>, never master's tag)
-//!                    --dry-run prints its plan without credentials or calls
+//!   image preview --output <file> [--build | --dry-run] [--summary <file>]
+//!                    resolve master's input-keyed Hermes image, or build it,
+//!                    and prepare it (--build); write its input key and digest
+//!                    for CI's preview deploy. --dry-run prints its plan
+//!                    without credentials or calls
 //!   cli-release plan | record <tag>
 //!                    CI's CLI input lookup/version plan, or record and
 //!                    verify inputs after publishing all four tarballs
@@ -104,6 +108,8 @@ use fragment_devstack as devstack;
 mod build;
 #[cfg(test)]
 mod ci_caches;
+#[cfg(test)]
+mod ci_gate;
 mod cloudflare;
 mod cli_release;
 mod deploy;
@@ -122,6 +128,7 @@ mod markdown_dom;
 mod continue_js;
 mod rollout;
 mod schema_lock;
+mod wire;
 // CI's freshness of its cached builds, compiled by itself with rustc
 // (ci.yml); here for its tests alone
 #[cfg(test)]
@@ -590,6 +597,7 @@ fn check() -> Result<()> {
     no_html_sinks(&root)?;
     no_eval_sinks(&root)?;
     schema_lock::holds(&root)?;
+    wire::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/settings.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
@@ -651,13 +659,14 @@ fn main() -> Result<()> {
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
+        Some("wire") => wire::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
         Some("cli-release") => cli_release::run(&args[1..]),
-        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | wire | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

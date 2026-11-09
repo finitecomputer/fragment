@@ -11,21 +11,14 @@
 #   the stub image's and the Hermes image's, and the check that needs both. It runs only when a change touches what it
 #   builds or runs (`changes` below: images/hermes, images/bridge,
 #   images/stub, the images' manifest and lock, the Hermes image's CLI
-#   stage's inputs, or this workflow), in merge groups and on master's
-#   pushes, on every run by hand, and whenever `changes` itself did not
-#   succeed. Never on a pull request's own runs: the merge queue runs it on
-#   the very tree that merges (as ci.yml's e2e), and a pull request's run
-#   of it only held the queue back by its 20 minutes (Paul, 2026-11-02).
-#   Skipped there, the required check passes; a run by hand runs it on a
-#   branch's head before it queues.
+#   stage's inputs, or this workflow), on master's pushes, on every run by
+#   hand, and whenever `changes` itself did not succeed. Never on a pull
+#   request's runs: master's push is the gate, as for ci.yml's e2e (Paul,
+#   2026-11-08); a run by hand runs it on a branch's head.
 #
-# The workflow runs on every pull request, merge group and master push,
-# with no path filter of its own: master's ruleset requires `images check`
-# and `docker (real Hermes)`, and a check a workflow-level `paths` filter
-# keeps from starting never reports, which blocks a pull request that
-# touches none of them for good. Each job decides instead (`changes`): one
-# its inputs did not change skips, which a required check counts as a
-# pass, and one `changes` could not decide for runs.
+# The workflow runs on every pull request and master push, with no path
+# filter of its own: each job decides (`changes`), one its inputs did not
+# change skips, and one `changes` could not decide for runs.
 #
 # Their Rust cache (the registry and images/target's dependencies) is
 # Swatinem/rust-cache's, one key for both jobs, saved only from master's
@@ -36,15 +29,14 @@ on:
   push:
     branches: [master]
   pull_request:
-  # `changes` compares a merge group's exact base and head, as it does a
-  # pull request's files and a push's since its `before`.
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch:
 
+# as ci.yml's: a pull request's newer run cancels its older one; a master
+# push's waits for the one under way (and replaces one already waiting),
+# so the newest push's Docker lane always finishes
 concurrency:
   group: images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -75,22 +67,44 @@ jobs:
   # Whether `check` and the Docker lane run: a change to what each checks,
   # builds or runs. Its own job, since a job's `if` reads only another
   # job's outputs. The changed
-  # files are the pull request's (from the API, every page), or the push's
-  # since its `before`, or the merge group's since its exact base (by git,
-  # hence the checkout); a run by hand runs the lane whatever it says.
+  # files are the pull request's (from the API, every page), or a master
+  # push's since the newest master commit this workflow passed on (`base`,
+  # below; by git, hence the checkout); a run by hand runs the lane
+  # whatever it says.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read # this workflow's runs, through the API
+      contents: read
+      pull-requests: read # a pull request's files
     outputs:
       check: ${{ steps.paths.outputs.check }}
       docker: ${{ steps.paths.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
+      # Not the push's `before`: a push whose run waited and was replaced
+      # by a newer push's (`concurrency`) never ran, so its change (an image
+      # change, beside a newer push's to the cell) is this run's to test
+      # (Codex review of #1118). A run that failed is no base: its change
+      # is tested again until one passes. With none to name this fails,
+      # and every job runs.
+      - name: the newest master commit this workflow passed on
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          sha=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" -f branch=master -f event=push -f status=success -f per_page=1 --jq '.workflow_runs[0].head_sha // ""')
+          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no master run of this workflow passed, to compare with: every job runs"; exit 1; }
+          echo "comparing with $sha, the newest master commit this workflow passed on"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - id: paths
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          base: ${{ github.event.merge_group.base_sha || github.ref }}
-          ref: ${{ github.event.merge_group.head_sha || github.ref }}
+          base: ${{ steps.base.outputs.sha || github.ref }}
           filters: |
             check:
               - images/**
@@ -154,45 +168,7 @@ jobs:
   # caches ci.yml reads on every run.
   #
   # The tests' container logs are kept on failure.
-  # Whether master's merge queue already ran the Docker lane on this push's
-  # very tree, as ci.yml's `proven` asks for the e2e: its `docker (real
-  # Hermes)` recorded the tree (`docker-lane-tree-<tree>`, below) once both
-  # halves passed. Then master's push runs it no more: the queue ran it on
-  # the tree that landed (about 25 minutes of a runner a merge, 2026-11-02).
-  # Only a merge group of master's counts, its run this workflow's and
-  # green, its head's tree this push's; anything else, or a question the
-  # API does not answer, runs the lane.
-  docker-proven:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: read # this workflow's runs and their artifacts, through the API
-      contents: read # the commits' trees
-    outputs:
-      proven: ${{ steps.ask.outputs.proven }}
-    steps:
-      - id: ask
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          repo=repos/$GITHUB_REPOSITORY
-          workflow=$(gh api "$repo/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
-          tree=$(gh api "$repo/git/commits/$GITHUB_SHA" --jq .tree.sha)
-          echo "$GITHUB_SHA's tree is $tree"
-          for id in $(gh api -X GET "$repo/actions/artifacts" -f name="docker-lane-tree-$tree" -f per_page=100 --jq '.artifacts[].workflow_run.id' | sort -u); do
-            run=$(gh api "$repo/actions/runs/$id")
-            jq -r '"\(.html_url), attempt \(.run_attempt): \(.event) of \(.head_sha) (\(.head_branch)), \(.status) \(.conclusion // "")"' <<< "$run"
-            jq -e --argjson w "$workflow" --arg r "$GITHUB_REPOSITORY" '.workflow_id == $w and .status == "completed" and .conclusion == "success" and .event == "merge_group" and .head_repository.full_name == $r and (.head_branch | startswith("gh-readonly-queue/master/"))' <<< "$run" > /dev/null || continue
-            [ "$(gh api "$repo/git/commits/$(jq -r .head_sha <<< "$run")" --jq .tree.sha)" = "$tree" ] || continue
-            echo "master's merge queue ran the Docker lane on this tree: it need not run again"
-            echo proven=true >> "$GITHUB_OUTPUT"
-            exit 0
-          done
-          echo "no merge group's run proved this tree: the Docker lane runs"
-          echo proven=false >> "$GITHUB_OUTPUT"
-
+  #
   # The Docker lane is two jobs, side by side, each building only the image
   # its tests run: the stub image's one test (`the_stub_image`), and the
   # Hermes image's, every other. Built one after the other on one runner,
@@ -202,9 +178,9 @@ jobs:
   # (real Hermes)`, the required check, is the job that needs both.
   docker-stub:
     name: docker lane (stub)
-    needs: [changes, docker-proven]
+    needs: changes
     # as `docker-hermes`'s, which says why
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.docker-proven.outputs.proven != 'true' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # the Docker `docker-hermes` runs on, which says why
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -241,12 +217,11 @@ jobs:
 
   docker-hermes:
     name: docker lane (Hermes)
-    needs: [changes, docker-proven]
+    needs: changes
     # fails closed: a `changes` that did not succeed (it failed, or ran out
-    # its time, as in run 41100441445) runs the lane rather than skip it,
-    # which a required check would count as a pass; a pull request's own
-    # run skips it, as its merge group runs it
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.docker-proven.outputs.proven != 'true' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    # its time, as in run 41100441445) runs the lane rather than skip it;
+    # a pull request's run skips it
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     # ubuntu-24.04 (Docker 28), not ubuntu-latest: since 2026-10-25,
     # ubuntu-latest is 26.04 with Docker 29, whose containerd image store
     # names `containerd` in every container's root mount, so Hermes takes
@@ -300,17 +275,17 @@ jobs:
           path: images/target/tmp/**/*.log
           retention-days: 7
 
-  # The required check: green when both halves of the lane are, skipped when
-  # the lane is not to run (a pull request's own run, or nothing it builds
+  # The lane's check: green when both halves of the lane are, skipped when
+  # the lane is not to run (a pull request's run, or nothing it builds
   # changed), and red otherwise. It runs through a cancelled run (`always()`,
-  # never `!cancelled()`): a required check that skips counts as passed, so
-  # one cancelled with a half still running would let the merge through
-  # (Codex review of #981). Its check runs whatever came before it, and a
-  # half cancelled, skipped or failed is red.
+  # never `!cancelled()`): a check that skips reads as passed, so one
+  # cancelled with a half still running would read green (Codex review of
+  # #981). Its check runs whatever came before it, and a half cancelled,
+  # skipped or failed is red.
   docker:
     name: docker (real Hermes)
-    needs: [changes, docker-proven, docker-stub, docker-hermes]
-    if: ${{ always() && github.event_name != 'pull_request' && needs.docker-proven.outputs.proven != 'true' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
+    needs: [changes, docker-stub, docker-hermes]
+    if: ${{ always() && github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || needs.changes.result != 'success' || needs.changes.outputs.docker == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -321,26 +296,3 @@ jobs:
         run: |
           echo "the stub image's half: $STUB; the Hermes image's: $HERMES"
           test "$STUB" = success && test "$HERMES" = success
-      # The tree both halves tested, for `docker-proven`: recorded as an
-      # artifact named by it, which counts only for a merge group's green
-      # run. Recording is a saving, not a test: a step of it that fails
-      # warns, and master's push of the tree runs the lane again.
-      - id: tree
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
-          [[ $tree =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "::warning::the API named no tree for $GITHUB_SHA: '$tree'"; exit 1; }
-          echo "$GITHUB_SHA $tree" > "$RUNNER_TEMP/docker-lane-tree"
-          echo "tree=$tree" >> "$GITHUB_OUTPUT"
-      - if: steps.tree.outcome == 'success'
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-lane-tree-${{ steps.tree.outputs.tree }}
-          path: ${{ runner.temp }}/docker-lane-tree
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 30

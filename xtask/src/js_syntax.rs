@@ -66,8 +66,10 @@ const TEST_SUFFIX: &str = ".test.mjs";
 /// The shell's tests, which a walk must find (each named in its file).
 const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/agent-claude.test.mjs",
+    "cell/shell-tests/agent-home-read.test.mjs",
     "cell/shell-tests/agent-remove.test.mjs",
     "cell/shell-tests/agent-runtimes.test.mjs",
+    "cell/shell-tests/agent-settings-read.test.mjs",
     "cell/shell-tests/apps-cards.test.mjs",
     "cell/shell-tests/apps-page.test.mjs",
     "cell/shell-tests/asked-agent.test.mjs",
@@ -75,11 +77,13 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/chat-control.test.mjs",
     "cell/shell-tests/chat-list.test.mjs",
     "cell/shell-tests/chat-pages.test.mjs",
+    "cell/shell-tests/chat-speakers.test.mjs",
     "cell/shell-tests/computer-answer.test.mjs",
     "cell/shell-tests/computer-disk.test.mjs",
     "cell/shell-tests/frame-messages.test.mjs",
     "cell/shell-tests/frame-standin.test.mjs",
     "cell/shell-tests/history-page.test.mjs",
+    "cell/shell-tests/key-paused.test.mjs",
     "cell/shell-tests/launcher-knowledge.test.mjs",
     "cell/shell-tests/limits.test.mjs",
     "cell/shell-tests/making.test.mjs",
@@ -87,6 +91,8 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/restart-follow.test.mjs",
     "cell/shell-tests/session-archive.test.mjs",
     "cell/shell-tests/session-text.test.mjs",
+    "cell/shell-tests/simplex-settings.test.mjs",
+    "cell/shell-tests/telegram-settings.test.mjs",
     "cell/shell-tests/threads.test.mjs",
 ];
 
@@ -310,9 +316,10 @@ mod tests {
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         // the Worker's restore reads (beside the module it tests), the shell's
-        // tests, and the board's and brain's apps' and the slides' build's and presenter's
-        // (beside the templates crate: a file under templates/ would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs"]].concat());
+        // tests, and the board's, brain's and Telegram connector's apps' and the slides'
+        // build's and presenter's (beside the templates crate: a file under templates/
+        // would ship with its template)
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");

@@ -7,6 +7,13 @@ export const newestChat = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? 
 // A section's order: the person's pinned chats first, then the rest, each
 // the newest first (Paul, 2026-10-31).
 export const pinnedFirst = (a, b) => Number(!!b.pinned) - Number(!!a.pinned) || newestChat(a, b);
+// The sidebar's agents (Paul, 2026-11-07: ordering them is a sidebar
+// matter, nothing deeper): the ones the person pinned first, then the rest,
+// each in their computer's order (`mine`'s; the sort keeps it). Pinned is
+// their own view of the agent's fragment, as a chat's is (`PUT …/pinned`),
+// so every device of theirs reads the one order; their main agent stays the
+// computer's first wherever it is drawn.
+export const pinnedAgentsFirst = (mine, pinned) => [...mine].sort((a, b) => Number(pinned(b.fragment)) - Number(pinned(a.fragment)));
 // What a section shows of its chats (in `pinnedFirst`'s order): all of
 // them unfolded; else its first `max`, pinned ones among them, the open one
 // wherever it is, and each whose row says what its agent is doing (`busy`,
@@ -264,6 +271,13 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     const named = el("span", "agent-hero-named");
     named.append(el("strong", "title", name));
     row.append(face, named);
+    // pinned to the top (`pinnedAgentsFirst`), marked as a pinned chat is
+    if (byName(agent.fragment)?.pinned) {
+      const pin = el("span", "pin-mark");
+      pin.title = "Pinned";
+      pin.append(icon("pin"));
+      row.append(pin);
+    }
     // its agent as it is when pressed: a hero kept from an earlier drawing
     // (the same node) may have been drawn before its computer was read
     row.onclick = () => openAgentMenu(agentNow(agent.fragment), row);
@@ -284,6 +298,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       ...doing.map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
       ...(agent.identity && !isGuest() ? [{ icon: "newChat", text: "New chat", onClick: () => { newChat(agent.identity); leaveSidebar(); } }] : []),
       { icon: "rename", text: "Rename…", onClick: () => rename(agent.fragment) },
+      ...(byName(agent.fragment) ? [pinItem(agent.fragment, "Pin to top")] : []),
       ...(offers(agent.fragment, "profile") ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent.fragment) }] : []),
       ...(computer() && offers(agent.fragment, "screen") ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent.fragment) }] : []),
     ];
@@ -323,8 +338,9 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     return rows;
   }
   // The sidebar's chats, a section per agent of the person's (Paul,
-  // 2026-10-31): their main agent first, then the others as their computer
-  // took them, an order nothing reshuffles; each its hero, then its chats
+  // 2026-10-31): the ones they pinned first, then their main agent, then
+  // the others as their computer took them (`pinnedAgentsFirst`), an order
+  // nothing but they reshuffle; each its hero, then its chats
   // (a chat goes under its lead agent, else the first of theirs in it, else
   // their main agent), the newest first. Chats someone else shared with them
   // are the last section, Shared. Before their computer is read, their main
@@ -338,7 +354,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       $(id).dataset.tooltip = `${launcherLabel} (${LAUNCHER_KEY})`;
       $(id).setAttribute("aria-label", launcherLabel);
     }
-    const mine = ownAgents();
+    const mine = pinnedAgentsFirst(ownAgents(), (name) => !!byName(name)?.pinned);
     const ids = new Map(mine.map((a) => [a.identity, a]));
     const sections = new Map(mine.map((a) => [a.identity, { agent: a, chats: [] }]));
     const main = primaryAgent();

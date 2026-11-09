@@ -370,7 +370,11 @@ fn cli_icons(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli_json(api, &home, &["create", &name, "--template", "blank", "--title", "Tea timer", "--json"])?;
     let made = s.cli_json(api, &home, &["icon", "generate", &name, "--hint", "a teapot", "--json"])?;
     let got = get(api, &keys, &name, None)?;
-    s.ok("CLI icon generation sets a real PNG and returns metadata without dumping candidates", made["sha256"].as_str().is_some_and(|s| s.len() == 64) && made.get("candidates").is_none() && got.status == 200 && read(&got.bytes).is_some(), &made);
+    s.ok(
+        "CLI icon generation sets a real PNG and returns metadata without dumping candidates, saying what was drawn (`subject`)",
+        made["sha256"].as_str().is_some_and(|s| s.len() == 64) && made["subject"] == "a teapot" && made.get("candidates").is_none() && got.status == 200 && read(&got.bytes).is_some(),
+        &made,
+    );
     let image = s.scratch.join("cli-icon.jpg");
     std::fs::write(&image, photo())?;
     let uploaded = s.cli_json(api, &home, &["icon", "set", &name, &image.to_string_lossy(), "--json"])?;

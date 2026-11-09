@@ -1128,6 +1128,56 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
           return fetch(url, options);
         };
       }
+      // Every read that can change Settings' Computer known from its start,
+      // in every document of this page (`add_agent_ui` holds them): the
+      // computer's (`/api/computers…`, but Settings' own `/uses`, which it
+      // draws only once answered) and the list's read, which `load` (shell.js)
+      // awaits with the computer's before it draws either. `hold()` holds
+      // the computer's asked from then on and, once each read already on
+      // its way has had its body read (`api` reads every answer's) and a
+      // task has passed (what awaited it drawn), says `settled`.
+      if (window === window.top) {
+        const send = window.fetch.bind(window);
+        const kind = (u, o) => {
+          const p = new URL(String(u instanceof Request ? u.url : u), location.href).pathname;
+          const get = (o?.method ?? (u instanceof Request ? u.method : 'GET')).toUpperCase() === 'GET';
+          return p === '/api/fragments' && get ? 'list' : p.startsWith('/api/computers') && !p.endsWith('/uses') ? 'computer' : null;
+        };
+        const open = new Set(), queued = [];
+        let holding = false;
+        const go = (u, o) => {
+          let finish;
+          const read = { url: String(u), done: new Promise((r) => { finish = () => { open.delete(read); r(); }; }) };
+          open.add(read);
+          return send(u, o).then((r) => {
+            for (const m of ['json', 'text']) { const body = r[m].bind(r); r[m] = () => body().finally(finish); }
+            return r;
+          }, (e) => { finish(); throw e; });
+        };
+        window.fetch = (u, o) => {
+          const k = kind(u, o);
+          if (!k) return send(u, o);
+          if (holding && k === 'computer') return new Promise((res, rej) => queued.push({ url: String(u), go: () => go(u, o).then(res, rej) }));
+          return go(u, o);
+        };
+        const reads = window.__computerHold = {
+          settled: false, earlier: [],
+          hold() {
+            holding = true;
+            reads.settled = false;
+            const earlier = [...open];
+            reads.earlier = earlier.map((r) => r.url);
+            Promise.all(earlier.map((r) => r.done)).then(() => {
+              const c = new MessageChannel();
+              c.port1.onmessage = () => { reads.settled = true; };
+              c.port2.postMessage(0);
+            });
+            return true;
+          },
+          held: () => queued.map((q) => q.url),
+          release() { holding = false; queued.splice(0).forEach((q) => q.go()); return true; },
+        };
+      }
     "#)?;
     b.viewport(&page, 1280, 800, false)?;
 
@@ -2674,7 +2724,22 @@ fn settings_navigation_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result
             if mobile {
                 b.eval(page, &format!("(document.querySelector({link:?})?.click(), true)"))?;
             } else {
-                b.click(page, &link)?;
+                // its link into view, and the page's answer to that settled,
+                // before the pointer goes where the link is then: scrolling a
+                // link of a sticky nav into view nudges the page, and the
+                // section that nudge shows is revealed in a row of links,
+                // which can move this one out from under the pointer
+                let mut at = Value::Null;
+                for _ in 0..4 {
+                    at = b.eval(
+                        page,
+                        &format!("new Promise((r) => {{ const l = document.querySelector({link:?}); l?.scrollIntoView({{ block: 'nearest' }}); requestAnimationFrame(() => requestAnimationFrame(() => {{ const b = l?.getBoundingClientRect(); const n = l?.parentElement.getBoundingClientRect(); r(b && b.left >= n.left - 1 && b.right <= n.right + 1 ? [b.x + b.width / 2, b.y + b.height / 2] : null); }})); }})"),
+                    )?;
+                    if !at.is_null() {
+                        break;
+                    }
+                }
+                b.click_at(page, (at[0].as_f64().unwrap_or(0.0), at[1].as_f64().unwrap_or(0.0)))?;
             }
             let selected = b.until(
                 page,
@@ -2840,16 +2905,20 @@ const WIDE_MESSAGE: &str = "A word that never breaks: supercalifragilisticexpial
 
 /// The shell on a phone, as an app (Paul, 2026-10-13: "staying strictly in
 /// the viewport (shouldn't feel overflow scrolly, shouldn't zoom on text
-/// input, should feel like a native app)"), at 320, 375, 390 and 430 px in
-/// Chrome's phone emulation: the page never wider than the screen nor
-/// scrolling, with its sidebar open and closed, a chat holding a long
-/// word, code and a wide table (the table scrolls in its own box), its
-/// stand-in's composer the chat's own box (nothing jumps as it loads), the
-/// launcher, settings (its Your data with an export ready, its widest
+/// input, should feel like a native app)"), at 320, 390 and 430 px in
+/// Chrome's phone emulation: a width each side of each rule that takes
+/// effect in a phone's widths (shell.css's `pane` container at 340 px, its
+/// `settings` container at 420 px: settings and the Apps page; sheet.css's
+/// 420 px media query is the share sheet's page, whose frame is narrower
+/// still at 430; FIN-452 dropped 375, between them): the page never wider
+/// than the screen nor scrolling, with its sidebar open and closed, a chat
+/// holding a long word, code and a wide table (the table scrolls in its
+/// own box), its stand-in's composer the chat's own box (nothing jumps as
+/// it loads), the launcher, settings (its Your data with an export ready, its widest
 /// rows), the share sheet, an app's window and the ways to ask for one
 /// (three, then three more from its die, a target of 44 px or more that a
 /// press reaches); no field a phone zooms into on focus (16px or more), in
-/// the shell, the chat, the launcher, settings and the sheet; and, at 375,
+/// the shell, the chat, the launcher, settings and the sheet; and, at 390,
 /// a way to ask the die dealt, pressed, goes into the chat's composer, the
 /// desktop's sheet closed.
 /// Safari's keyboard, bounce and zoom are not Chrome's: a phone tests those.
@@ -3004,7 +3073,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     let mut small: Vec<Value> = Vec::new();
     let mut phone_prompt: Option<(bool, Value)> = None;
     let mut phone_loading: Option<Value> = None;
-    for w in [320u32, 375, 390, 430] {
+    for w in [320u32, 390, 430] {
         b.viewport(page, w, 812, true)?;
         b.reload(page)?;
         b.until(page, home, wait);
@@ -3059,9 +3128,9 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         }
         b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
         b.until(page, "!document.getElementById('search-dialog').open", wait);
-        // settings (at 375 px, held loading a moment: where the loaded page's content goes)
+        // settings (at 390 px, held loading a moment: where the loaded page's content goes)
         let open = "document.getElementById('scrim').click(), document.getElementById('settings').click()";
-        if w == 375 {
+        if w == 390 {
             phone_loading = Some(settings_loading(b, page, open, wait)?);
         } else {
             b.eval(page, &format!("({open}, true)"))?;
@@ -3128,7 +3197,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         )?;
         let fits = b.eval(page, PAGE_FITS)?;
         places.push(("ways to ask, dealt by its die", json!({ "ok": dealt && target["ok"] == true && fits["ok"] == true, "first": first, "target": target, "page": fits })));
-        if w == 375 {
+        if w == 390 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-prompts.png")));
             let text = b.eval(page, &format!("document.querySelector('{prompts}')?.textContent ?? ''"))?.as_str().unwrap_or("").to_string();
             let before = chat_count(api, session, &chat);
@@ -3158,7 +3227,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     s.ok("on a phone, a way to ask from the dock's Add goes into the chat's composer: the desktop's sheet closes, the composer shows, focused, and nothing is sent", composed, seen);
     let loading = phone_loading.unwrap_or(Value::Null);
     s.ok(
-        "settings load in the loaded page's own box: its layout, padding, content and heading where they stay once loaded (no jump), on a phone (375 px)",
+        "settings load in the loaded page's own box: its layout, padding, content and heading where they stay once loaded (no jump), on a phone (390 px)",
         loading["ok"] == true,
         &loading,
     );
@@ -4804,6 +4873,8 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     // refused while `__refuse` is not false
     let refusing = format!(
         "(() => {{ const real = window.fetch; window.__refused = 0; window.fetch = (u, o) => {{ if (window.__refuse !== false && (o?.method ?? 'GET') === 'GET' && String(u).endsWith({})) {{ window.__refused++; \
+         const no = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         if (window.__hold === true) {{ window.__hold = false; return new Promise((done) => {{ window.__release = () => done(no()); }}); }} \
          return Promise.resolve(new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }})); }} return real(u, o); }}; }})();",
         js(&format!("/api/f/{agent}/file?path=agent.json"))
     );
@@ -4829,18 +4900,32 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
     b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
-    b.eval(&p, "(window.__refuse = false, true)")?;
-    if said {
+    // a list's refresh reads it again (`loadHomes`): one held out, as a
+    // slow read is, while the hand is on Try again, made by a list change
+    // (a fragment made). The line stays under the hand through it
+    b.eval(&p, "(window.__hold = true, true)")?;
+    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": format!("{}-refresh", me.first), "template": "blank" })), &[])?;
+    anyhow::ensure!(made.status == 200, "a fragment made, for a list's refresh: {made}");
+    let held = said && b.until(&p, "typeof window.__release === 'function'", wait);
+    // reads answer from the press of Try again on, so the read it starts is
+    // the one that answers; the refresh's, asked before, is refused
+    b.eval(&p, &format!("(document.addEventListener('click', (e) => {{ if (e.target.closest?.({})) window.__refuse = false; }}, true), true)", js(&format!("[data-home-unread={agent:?}] button"))))?;
+    if held {
         b.click(&p, &format!("[data-home-unread={agent:?}] button"))?;
     }
-    let retried = said && b.until(&p, &painted, wait);
-    let second = json!({ "line": line, "seen": b.eval(&p, &seen)? });
+    let retried = held && b.until(&p, &painted, wait);
+    let second = json!({ "line": line, "held": held, "seen": b.eval(&p, &seen)? });
+    // the refresh's read let go (refused), so nothing is left out
+    b.eval(&p, "(window.__release?.(), true)")?;
     b.close(p)?;
     s.ok(
-        "a home read that fails with Settings open says so under its pick in one line, with Try again, which reads it again and shows it",
-        said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && retried,
+        "a home read that fails with Settings open says so under its pick in one line, with Try again, which stays under the hand while a list's refresh reads it, then reads it again and shows it",
+        said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && held && retried,
         second,
     );
+    let refresh = made.body["name"].as_str().unwrap_or("").to_string();
+    let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{refresh}"), None, &[])?;
+    anyhow::ensure!(deleted.status == 200, "the fragment made for a refresh deleted: {deleted}");
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
@@ -8254,8 +8339,8 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let members = shell(api, session, "GET", &format!("/api/f/{made}/members"), None, &[])?;
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
     s.ok(
-        "the Reader's hero opens its menu (New chat, Rename, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
-        offered == ["New chat", "Rename…", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
+        "the Reader's hero opens its menu (New chat, Rename, Pin to top, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
+        offered == ["New chat", "Rename…", "Pin to top", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
         json!({ "offered": offered, "made": made, "agents": agents }),
     );
     // let go, so the newest chats below are the ones they make
@@ -8271,6 +8356,66 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         renamed && back && hits == json!([]),
         json!({ "renamed": renamed, "back": back, "hits": hits }),
     );
+    pinned_agent_ui(s, api, b, page, session, first_title, reader, reader_chat, shots)
+}
+
+/// Their agents' order in the sidebar (FIN-404; Paul, 2026-11-07: a
+/// sidebar matter, nothing deeper): an agent's hero's Pin to top puts its
+/// section first, marked pinned, its chats still under it, and the rest
+/// after it in their computer's order; it is their list's row's `pinned`
+/// (the one order every device of theirs reads). Its Unpin puts it back.
+#[allow(clippy::too_many_arguments)]
+fn pinned_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, first_title: &str, reader: &str, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let hero = format!("#chats [data-key={}]", js(&format!("agent:{reader}")));
+    let order = |names: &str| format!("({HEROES}).map((h) => h.name).join() === {}", js(names));
+    let pick = |b: &mut Browser, text: &str| -> Result<bool> {
+        b.click(page, &hero)?;
+        let open = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
+        Ok(open && menu_item(b, page, text)?)
+    };
+    let pinned = pick(b, "Pin to top")?;
+    let first = b.until(page, &format!("{} && ({HEROES})[0].chats.includes({}) && !!document.querySelector({})", order(&format!("Reader,{first_title}")), js(reader_chat), js(&format!("{hero} .pin-mark"))), wait);
+    let row = own_row_of(api, session, reader);
+    let menu = hero_menu(b, page, &hero)?;
+    let _ = b.screenshot(page, &shots.join("desktop-agent-pinned.png"));
+    s.ok(
+        "an agent's Pin to top puts its section first in the sidebar, marked pinned, its chat still under it, their main agent's after it; it is their list row's pinned, and its menu then offers Unpin",
+        pinned && first && row["pinned"] == json!(true) && menu.iter().any(|m| m == "Unpin"),
+        json!({ "heroes": b.eval(page, HEROES)?, "row": row, "menu": menu }),
+    );
+    // on a phone: the list, the pinned agent first
+    let wide = b.eval(page, "[innerWidth, innerHeight]")?;
+    // (narrow and settled first: the wide layout's open sidebar closes as it narrows)
+    let settled = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
+    let left_open = "document.getElementById('layout').classList.contains('left-open')";
+    b.viewport(page, 390, 844, true)?;
+    let narrow = b.until(page, &format!("innerWidth === 390 && document.getElementById('layout').classList.contains('narrow') && {settled}"), wait);
+    if b.eval(page, left_open)? != true {
+        b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
+    }
+    let phone = narrow && b.until(page, &format!("{left_open} && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {settled} && {}", order(&format!("Reader,{first_title}"))), wait);
+    let _ = b.screenshot(page, &shots.join("phone-390-agent-pinned.png"));
+    let phone_heroes = b.eval(page, HEROES)?;
+    b.eval(page, "(document.getElementById('scrim').click(), true)")?;
+    b.until(page, &format!("!{left_open}"), wait);
+    let (w, h) = (wide[0].as_u64().unwrap_or(1280) as u32, wide[1].as_u64().unwrap_or(900) as u32);
+    b.viewport(page, w, h, false)?;
+    // wide again, its sidebar open as it was, before the next press, which goes by where things are
+    b.until(page, &format!("innerWidth === {w} && !document.getElementById('layout').classList.contains('narrow') && {settled}"), wait);
+    if b.eval(page, left_open)? != true {
+        b.eval(page, "(document.getElementById('toggle-left').click(), true)")?;
+    }
+    let back = b.until(page, &format!("{left_open} && document.querySelector({})?.getBoundingClientRect().width > 0 && {settled}", js(&hero)), wait);
+    s.ok("on a phone the list shows the pinned agent first too", phone && back, json!({ "heroes": phone_heroes, "back": back }));
+    let unpinned = pick(b, "Unpin")?;
+    let again = b.until(page, &format!("{} && !document.querySelector({})", order(&format!("{first_title},Reader")), js(&format!("{hero} .pin-mark"))), wait);
+    let row = own_row_of(api, session, reader);
+    s.ok(
+        "its Unpin puts it back after their main agent, unmarked, and their list's row no longer pins it",
+        unpinned && again && row.get("pinned").is_none_or(|p| p == &json!(false)),
+        json!({ "heroes": b.eval(page, HEROES)?, "row": row }),
+    );
     Ok(())
 }
 
@@ -8284,13 +8429,49 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
     b.viewport(page, 1280, 900, false)?;
+    // each agent's settings read (agent.json) held until New agent shows,
+    // so the cards are drawn reading, however warm the reads
+    b.eval(page, "(() => { const f = window.fetch; window.__settingsReads = []; window.fetch = (u, o) => (String(u).includes('path=agent.json') && !window.__settingsReadsGo) ? new Promise((res) => window.__settingsReads.push(() => res(f(u, o)))) : f(u, o); return true; })()")?;
+    // and nothing else that changes Settings' Computer, above Agents (a
+    // read of the computer: the list's `load`, a wake, its notices) lands
+    // from Settings' opening through New agent's press: those asked from
+    // here on held, and those already on their way read and drawn first
+    // (the page's `__computerHold`, known from its start)
+    b.eval(page, "window.__computerHold.hold()")?;
+    let settled = b.until(page, "window.__computerHold.settled", wait);
+    let earlier = b.eval(page, "window.__computerHold.earlier")?;
     b.click(page, "#settings")?;
-    // one button, New agent, opens its dialog
+    // one button, New agent, opens its dialog. It stays where it showed as
+    // each agent's card reads its settings (its Model pick read: Hermes'
+    // `data-model-for`, a Claude agent's `data-claude-model-for`), so the
+    // press measured for it lands on it (FIN-424: a card that grew as its
+    // read answered moved it from under that press)
     let offered = b.until(page, "!!document.querySelector('#settings-page .agent-add-open') && !document.getElementById('new-agent')?.open", wait);
-    // pressed as an element, not at a point: Settings' Computer section
-    // grows above it as its computer is read, which moves the button
-    // between a point's measuring and its press
-    b.eval(page, "(document.querySelector('#settings-page .agent-add-open').click(), true)")?;
+    let shown = b.eval(
+        page,
+        "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); \
+          return { at: [r.x, r.y], reading: [...document.querySelectorAll('#settings-page .agent-summary-item[data-from-settings] dd')].map((d) => d.textContent), held: window.__settingsReads.length }; })()",
+    )?;
+    b.eval(page, "(window.__settingsReadsGo = true, window.__settingsReads.forEach((r) => r()), true)")?;
+    let models_read = b.until(
+        page,
+        "(() => { const cards = [...document.querySelectorAll('#settings-page .agent-setting')]; \
+          return cards.length > 0 && cards.every((c) => !!c.querySelector('select[data-model-for][data-read], select[data-claude-model-for][data-read]')); })()",
+        wait,
+    );
+    let read = b.eval(page, "(() => { const r = document.querySelector('#settings-page .agent-add-open').getBoundingClientRect(); return [r.x, r.y]; })()")?;
+    s.ok(
+        "Settings' agent cards keep their size as their models are read: drawn reading, New agent stays where it showed",
+        settled
+            && offered
+            && shown["held"].as_u64().is_some_and(|n| n > 0)
+            && shown["reading"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|t| t == "Reading…"))
+            && models_read
+            && shown["at"] == read,
+        json!({ "shown": shown, "read": read, "settled": settled, "earlier": earlier, "held": b.eval(page, "window.__computerHold.held()")? }),
+    );
+    b.click(page, "#settings-page .agent-add-open")?;
+    b.eval(page, "window.__computerHold.release()")?;
     let unfolded = b.until(page, "document.getElementById('new-agent')?.open === true && !document.querySelector('#new-agent .agent-add').hidden", wait);
     // what it runs on: Hermes alone, no choice, while Claude Code is left out
     // of new agents (agent-settings.js `NEW_AGENT_RUNTIMES`, Paul, 2026-11-03)
@@ -8298,7 +8479,8 @@ fn add_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     b.eval(page, &fill("#new-agent .agent-add-name", "Wren"))?;
     b.eval(page, &fill("#new-agent .agent-add-role", "editor"))?;
     let _ = b.screenshot(page, &shots.join("settings-add-agent.png"));
-    b.eval(page, "(document.querySelector('#new-agent .agent-add').requestSubmit(), true)")?;
+    // its dialog not open, nothing is asked: the check below says so
+    b.eval(page, "(document.querySelector('#new-agent .agent-add')?.requestSubmit(), true)")?;
     let mut chat = String::new();
     let made = s.eventually(wait, || own_named(api, session, "wren-chat").map(|c| chat = c).is_ok());
     let opened = made && b.until(page, &format!("!document.getElementById('new-agent')?.open && location.pathname === '/' && document.getElementById('chat-title').textContent === {} && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(FIRST_CHAT), js(&chat)), wait);
@@ -8356,12 +8538,51 @@ fn remove_agent_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessi
     let offered = b.until(page, &format!("!!{ask}"), wait);
     // every agent's row but the main one's offers it
     let rows = b.eval(page, "[document.querySelectorAll('#settings-page .agent-setting').length, document.querySelectorAll('#settings-page [data-remove-agent]').length]")?;
-    b.eval(page, &format!("({ask}.scrollIntoView({{ block: 'center' }}), {ask}.click(), true)"))?;
+    // here, the main agent's Edit open, a change of its model on its way
+    // (its write held), while another tab removes Wren (FIN-424, #1090):
+    // its card is the one it was, and its summary and its Edit say the change
+    let lead = b.eval(page, "document.querySelector('#settings-page [data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
+    let pick = format!("document.querySelector({})", js(&format!("[data-model-for={}]", js(&lead))));
+    let card = format!("document.querySelector({})", js(&format!("#settings-page .agent-setting[data-agent={}]", js(&lead))));
+    b.until(page, &format!("{pick}?.dataset.read === '1'"), wait);
+    let choice = b.eval(page, &format!("(() => {{ const o = [...{pick}.options].find((o) => o.value !== {pick}.value); return o ? {{ was: {pick}.value, value: o.value, text: o.textContent }} : null; }})()"))?;
+    let (was, value, text) = (choice["was"].as_str().unwrap_or("").to_string(), choice["value"].as_str().unwrap_or("").to_string(), choice["text"].as_str().unwrap_or("").to_string());
+    let files = format!("/api/f/{lead}/files");
+    b.eval(page, &format!("(() => {{ const f = window.fetch; window.__writes = []; window.fetch = (u, o) => (String(u).endsWith({files:?}) && !window.__writing) ? new Promise((res) => window.__writes.push(() => res(f(u, o)))) : f(u, o); {card}.__kept = true; return true; }})()"))?;
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(&format!("[data-edit-agent={}]", js(&lead)))))?;
+    let editing = b.until(page, "document.getElementById('edit-agent')?.open === true", wait);
+    b.eval(page, &format!("(() => {{ {pick}.value = {value:?}; {pick}.dispatchEvent(new Event('change')); return true; }})()"))?;
+    let held = b.until(page, "window.__writes.length === 1", wait);
+    let other = b.open(&format!("{}/settings", api.base))?;
+    b.until(&other, &format!("!!{ask}"), wait);
+    b.eval(&other, &format!("({ask}.scrollIntoView({{ block: 'center' }}), {ask}.click(), true)"))?;
     let sure = format!("document.querySelector({})", js(&format!("[data-remove-agent-sure={}]", js(&agent))));
-    let asked = b.until(page, &format!("{sure}?.textContent === 'Remove Wren' && {sure}.parentElement.innerText.includes('Its chats go to History. Its routines stop.')"), wait);
-    let _ = b.screenshot(page, &shots.join("desktop-remove-agent-ask.png"));
-    b.eval(page, &format!("({sure}.click(), true)"))?;
+    let asked = b.until(&other, &format!("{sure}?.textContent === 'Remove Wren' && {sure}.parentElement.innerText.includes('Its chats go to History. Its routines stop.')"), wait);
+    let _ = b.screenshot(&other, &shots.join("desktop-remove-agent-ask.png"));
+    b.eval(&other, &format!("({sure}.click(), true)"))?;
     let gone_row = b.until(page, &format!("!document.querySelector({})", js(&format!(".agent-setting[data-agent={}]", js(&agent)))), wait);
+    b.close(other)?;
+    // Wren's card gone here: the main agent's save lands, its dialog closed
+    b.eval(page, "(window.__writing = true, window.__writes.forEach((w) => w()), true)")?;
+    let saved = b.until(page, &format!("{pick}?.dataset.saved === {value:?}"), wait);
+    // closed, once its `close` has fired: a dialog's close event comes in a
+    // task after `close()`, and its fields go back to their card on it
+    // (agent-settings.js `editTenancy`), whose handlers were added before this one
+    b.eval(page, "new Promise((done) => { const d = document.getElementById('edit-agent'); if (!d.open) return done(false); d.addEventListener('close', () => done(true), { once: true }); d.close(); })")?;
+    let home_pick = js(&format!(".agent-edit-home [data-model-for={}]", js(&lead)));
+    let after_save = b.eval(page, &format!("({{ kept: {card}?.__kept === true, summary: {card}?.querySelector('.agent-summary')?.textContent ?? null, home: !!{card}?.querySelector({home_pick}) }})"))?;
+    // opened again: its pick says the change
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(&format!("[data-edit-agent={}]", js(&lead)))))?;
+    let reopened = b.until(page, &format!("document.getElementById('edit-agent')?.open === true && {pick}?.value === {value:?}"), wait);
+    s.ok(
+        "a roster changed in another tab while an agent is edited, its save on its way: its card is the one it was, and its summary and its Edit opened again say what was saved",
+        editing && held && gone_row && saved && after_save["kept"] == true && after_save["home"] == true && after_save["summary"].as_str().is_some_and(|t| t.contains(&text)) && reopened,
+        json!({ "choice": choice, "after": after_save, "reopened": reopened }),
+    );
+    // and back to the model it had
+    b.eval(page, &format!("(() => {{ {pick}.value = {was:?}; {pick}.dispatchEvent(new Event('change')); return true; }})()"))?;
+    b.until(page, &format!("{pick}?.dataset.saved === {was:?}"), wait);
+    b.eval(page, "(document.getElementById('edit-agent').close(), true)")?;
     let gone = s.eventually(wait, || own_row_of(api, session, &agent).is_null());
     // off its computer a moment after its list (agent-settings.js `liveOwn`)
     let on_computer = || shell(api, session, "GET", "/api/computers", None, &[]).ok().and_then(|r| r.body["computers"][0]["agents"].as_array().map(Vec::len)).unwrap_or(0);

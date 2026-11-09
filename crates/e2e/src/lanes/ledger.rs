@@ -104,6 +104,42 @@ fn hello() -> Value {
 }
 
 /// What the default book charges for `usage`.
+/// A stream's text with the fake's ids masked (`fake` and 8 hex digits,
+/// `call_` and digits): they count the fake's answers, so they move with
+/// the lanes' order.
+pub(super) fn ids_masked(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // bounded by the text: each pass takes at least one byte of it
+    while let Some(c) = rest.chars().next() {
+        let (prefix, digits): (&str, fn(&u8) -> bool) = match () {
+            () if rest.starts_with("\"fake") => ("\"fake", u8::is_ascii_hexdigit),
+            () if rest.starts_with("\"call_") => ("\"call_", u8::is_ascii_digit),
+            () => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+        };
+        let n = rest.as_bytes()[prefix.len()..].iter().take_while(|b| digits(b)).count();
+        out.push_str(prefix);
+        out.push('#');
+        rest = &rest[prefix.len() + n..];
+    }
+    out
+}
+
+/// The client's bytes of the Workers AI fake's streamed answer to "hello"
+/// (prompt 40, cached 10, completion 30), ids masked: usage dropped from
+/// each chunk with choices, its last line OpenAI's last chunk.
+const STREAMED_WORKERS_AI: &str = "\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
+    data: {\"choices\":[],\"id\":\"fake#\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":30,\"neurons\":1.8,\"prompt_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":10},\"total_tokens\":70}}\n\n\
+    data: [DONE]\n\n";
+
 pub(super) fn charge(usage: &Usage) -> i64 {
     PriceBook::defaults().price(usage).expect("the book prices the tiers' models").charge
 }
@@ -750,7 +786,24 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let streamed = charge(&tokens(CHEAP, 30, 10, 30));
     let landed = s.eventually(wait, || aig().iter().any(|e| charged(e) == Some(streamed)));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
+    s.ok("its bytes are the ones pinned", ids_masked(&r.text) == STREAMED_WORKERS_AI, ids_masked(&r.text));
     s.ok("and is charged from its last, cumulative usage only", landed, json!(aig()));
+    // a client that goes away mid-answer: the call is read on, and charged
+    s.ai.set_usage(&[Used { prompt: 41, cached: 0, completion: 7 }]);
+    s.ai.pace_next(&[Pace { every_ms: 0, thinking: 0, hold_ms: 0 }]);
+    s.ai.hold_streams();
+    let before = aig().len();
+    let hung = api.signed_hung_up(&hand, route, &chat(true));
+    s.ai.release_streams();
+    let (status, read) = hung?;
+    let gone = charge(&tokens(CHEAP, 41, 0, 7));
+    let landed = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(gone)));
+    s.ok(
+        "a client that hangs up after the answer's first event leaves the call read on to its usage, and charged from it",
+        status == 200 && read.starts_with("data: ") && !read.contains("[DONE]") && landed,
+        json!({ "status": status, "read": read, "entries": aig() }),
+    );
+    quote(s, api, &hand, &owner, &owner_id, wait)?;
     let (before, said) = (aig().len(), logged(s, "ledger.unknown-usage"));
     s.ai.break_next();
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
@@ -794,6 +847,73 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- the meters: requests, dynamic workers and storage, once each
     s.ai.clear_script();
     meters(s, api, wait)
+}
+
+/// A quote (FIN-448; docs/ledger.md, A quote): an agent quotes a job of
+/// model calls for its owner, by the tier's name and by its model's id,
+/// beside names the book does not price; the answer is the owner's ledger
+/// beside each item's charge, and the calls, made, are charged what it
+/// said.
+fn quote(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wait: Duration) -> Result<()> {
+    const QUOTE: &str = "/api/ledger/quote";
+    // tokens no other call of the lane's reports
+    let (input, output) = (321u64, 47u64);
+    let ask = json!({ "items": [
+        { "model": "cheap", "input": input, "output": output, "calls": 2 },
+        { "model": CHEAP, "input": input, "output": output },
+        { "key": "e2e-no-such-key", "calls": 3 },
+        { "model": "e2e-no-such-model", "input": 1 },
+    ] });
+    let each = charge(&tokens(CHEAP, input, 0, output));
+    // the owner's ledger read beside it: a meter landing between the two
+    // reads moves one, so they are read again until both are one moment's
+    let (mut status, mut quoted, mut theirs) = (0, Value::Null, Value::Null);
+    let same = s.eventually(wait, || {
+        (status, quoted) = api.signed(hand, "POST", QUOTE, Some(&ask)).map_or((0, Value::Null), |r| (r.status, r.body));
+        theirs = ledger(api, owner);
+        status == 200 && quoted["ledger"] == theirs
+    });
+    let items = &quoted["items"];
+    s.ok(
+        "an agent's quote is its owner's: its owner's ledger beside each item priced as the ledger charges it, a tier by the model it runs, and what is left",
+        same
+            && items[0] == json!({ "pricedAs": CHEAP, "eachMicros": each, "calls": 2, "chargeMicros": 2 * each })
+            && items[1] == json!({ "pricedAs": CHEAP, "eachMicros": each, "calls": 1, "chargeMicros": each })
+            && m(&quoted, "totalMicros") == 3 * each
+            && m(&quoted, "leftMicros") == m(&theirs, "balanceMicros").max(0),
+        &quoted,
+    );
+    s.ok(
+        "a name the book does not price is said so, never guessed, and adds nothing",
+        items[2] == json!({ "pricedAs": "e2e-no-such-key", "calls": 3, "unknown": "no_price" }) && items[3] == json!({ "pricedAs": "e2e-no-such-model", "calls": 1, "unknown": "no_price" }),
+        &quoted,
+    );
+    let theirs_too = api.signed(owner, "POST", QUOTE, Some(&json!({ "items": [] })))?;
+    let bad = api.signed(hand, "POST", QUOTE, Some(&json!({ "items": [{ "key": "fal", "calls": 0 }] })))?;
+    let misspelt = api.signed(hand, "POST", QUOTE, Some(&json!({ "items": [{ "model": "cheap", "inputs": 5 }] })))?;
+    let unsigned = api.unsigned("POST", QUOTE, Some(&ask))?;
+    s.ok(
+        "a person quotes nothing to read what is left; calls out of bounds and a misspelt field are refused (400), and no one unsigned is quoted",
+        theirs_too.status == 200 && theirs_too.body["items"] == json!([]) && theirs_too.body["totalMicros"] == 0 && bad.status == 400 && misspelt.status == 400 && unsigned.status == 401,
+        format!("{theirs_too} | {bad} | {misspelt} | {unsigned}"),
+    );
+    // the job, made: three calls of those tokens
+    let rows = || entries(api, owner_id, "aig:").into_iter().filter(|e| *usage(e) == json!(tokens(CHEAP, input, 0, output))).filter_map(|e| charged(&e)).collect::<Vec<_>>();
+    let before = rows();
+    s.ai.set_usage(&[Used { prompt: input, cached: 0, completion: output }; 3]);
+    let mut answered = vec![];
+    for _ in 0..3 {
+        answered.push(api.signed(hand, "POST", MODEL_ROUTE, Some(&hello()))?.status);
+    }
+    let landed = s.eventually(wait, || rows().len() == before.len() + 3);
+    let after = rows();
+    let charged_total: i64 = after.iter().sum::<i64>() - before.iter().sum::<i64>();
+    s.ok(
+        "the calls quoted, made, are charged what the quote said",
+        answered == [200, 200, 200] && landed && charged_total == m(&quoted, "totalMicros"),
+        json!({ "quoted": quoted["totalMicros"], "charged": charged_total, "rows": after, "answered": answered }),
+    );
+    Ok(())
 }
 
 /// A model by its own id (Paul, 2026-10-16: "be able to run `/model` with

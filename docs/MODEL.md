@@ -69,6 +69,7 @@ Every change is checked against this table.
 | How far a fragment's making has got (claimed, made, its template's repo, commit, deploy, install, landed) | its supervisor's `meta` rows and its template's commit key, read by `fragment_core::seed::stage` | none: never stored, so a restart, or an older release, reads the same stage |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A fragment's search index | what its app writes (`…/search/upsert`), held in a `SearchIndex` object of the life's own (docs/api.md, A fragment's search) | a projection its app writes again whole when asked (a new embeddings space empties it); the supervisor holds who reads it, the forgets still to send, and whether the life wrote one (`MetaKey::Search`) |
+| The wire's shapes: what each route a client calls takes and answers, and its socket frames | `crates/proto`'s types and `src/routes.rs` | `docs/wire` (OpenAPI 3.1 and its reference) and `crates/proto/wire.lock`, which `cargo xtask wire` writes and `cargo xtask check` holds to proto and to master's facts; docs/api.md says what they mean |
 | A platform object's schema | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema`, which refuses code whose steps differ; `schema.lock`, which `cargo xtask check` holds the tree to |
 | The release a call between objects was made by | the caller's `FRAGMENT_DEPLOY_ID` (Calls between releases, below) | stamped on each call and checked first by the object; never stored. Its deploy time (`FRAGMENT_DEPLOYED_AT`) is stamped too, read by no release (the debt ledger) |
 | The release a platform page runs | the page as answered (its `fragment-release` meta), and each answer's `x-fragment-deploy` | the page reloads once they differ, at a safe moment, never in a loop (docs/api.md, The shell, "A new release") |
@@ -96,6 +97,8 @@ Every change is checked against this table.
 | An agent's colour | its identity, through one function (`agent-color.js`) | none: never stored |
 | The model route's models, and each tier's Fast and Deep | the deployment's `models` (`FRAGMENT_MODELS`) | ids only, in each computer's view and its owner's; `GET /v1/models` reads the config |
 | A computer's agents | the Computer DO's `agents` | the agent fragment's `computer` and the registry's `agent_fragments`; a delete unassigns it (cell/src/ended.rs) |
+| A shared key's charges this last hour, per person | their computer's `key_hour` (`fragment_core::key_hour`), counted as `computer/used` counts each call | none |
+| A person's hourly cap on a shared key | their computer's `key_caps` (no row: `key_hour::KEY_HOUR_CAP`) | none: its pause notice is worked out on read |
 | A computer's XFTP relays | the Computer DO: leases in memory, the day's bytes in `relay_day` | none |
 | A fragment's scheduled records | its supervisor's `record_schedules` (docs/api.md, "Scheduled records") | each fire appended once, keyed by schedule and minute; a computer keeps none |
 | Money | each payer's ledger (docs/ledger.md) | meters batch rows to it, idempotently; each isolate's gate keeps an answer a minute at most |

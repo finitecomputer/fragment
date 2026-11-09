@@ -75,6 +75,8 @@ pub fn rename(c: &Client, name: &str, title: &str) -> Result<Value> {
 
 #[derive(Deserialize)]
 struct MadeIcon {
+    /// What was drawn: the object the hint names, or the platform's choice.
+    subject: String,
     candidates: Vec<Candidate>,
     flaws: Value,
 }
@@ -94,13 +96,13 @@ pub fn icon(c: &Client, command: IconCmd, progress: bool) -> Result<Value> {
             let made: MadeIcon = c.call_as(c.post_json_with_timeout(&format!("{path}/make"), &json!({ "hint": hint }), Duration::from_secs(90))?)?;
             let first = made.candidates.first().ok_or_else(|| anyhow::Error::new(CodedError {
                 code: Code::AppFailed,
-                msg: format!("no usable icon was generated; the existing icon is unchanged. Try another --hint (rejections: {})", made.flaws),
+                msg: format!("no usable icon was generated of {:?}; the existing icon is unchanged. Try another --hint (rejections: {})", made.subject, made.flaws),
             }))?;
             // The API orders candidates best first. Only the chosen PNG
             // crosses back; base64 is never printed into the transcript.
             let bytes = base64::engine::general_purpose::STANDARD.decode(&first.png).context("the host's icon is not base64")?;
             let result = c.call(c.put_bytes(&path, bytes)?)?;
-            Ok(json!({ "name": name, "icon": result["icon"], "sha256": result["sha256"], "size": result["size"] }))
+            Ok(json!({ "name": name, "subject": made.subject, "icon": result["icon"], "sha256": result["sha256"], "size": result["size"] }))
         }
         IconCmd::Set { name, file } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;

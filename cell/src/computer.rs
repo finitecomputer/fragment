@@ -49,6 +49,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
+use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
@@ -58,8 +59,8 @@ use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -217,6 +218,14 @@ const RESTORE_MS: i64 = START_DEADLINE_MS - EXEC_READY_MS - CHECK_EXEC_MS - MARK
 /// The lever's `slow-tell` waits at most this: a restart's request is held
 /// no longer than a request's wait in the lane.
 const SLOW_TELL_MAX_MS: u64 = 30_000;
+/// The lever's `stall-failing-start` waits at most this.
+const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
+/// A takeover that failed (`take_over`) is tried again by an alarm within
+/// this: each try is one destroy, or one adopt, of a container, never a
+/// tight loop past a deadline already gone.
+const TAKE_OVER_RETRY_MS: i64 = 60_000;
+/// The lever's `fail-starts` and `fail-takeover-destroys` count at most this.
+const LEVER_FAILS_MAX: u32 = 10;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -315,11 +324,23 @@ enum MetaKey {
     /// `<day> <bytes>`.
     RelayDay,
     /// The clock a test fleet moved (the `clock` lever): the milliseconds its
-    /// uses' months are counted and read ahead by. None elsewhere.
+    /// uses' months and its keys' hours are counted and read ahead by. None
+    /// elsewhere.
     ClockOffset,
     /// The test lever's slow owner notification for its next restart
     /// (`slow-tell`), in ms.
     SlowTell,
+    /// The test lever's wait between a failing start's `StartFailing` and
+    /// its destroy (`stall-failing-start`), in ms.
+    StallFailingStart,
+    /// The test lever's starts still to fail (`fail-starts`).
+    FailStarts,
+    /// The test lever's wait before a takeover's destroy (`stall-takeover`),
+    /// in ms.
+    StallTakeOver,
+    /// The test lever's takeover destroys still to fail
+    /// (`fail-takeover-destroys`).
+    FailTakeOverDestroys,
 }
 
 impl MetaKey {
@@ -342,6 +363,10 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::ClockOffset => "clock_offset",
             MetaKey::SlowTell => "slow_tell",
+            MetaKey::StallFailingStart => "stall_failing_start",
+            MetaKey::FailStarts => "fail_starts",
+            MetaKey::StallTakeOver => "stall_take_over",
+            MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
         }
     }
 }
@@ -385,9 +410,16 @@ pub struct ComputerCell {
     raw: JsValue,
     cfg: &'static Config,
     env: Env,
-    /// Whether this isolate has looked for a container an earlier one left
-    /// running (lesson 6: `adopt`).
+    /// Whether this isolate has taken the computer over: looked for a
+    /// container an earlier one left running (lesson 6: `adopt`), and done
+    /// what that look asked. Set only once it has.
     adopted: std::cell::Cell<bool>,
+    /// Held while this isolate takes the computer over (`take_over`): an
+    /// event that comes meanwhile waits for it, never acting on a lifecycle
+    /// whose takeover is still destroying a container (a second review on
+    /// #1079: a deadline's alarm applied during that destroy failed the
+    /// start for good, its container left running).
+    taking_over: futures_util::lock::Mutex<()>,
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only. What the
     /// guest's view lists, and what a swap may use: a token is asked of
@@ -408,10 +440,6 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
-    /// The start this isolate found failed, and destroys: its container's
-    /// end is that start's own failure, which the start reports itself
-    /// (`exit_of`), never a crash as well.
-    failing: std::cell::Cell<Option<u64>>,
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
@@ -433,12 +461,12 @@ impl DurableObject for ComputerCell {
             cfg,
             env,
             adopted: std::cell::Cell::new(false),
+            taking_over: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
-            failing: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
         }
@@ -764,7 +792,9 @@ impl ComputerCell {
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
-            Some(text) => crate::json_text(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
+            // this release's, or the previous one's (`Lifecycle::read`, which
+            // reads its bytes, as `crate::json_text` does)
+            Some(text) => Lifecycle::read(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
             None => Ok(Lifecycle::new()),
         }
     }
@@ -894,16 +924,88 @@ impl ComputerCell {
     /// The lever's `slow-tell`, taken once: the restart that takes it waits
     /// its ms before its owner is told, as a slow principal answers.
     async fn slow_tell(&self) {
-        let Ok(Some(ms)) = self.meta(MetaKey::SlowTell) else { return };
-        let _ = self.delete_meta(MetaKey::SlowTell);
-        let ms = ms.parse::<u64>().unwrap_or(0).min(SLOW_TELL_MAX_MS);
-        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": "slow-tell", "waits": ms }));
+        self.lever_wait(MetaKey::SlowTell, SLOW_TELL_MAX_MS).await;
+    }
+
+    /// A lever's wait (`key`'s ms, at most `max_ms`), taken once: the wait
+    /// `slow-tell` and `stall-failing-start` put where they say.
+    async fn lever_wait(&self, key: MetaKey, max_ms: u64) {
+        let Ok(Some(ms)) = self.meta(key) else { return };
+        let _ = self.delete_meta(key);
+        let ms = ms.parse::<u64>().unwrap_or(0).min(max_ms);
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "lever": key.key(), "waits": ms }));
         Delay::from(std::time::Duration::from_millis(ms)).await;
     }
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// `told`, and a notice of each shared key its owner's cap pauses now,
+    /// worked out from its hour (`fragment_core::key_hour`).
+    fn with_keys(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
+        let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
+        for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
+            let provider = row["provider"].as_str().unwrap_or_default();
+            let cap = self.key_cap(provider)?;
+            if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
+                let allow_micros = key_hour::next_lift(cap);
+                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, allow_micros, resumes_at: real + resumes_in });
+            }
+        }
+        Ok(told)
+    }
+
+    /// A shared key's hourly cap: its owner's, else the default.
+    fn key_cap(&self, provider: &str) -> CellResult<i64> {
+        let rows = self.rows("SELECT micros FROM key_caps WHERE provider = ?", vec![provider.into()])?;
+        Ok(rows.first().and_then(|r| r["micros"].as_i64()).unwrap_or(key_hour::KEY_HOUR_CAP))
+    }
+
+    /// `computer/key-cap`: its owner's cap on a shared key (`KeyCapAsk`),
+    /// `from` lifting it one step from the cap it holds, so a stale page
+    /// changes nothing; its pages told.
+    async fn set_key_cap(&self, provider: &str, ask: KeyCapAsk) -> CellResult<()> {
+        if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Operator) {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no shared key {provider:?} here")));
+        }
+        let cap = self.key_cap(provider)?;
+        let to = match (ask.from, ask.micros) {
+            (Some(from), None) => (from == cap).then(|| key_hour::next_lift(cap)).flatten().unwrap_or(cap),
+            (None, Some(m)) if (1..=key_hour::KEY_CAP_MAX).contains(&m) => m,
+            (None, None) => key_hour::KEY_HOUR_CAP,
+            _ => return Err(CellError::invalid(format!("a key's cap is `from` (the cap a notice showed), or `micros` from 1 to {}, or neither (the default)", key_hour::KEY_CAP_MAX))),
+        };
+        match to == key_hour::KEY_HOUR_CAP {
+            true => self.exec("DELETE FROM key_caps WHERE provider = ?", vec![provider.into()])?,
+            false => self.exec("INSERT INTO key_caps (provider, micros) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET micros = excluded.micros", vec![provider.into(), to.into()])?,
+        }
+        self.tell_owner().await;
+        Ok(())
+    }
+
+    /// A shared key's slots this last hour, oldest first.
+    fn key_slots(&self, provider: &str) -> CellResult<Vec<(i64, i64)>> {
+        let rows = self.rows("SELECT slot, micros FROM key_hour WHERE provider = ? ORDER BY slot", vec![provider.into()])?;
+        Ok(rows.iter().map(|r| (r["slot"].as_i64().unwrap_or(0), r["micros"].as_i64().unwrap_or(0))).collect())
+    }
+
+    /// Refuses a shared key its owner's cap pauses (FIN-448): 429, with when
+    /// it resumes. A read that fails lets the call go (a preference never
+    /// breaks an agent).
+    fn key_open(&self, provider: &str) -> CellResult<()> {
+        let now = js::now_ms() + self.offset_ms().unwrap_or(0);
+        let slots = self.key_slots(provider).unwrap_or_else(|e| {
+            console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
+            vec![]
+        });
+        let cap = self.key_cap(provider).unwrap_or(key_hour::KEY_HOUR_CAP);
+        let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
+        let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
+        let (spent, cap) = (fragment_core::price::dollars(spent), fragment_core::price::dollars(cap));
+        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes, or ask your person to allow more (they'll see a button in this chat)");
+        Err(CellError::new(ErrorCode::RateLimited, said).because(Reason::KeyPaused).retry_after(resumes_in.unsigned_abs()))
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -1018,11 +1120,40 @@ impl ComputerCell {
 
     /// This isolate's first look, once (`adopt`): the exit to apply when the
     /// container it should find is gone.
+    ///
+    /// Not taken over (any error of `adopt`), it looks again at the next
+    /// event, and an alarm within `TAKE_OVER_RETRY_MS` is one: its caller
+    /// (a request, or the alarm that woke it, which spends itself) stops at
+    /// this error before it sets any alarm of its own, and nothing else may
+    /// come (a start destroying on its last strike: Codex on #1079).
     async fn take_over(&self) -> CellResult<Option<Event>> {
-        if self.adopted.replace(true) {
+        if self.adopted.get() {
             return Ok(None);
         }
-        self.adopt().await
+        let _taking = self.taking_over.lock().await;
+        if self.adopted.get() {
+            // the event it waited for took it over (what that asked is
+            // stored: nothing awaits between this lock's release and it)
+            return Ok(None);
+        }
+        let found = self.adopt().await;
+        if found.is_ok() {
+            self.adopted.set(true);
+        }
+        if let Err(e) = &found {
+            let at = js::now_ms() + TAKE_OVER_RETRY_MS;
+            let kept = self.alarm_by(at).await;
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "take_over": e.message, "again_by": at, "alarm": kept.err().map(|e| e.message) }));
+        }
+        found
+    }
+
+    /// The DO's alarm fires by `at`: one due sooner stays.
+    async fn alarm_by(&self, at: i64) -> CellResult<()> {
+        if self.state.storage().get_alarm().await?.is_some_and(|set| set <= at) {
+            return Ok(());
+        }
+        self.alarm_at(Some(at)).await
     }
 
     /// A new isolate's first look (lesson 6): a container its lifecycle says
@@ -1032,6 +1163,24 @@ impl ComputerCell {
     /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
         let life = self.lifecycle()?;
+        if let Phase::Starting { generation, destroying: true, .. } = life.phase {
+            // a start that failed was destroying what it started when its
+            // isolate went, and its own report (why, and whether it is a
+            // strike) went with it: its container destroyed, one failure.
+            // This isolate's host owns no start yet, so its destroy is of
+            // whatever runs (`0`, as a new start's is): the lifecycle names
+            // no start after this one, so only its container can run. One
+            // still running after its destroy is no failure told yet: the
+            // next event tries again, the alarm `take_over` keeps at the
+            // latest.
+            // (the levers: `stall-takeover` holds it here, an event coming
+            // meanwhile; `fail-takeover-destroys`, one that leaves it running)
+            self.lever_wait(MetaKey::StallTakeOver, STALL_FAILING_START_MAX_MS).await;
+            if self.lever_take(MetaKey::FailTakeOverDestroys) || !self.destroy(0, "its start failed").await? {
+                return Err(CellError::host(format!("start {generation}'s container still runs {}s after its destroy", DESTROY_MS / 1000)));
+            }
+            return Ok(Some(Event::StartFailed { generation, why: "its start failed, and the isolate that saw why went before it said so".into() }));
+        }
         let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
@@ -1233,7 +1382,9 @@ impl ComputerCell {
             // what it destroys below ends as this start's failure, reported
             // by the event this answers, so the end is not a crash too: it
             // would count a second strike, and start again with no pause
-            self.failing.set(Some(generation));
+            // (#1004). Stored, so an isolate after this one knows it too.
+            self.start_failing(generation);
+            self.stall_failing_start().await;
         }
         match started {
             Ok(()) => {
@@ -1268,7 +1419,7 @@ impl ComputerCell {
             Err(Unstarted::Dead(why)) => {
                 // as a snapshot that would not start : its snapshot
                 // forgotten and its container destroyed, whose exit is this
-                // report's to make (`exit_of`), and the same wake starts the
+                // report's to make (`start_failing`), and the same wake starts the
                 // image and the save, no strike. Its own line, so the logs
                 // count how often a snapshot's restore comes up dead (#362).
                 let forgot = self.update_saves(|s| s.snapshot_failed());
@@ -1346,6 +1497,10 @@ impl ComputerCell {
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
+        }
+        if self.lever_take(MetaKey::FailStarts) {
+            // the lever's `fail-starts`: a start that fails with its container up
+            return Err(CellError::host(format!("start {generation} failed (the test lever)")).into());
         }
         if planned.freeze {
             // the lever's dead start: its guest stopped once its container is
@@ -1464,16 +1619,51 @@ impl ComputerCell {
     /// stopped on its own before it came up is the start's own failure (the
     /// snapshot is forgotten), never a strike.
     fn exit_of(&self, generation: u64) -> CellResult<Option<Event>> {
-        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
-        if starting && self.failing.get() == Some(generation) {
-            return Ok(None);
-        }
+        // a failing start's own destroy is the lifecycle's to tell from a
+        // crash (`Phase::Starting`'s `destroying`): reported as it is
+        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, destroying: false, .. } if g == generation);
         if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {
             let forgot = self.update_saves(|s| s.snapshot_failed())?;
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "snapshot": "stopped", "generation": generation, "forgot": forgot }));
             return Ok(Some(Event::SnapshotFailed { generation, why: "its container stopped as it started from the snapshot".into() }));
         }
         Ok(Some(Event::Exited { generation }))
+    }
+
+    /// Its start `generation` failed and destroys what it started next:
+    /// the lifecycle keeps that (`Event::StartFailing`), so the container's
+    /// exit is no crash, whichever isolate hears it. Its step changes
+    /// nothing else (no action, the same deadline). Logged, never failed:
+    /// one missed is that exit counted as a crash, as before it was kept.
+    fn start_failing(&self, generation: u64) {
+        let applied = (|| -> CellResult<()> {
+            let mut life = self.lifecycle()?;
+            let event = Event::StartFailing { generation };
+            let logged = json!(event);
+            let step = life.apply_with(event, js::now_ms(), &self.rules());
+            assert!(step.actions.is_empty() && step.ended.is_none(), "a start's failing asks for nothing");
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase }));
+            self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)
+        })();
+        if let Err(e) = applied {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start_failing": generation, "error": e.message }));
+        }
+    }
+
+    /// The lever's `stall-failing-start`, taken once: a failing start waits
+    /// its ms between storing that it fails and its destroy, the gap an
+    /// isolate that goes leaves (a test crashes the node in it).
+    /// A lever's count of failures still to make (`key`), one taken:
+    /// whether there was one (`fail-starts`, `fail-takeover-destroys`).
+    fn lever_take(&self, key: MetaKey) -> bool {
+        let Ok(Some(n)) = self.meta(key) else { return false };
+        let n = n.parse::<u32>().unwrap_or(0);
+        let _ = if n <= 1 { self.delete_meta(key) } else { self.set_meta(key, &(n - 1).to_string()) };
+        n > 0
+    }
+
+    async fn stall_failing_start(&self) {
+        self.lever_wait(MetaKey::StallFailingStart, STALL_FAILING_START_MAX_MS).await;
     }
 
     /// Whether a container runs here now.
@@ -2015,15 +2205,28 @@ impl ComputerCell {
 
     /// Counts an agent's calls a provider answered, in `at`'s month, and
     /// forgets months past `USES_MONTHS_KEPT`. A month already holding
-    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged).
-    fn count_uses(&self, b: &UsedAsk) -> CellResult<()> {
+    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged). A
+    /// shared key's charge counts in its hour too: whether one reached its cap.
+    fn count_uses(&self, b: &UsedAsk) -> CellResult<bool> {
         if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
         }
-        let month = Month::of(b.at.saturating_add(self.offset_ms()?));
+        let offset = self.offset_ms()?;
+        let (at, now) = (b.at.saturating_add(offset), js::now_ms() + offset);
+        let month = Month::of(at);
+        let mut capped = false;
         for u in &b.uses {
-            if self.cfg.providers.get(&u.provider).is_none() || u.micros < 0 {
+            let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
                 return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
+            };
+            // a shared key's charge counts in its hour (fragment_core::key_hour)
+            if provider.kind == Kind::Operator && u.micros > 0 {
+                let (before, cap) = (key_hour::spent(&self.key_slots(&u.provider)?, now), self.key_cap(&u.provider)?);
+                capped |= before < cap && before + u.micros >= cap;
+                self.exec(
+                    "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
+                    vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
+                )?;
             }
             let m = i64::from(month.0);
             let held = self.rows("SELECT COUNT(*) AS n FROM uses WHERE month = ?", vec![m.into()])?;
@@ -2038,7 +2241,9 @@ impl ComputerCell {
             )?;
         }
         let oldest = i64::from(month.0.saturating_sub(USES_MONTHS_KEPT - 1));
-        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])
+        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])?;
+        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
+        Ok(capped)
     }
 
     fn view(&self) -> CellResult<ComputerView> {
@@ -2046,12 +2251,12 @@ impl ComputerCell {
         let life = self.lifecycle()?;
         let (phase, why) = match &life.phase {
             // a start owed and due is told as starting (`Lifecycle::starting`)
-            Phase::Asleep if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
-            Phase::Asleep => (ComputerPhase::Asleep, None),
+            Phase::Asleep { .. } if life.starting(js::now_ms()) => (ComputerPhase::Starting, None),
+            Phase::Asleep { .. } => (ComputerPhase::Asleep, None),
             Phase::Starting { .. } => (ComputerPhase::Starting, None),
             Phase::Awake { .. } => (ComputerPhase::Awake, None),
             Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
-            Phase::Failed { why } => (ComputerPhase::WontWake, Some(why.clone())),
+            Phase::Failed { why, .. } => (ComputerPhase::WontWake, Some(why.clone())),
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
@@ -2074,7 +2279,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: notices(&life, &saves, &images, &self.rules()),
+            notices: self.with_keys(notices(&life, &saves, &images, &self.rules()))?,
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -2255,6 +2460,29 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "slow-tell", "ms": ms }));
                 Ok(json!({ "computer": id, "slowTell": ms }))
             }
+            "fail-starts" | "fail-takeover-destroys" => {
+                // the next `times` starts fail with their container up, or
+                // the next takeovers' destroys leave it running (0: none)
+                let key = if b.op == "fail-starts" { MetaKey::FailStarts } else { MetaKey::FailTakeOverDestroys };
+                let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
+                self.set_meta(key, &times.to_string())?;
+                Ok(json!({ "computer": id }))
+            }
+            "alarm-in" => {
+                // its alarm fires in `ms`, whatever its lifecycle asked for
+                let ms = b.ms.ok_or_else(|| CellError::invalid("alarm-in names its ms"))?;
+                self.alarm_at(Some(js::now_ms() + i64::from(ms))).await?;
+                Ok(json!({ "computer": id }))
+            }
+            "stall-failing-start" | "stall-takeover" => {
+                // its next start that fails waits `ms` between storing that
+                // it fails and destroying its container, or its next
+                // takeover of a start destroying, before its destroy (0: none)
+                let key = if b.op == "stall-takeover" { MetaKey::StallTakeOver } else { MetaKey::StallFailingStart };
+                let ms = b.ms.filter(|ms| u64::from(*ms) <= STALL_FAILING_START_MAX_MS).ok_or_else(|| CellError::invalid("it names its ms, 0 to 600000"))?;
+                self.set_meta(key, &ms.to_string())?;
+                Ok(json!({ "computer": id }))
+            }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
                 // minutes would leave it: its row stays, refused by its expiry
@@ -2314,13 +2542,17 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                v["phase"] = json!(life.phase);
+                v["failures"] = json!(life.failures());
+                // a container runs for this object, whichever start's
+                v["running"] = json!(self.container_running().await);
                 // the keepalives the runtime holds open, beside those it counts
                 v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell or always-on"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, alarm-in or always-on"))),
         }
     }
 
@@ -2544,10 +2776,21 @@ impl ComputerCell {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
             }
+            "computer/key-cap" => {
+                // `{provider, from, micros}`: the router's, from a `KeyCapAsk`
+                let b: Value = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                let ask = KeyCapAsk { from: b["from"].as_i64(), micros: b["micros"].as_i64() };
+                self.set_key_cap(b["provider"].as_str().unwrap_or_default(), ask).await?;
+                json_response(&self.view()?)
+            }
             "computer/used" => {
                 let b: UsedAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
-                self.count_uses(&b)?;
+                // a key's charge that reaches its cap: its owner's pages read again
+                if self.count_uses(&b)? {
+                    self.tell_owner().await;
+                }
                 json_response(&json!({ "ok": true }))
             }
             "computer/uses" => {
@@ -2768,8 +3011,12 @@ impl ComputerCell {
             }
             let secret = match provider.kind {
                 Kind::Connection => self.connection_token(&owner, &provider.name, agent).await?,
-                // its call is gated on its owner's standing, and charged after (`egress_swap`)
-                Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
+                // its call is held to its owner's cap on the key here, gated on
+                // their standing and charged after (`egress_swap`)
+                Kind::Operator => {
+                    self.key_open(&provider.name)?;
+                    crate::keys::operator_key(&self.env, &provider.name).await?
+                }
                 Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
             };
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
@@ -3036,6 +3283,11 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             owned(env, who, id).await?;
             let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_response(&view_of(ask(env, id, "computer/notices-seen", &json!(seen)).await?)?)
+        }
+        (Method::Post, [id, "key-caps", provider]) => {
+            owned(env, who, id).await?;
+            let cap: KeyCapAsk = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_response(&view_of(ask(env, id, "computer/key-cap", &json!({ "provider": provider, "from": cap.from, "micros": cap.micros })).await?)?)
         }
         (Method::Post, [id, "notices", "later"]) => {
             owned(env, who, id).await?;
@@ -3651,24 +3903,29 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
-    let answered = status.is_some_and(|s| s < 500);
     // after the answer, never in its way
-    if let (Some((agent, owner, identity)), true) = (payer, answered) {
+    if let (Some((agent, owner, identity)), Some(answered)) = (payer, status.filter(|s| *s < 500)) {
         let book = &cfg.book;
-        let key = |p: &Placeholder| Usage::Key { key: p.provider.clone(), units: 1 };
+        // what each key's call used: a call, the units of a part the book
+        // prices apart (ElevenLabs' speech by its characters, fal's images
+        // by their pixels, when its answer is a 2xx), or none (fal's
+        // polls), the row and the agent's count alike
+        let call = fragment_core::price::KeyCall { method: method.as_ref(), host: &host, path: url.path(), body: &body, status: answered };
+        let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
         let uses: Vec<Value> = plan
             .wanted
             .iter()
             .map(|p| {
-                let micros = if keys.contains(&p) { book.price(&key(p)).map_or(0, |priced| priced.charge) } else { 0 };
+                let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
+                let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
                 json!({ "provider": p.provider, "micros": micros })
             })
             .collect();
         let at = js::now_ms();
-        let rows: Vec<MeterRow> = keys
-            .iter()
-            .map(|p| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage: key(p), fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
+        let rows: Vec<MeterRow> = used
+            .into_iter()
+            .map(|(_, usage)| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage, fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
             .collect();
         let (env, computer) = (env.clone(), computer.to_string());
         ctx.wait_until(async move {

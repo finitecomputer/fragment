@@ -3,7 +3,7 @@
 //! sending the node the right `Host` header; a hosted run's, at their own
 //! names over https (`Target::Hosted`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -360,8 +360,23 @@ impl Api {
 
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
+        Api::hosted_with(preview, run, client(Pool::Idle(POOL_IDLE)))
+    }
+
+    /// `hosted` for a dry run's plan, which sends nothing: every plan's
+    /// lanes share one client. A client reads its TLS roots as it is built,
+    /// the system's too where the CLI's `rustls-tls-native-roots` joins
+    /// this crate's reqwest (a workspace build: `cargo xtask check`'s),
+    /// about 40 ms in debug; one per lane made each plan cost 1.7 s, and
+    /// the plan's tests 10 s of the check (FIN-452).
+    pub fn planned(preview: &Preview, run: &Arc<Run>) -> Api {
+        static UNSENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+        Api::hosted_with(preview, run, UNSENT.get_or_init(|| client(Pool::Fresh)).clone())
+    }
+
+    fn hosted_with(preview: &Preview, run: &Arc<Run>, http: reqwest::blocking::Client) -> Api {
         let (base, label_suffix) = (preview.platform(), String::new());
-        Api { http: client(Pool::Idle(POOL_IDLE)), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+        Api { http, base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
     }
 
     /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
@@ -470,9 +485,46 @@ impl Api {
         self.send(c, false)
     }
 
+    /// `signed`'s POST of `body`, read to its first event (a blank line)
+    /// and then hung up, as a client that goes away mid-answer: its status
+    /// and what it read.
+    pub fn signed_hung_up(&self, keys: &Keys, path: &str, body: &Value) -> Result<(u16, String)> {
+        use std::io::Read;
+        let body = body.to_string().into_bytes();
+        let c = Call { method: "POST", url: format!("{}{path}", self.base), content_type: Some("application/json"), keys: Some(keys), ..Call::default() };
+        let mut resp = self.builder(&c, &body, true)?.send().with_context(|| format!("POST {path}"))?;
+        let status = resp.status().as_u16();
+        let (mut read, mut buf) = (Vec::new(), [0u8; 4096]);
+        // bounded by the answer: each pass reads some of it, or its end
+        while !read.windows(2).any(|w| w == b"\n\n") {
+            match resp.read(&mut buf).with_context(|| format!("POST {path}: its first event"))? {
+                0 => break,
+                n => read.extend_from_slice(&buf[..n]),
+            }
+        }
+        drop(resp);
+        Ok((status, String::from_utf8_lossy(&read).into_owned()))
+    }
+
     fn send(&self, c: Call<'_>, secret: bool) -> Result<Reply> {
+        let body = c.body.clone().unwrap_or_default();
+        let req = self.builder(&c, &body, secret)?;
+        // when it went and how long it waited, so a failure tells a refused
+        // or dropped connection (at once) from a request that hung
+        let (sent, t0) = (clock(), Instant::now());
+        let failed = || format!("{} {} (sent {sent}, failed after {:.1?})", c.method, c.url, t0.elapsed());
+        let resp = req.send().with_context(failed)?;
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let bytes = resp.bytes().with_context(failed)?.to_vec();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
+        Ok(Reply { status, body, text, bytes, headers })
+    }
+
+    /// The request `c` makes, `body` its body.
+    fn builder(&self, c: &Call<'_>, body: &[u8], secret: bool) -> Result<reqwest::blocking::RequestBuilder> {
         let url = reqwest::Url::parse(&c.url)?;
-        let body = c.body.unwrap_or_default();
         let mut req = match &self.target {
             // Everything goes to the node; the Host header names the site.
             Target::Local => {
@@ -485,11 +537,11 @@ impl Api {
             // A deployment's hosts are its own, over https.
             Target::Hosted(_) => self.http.request(c.method.parse()?, url.clone()),
         };
-        req = with_body(req, c.method, &body);
+        req = with_body(req, c.method, body);
         if let Some(ct) = c.content_type {
             req = req.header("content-type", ct);
         }
-        if let Some(cookie) = c.cookie {
+        if let Some(cookie) = c.cookie.clone() {
             let cookie = match url.scheme() {
                 "https" => https_cookies(&cookie),
                 _ => cookie,
@@ -497,27 +549,17 @@ impl Api {
             req = req.header("cookie", cookie);
         }
         if let Some(keys) = c.keys {
-            req = req.header("authorization", keys.header(c.method, &c.url, &body, now_s()));
+            req = req.header("authorization", keys.header(c.method, &c.url, body, now_s()));
         }
         // the secret goes to the platform's levers, never to a fragment's
         // host, where an app's code reads the request's headers
         if secret && self.is_lever(&c.url) {
             req = req.header(fragment_core::levers::SECRET_HEADER, self.run.secret.as_str());
         }
-        for (k, v) in c.extra {
-            req = req.header(k, v);
+        for (k, v) in &c.extra {
+            req = req.header(*k, v);
         }
-        // when it went and how long it waited, so a failure tells a refused
-        // or dropped connection (at once) from a request that hung
-        let (sent, t0) = (clock(), Instant::now());
-        let failed = || format!("{} {} (sent {sent}, failed after {:.1?})", c.method, c.url, t0.elapsed());
-        let resp = req.send().with_context(failed)?;
-        let status = resp.status().as_u16();
-        let headers = resp.headers().clone();
-        let bytes = resp.bytes().with_context(failed)?.to_vec();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Ok(Reply { status, body, text, bytes, headers })
+        Ok(req)
     }
 
     /// The control API, signed by `keys`.

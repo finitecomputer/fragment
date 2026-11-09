@@ -1,0 +1,5 @@
+# Wire facts retired on purpose (crates/proto/wire.lock; xtask/src/wire/).
+# Each line waives exactly the fact it names, once the clients that read
+# or send it are gone: `retire <YYYY-MM-DD> <the lock's line> # <why, and
+# the client floor that makes it safe>`. Append only: master's lines stay
+# as they are.

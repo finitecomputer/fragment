@@ -8,11 +8,27 @@ struct FragmentApp: App {
 
 @MainActor @Observable
 final class Library {
-    var fragments: [FragmentSummary] = []
+    /// The person's list. Each chat's session follows its agents in it
+    /// (`ChatSession.agents`): one added after the chat opened counts in
+    /// its cached session at once, its draft and outbox kept.
+    var fragments: [FragmentSummary] = [] {
+        didSet {
+            guard fragments != oldValue else { return }
+            for chat in fragments { if let agents = chat.agents, let session = sessions[chat.name] { session.agents = agents } }
+        }
+    }
     var error: String?
     var loading = false
     var creating = false
     var unfinishedChat: FragmentSummary?
+    @ObservationIgnored private var readying: (agent: String, chat: Task<FragmentSummary, Error>)?
+    /// What the home screen's prompt holds (`HomeDraft`).
+    let home = HomeDraft()
+    /// A launch not sent yet: its chat, made for it and still empty, and
+    /// the id its message goes with (launcher.js `pendingLaunch`). Sent
+    /// again, the same words and files are the same post in the same chat;
+    /// changed, a post of their own, still in that chat.
+    private(set) var pendingLaunch: (id: String, text: String, files: [UUID], agent: String, chat: FragmentSummary?)?
     var selectedAgent: String?
     var imported: [ImportedSession] = []
     var identities: [String: String] = [:]
@@ -48,6 +64,16 @@ final class Library {
             }
         }.map(\.element)
     }
+    /// The sidebar's agents, as the web's (cell/shell/chat-list.js
+    /// `pinnedAgentsFirst`; Paul, 2026-11-07: ordering them is a sidebar
+    /// matter): the ones they pinned first, then the rest, each in `agents`'
+    /// order. Their main agent stays `agents`' first, wherever it is drawn.
+    var sidebarAgents: [FragmentSummary] {
+        agents.enumerated().sorted { a, b in
+            let pa = a.element.pinned == true, pb = b.element.pinned == true
+            return pa != pb ? pa : a.offset < b.offset
+        }.map(\.element)
+    }
     var agent: FragmentSummary? { agents.first { $0.name == selectedAgent } ?? agents.first }
     func agent(for identity: String) -> FragmentSummary? { agents.first { identities[$0.name] == identity } }
     /// The fragment of the person's list a link is a page of (the web's
@@ -63,6 +89,82 @@ final class Library {
     func leftChat(_ name: String) {
         if sessions[name]?.closed != nil { sessions.removeValue(forKey: name) }
     }
+    /// Whether Home may start a chat now: one rule for every way to.
+    var canLaunch: Bool { home.ready && agent != nil && !creating }
+
+    /// A new chat with `agent` in it, begun ahead of its first message (a
+    /// memo's, as it records) so that message need not wait. Asked again it is
+    /// the same one; a chat made outlasts a failed join, for the next try.
+    @discardableResult
+    func readyChat(with agent: FragmentSummary, api: FragmentAPI) -> Task<FragmentSummary, Error> {
+        if let readying, readying.agent == agent.name { return readying.chat }
+        let earlier = readying?.chat
+        let chat = Task { [self] in
+            do {
+                // one readied for another agent has them in it: not this one's
+                if let earlier { _ = try? await earlier.value; unfinishedChat = nil }
+                var chat: FragmentSummary
+                if let unfinishedChat { chat = unfinishedChat } else { chat = try await api.createChat(); unfinishedChat = chat }
+                chat.agents = [try await api.join(agent, to: chat)]
+                return chat
+            } catch { readying = nil; throw error }
+        }
+        readying = (agent.name, chat)
+        return chat
+    }
+
+    /// A new chat with what Home holds as its first message, sent as its
+    /// chat sends one (`ChatSession.sendFirst`), as the web's launcher sends
+    /// it (launcher.js `startFromSearch`): what was submitted, locked while
+    /// it goes; its chat opened (`opened`) once made. Not sent, all of it
+    /// stays on Home with why, and its chat is kept for it: sent again, it
+    /// goes there. Throws what kept it.
+    func launch(_ api: FragmentAPI, opened: (FragmentSummary) -> Void) async throws {
+        guard canLaunch, let agent else { return }
+        creating = true
+        let submitted = home.begin()
+        var sent = false
+        defer { creating = false; home.ended(sent: sent ? submitted : nil) }
+        let ids = submitted.files.map(\.id)
+        let same = pendingLaunch.map { $0.text == submitted.text && $0.files == ids && $0.agent == agent.name } == true
+        // the chat made for the last try, if it was for this agent: nothing was posted to it
+        let earlier = pendingLaunch?.agent == agent.name ? pendingLaunch?.chat : nil
+        pendingLaunch = (same ? pendingLaunch!.id : UUID().uuidString, submitted.text, ids, agent.name, earlier)
+        do {
+            var chat = earlier
+            if chat == nil {
+                let made = try await readyChat(with: agent, api: api).value
+                readying = nil; unfinishedChat = nil
+                pendingLaunch?.chat = made
+                chat = made
+            }
+            guard let chat, let id = pendingLaunch?.id else { return }
+            // listed at once: the list's own read comes after the chat has opened
+            if !fragments.contains(where: { $0.name == chat.name }) { fragments.insert(chat, at: 0) }
+            let resolved = fragments.first { $0.name == chat.name } ?? chat
+            let session = try session(for: resolved, api: api)
+            if earlier == nil { session.beginEmpty() }
+            opened(resolved)
+            try await session.sendFirst(id: id, text: submitted.text, files: submitted.files.map(\.file))
+            pendingLaunch = nil
+            sent = true
+            await load(api)
+        } catch {
+            home.error = "Your message wasn't sent. " + error.localizedDescription
+            throw error
+        }
+    }
+
+    /// The identities of the person's own agents: whose menus they may use
+    /// in a chat (chat.js `menuOf`, an agent's owner by `__members`).
+    var ownedIdentities: Set<String> { Set(agents.filter { $0.role == "owner" }.compactMap { identities[$0.name] }) }
+    /// The word that @mentions each agent listed, by its identity: its
+    /// fragment's label (chat.js `handleOf`), lowercased.
+    var handles: [String: String] {
+        var words: [String: String] = [:]
+        for agent in agents { if let id = identities[agent.name], let label = agent.name.components(separatedBy: "--").first, !label.isEmpty { words[id] = words[id] ?? label.lowercased() } }
+        return words
+    }
     /// Each agent by its identity, the first of an identity's (`agents`' order).
     var agentsByIdentity: [String: FragmentSummary] {
         var faces: [String: FragmentSummary] = [:]
@@ -73,11 +175,15 @@ final class Library {
     func session(for chat: FragmentSummary, api: FragmentAPI) throws -> ChatSession {
         if let session = sessions[chat.name] { return session }
         // A bounded cache preserves unsent messages and cursors while changing screens.
-        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty })?.key {
+        // A session sending Home's first message is its one owner (`launch`):
+        // replaced, its chat would send around that message and save over it.
+        if sessions.count >= 32, let unused = sessions.first(where: { $0.value.pending.isEmpty && $0.value.composer.isEmpty && $0.value.attachments.isEmpty && $0.value.sendingFirst == nil })?.key {
             sessions.removeValue(forKey: unused)
         }
         guard sessions.count < 32 else { throw APIError.server("Finish or discard a draft in another chat before opening more conversations.") }
         let session = ChatSession(fragment: chat, api: api)
+        // its agents as the list names them, which may be newer than `chat` (a chat just made)
+        if let agents = fragments.first(where: { $0.name == chat.name })?.agents { session.agents = agents }
         sessions[chat.name] = session
         return session
     }
@@ -258,6 +364,13 @@ final class Library {
             do { try await Task.sleep(for: .seconds(min(15, 1 << attempt))) } catch { return }
         }
     }
+    /// Pinned or not, as the person chose (`PUT …/pinned`), then the list again.
+    func pin(_ fragment: FragmentSummary, api: FragmentAPI) async {
+        do {
+            let _: JSONValue = try await api.request("api/fragments/\(fragment.name)/pinned", method: "PUT", body: .object(["pinned": .bool(fragment.pinned != true)]))
+            await load(api)
+        } catch { self.error = error.localizedDescription }
+    }
     func archive(_ fragment: FragmentSummary, api: FragmentAPI) async {
         do {
             let _: JSONValue = try await api.request("api/fragments/\(fragment.name)/archived", method: "PUT", body: .object(["archived": .bool(fragment.archived != true)]))
@@ -267,7 +380,7 @@ final class Library {
 }
 
 struct FragmentStatus: Decodable { struct URLs: Decodable { let canonical: URL }; let npub: String; let urls: URLs }
-enum ShellPage: Equatable { case launcher, chat(String), history, settings, apps }
+enum ShellPage: Equatable { case launcher, startingChat, chat(String), history, settings, apps }
 
 struct FragmentRoot: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -279,7 +392,6 @@ struct FragmentRoot: View {
     @State private var sidebar = false
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
-    @State private var homeDraft = ""
 
     var body: some View {
         Group {
@@ -299,6 +411,10 @@ struct FragmentRoot: View {
     }
     private func resetNavigation() {
         ImageCache.shared.removeAll()
+        BlobStore.shared.removeAll()
+        SoundFacts.shared.removeAll()
+        ShownFacts.shared.removeAll()
+        AudioPlayback.shared.stop()
         library = Library(); page = .launcher; sidebar = false; showingApps = false; openedApp = nil
     }
     private func shell(_ api: FragmentAPI) -> some View {
@@ -320,7 +436,7 @@ struct FragmentRoot: View {
                                         Button("Search or start a new chat", systemImage: "square.and.pencil") { page = .launcher }.accessibilityIdentifier("launcher")
                                     }
                                     if page != .apps {
-                                        Button("Your Apps", systemImage: "list.bullet.rectangle") { showingApps = true }.accessibilityIdentifier("yourApps")
+                                        Button("Your Apps", systemImage: "square.grid.2x2") { showingApps = true }.accessibilityIdentifier("yourApps")
                                     }
                                 }
                             }
@@ -338,7 +454,7 @@ struct FragmentRoot: View {
         .sheet(item: $openedApp) { app in
             if app.name == "add-app" {
                 AppCreationSheet { prompt in
-                    openedApp = nil; showingApps = false; homeDraft = prompt; page = .launcher
+                    openedApp = nil; showingApps = false; library.home.text = prompt; page = .launcher
                 }
             } else { FragmentWebSheet(fragment: app, api: api) }
         }
@@ -355,7 +471,9 @@ struct FragmentRoot: View {
     @ViewBuilder private func content(_ api: FragmentAPI) -> some View {
         switch page {
         case .launcher:
-            HomeView(library: library, api: api, draft: $homeDraft, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) })
+            HomeView(library: library, api: api, open: { open($0) }, start: { await start(api) }, refresh: { await library.load(api) }, covered: sidebar || openedApp != nil)
+        // a message on its way to a chat not made yet: the launcher is already left
+        case .startingChat: ChatLoadingView()
         case .chat(let name):
             if let chat = library.fragments.first(where: { $0.name == name }) {
                 if let session = try? library.session(for: chat, api: api) {
@@ -377,6 +495,7 @@ struct FragmentRoot: View {
     private var title: String {
         switch page {
         case .launcher: return "Finite.Computer"
+        case .startingChat: return "New chat"
         case .chat(let name): return library.fragments.first { $0.name == name }?.displayTitle ?? "Chat"
         case .history: return "History"
         case .apps: return "Your Apps"
@@ -395,24 +514,15 @@ struct FragmentRoot: View {
         else if fragment.kind == "launcher" { page = .launcher }
         else { openedApp = fragment }
     }
+    /// Home's launch (`Library.launch`): its chat shown once made; not
+    /// sent, Home again with its words, files and why, if that chat is still
+    /// what is shown (moved on, Home has them when next opened).
     private func start(_ api: FragmentAPI) async {
-        guard let agent = library.agent, !library.creating else { return }
-        library.creating = true
-        defer { library.creating = false }
-        do {
-            if library.unfinishedChat == nil { library.unfinishedChat = try await api.createChat() }
-            guard let chat = library.unfinishedChat else { return }
-            try await api.join(agent, to: chat)
-            library.unfinishedChat = nil
-            await library.load(api)
-            let resolved = library.fragments.first { $0.name == chat.name } ?? chat
-            let session = try library.session(for: resolved, api: api)
-            session.edit(homeDraft)
-            homeDraft = ""
-            page = .chat(chat.name)
-            await session.send()
-            await library.load(api)
-        } catch { library.error = error.localizedDescription }
+        var shown: String?
+        page = .startingChat
+        do { try await library.launch(api) { chat in shown = chat.name; page = .chat(chat.name) } }
+        catch { if let shown, page == .chat(shown) { page = .launcher } }
+        if page == .startingChat { page = .launcher }
     }
 }
 
