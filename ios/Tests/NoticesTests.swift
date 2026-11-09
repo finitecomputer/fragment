@@ -104,4 +104,45 @@ struct NoticesTests {
         #expect(await library.act(notice, notice.actions[0], api: api) == nil)
         #expect(library.answered == nil)
     }
+
+    /// The read after an answer decides its page as it takes its list, and
+    /// nothing after (Codex on #1162): that read not listing it, a newer one
+    /// that lists it while the first still reads the rest opens nothing.
+    @MainActor @Test func anAnswersPageIsDecidedAsItsReadTakesItsList() async throws {
+        final class Shared: Sendable { let listed = Mutex(false); let gate = Mutex<Gate?>(nil) }
+        let shared = Shared()
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments":
+                let garden = shared.listed.withLock { $0 } ? #",{"name":"garden--k3x9","kind":"app","role":"editor","title":"Garden plans"}"# : ""
+                return (200, #"{"fragments":[{"name":"juniper--a2","kind":"agent","role":"owner","title":"Juniper"}"# + garden + "]}")
+            case "GET /api/f/juniper--a2/status": return (200, #"{"npub":"npub1juniper","urls":{"canonical":"https://juniper--a2.finite.test/"}}"#)
+            case "GET /api/computers":
+                shared.gate.withLock { $0 }?.pass()
+                return (200, #"{"computers":[]}"#)
+            case "POST /api/invites/garden--k3x9/accept": return (200, #"{"fragment":"garden--k3x9","role":"editor","open":"https://garden--k3x9.finite.test/"}"#)
+            default: return (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+        let api = try stub.api()
+        let notice = try #require(try read(#"{"notices":[{"id":"invite:garden--k3x9","kind":"invite","level":"info","title":"Garden plans","actions":[{"label":"Accept","post":"/api/invites/garden--k3x9/accept","body":{}}]}]}"#).first)
+        let library = Library()
+        await library.load(api)
+        let lists = { stub.seen.filter { $0.route == "GET /api/fragments" }.count }
+        let computers = { stub.seen.filter { $0.route == "GET /api/computers" }.count }
+        // the read after the answer takes a list without it, then waits on the computer
+        let gate = Gate()
+        shared.gate.withLock { $0 = gate }
+        let acting = Task { await library.act(notice, notice.actions[0], api: api) }
+        try await waitUntil("the read after the answer took its list and asks for the computer") { computers() == 2 }
+        // a newer read, begun meanwhile, lists it
+        shared.listed.withLock { $0 = true }
+        let newer = Task { await library.load(api) }
+        try await waitUntil("the newer read has its list") { lists() == 3 }
+        gate.open()
+        await newer.value
+        #expect(await acting.value == nil)
+        #expect(library.fragments.contains { $0.name == "garden--k3x9" }, "the newer read's list is shown")
+        #expect(library.answered == nil, "decided by the read after the answer, which did not list it: nothing opens")
+    }
 }
