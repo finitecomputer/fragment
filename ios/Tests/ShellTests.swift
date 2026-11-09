@@ -308,6 +308,96 @@ struct ShellTests {
         #expect(model.url?.query == "token=t2" && model.error == nil)
     }
 
+    /// A connected account on `stub`, kept in a store of the test's own, its
+    /// requests answered by the stub and its web data clears counted.
+    private func connected(_ stub: Stub, identity: String, clears: Clears) throws -> (AccountConnection, LaunchScope) {
+        let scope = LaunchScope(keychainService: "tests-" + UUID().uuidString, supportFolder: "Finite-Tests", loopbackOnly: false)
+        try DeviceKeychain.save(DeviceAccount(origin: try #require(URL(string: "https://\(stub.host)")), secret: try DeviceIdentity().secret,
+                                              identity: identity, approved: true), service: scope.keychainService)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubProtocol.self]
+        return (AccountConnection(scope: scope, session: URLSession(configuration: configuration), clearWebData: { clears.add() }), scope)
+    }
+
+    /// Every window shows the app's one account (`FragmentApp`): removing it
+    /// in one is every window's at once, so no window keeps an account
+    /// another has removed, beside the web data they all share.
+    @Test func everyWindowSharesTheOneAccount() async throws {
+        let stub = Stub { _, _ in (404, "{}") }, clears = Clears()
+        let (connection, scope) = try connected(stub, identity: "npub1alice", clears: clears)
+        defer { try? DeviceKeychain.clear(service: scope.keychainService) }
+        let one = FragmentRoot(connection: connection), two = FragmentRoot(connection: connection)
+        #expect(one.connection === two.connection && two.connection.api != nil)
+        await one.connection.forget()
+        #expect(two.connection.account == nil && two.connection.api == nil, "removed in one window, gone from the other")
+        #expect(clears.count == 1)
+    }
+
+    /// Newest wins: an answer that arrives for an account no longer this
+    /// app's (removed, and another paired meanwhile) does nothing at all,
+    /// and never clears the new person’s web data.
+    @Test func aStaleAnswerForARemovedAccountDoesNothing() async throws {
+        let gate = Gate(), clears = Clears()
+        let stub = Stub { seen, _ in
+            guard seen.route == "GET /api/identities/me" else { return (404, "{}") }
+            gate.pass()
+            return (200, #"{"kind":"person","id":"npub1alice","email":"alice@example.com"}"#)
+        }
+        let (connection, scope) = try connected(stub, identity: "npub1alice", clears: clears)
+        defer { try? DeviceKeychain.clear(service: scope.keychainService) }
+        let validating = Task { await connection.validate() }
+        try await waitUntil("Alice's answer asked for") { stub.seen.contains { $0.route == "GET /api/identities/me" } }
+        // Alice removed from this iPhone, and Bob paired with a key of his own
+        await connection.forget()
+        #expect(clears.count == 1)
+        let bob = DeviceAccount(origin: try #require(URL(string: "https://\(stub.host)")), secret: try DeviceIdentity().secret, identity: "npub1bob", approved: true)
+        connection.account = bob
+        gate.open()
+        await validating.value
+        #expect(clears.count == 1, "Alice's late answer cleared nothing of Bob's")
+        #expect(connection.account?.identity == "npub1bob" && connection.account?.approved == true)
+    }
+
+    /// Share gives a fragment's page and nothing of the person's: never the
+    /// one-use redemption, a session key `s=`, a token, or any other query,
+    /// hash, user or password; and nothing of another origin at all.
+    @Test func aSharedPageCarriesNothingOfThePersons() throws {
+        let fragment = try #require(URL(string: "https://notes--ab12.finite.place/"))
+        let pages = [
+            "https://notes--ab12.finite.place/__signin?token=0123456789abcdef&return=%2Fweek",
+            "https://notes--ab12.finite.place/week?s=a1b2c3d4e5f6&token=secret#access_token=xyz",
+            "https://someone:pass@notes--ab12.finite.place/week/2?view=1",
+            "https://notes--ab12.finite.place",
+        ]
+        let shared = pages.map { WebLinks.shareable(URL(string: $0)!, fragment: fragment)?.absoluteString ?? "none" }
+        #expect(shared == ["https://notes--ab12.finite.place/", "https://notes--ab12.finite.place/week",
+                           "https://notes--ab12.finite.place/week/2", "https://notes--ab12.finite.place/"])
+        for url in shared {
+            #expect(!url.contains("__signin") && !url.contains("s=") && !url.contains("token") && !url.contains("?") && !url.contains("#") && !url.contains("@"), "\(url)")
+        }
+        #expect(WebLinks.shareable(try #require(URL(string: "https://other--cd34.finite.place/")), fragment: fragment) == nil)
+        #expect(WebLinks.shareable(try #require(URL(string: "https://finite.chat/settings")), fragment: fragment) == nil)
+    }
+
+    /// A sheet holds its fragment's pages alone: they stay; the platform's
+    /// page, reached by a refusal's redirect, is a sign-in that ended; any
+    /// other address (a link, a new window, a script's) leaves the sheet.
+    @Test func aSheetKeepsItsFragmentsPagesAndSendsTheRestOut() throws {
+        let fragment = try #require(URL(string: "https://notes--ab12.finite.place/"))
+        let platform = try #require(URL(string: "https://finite.chat"))
+        func route(_ raw: String, clicked: Bool = false) throws -> WebLinks.Route {
+            WebLinks.route(try #require(URL(string: raw)), fragment: fragment, platform: platform, clicked: clicked)
+        }
+        #expect(try route("https://notes--ab12.finite.place/week?x=1") == .stay)
+        #expect(try route("about:blank") == .stay)
+        #expect(try route("https://finite.chat/auth/fragment?name=notes--ab12") == .signedOut)
+        #expect(try route("https://finite.chat/settings", clicked: true) == .leave, "a link to the platform is the browser's")
+        #expect(try route("https://other--cd34.finite.place/") == .leave)
+        #expect(try route("https://example.com/", clicked: true) == .leave)
+        #expect(try route("http://notes--ab12.finite.place/") == .leave, "another scheme is another origin")
+        #expect(try route("mailto:someone@example.com", clicked: true) == .leave)
+    }
+
     /// A message's links are the URLs its words link, as drawn: Markdown
     /// targets whole (parentheses, a final `!`), `<autolinks>`, and bare
     /// URLs, which end before trailing punctuation.
@@ -860,6 +950,12 @@ struct ShellTests {
 }
 
 private final class Heard: Sendable { let keys = Mutex<[String]>([]) }
+/// How many times a test's web data was cleared.
+private final class Clears: Sendable {
+    private let value = Mutex(0)
+    func add() { value.withLock { $0 += 1 } }
+    var count: Int { value.withLock { $0 } }
+}
 
 /// A microphone that records known bytes, for a voice memo's tests.
 @MainActor final class TestMicrophone: Microphone {
