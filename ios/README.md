@@ -3,7 +3,7 @@
 A native SwiftUI client for Finite.Computer, organized like the web shell. iOS 26+,
 Swift 6, Apple frameworks and pinned P256K 0.21.1 for CLI-compatible NIP-98 signing.
 No Rust bindings, shared runtime, or web chat UI. App fragments and imported
-conversations open in Safari's own view (`SFSafariViewController`). Every request is signed by this
+conversations open in a native WKWebView sheet. Every request is signed by this
 iPhone's own approved key: there is no unsigned or offline mode.
 
 ## Connect an account
@@ -71,7 +71,7 @@ A physical phone reaches a platform over HTTPS; Release builds take nothing else
 - The launcher's one action records a voice memo until something is typed, then
   sends. A finished memo sends itself, there and in a chat, with any words typed;
   its chat is made as it records. A soft haptic tap marks a reply's new words.
-- Apps open in Safari's own view and leave the conversation in place; a bounded in-memory
+- Dismissible app sheets (Reload, Share) leave the conversation in place; a bounded in-memory
   session cache retains composer drafts, pending post ids and cursors across navigation.
 - Native message author identities, Markdown, timestamps, long-press Reply/Copy/
   Share, quoted replies, file import, and AAC voice memos (five minutes maximum).
@@ -159,7 +159,8 @@ written by hand from docs/api.md.
 
 `FragmentUITests` drive what needs no server: Connect, an unreachable server,
 a server past loopback refused, and Home's composer above the keyboard after
-Your Apps and Back (an approved account at a closed loopback port). Each launches with `--ui-test` (Debug only):
+Your Apps and Back, with or without a sheet opened from Your Apps (an approved
+account at a closed loopback port). Each launches with `--ui-test` (Debug only):
 a Keychain service and Application Support folder of its own, emptied as it
 starts, and loopback alone, so a simulator's own account is never read and no
 other server is ever asked (`Sources/LaunchScope.swift`;

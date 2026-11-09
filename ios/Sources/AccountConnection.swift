@@ -1,5 +1,5 @@
-import SafariServices
 import SwiftUI
+import WebKit
 
 @MainActor @Observable
 final class AccountConnection {
@@ -20,10 +20,12 @@ final class AccountConnection {
     private let scope: LaunchScope
     /// The session its requests go through (the platform's, or a test's stub).
     @ObservationIgnored private let session: URLSession?
-    /// Clears this app's Safari data, every app's page state with it.
+    /// Clears the app's web data (its sheets' store), every app's page state with it.
     @ObservationIgnored private let clearWebData: @MainActor () async -> Void
     init(scope: LaunchScope = .current, session: URLSession? = nil,
-         clearWebData: @escaping @MainActor () async -> Void = { await SFSafariViewController.DataStore.default.clearWebsiteData() }) {
+         clearWebData: @escaping @MainActor () async -> Void = {
+             await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+         }) {
         self.scope = scope
         self.session = session
         self.clearWebData = clearWebData
@@ -76,7 +78,7 @@ final class AccountConnection {
             // newest wins: an answer for an account no longer this app's
             // (removed, or replaced by another key) does nothing at all
             guard isCurrent(api) else { throw CancellationError() }
-            // this app's Safari data is the person's it was kept for: another
+            // the app's web data is the person's it was kept for: another
             // person (a new key, or this one approved by someone else) starts
             // with none of it, before they can open an app
             if account?.identity != identity {
@@ -129,7 +131,7 @@ final class AccountConnection {
             try ChatDraftStore.removeAccount(api: client)
         }
         try DeviceKeychain.clear(service: scope.keychainService); account = nil; code = nil; cachedAPI = nil
-        // every app's page data, kept in this app's Safari view (iOS 16+; the app needs 26)
+        // every app's page data goes with the account
         await clearWebData()
     }
 }

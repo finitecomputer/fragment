@@ -62,6 +62,38 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Home after Your Apps")
     }
 
+    /// Paul's sequence: from Your Apps, open a sheet (here Add an app, which
+    /// needs no server) and close it, then Back to Home. The keyboard waits
+    /// for Home itself: it never rises over Your Apps as the sheet goes, and
+    /// back on Home the composer rests above it.
+    func testHomesComposerStaysAboveTheKeyboardAfterASheetFromYourApps() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", "http://127.0.0.1:9"]
+        app.launch()
+        let composer = app.textViews["composer"], keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "Home, its saved account approved")
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "Home opens with the keyboard")
+
+        app.buttons["yourApps"].tap()
+        XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5), "Your Apps has no keyboard")
+        app.buttons["app-add-app"].tap()
+        let sheet = app.navigationBars["Add an app"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), "the sheet closed")
+        XCTAssertTrue(app.navigationBars["Your Apps"].exists)
+        // the keyboard is Home's alone: none rises over Your Apps
+        XCTAssertFalse(keyboard.waitForExistence(timeout: 2), "no keyboard over Your Apps once the sheet closes")
+        screenshot(app, "Your Apps after a sheet")
+
+        app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 10), "Home takes the keyboard back")
+        aboveTheKeyboard(composer, keyboard, "after a sheet from Your Apps, and Back")
+        screenshot(app, "Home after a sheet from Your Apps")
+    }
+
     /// Words that wrap take the composer's whole width, its buttons a row
     /// beneath them; back on one line, they sit between the buttons again.
     /// Right at the wrap point it changes once each way, and the keyboard
@@ -269,19 +301,13 @@ final class DevStackUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 20), "\(name) is in Your Apps"); row.tap()
     }
 
-    /// Closes the app's page, back to Your Apps: Safari's Close, or (a web
-    /// view in a sheet, before Safari's) its sheet dragged down off the screen.
+    /// Swipes its sheet away, back to Your Apps: dragged by its title bar
+    /// down off the screen, as a person dismisses it.
     private func close(_ app: XCUIApplication, _ title: String, _ name: String) {
-        let safari = app.buttons["Close"]
-        if safari.waitForExistence(timeout: 3) {
-            // its own left part: the address field's frame spans the rest of it
-            safari.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).tap()
-        } else {
-            let bar = app.navigationBars[title]
-            XCTAssertTrue(bar.waitForExistence(timeout: 5))
-            bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-                .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
-        }
+        let bar = app.navigationBars[title]
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
         XCTAssertTrue(app.buttons["app-\(name)"].waitForExistence(timeout: 10), "it closed")
         XCTAssertTrue(app.webViews.firstMatch.waitForNonExistence(timeout: 10))
     }

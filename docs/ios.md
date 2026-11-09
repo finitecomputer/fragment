@@ -27,8 +27,8 @@ personal show/hide/archive, naming, icons and preview generation.
 Use system typography and system glass controls, a single glass composer with
 aligned 44-point controls and no recipient caption, and actual fragment icons
 in Your Apps. The installed hand icon is a layered Icon Composer asset; product copy is Finite.Computer,
-Finite for short, and messages name their actual agent. Apps open in Safari's own
-view (`SFSafariViewController`), full screen, closed by its Close; chat state is retained. Native history, settings categories, attachments, voice
+Finite for short, and messages name their actual agent. App viewers are native large sheets with a visible drag handle and swipe-down
+dismissal, without a Done button, with Reload and Share; chat state is retained. Native history, settings categories, attachments, voice
 memos, reply/copy/share and group addressing follow the existing wire contracts.
 No Rust FFI, embedded chat webpage, model key or parallel chat protocol.
 
@@ -37,7 +37,7 @@ and WebSockets, a working composer above the keyboard, whole-text drafts
 replaced once by committed replies, Stop, retry with the original id,
 reconnect/catch-up without duplicates or regressing either channel's cursor,
 earlier history independent of live catch-up, selectable native Markdown,
-light/dark, and ordinary fragments in Safari's own view. Build
+light/dark, and ordinary fragments in dismissible WKWebView sheets. Build
 with Swift 6 strict concurrency and warnings as errors. See `ios/README.md`
 for commands and evaluation. Unit tests on a stub of the platform's answers
 lose a committed post's acknowledgement, refuse a post and drop a stream to
@@ -106,10 +106,10 @@ CLI hold, so the app leaves it to the web until one route does both.
 
 A signed `POST /api/f/{name}/session` reuses the registry’s existing single-use
 redemption and top-level fragment session. It returns a one-fragment `__signin`
-URL, good for 60 seconds, that opens in Safari's own view (`SFSafariViewController`):
-the page is Safari's, with this app's Safari data, kept as Safari keeps it, so a
-page's saved state (localStorage, IndexedDB, its cookies) is there the next time
-it opens and after a relaunch. Only fragments' cookies, each from its own
+URL, good for 60 seconds, that the sheet’s WKWebView opens. The sheets keep the
+app's own web data (`WKWebsiteDataStore.default()`), as Safari keeps an origin's,
+so a page's saved state (localStorage, IndexedDB, its cookies) is there the next
+time it opens and after a relaunch. Only fragments' cookies, each from its own
 `__signin`, enter it, host-only to their fragment; native authorization headers
 and private keys never do. A stranger’s app asks for consent before learning the person’s
 identity; owned/shared apps use their existing membership. General access and
@@ -123,16 +123,21 @@ redemption and per-fragment session bounds apply. Expired parents are replaced o
 the next authenticated mint. The key itself follows normal CLI-key revocation,
 not a separate mobile expiration rule. Schema step: `0009_key_sessions.sql`.
 
-Before a URL exists the sheet is native: loading, the consent question and the
-error a status or redemption answers. It validates the redemption against the
-fragment’s canonical origin, then presents Safari's view full screen (never
-embedded or covered, as Apple asks); a sheet asks once, and each opening is a new
-sheet and a new redemption. Safari's view handles the page: its links, a
-page's errors, and other origins. This app's Safari data is the person's it was
-kept for: disconnecting this iPhone, removing it here, or an approval that names
-another person (a new key, or this key approved by someone else) clears it, before
-that person can open an app, with `SFSafariViewController.DataStore` (iOS 16+),
-which clears all of it: no one app's data alone. Add is a
+The sheet validates the redemption against the fragment’s canonical origin,
+reports main-frame HTTP errors, and supports swipe dismissal; each opening is a
+new redemption. It holds that fragment's pages alone (`WebLinks`): a link, a new
+window or a script's navigation to another address leaves it, a fragment of the
+person's opening in the app as a chat's link opens one (its own redemption) and
+anything else in the system's browser; the platform's own page, where a page whose
+sign-in ended is sent, is said so, and Try again asks for a new redemption.
+Reload reloads the page it is at, never the spent redemption. Share gives that
+page's address alone: its origin and path, with no query, hash, user, password or
+redemption, so nothing of the person's goes with it. The app's web data is the
+person's it was kept for: disconnecting this iPhone, removing it here, or an
+approval that names another person (a new key, or this key approved by someone
+else) removes all of it, every type since `.distantPast`, before that person can
+open an app; an answer for an account no longer this app's does nothing. Every
+window (an iPad runs several) shows the app's one account. Add is a
 native prompt sheet, matching the web shell’s built-in Add hand; there is no real
 server fragment named `add-app`.
 

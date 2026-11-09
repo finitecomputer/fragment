@@ -464,7 +464,14 @@ struct FragmentRoot: View {
                 AppCreationSheet { prompt in
                     openedApp = nil; showingApps = false; library.home.text = prompt; page = .launcher
                 }
-            } else { FragmentWebSheet(fragment: app, api: api) }
+            } else {
+                // a link there to another fragment of theirs opens it, as a chat's link does
+                FragmentWebSheet(fragment: app, api: api) { url in
+                    guard let found = library.fragment(linkedBy: url) else { return false }
+                    openedApp = nil; open(found)
+                    return true
+                }
+            }
         }
         .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(scenePhase)") {
             if scenePhase == .active { await library.load(api); await library.watch(api) }
