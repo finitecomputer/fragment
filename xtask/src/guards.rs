@@ -111,6 +111,29 @@ mod tests {
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 
+    /// Goal: a type is written as JSON once (FIN-453 M7): an answer as
+    /// `Response::from_json`, a call's body as `routed::ask_object`'s,
+    /// JavaScript's as `js::to_js`, never made a `serde_json::Value` first
+    /// only to be written out again. What may make one is what edits it or
+    /// hands it on as one: a computer's saves and a job's trigger, fields
+    /// added (computer.rs, jobs.rs); a job step's results and a file's
+    /// content, the facet's arguments and a step's answer (jobs.rs,
+    /// files.rs); the queues' messages, whose JSON stays `to_value`'s, keys
+    /// sorted, byte for byte across releases (meter.rs, deliveries.rs); and
+    /// the rare calls whose body is a `Value` so `fragment::ask` and
+    /// `computer::ask` stay one copy each (an invite's claim, an own key's
+    /// sign-in: a body type of their own is about 1.4 KB more of the Wasm
+    /// apiece; registry/invites.rs, computer.rs). clippy cannot hold this:
+    /// `json!` writes through `to_value`. A `from_value` is clippy's
+    /// (cell/clippy.toml). Method: the cell's source, read.
+    #[test]
+    fn a_type_is_made_a_value_only_to_be_edited() {
+        // the name alone: `to_value::<T>(…)` is one too
+        let made = uses(&cell_sources(), "to_value");
+        let edited = BTreeMap::from([("computer.rs", 2), ("deliveries.rs", 1), ("files.rs", 1), ("jobs.rs", 2), ("meter.rs", 2), ("registry/invites.rs", 3)].map(|(f, n)| (f.to_string(), n)));
+        assert_eq!(made, edited, "write the type as JSON once (Response::from_json, routed::ask_object, js::to_js), not as a Value written out again");
+    }
+
     /// Goal: a change to a call's shape between the Worker and a platform
     /// object, or between two objects, ships safely across a deploy
     /// (fragment_core::release; docs/MODEL.md, "Calls between releases"):
