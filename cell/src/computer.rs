@@ -1450,7 +1450,6 @@ impl ComputerCell {
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
-        let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
         // a wipe that began while this start awaited starts nothing: the
         // check and the start are one turn (the host's start is synchronous)
         if self.wiped.get() {
@@ -3278,6 +3277,8 @@ impl SignedIn {
 /// The sign-in `signed` finishes, taken from its computer (once, and gone
 /// whatever comes of it): its verifier.
 pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+    // a Value, so `ask` stays one copy for every body (FIN-453 M7: a body
+    // type of its own is about 1.4 KB more of the Wasm, for a rare call)
     let body = serde_json::to_value(signed).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
     let answer = ask(env, &signed.computer, "computer/signed-in", &body).await?;
     let verifier = answer["verifier"].as_str().unwrap_or_default().to_string();

@@ -126,7 +126,7 @@ impl DurableObject for LedgerCell {
             return Ok(probed);
         }
         match self.route(req).await {
-            Ok(answer) => Response::from_json(&answer),
+            Ok(answer) => Ok(answer),
             Err(Failed::Refused(why)) => refusal(why, why.message()),
             Err(Failed::Saying(why, message)) => refusal(why, message),
             Err(Failed::Cell(e)) => e.response(),
@@ -153,6 +153,12 @@ impl DurableObject for LedgerCell {
 fn refusal(why: Refused, message: String) -> Result<Response> {
     let body = json!({ "error": why.code(), "message": message, "refused": why });
     Ok(Response::from_json(&body)?.with_status(why.code().status()))
+}
+
+/// A route's answer, as JSON, once (no `Value` between), through the one
+/// response builder every type shares (`json_answer`).
+fn reply<T: Serialize>(answer: T) -> Result<Response, Failed> {
+    Ok(crate::json_response::json_answer(&answer)?)
 }
 
 /// How a route failed: the ledger refused (typed), or the cell did.
@@ -719,7 +725,7 @@ impl LedgerCell {
         Ok(swept)
     }
 
-    async fn route(&self, mut req: Request) -> Result<Value, Failed> {
+    async fn route(&self, mut req: Request) -> Result<Response, Failed> {
         // a wipe ends a ledger that refuses its schema too, and a wiped
         // ledger answers as one, refused or not (schema.rs)
         if let Some(route) = req.path().strip_prefix("/wipe/") {
@@ -727,7 +733,7 @@ impl LedgerCell {
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")).into());
             }
-            return Ok(self.wipe(route).await?);
+            return reply(self.wipe(route).await?);
         }
         if self.wiped.get() {
             return Err(Failed::Refused(Refused::Wiped));
@@ -748,9 +754,6 @@ impl LedgerCell {
             Delay::from(std::time::Duration::from_millis(slow)).await;
         }
         let body = req.bytes().await?;
-        fn reply<T: Serialize>(answer: T) -> Result<Value, Failed> {
-            Ok(serde_json::to_value(answer).expect("the ledger's answers serialize"))
-        }
         fn done(answer: ()) -> Done {
             let () = answer;
             Done {}
@@ -887,23 +890,23 @@ impl LedgerCell {
         Ok(())
     }
 
-    async fn test_hook(&self, hook: TestHook) -> Result<Value, Failed> {
+    async fn test_hook(&self, hook: TestHook) -> Result<Response, Failed> {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
-            TestHook::Schema => Ok(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
+            TestHook::Schema => reply(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
             TestHook::Slow { ms } => {
                 self.slow_ms.set(ms.min(TEST_SLOW_MAX_MS));
-                Ok(json!({ "slowMs": self.slow_ms.get() }))
+                reply(json!({ "slowMs": self.slow_ms.get() }))
             }
             TestHook::ForgetGate => {
                 forget_gate();
-                Ok(json!({ "forgot": true }))
+                reply(json!({ "forgot": true }))
             }
             // the router answers it, never forwarding it here (levers.rs)
             TestHook::GateHeard => Err(CellError::new(ErrorCode::NotFound, "gate-heard is the router's lever").into()),
             TestHook::FailGrants { times } => {
                 self.fail_grants.set(times.min(TEST_FAIL_GRANTS_MAX));
-                Ok(json!({ "failGrants": self.fail_grants.get() }))
+                reply(json!({ "failGrants": self.fail_grants.get() }))
             }
             TestHook::PaidCalls { max } => {
                 let max = match max {
@@ -911,7 +914,7 @@ impl LedgerCell {
                     None => self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
                 };
                 self.set_meta(PAID_CALLS_MAX, &max.to_string())?;
-                Ok(json!({ "max": max, "used": self.paid_calls_used()? }))
+                reply(json!({ "max": max, "used": self.paid_calls_used()? }))
             }
             TestHook::Clock { offset_ms } => {
                 self.set_meta("clock_offset", &offset_ms.to_string())?;
@@ -919,9 +922,9 @@ impl LedgerCell {
                 let status = self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?;
                 // the alarm follows the clock
                 self.armed.set(None);
-                Ok(json!({ "offsetMs": offset_ms, "month": status.month }))
+                reply(json!({ "offsetMs": offset_ms, "month": status.month }))
             }
-            TestHook::Sweep => Ok(serde_json::to_value(self.swept().await?).expect("a sweep serializes")),
+            TestHook::Sweep => reply(self.swept().await?),
             TestHook::Entries { prefix } => {
                 #[derive(Deserialize)]
                 struct Row {
@@ -938,16 +941,16 @@ impl LedgerCell {
                         json!({ "ref": r.r#ref, "entry": entry })
                     })
                     .collect();
-                Ok(json!({ "entries": entries }))
+                reply(json!({ "entries": entries }))
             }
-            TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
+            TestHook::Totals => reply(self.mutate(|l, _, _| Ok(l.totals())).await?),
             // the book it charges with: its release's (it keeps none)
-            TestHook::Book => Ok(json!({ "book": self.cfg.book })),
+            TestHook::Book => reply(json!({ "book": self.cfg.book })),
             TestHook::LegacySeat { seat, seq } => {
                 let c = SetSeat { id: format!("legacy-seat:{seq}"), seat, seq };
                 let book = &self.cfg.book;
                 let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now, book))).await?;
-                Ok(serde_json::to_value(status).expect("a status serializes"))
+                reply(status)
             }
         }
     }
