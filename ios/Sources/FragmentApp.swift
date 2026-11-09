@@ -465,8 +465,6 @@ struct FragmentRoot: View {
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
                         content(api)
-                            // what they are told, over every page (as the web's band)
-                            .safeAreaInset(edge: .top, spacing: 0) { NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4) }
                             .navigationTitle(title)
                             .navigationBarTitleDisplayMode(.inline)
                             .toolbar {
@@ -488,6 +486,9 @@ struct FragmentRoot: View {
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
                             }
                     }
+                    // what they are told, over every page and every page pushed
+                    // on it (Your Apps, Settings' own), as the web's band
+                    .safeAreaInset(edge: .top, spacing: 0) { NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4) }
             }
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
