@@ -110,6 +110,14 @@ A fragment's channels: its records, read, posted and drafted.
 - Answer: [`Done`](#done)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 429 `rate_limited`; 500 `schema_refused`; 503 `deploying`
 
+#### `channels.newest`
+
+`GET /api/f/{name}/channels/{channel}/newest`: Each poster's newest record of each kind the channel keeps the newest of, the newest first.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`ChannelNewest`](#channelnewest)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
 #### `channels.post`
 
 `POST /api/f/{name}/channels/{channel}`: Append a `message` record as the poster.
@@ -157,6 +165,15 @@ out. Its answer: the fragment, and whether it is archived now.
 | --- | --- | --- | --- |
 | `archived` | `boolean` | required |  |
 | `name` | `string` | required |  |
+
+### `ChannelNewest`
+
+out. `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader): each poster's newest record of each kind the channel keeps the newest of (`ChannelDecl::newest`), the newest first, at most `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past its retention) is none; a channel that keeps no kind answers none.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `channel` | `string` | required |  |
+| `records` | `array` of [`ChannelRecord`](#channelrecord) | required |  |
 
 ### `ChannelPage`
 

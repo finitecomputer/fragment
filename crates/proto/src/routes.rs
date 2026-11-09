@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
 use crate::{
-    Archived, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
+    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
 };
 use ErrorCode::{BudgetUsedUp, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
@@ -295,6 +295,17 @@ pub const ROUTES: &[Route] = &[
         ],
         request: None,
         answer: Answer::Json(ty::<ChannelPage>()),
+        errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound],
+    },
+    Route {
+        operation: "channels.newest",
+        method: Method::Get,
+        path: "/api/f/{name}/channels/{channel}/newest",
+        summary: "Each poster's newest record of each kind the channel keeps the newest of, the newest first.",
+        auth: SIGNED,
+        params: &[NAME, CHANNEL],
+        request: None,
+        answer: Answer::Json(ty::<ChannelNewest>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound],
     },
     Route {

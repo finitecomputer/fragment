@@ -18,6 +18,26 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "ChannelNewest": {
+        "description": "`GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):\neach poster's newest record of each kind the channel keeps the newest\nof (`ChannelDecl::newest`), the newest first, at most\n`limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past\nits retention) is none; a channel that keeps no kind answers none.",
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "channel",
+          "records"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
       "ChannelPage": {
         "description": "`GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):\nA page in ascending seq order. `next` is its last seq for a forward\nread, its first seq for a backwards read, or the input cursor if empty.\n`more`: whether the channel holds records past the page in the\ndirection read (added 2026-11; absent from older releases' pages).",
         "properties": {
@@ -2432,6 +2452,133 @@
           }
         ],
         "summary": "Show a record as it is written to the channel's live readers; never stored.",
+        "tags": [
+          "channels"
+        ]
+      }
+    },
+    "/api/f/{name}/channels/{channel}/newest": {
+      "get": {
+        "operationId": "channels.newest",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The channel's name.",
+            "in": "path",
+            "name": "channel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelNewest"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Each poster's newest record of each kind the channel keeps the newest of, the newest first.",
         "tags": [
           "channels"
         ]

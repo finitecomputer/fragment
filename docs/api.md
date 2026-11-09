@@ -729,6 +729,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
 | `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, from, listed, seq}]}`: `events`, `ops`, `inbox`, and the app's (Apps) |
 | `GET /api/f/{name}/channels/{channel}?after=\|before=&limit=` | the channel's reader | → `ChannelPage` (docs/wire, `channels.read`): at most `CHANNEL_PAGE` records and, past its first record, `CHANNEL_HTTP_PAGE_MAX_BYTES` of bodies, always ascending. Both cursors, or a bad cursor or limit, 400 |
+| `GET /api/f/{name}/channels/{channel}/newest` | the channel's reader | → `ChannelNewest {channel, records}` (docs/wire, `channels.newest`): each poster's newest record of each kind the channel keeps the newest of (Newest records), the newest first, at most `NEWEST_KEPT_MAX`; none when it keeps none |
 | `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `PostRecord` → `Posted` (docs/wire, `channels.post`): `body` (any JSON, at most `RECORD_BODY_MAX_BYTES`; 413) appended as a `message` record naming the poster, with no app code, reaching sockets, subscriptions and triggers. The same id and body again answer that record (and finish what the first left); the same id otherwise 409. A channel without `post`, and `events`, `ops`, `inbox`, 403; `signedIn` refuses an anonymous poster (401); `from` refuses all but a member of that kind posting as itself (403). A `public` poster spends a public call |
 | `PUT /api/f/{name}/channels/{channel}/draft` | the channel's `post` role | `PutDraft` → `Done` (docs/wire, `channels.draft`): a record its poster is writing, whole so far (at most `RECORD_BODY_MAX_BYTES`), to the sockets following the channel (`draft` on `__live`), never stored; `text: null` stops it. At most 10 a second a fragment (429); `turn` is `^[A-Za-z0-9._:-]{1,128}$` |
 
@@ -780,6 +781,23 @@ what a kind means.
   for channels the row's role may read; a role change, a removal, or a
   deploy changing `read` or `listed` sends them again. An agent's list
   read `for` someone carries none of theirs. History is never read back.
+
+### Newest records
+
+A channel that declares `newest` (Apps) keeps each poster's newest record
+of those kinds, which one read answers (`…/channels/{channel}/newest`,
+`__channel/{channel}/newest`, `fragment.newest`), however long ago it was
+posted: the latest state each poster says, with no history read back (a
+chat's agents' helpers working, docs/chat-records.md `turn.helpers`). A
+record's kind is its body's `kind`, as for `listed`; the platform never
+reads what one means, and nothing goes to members' lists.
+
+- **What is kept.** Each record of such a kind, as it is appended, is its
+  poster's newest of that kind: one row a poster and kind, at most
+  `NEWEST_KEPT_MAX` a channel (past it, the one posted longest ago goes).
+  A record the channel's retention dropped is none.
+- **The fence.** A deploy that stops keeping a kind drops what was kept of
+  it; one that starts keeping a kind starts from its next record.
 
 ### A fragment's search
 
@@ -962,6 +980,8 @@ agent, or carrying code, keeps the last good code and says to fork it.
     `LISTED_KINDS_MAX` kinds (`^[A-Za-z0-9._-]{1,64}$`) and at most
     `LISTED_FIELDS_MAX` fields (`^[A-Za-z][A-Za-z0-9_]{0,31}$`, never
     `kind`), each once; else refused at deploy.
+  - `"newest": [...]` (Newest records): 1 to `NEWEST_KINDS_MAX` kinds,
+    named as `listed`'s are, each once; else refused at deploy.
 - `triggers` (at most `TRIGGERS_MAX`) start runs of a mutation or a job an
   editor may call: `{"cron": "0 9 * * *", "run": op}` (five fields, UTC,
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
@@ -1667,6 +1687,7 @@ fragment's, `/api/…` included.
 | `__members` | viewers and up (the share link too): as `GET /api/f/{name}/members` |
 | `__schedules` | viewers and up (the share link too): as `GET /api/f/{name}/schedules` |
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: as `GET /api/f/{name}/channels/{channel}`, with this origin's session or share link |
+| `GET __channel/{channel}/newest` | the channel's readers: as `GET /api/f/{name}/channels/{channel}/newest` |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser calls as its person, an unsigned one gets an anonymous principal cookie; `public` callers get `PUBLIC_CALLS_PER_MIN` calls a minute each, `PUBLIC_CALLS_PER_MIN_FRAGMENT` a fragment |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`): `{id, input}`, the record's body as `input` → `{result: record, replayed}`; it spends a public call as a call does |
 | `PUT __secrets/{KEY}` | an editor's session: `PUT /api/f/{name}/secrets/{KEY}`'s body and answer, `application/json` only (so no cross-site form sets one), from the fragment's own page; written, never read back (`secret.set` logs it) |
@@ -1744,6 +1765,8 @@ between two changes to the fragment, one at a time per id (429
   pages the backlog, then follows live, resuming after a reconnect;
   `onDraft` hears drafts, `onReady({next})` the backlog caught up.
 - `read(channel, {after?, before?, limit?})`: one page through `__channel`.
+- `newest(channel)`: each poster's newest record of each kind the channel
+  keeps the newest of (Newest records).
 - `presence.set(data)` (changes within 150 ms sent as one), `presence.on(fn)`.
 - `blob(file, {name?, type?})` → `{sha256, size, type, name}`, uploaded as
   an editor.
