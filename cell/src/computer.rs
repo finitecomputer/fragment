@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::key_hour;
 use fragment_core::computer::{
-    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -897,6 +897,13 @@ impl ComputerCell {
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
         self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// What its owner is told now, in words (FIN-458, `GET /api/notices`).
+    fn said(&self) -> CellResult<Vec<fragment_proto::notice::Notice>> {
+        let (id, life) = (self.must(MetaKey::Id)?, self.lifecycle()?);
+        let facts = said::Facts { computer: &id, generation: life.generation(), always_on: life.always_on(), support: self.cfg.support_url.as_deref(), now_ms: js::now_ms() };
+        Ok(said::said(&self.with_keys(notices(&life, &self.saves()?, &self.images()?, &self.rules()))?, &facts))
     }
 
     /// `told`, and a notice of each shared key its owner's cap pauses now,
@@ -2757,6 +2764,19 @@ impl ComputerCell {
         let rest = match (req.method(), segments.as_slice()) {
             // the person's own computer (the router found it by them): made
             (Method::Post, ["api", "computers"]) => return self.make(&who).await,
+            // what its owner is told, in words (`notices::route`): theirs,
+            // or none while it is not made, a deploy since its last look news
+            (Method::Get, ["api", "notices"]) => {
+                let notices = match self.owned_by(&who) {
+                    Ok(()) => {
+                        self.look_and_tell().await;
+                        self.said()?
+                    }
+                    Err(e) if e.code == ErrorCode::NotFound => vec![],
+                    Err(e) => return Err(e),
+                };
+                return json_response(&fragment_proto::notice::NoticeList { notices });
+            }
             // listed: theirs, or none yet
             (Method::Get, ["api", "computers"]) => {
                 let list = match self.owned_by(&who) {
@@ -3291,6 +3311,12 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
     }
 }
 
+/// `GET /api/notices`, the computer's part (`notices::route`): handed to
+/// the person's own computer, which answers what it tells them.
+pub(crate) async fn notices_for(env: &Env, who: &str) -> CellResult<Response> {
+    send_api(env, who, Method::Get, &fragment_core::computer::default_computer_of(who), "https://computer.internal/api/notices".into(), &[]).await
+}
+
 /// Hands `/api/computers/{rest}` to computer `id`, as `/api/f/{name}/…` is
 /// handed to its fragment: the computer checks who is asking
 /// (`ComputerCell::api`). Asked again while it refuses this release (it
@@ -3300,6 +3326,11 @@ async fn forward(env: &Env, who: &str, method: Method, id: &str, rest: &[&str], 
         return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
     }
     let url = format!("https://computer.internal/{}", ["api", "computers"].iter().chain(rest).copied().collect::<Vec<_>>().join("/"));
+    send_api(env, who, method, id, url, body).await
+}
+
+/// `url` asked of computer `id` as `who` (its `api`), with `body`.
+async fn send_api(env: &Env, who: &str, method: Method, id: &str, url: String, body: &[u8]) -> CellResult<Response> {
     crate::routed::send_again(env, "COMPUTER", id, || {
         let headers = Headers::new();
         headers.set(KIND_HEADER, "api")?;
