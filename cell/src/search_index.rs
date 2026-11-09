@@ -280,7 +280,7 @@ impl DurableObject for SearchIndexCell {
             return Ok(probed);
         }
         match self.route(req).await {
-            Ok(answer) => Response::from_json(&answer),
+            Ok(answer) => Ok(answer),
             Err(e) => e.response(),
         }
     }
@@ -310,15 +310,21 @@ impl SearchIndexCell {
         self.state.id().to_string()
     }
 
-    async fn route(&self, mut req: Request) -> CellResult<Value> {
+    async fn route(&self, mut req: Request) -> CellResult<Response> {
         self.schema.ready()?;
         let path = req.path();
         let op = path.strip_prefix("/index/").ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no route {path}")))?.to_string();
-        let body: Value = req.json().await.map_err(|e| CellError::invalid(format!("a search index's call is JSON: {e}")))?;
-        let parse = |what: &str, e: serde_json::Error| CellError::invalid(format!("index/{what}: {e}"));
+        // each op reads its own type from the call's bytes, once
+        let body = req.bytes().await?;
+        fn read<'a, T: Deserialize<'a>>(op: &str, body: &'a [u8]) -> CellResult<T> {
+            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("index/{op}: {e}")))
+        }
+        fn answer(a: &impl Serialize) -> CellResult<Response> {
+            Ok(Response::from_json(a)?)
+        }
         match op.as_str() {
             "upsert" => {
-                let w: Write = serde_json::from_value(body).map_err(|e| parse("upsert", e))?;
+                let w: Write = read(&op, &body)?;
                 if self.cfg.test_hooks && self.holding.get() {
                     self.held.set(self.held.get() + 1);
                     let mut waited = 0;
@@ -334,39 +340,41 @@ impl SearchIndexCell {
                 if !matches!(wrote, Wrote::Ended | Wrote::Fenced { .. } | Wrote::Written { written: false, cleared: false, .. }) {
                     self.after_write().await?;
                 }
-                Ok(serde_json::to_value(wrote).expect("an outcome serializes"))
+                answer(&wrote)
             }
             "delete" => {
+                let body: Value = read(&op, &body)?;
                 let source = body["source"].as_str().ok_or_else(|| CellError::invalid("index/delete names its source"))?.to_string();
                 let fence = body["fence"].as_u64();
                 let me = self.parts();
                 // the fence's check, the removal and its tombstone, one transaction
                 let removed = js::transaction_sync(&self.raw, move || me.remove_fenced(&source, fence))?;
                 match removed {
-                    Err(stored) => Ok(json!({ "deleted": false, "fenced": stored })),
+                    Err(stored) => answer(&json!({ "deleted": false, "fenced": stored })),
                     Ok(n) => {
                         if n > 0 {
                             self.after_write().await?;
                         }
-                        Ok(json!({ "deleted": n > 0 }))
+                        answer(&json!({ "deleted": n > 0 }))
                     }
                 }
             }
             "known" => {
-                let k: Known = serde_json::from_value(body).map_err(|e| parse("known", e))?;
-                Ok(json!({ "known": self.parts().known(&k)? }))
+                let k: Known = read(&op, &body)?;
+                answer(&json!({ "known": self.parts().known(&k)? }))
             }
             "sources" => {
-                let p: Page = serde_json::from_value(body).map_err(|e| parse("sources", e))?;
-                self.parts().sources(&p)
+                let p: Page = read(&op, &body)?;
+                answer(&self.parts().sources(&p)?)
             }
-            "status" => self.parts().status(self.chunks_max()?),
+            "status" => answer(&self.parts().status(self.chunks_max()?)?),
             "search" => {
-                let a: Ask = serde_json::from_value(body).map_err(|e| parse("search", e))?;
-                Ok(serde_json::to_value(self.parts().search(&a)?).expect("an answer serializes"))
+                let a: Ask = read(&op, &body)?;
+                answer(&self.parts().search(&a)?)
             }
-            "end" => self.end().await,
+            "end" => answer(&self.end().await?),
             "test" if self.cfg.test_hooks => {
+                let body: Value = read(&op, &body)?;
                 if let Some(hold) = body["hold"].as_bool() {
                     self.holding.set(hold);
                 }
@@ -380,7 +388,7 @@ impl SearchIndexCell {
                 // the build's SIMD, and its dot product checked against the
                 // scalar one in this very Wasm
                 status["simd"] = json!({ "built": cfg!(all(target_arch = "wasm32", target_feature = "simd128")), "agrees": engine::dot_agrees() });
-                Ok(status)
+                answer(&status)
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         }
