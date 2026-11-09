@@ -234,6 +234,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       copy.append(el("strong", null, said.title));
       if (said.most) copy.append(el("p", null, said.most));
       if (said.allow) {
+        // its tap unconfirmed: the pause as last read, to tap again
+        if (allowFailed.has(`${n.provider} ${n.resumesAt}`)) copy.append(el("p", null, "Couldn't confirm that. Try again."));
         const allow = el("button", "primary", said.allow);
         allow.type = "button";
         allow.dataset.action = "allow-key";
@@ -312,16 +314,26 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
   }
   // Allow: the computer lifts the key's cap a step from the one this
-  // notice showed (a stale page changes nothing), and answers its view
+  // notice showed (a stale page changes nothing), and answers its view, or
+  // its read does when that ask fails. The tap is one more read of the
+  // computer in the list's sequence (`reads().asked`), and the newest wins:
+  // its view is taken in only while no read was asked after it (the
+  // computer tells this page of each change, so a newer read follows any it
+  // misses). Neither answering, the pause stays as last read, its button
+  // back with a short line while that pause is shown, to tap again.
+  const allowFailed = new Set();
   async function allowKey(n, button) {
     const c = computer();
     if (!c) return;
+    const mine = ++reads().asked;
     button.disabled = true;
-    try {
-      computerIs(await api("POST", `/api/computers/${seg(c.computer)}/key-caps/${seg(n.provider)}`, { from: n.capMicros }));
-    } catch {
-      computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
+    const at = `/api/computers/${seg(c.computer)}`;
+    const view = (await api("POST", `${at}/key-caps/${seg(n.provider)}`, { from: n.capMicros }).catch(() => null)) ?? (await api("GET", at).catch(() => null));
+    if (!view?.computer) {
+      allowFailed.add(`${n.provider} ${n.resumesAt}`);
+      return renderComputer();
     }
+    if (mine === reads().asked) computerIs(view);
   }
   // Later: this update is told no more, anywhere, until another is ready.
   async function updateLater(version, button) {

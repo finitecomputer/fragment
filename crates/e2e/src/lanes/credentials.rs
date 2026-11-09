@@ -77,7 +77,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "its owner sees it over the agent's chat: the key, and what it spent this hour",
     "as the hour passes, its oldest charges go: the key's calls go again, and its notice with them",
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
-    "its owner taps Allow: the computer lifts the cap a step, the notice goes, and the key's next call goes through",
+    "its owner taps Allow: unconfirmed (its ask refused, the computer's read failing), the pause stays with its button and a short line; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
 ];
 
@@ -504,11 +504,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     s.ok(
         SWAP_CHECKS[41],
         told.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused" && n["provider"] == "elevenlabs" && n["capMicros"] == cap && n["allowMicros"] == 4 * cap))
-            && in_chat.as_ref().is_some_and(|(shown, _)| *shown == json!({ "said": "ElevenLabs calls paused: $5.03 this hour", "buttons": ["Allow up to $20 an hour"] })),
+            && in_chat.as_ref().is_some_and(|(shown, _, _)| *shown == json!({ "said": "ElevenLabs calls paused: $5.03 this hour", "buttons": ["Allow up to $20 an hour"] })),
         json!({ "told": told, "inChat": in_chat }),
     );
     let lifted = say(s, 160, &speak(SPOKEN))?;
-    s.ok(SWAP_CHECKS[44], in_chat.as_ref().is_some_and(|(_, gone)| *gone) && !paused_now() && lifted.starts_with("fetched 200"), json!({ "lifted": lifted, "notices": notices() }));
+    let unconfirmed = json!({ "lines": ["Couldn't confirm that. Try again."], "button": "Allow up to $20 an hour" });
+    s.ok(
+        SWAP_CHECKS[44],
+        in_chat.as_ref().is_some_and(|(_, failed, gone)| *failed == unconfirmed && *gone) && !paused_now() && lifted.starts_with("fetched 200"),
+        json!({ "lifted": lifted, "inChat": in_chat, "notices": notices() }),
+    );
     // a page still showing the $5 notice taps again: nothing changes, so
     // $20 holds and the next call goes through
     let stale = key_cap(w.owner, "elevenlabs", json!({ "from": cap }))?;
@@ -557,11 +562,20 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 /// words and its buttons; null while it is not shown.
 const KEY_NOTICE: &str = "(() => { const box = document.getElementById('computer-notices'); const r = box?.querySelector('.computer-notice[data-kind=\"key_paused\"]'); if (!r || box.hidden) return null; return { said: r.querySelector('strong')?.textContent ?? null, buttons: [...r.querySelectorAll('button')].map((x) => x.textContent) }; })()";
 
+/// Taps a paused key's Allow, enabled: whether it was.
+const ALLOW: &str = "(() => { const x = document.querySelector('#computer-notices [data-action=\"allow-key\"]'); if (!x || x.disabled) return false; x.click(); return true; })()";
+/// The page's asks of Allow refused (503) and its reads of the computer
+/// failing as a network fails, until `__restoreFetch()`.
+const KEY_ASKS_FAIL: &str = "(() => { const f = window.fetch; window.__restoreFetch = () => { window.fetch = f; }; window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const method = o?.method ?? 'GET'; if (method === 'POST' && path.includes('/key-caps/')) return new Response(JSON.stringify({ error: 'unavailable', message: 'refused (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); if (method === 'GET' && /^\\/api\\/computers\\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch'); return f(url, o); }; return true; })()";
+/// A paused key's notice whose tap went unconfirmed: its lines, and its
+/// button, enabled; null while that button is not.
+const KEY_UNCONFIRMED: &str = "(() => { const r = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"]'); const b = r?.querySelector('[data-action=\"allow-key\"]'); return r && b && !b.disabled ? { lines: [...r.querySelectorAll('.notice-copy p')].map((p) => p.textContent), button: b.textContent } : null; })()";
 /// The person's chat page in Chrome (the shell, signed in as `owner`): the
 /// paused key's notice as it shows, shot at 1280 and 390 wide, light, in
-/// the run's `key-guard/`; its Allow tapped, and whether the notice went
-/// (shot again). None without Chrome.
-fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<(Value, bool)>> {
+/// the run's `key-guard/`; its Allow tapped while its ask and the
+/// computer's read fail, and the notice then (shot); tapped again, whether
+/// the notice went (shot again). None without Chrome.
+fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<(Value, Value, bool)>> {
     let Some(mut b) = s.browser()? else { return Ok(None) };
     let shots = s.dir("key-guard");
     let session = api.sign_in(&Api::email_of(owner))?;
@@ -574,11 +588,22 @@ fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<O
         !shown.is_null()
     });
     super::telegram_settings::shoot(&mut b, &page, &shots, "k1-paused", Some("#computer-notices"))?;
-    let tapped = b.eval(&page, "(() => { const x = document.querySelector('#computer-notices [data-action=\"allow-key\"]'); if (!x || x.disabled) return false; x.click(); return true; })()")? == true;
+    // tapped while its ask is refused and the computer's read fails: the
+    // pause stays as last read, its button back with a short line
+    b.eval(&page, KEY_ASKS_FAIL)?;
+    b.eval(&page, ALLOW)?;
+    let mut failed = Value::Null;
+    s.eventually(Duration::from_secs(30), || {
+        failed = b.eval(&page, KEY_UNCONFIRMED).unwrap_or(Value::Null);
+        failed["lines"].as_array().is_some_and(|l| !l.is_empty())
+    });
+    super::telegram_settings::shoot(&mut b, &page, &shots, "k1b-unconfirmed", Some("#computer-notices"))?;
+    b.eval(&page, "(window.__restoreFetch(), true)")?;
+    let tapped = b.eval(&page, ALLOW)? == true;
     let gone = tapped && b.until(&page, &format!("{KEY_NOTICE} === null"), Duration::from_secs(30));
     super::telegram_settings::shoot(&mut b, &page, &shots, "k2-allowed", None)?;
     b.close(page)?;
-    Ok(Some((shown, gone)))
+    Ok(Some((shown, failed, gone)))
 }
 
 /// The checks `model_checks` makes, as a run without the stub or the fakes
