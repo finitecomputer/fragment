@@ -1,5 +1,5 @@
+import SafariServices
 import SwiftUI
-import WebKit
 
 @MainActor @Observable
 final class AccountConnection {
@@ -108,9 +108,8 @@ final class AccountConnection {
             try ChatDraftStore.removeAccount(api: client)
         }
         try DeviceKeychain.clear(service: scope.keychainService); account = nil; code = nil; cachedAPI = nil
-        await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-        // every app's pages' state and session cookie go with the account
-        try await FragmentWebStore.removeAll()
+        // every app's page data, kept in this app's Safari view (iOS 16+; the app needs 26)
+        await SFSafariViewController.DataStore.default.clearWebsiteData()
     }
 }
 

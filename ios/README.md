@@ -3,7 +3,7 @@
 A native SwiftUI client for Finite.Computer, organized like the web shell. iOS 26+,
 Swift 6, Apple frameworks and pinned P256K 0.21.1 for CLI-compatible NIP-98 signing.
 No Rust bindings, shared runtime, or web chat UI. App fragments and imported
-conversations open in a native WKWebView sheet. Every request is signed by this
+conversations open in Safari's own view (`SFSafariViewController`). Every request is signed by this
 iPhone's own approved key: there is no unsigned or offline mode.
 
 ## Connect an account
@@ -71,7 +71,7 @@ A physical phone reaches a platform over HTTPS; Release builds take nothing else
 - The launcher's one action records a voice memo until something is typed, then
   sends. A finished memo sends itself, there and in a chat, with any words typed;
   its chat is made as it records. A soft haptic tap marks a reply's new words.
-- Dismissible app sheets leave the conversation in place; a bounded in-memory
+- Apps open in Safari's own view and leave the conversation in place; a bounded in-memory
   session cache retains composer drafts, pending post ids and cursors across navigation.
 - Native message author identities, Markdown, timestamps, long-press Reply/Copy/
   Share, quoted replies, file import, and AAC voice memos (five minutes maximum).
@@ -166,10 +166,11 @@ other server is ever asked (`Sources/LaunchScope.swift`;
 `--ui-test-saved-account <origin>` seeds one, to show it unused).
 
 `DevStackUITests` run against a dev stack, and skip without one. The test signs a
-new person in through the WorkOS fake, makes their apps, approves the app's code
-at `/cli`, and checks that an app's page keeps its state across sheets (a page's
-localStorage, a todo's server writes) until the iPhone disconnects. Forward the
-platform and the fake to the Mac, then name the platform to the test runner:
+new person in through the WorkOS fake, makes their apps, and approves the app's
+code at `/cli`. It checks that an app's page keeps what it saved (localStorage)
+when it is closed and opened again and after a relaunch, that a todo's server
+write sticks, and that disconnecting clears what pages kept. Forward the platform
+and the fake to the Mac, then name the platform to the test runner:
 
 ```sh
 ssh -N -L 8790:127.0.0.1:8790 -L 8794:127.0.0.1:8794 linux

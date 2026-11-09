@@ -158,9 +158,9 @@ final class DevStackUITests: XCTestCase {
     }
 
     /// An app's page keeps what it saved in the browser (localStorage) from
-    /// one opening of its sheet to the next, as it does in Safari, and a
-    /// server-backed app's writes stick as well; disconnecting this iPhone
-    /// removes what the pages kept, so pairing again finds none of it.
+    /// one opening of it to the next, and across a relaunch, as it does in
+    /// Safari, and a server-backed app's writes stick as well; disconnecting
+    /// this iPhone removes what the pages kept, so pairing again finds none.
     func testAnAppsPageKeepsItsStateAcrossSheetsUntilDisconnect() async throws {
         let platform = try await DevPlatform.start()
         let notes = try await platform.app(template: "blank", title: "Notes kept here", page: Self.notesPage)
@@ -174,7 +174,7 @@ final class DevStackUITests: XCTestCase {
         let note = "milk \(UUID().uuidString.prefix(6))"
         open(app, notes)
         let field = app.webViews.textFields["note"]
-        XCTAssertTrue(field.waitForExistence(timeout: 20), "the notes page loads in its sheet")
+        XCTAssertTrue(field.waitForExistence(timeout: 20), "the notes page loads")
         field.tap(); field.typeText(note)
         app.webViews.buttons["Save"].tap()
         XCTAssertTrue(app.webViews.staticTexts[note].waitForExistence(timeout: 5), "the page saved the note")
@@ -186,26 +186,41 @@ final class DevStackUITests: XCTestCase {
         screenshot(app, "Notes reopened")
         close(app, "Notes kept here", notes)
 
-        // a page whose writes are the server's (the todo template's operations)
+        // a page whose writes are the server's (the todo template's operations):
+        // a todo the person added elsewhere, ticked on the page, still ticked
         let task = "eggs \(UUID().uuidString.prefix(6))"
+        try await platform.call(todo, "add", ["text": task])
         open(app, todo)
-        let todoField = app.webViews.textFields.firstMatch
-        XCTAssertTrue(todoField.waitForExistence(timeout: 20), "the todo page loads in its sheet")
-        todoField.tap(); todoField.typeText(task)
-        app.webViews.buttons["Add"].tap()
-        XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 10), "the server took the todo")
+        let box = app.webViews.checkBoxes.firstMatch.exists ? app.webViews.checkBoxes.firstMatch : app.webViews.switches.firstMatch
+        XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 20), "the todo page loads, its todo there")
+        box.tap()
+        XCTAssertTrue(app.webViews.staticTexts["finished \u{201C}\(task)\u{201D}"].waitForExistence(timeout: 10), "the server took the tick")
         close(app, "Sheet todo", todo)
         open(app, todo)
-        XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 20), "reopened, the todo is there")
+        XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.webViews.staticTexts["finished \u{201C}\(task)\u{201D}"].exists, "reopened, the tick is there")
         screenshot(app, "Todo reopened")
         close(app, "Sheet todo", todo)
 
+        // relaunched (a test launch pairs again: its account starts empty)
+        app.terminate()
+        app.launch()
+        try await pair(app, platform)
+        open(app, notes)
+        XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 20), "relaunched, the page still has its note")
+        XCTAssertTrue(app.webViews.staticTexts[note].exists)
+        screenshot(app, "Notes after relaunch")
+        close(app, "Notes kept here", notes)
+
         // disconnect, then pair again as the same person: nothing kept
-        app.buttons["sidebar"].tap()
+        app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["sidebar"].waitForExistence(timeout: 5)); app.buttons["sidebar"].tap()
         let settings = app.buttons["sidebar-settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5)); settings.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         let connection = app.buttons["accountConnection"]
-        XCTAssertTrue(connection.waitForExistence(timeout: 5)); connection.tap()
+        for _ in 0..<4 where !connection.isHittable { app.swipeUp() }
+        XCTAssertTrue(connection.isHittable, "Account connection, at the end of Settings"); connection.tap()
         let disconnect = app.buttons["disconnectAccount"]
         XCTAssertTrue(disconnect.waitForExistence(timeout: 5)); disconnect.tap()
         try await pair(app, platform)
@@ -218,23 +233,40 @@ final class DevStackUITests: XCTestCase {
     /// Connect, its code approved at `/cli` by the person, then Home.
     private func pair(_ app: XCUIApplication, _ platform: DevPlatform) async throws {
         let connect = app.buttons["pairAccount"].firstMatch
-        XCTAssertTrue(connect.waitForExistence(timeout: 10)); connect.tap()
-        let code = app.staticTexts["pairingCode"]
-        XCTAssertTrue(code.waitForExistence(timeout: 20), "a pairing code")
+        XCTAssertTrue(connect.waitForExistence(timeout: 10))
+        // after a disconnect from Settings, its sheet and Home both show Connect,
+        // one code; a tap as the sheet goes away is tapped again
+        let code = app.staticTexts["pairingCode"].firstMatch
+        for _ in 0..<3 where !code.exists { connect.tap(); _ = code.waitForExistence(timeout: 8) }
+        XCTAssertTrue(code.exists, "a pairing code")
         try await platform.approve(code: code.label)
-        XCTAssertTrue(app.buttons["yourApps"].waitForExistence(timeout: 20), "approved, Home")
+        XCTAssertTrue(app.textViews["composer"].waitForExistence(timeout: 20), "approved, Home")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "Home settles, its keyboard up")
     }
 
     private func open(_ app: XCUIApplication, _ name: String) {
-        if !app.buttons["app-\(name)"].exists { app.buttons["yourApps"].tap() }
+        if !app.navigationBars["Your Apps"].exists {
+            app.buttons["yourApps"].tap()
+            XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 10), "Your Apps")
+        }
         let row = app.buttons["app-\(name)"]
         XCTAssertTrue(row.waitForExistence(timeout: 20), "\(name) is in Your Apps"); row.tap()
     }
 
-    /// Swipes its sheet away, back to Your Apps.
+    /// Closes the app's page, back to Your Apps: Safari's Close, or (a web
+    /// view in a sheet, before Safari's) its sheet dragged down off the screen.
     private func close(_ app: XCUIApplication, _ title: String, _ name: String) {
-        app.navigationBars[title].swipeDown(velocity: .fast)
-        XCTAssertTrue(app.buttons["app-\(name)"].waitForExistence(timeout: 10), "the sheet closed")
+        let safari = app.buttons["Close"]
+        if safari.waitForExistence(timeout: 3) {
+            // its own left part: the address field's frame spans the rest of it
+            safari.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).tap()
+        } else {
+            let bar = app.navigationBars[title]
+            XCTAssertTrue(bar.waitForExistence(timeout: 5))
+            bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+                .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+        }
+        XCTAssertTrue(app.buttons["app-\(name)"].waitForExistence(timeout: 10), "it closed")
         XCTAssertTrue(app.webViews.firstMatch.waitForNonExistence(timeout: 10))
     }
 
@@ -303,6 +335,11 @@ private struct DevPlatform {
             _ = try await shell("api/f/\(name)/deploy", [:])
         }
         return name
+    }
+
+    /// One of `name`'s operations, called as the person (`POST /api/f/{name}/ops/{op}`).
+    func call(_ name: String, _ op: String, _ input: [String: String]) async throws {
+        _ = try await shell("api/f/\(name)/ops/\(op)", ["id": UUID().uuidString, "input": input])
     }
 
     /// Types `code` at `/cli` and approves the key it names.
