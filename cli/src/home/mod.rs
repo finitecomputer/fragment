@@ -89,7 +89,11 @@ pub struct Extracted {
     pub bytes: u64,
 }
 
-/// Each named file, and each file under each named folder, copied under `to`.
+/// Each named file, and each file under each named folder, copied under
+/// `to`. What it writes never lands in what it reads: `to` and the home
+/// (its folder, or its zip) do not overlap, either way. Nothing is
+/// written through a link: each folder on a file's way under `to` is a
+/// folder of its own, and the file itself no link.
 fn extract(src: &Source, paths: &[String], to: &Path) -> Result<Extracted> {
     let mut picked = Vec::new();
     for p in paths {
@@ -103,14 +107,15 @@ fn extract(src: &Source, paths: &[String], to: &Path) -> Result<Extracted> {
         }
         picked.extend(found);
     }
+    std::fs::create_dir_all(to).with_context(|| format!("making {}", to.display()))?;
+    let to = to.canonicalize().with_context(|| format!("reading {}", to.display()))?;
+    let origin = src.origin().canonicalize().with_context(|| format!("reading {}", src.origin().display()))?;
+    if to.starts_with(&origin) || origin.starts_with(&to) {
+        bail!(usage(format!("--to {} and the home {} overlap: copy into a folder apart from it", to.display(), origin.display())));
+    }
     let (mut files, mut bytes) = (0, 0);
     for e in picked {
-        // a source's paths are relative names (source.rs): this stays under `to`
-        let target = to.join(&e.path);
-        assert!(target.strip_prefix(to).is_ok_and(|r| r.components().all(|c| matches!(c, std::path::Component::Normal(_)))), "a source path is relative: {}", e.path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
-        }
+        let target = target_under(&to, &e.path)?;
         let copied = src.with_reader(&e.path, |r| {
             let mut out = std::fs::File::create(&target).with_context(|| format!("writing {}", target.display()))?;
             std::io::copy(r, &mut out).with_context(|| format!("copying {}", e.path))
@@ -119,6 +124,30 @@ fn extract(src: &Source, paths: &[String], to: &Path) -> Result<Extracted> {
         bytes += copied;
     }
     Ok(Extracted { to: to.display().to_string(), files, bytes })
+}
+
+/// Where a source's file (a plain path, source.rs) goes under `to`: each
+/// folder on its way made, or a folder already (never a link to one), and
+/// the place itself no link and no folder.
+fn target_under(to: &Path, rel: &str) -> Result<PathBuf> {
+    assert!(source::plain(rel), "a source lists plain paths: {rel:?}");
+    let not_through = |at: &Path| refused(format!("{} is a link or not a folder: nothing is copied through it", at.display()));
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut at = to.to_path_buf();
+    for dir in &parts[..parts.len() - 1] {
+        at.push(dir);
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => bail!(not_through(&at)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&at).with_context(|| format!("making {}", at.display()))?,
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", at.display()))),
+        }
+    }
+    at.push(parts[parts.len() - 1]);
+    match std::fs::symlink_metadata(&at) {
+        Ok(m) if !m.is_file() => bail!(not_through(&at)),
+        _ => Ok(at),
+    }
 }
 
 /// What a `fragment home` command answered, for main to print.
@@ -258,5 +287,48 @@ mod tests {
         assert!(done.files >= 3);
         let e = extract(&src, &["nowhere".into()], &t.0).err().unwrap();
         assert!(format!("{e:#}").contains("is no file or folder of this home"));
+    }
+
+    /// Invalid: copying into the home itself, or into a folder holding its
+    /// zip, or through a link left in the folder copied into. Nothing of
+    /// the home or outside the folder changes.
+    #[test]
+    fn extract_writes_only_into_a_folder_of_its_own() {
+        let t = Temp::new();
+        let home = t.0.join("home");
+        std::fs::create_dir_all(home.join("sub")).unwrap();
+        std::fs::write(home.join("SOUL.md"), "me").unwrap();
+        std::fs::write(home.join("sub/note.md"), "note").unwrap();
+        let src = open(&home, &Layout::hermes()).unwrap();
+        for to in [home.clone(), home.join("sub"), t.0.clone()] {
+            let e = extract(&src, &["SOUL.md".into()], &to).err().unwrap_or_else(|| panic!("{} refused", to.display()));
+            assert!(format!("{e:#}").contains("overlap"), "{e:#}");
+        }
+        assert_eq!(std::fs::read_to_string(home.join("SOUL.md")).unwrap(), "me", "the home is untouched");
+        let zip = t.0.join("zips/home.zip");
+        std::fs::create_dir_all(zip.parent().unwrap()).unwrap();
+        source::tests::zip_of(&zip, &[("home.zip", b"a member named as its zip")]);
+        let zipped = open(&zip, &Layout::hermes()).unwrap();
+        assert!(format!("{:#}", extract(&zipped, &["home.zip".into()], zip.parent().unwrap()).err().unwrap()).contains("overlap"));
+        // a link left in the folder copied into: to a file outside, and to a folder outside
+        let dest = t.0.join("dest");
+        let outside = t.0.join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim"), "keep").unwrap();
+        std::os::unix::fs::symlink(outside.join("victim"), dest.join("SOUL.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("sub")).unwrap();
+        for p in ["SOUL.md", "sub/note.md"] {
+            let e = extract(&src, &[p.into()], &dest).err().unwrap_or_else(|| panic!("{p} refused"));
+            assert!(format!("{e:#}").contains("is a link or not a folder"), "{p}: {e:#}");
+        }
+        assert_eq!(std::fs::read_to_string(outside.join("victim")).unwrap(), "keep");
+        assert!(!outside.join("note.md").exists(), "nothing written through the folder's link");
+        // into a folder of its own, again: the same files, written over
+        let fresh = t.0.join("fresh");
+        for _ in 0..2 {
+            assert_eq!(extract(&src, &["SOUL.md".into(), "sub".into()], &fresh).unwrap().files, 2);
+        }
+        assert_eq!(std::fs::read_to_string(fresh.join("sub/note.md")).unwrap(), "note");
     }
 }

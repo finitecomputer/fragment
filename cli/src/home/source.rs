@@ -44,6 +44,8 @@ pub struct Entry {
 
 /// A source: its files, and how their bytes are read.
 pub struct Source {
+    /// The folder or the zip it was opened from.
+    origin: PathBuf,
     backing: Backing,
     /// Every file, by path.
     entries: Vec<Entry>,
@@ -106,6 +108,13 @@ pub fn said(names: &[String]) -> String {
     out
 }
 
+/// A plain relative path: names between single slashes, none of them
+/// `.` or `..`, no backslash or control character. Every path a source
+/// lists is one, so it is matched, written and joined as its text says.
+pub fn plain(path: &str) -> bool {
+    !path.is_empty() && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..") && !path.bytes().any(|b| b < 0x20 || b == b'\\')
+}
+
 impl Source {
     /// The source a person names: a folder, or a zip file.
     pub fn open(path: &Path) -> Result<Source> {
@@ -152,23 +161,26 @@ impl Source {
                 }
             }
         }
-        Ok(Source::with(Backing::Dir(root.to_path_buf()), entries.into_iter().map(|e| (e, 0)).collect(), unread))
+        Ok(Source::with(root, Backing::Dir(root.to_path_buf()), entries.into_iter().map(|e| (e, 0)).collect(), unread))
     }
 
     fn zip(path: &Path) -> Result<Source> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let len = file.metadata()?.len();
         let archive = zip::ZipArchive::new(At { file: Arc::new(file), pos: 0, len }).with_context(|| format!("reading {} as a zip", path.display()))?;
-        Source::from_archive(archive, &path.display().to_string())
+        Source::from_archive(path, archive, &path.display().to_string())
     }
 
-    /// A zip's files, from its central directory (no file's bytes are read).
-    pub fn from_archive(archive: zip::ZipArchive<At>, said_as: &str) -> Result<Source> {
+    /// A zip's files, from its central directory (no file's bytes are
+    /// read). Each is named by a plain path (`plain`), or the whole zip is
+    /// refused: a name a reader resolves another way than its text (`a/./b`
+    /// is `a/b`) would pass what is matched by its text, a secret's glob.
+    pub fn from_archive(origin: &Path, archive: zip::ZipArchive<At>, said_as: &str) -> Result<Source> {
         if archive.len() > ENTRIES_MAX {
             bail!(refused(format!("{said_as} holds more than {ENTRIES_MAX} files")));
         }
         let mut entries = Vec::with_capacity(archive.len());
-        let mut leaving = Vec::new();
+        let mut odd = Vec::new();
         let mut unread = Vec::new();
         for i in 0..archive.len() {
             let e = archive.by_index_data(i).with_context(|| format!("reading {said_as}'s entry {i}"))?;
@@ -179,23 +191,23 @@ impl Source {
                     continue;
                 }
             };
-            if e.enclosed_name().is_none() || name.starts_with('/') || name.split('/').any(|p| p == "..") {
-                leaving.push(name);
+            let path = if e.is_dir() { name.strip_suffix('/').unwrap_or(&name) } else { name.as_str() };
+            if e.enclosed_name().is_none() || !plain(path) {
+                odd.push(name);
                 continue;
             }
             if e.is_dir() || e.is_symlink() {
                 continue;
             }
-            let path = name.trim_start_matches("./").to_string();
-            entries.push((Entry { path, size: e.size(), mtime: e.last_modified().and_then(dos_seconds) }, i));
+            entries.push((Entry { path: name, size: e.size(), mtime: e.last_modified().and_then(dos_seconds) }, i));
         }
-        if !leaving.is_empty() {
-            bail!(refused(format!("{said_as} names files outside itself ({}): it is not read", said(&leaving))));
+        if !odd.is_empty() {
+            bail!(refused(format!("{said_as} names files outside itself, or by paths that are not plain ({}): it is not read", said(&odd))));
         }
-        Ok(Source::with(Backing::Zip(archive), entries, unread))
+        Ok(Source::with(origin, Backing::Zip(archive), entries, unread))
     }
 
-    fn with(backing: Backing, mut entries: Vec<(Entry, usize)>, unread: Vec<String>) -> Source {
+    fn with(origin: &Path, backing: Backing, mut entries: Vec<(Entry, usize)>, unread: Vec<String>) -> Source {
         entries.sort_by(|a, b| a.0.path.cmp(&b.0.path));
         // a zip may name one path twice: the last written is the file
         entries.dedup_by(|later, earlier| later.0.path == earlier.0.path && {
@@ -203,7 +215,12 @@ impl Source {
             true
         });
         let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
-        Source { backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
+        Source { origin: origin.to_path_buf(), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
+    }
+
+    /// The folder or the zip it was opened from, as named.
+    pub fn origin(&self) -> &Path {
+        &self.origin
     }
 
     /// Every file, by path.
@@ -352,7 +369,14 @@ pub mod tests {
         let zip = t.0.join("bad.zip");
         zip_of(&zip, &[("ok.txt", b"ok"), ("../escape.txt", b"no")]);
         let e = Source::open(&zip).err().expect("refused");
-        assert!(format!("{e:#}").contains("names files outside itself (\"../escape.txt\")"), "{e:#}");
+        assert!(format!("{e:#}").contains("(\"../escape.txt\"): it is not read"), "{e:#}");
+        // a path a reader resolves past its text: `agent/./keys` is `agent/keys`
+        for odd in ["agent/./keys/signing.txt", "./SOUL.md", "a//b", "a\\b", "a/b/../c"] {
+            zip_of(&zip, &[("ok.txt", b"ok"), (odd, b"no")]);
+            let e = Source::open(&zip).err().unwrap_or_else(|| panic!("{odd} refused"));
+            assert!(format!("{e:#}").contains("not plain"), "{odd}: {e:#}");
+        }
+        assert!(plain("a/b.c/d") && !plain("") && !plain("/a") && !plain("a/") && !plain("a/\nb"));
         let dir = t.0.join("home");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(t.0.join("outside.txt"), "secret").unwrap();
