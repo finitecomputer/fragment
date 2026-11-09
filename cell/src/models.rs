@@ -85,7 +85,6 @@
 //! as `route`, charged at the input tokens it counted; no fallback (a
 //! decision's answer is its model's).
 
-
 use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
@@ -311,24 +310,28 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     // `[DONE]`, where its usage is whole: a gateway has held a stream open
     // ~150 s past it, and a charge at the stream's end came that late, or
     // was cut with the Worker's waitUntil. The stream is read on to its
-    // end after `[DONE]`, as it always was, and the client's answer ends
-    // with it.
+    // end after `[DONE]` while the charge is made, as it always was, and
+    // the client's answer ends with it, never waiting on the charge.
     let source = source.clone();
     let (to_client, client) = futures_channel::mpsc::unbounded::<Result<Vec<u8>>>();
     after.later(Box::pin(async move {
         let mut stream = Stream::default().on(api);
         let mut bytes = ByteStream::from(source);
-        let mut broke = false;
-        let mut charge = Some(charge);
+        let (mut broke, mut ended) = (false, false);
+        let mut charge = charge;
         // a client gone away is sent nothing more, and the call read on
         let send = |out: Vec<u8>| {
             if !out.is_empty() {
                 let _ = to_client.unbounded_send(Ok(out));
             }
         };
-        // bounded by the model's answer: at most the tier's max_tokens, then
-        // the stream's end (nothing after `[DONE]` is read into it)
-        while let Some(chunk) = bytes.next().await {
+        // bounded by the model's answer: at most the tier's max_tokens,
+        // then its `[DONE]` or the stream's end
+        while !stream.done() {
+            let Some(chunk) = bytes.next().await else {
+                ended = true;
+                break;
+            };
             match chunk {
                 Ok(c) => {
                     let mut out = Vec::new();
@@ -341,25 +344,31 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
                     break;
                 }
             }
-            if let Some(c) = charge.as_mut().filter(|c| c.first_ms.is_none() && stream.began()) {
-                c.first_ms = Some(js::now_ms() - c.t0);
-            }
-            if stream.done() {
-                if let Some(c) = charge.take() {
-                    c.charge(stream.usage().and_then(|u| bounds::usage_of(model, u)), log_id.clone()).await;
-                }
+            if charge.first_ms.is_none() && stream.began() {
+                charge.first_ms = Some(js::now_ms() - charge.t0);
             }
         }
-        if !broke {
+        if !broke && !stream.done() {
             let mut out = Vec::new();
             stream.finish(Some(&mut out));
             send(out);
         }
-        drop(to_client);
-        if let Some(c) = charge {
-            let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
-            c.charge(usage, log_id).await;
-        }
+        let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
+        // bounded by the stream's end: nothing after `[DONE]` is the answer's
+        let read_on = async {
+            while stream.done() && !ended {
+                match bytes.next().await {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        let _ = to_client.unbounded_send(Err(e));
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            drop(to_client);
+        };
+        futures_util::future::join(charge.charge(usage, log_id), read_on).await;
     }));
     let mut resp = Response::from_stream(client)?;
     resp.headers_mut().set("content-type", "text/event-stream")?;
