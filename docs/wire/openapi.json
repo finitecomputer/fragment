@@ -1427,6 +1427,137 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Notice": {
+        "description": "One thing a person is told, in the server's words, with what they may do\nabout it.",
+        "properties": {
+          "actions": {
+            "default": [],
+            "description": "What the person may do about it; the first is the main one.",
+            "items": {
+              "$ref": "#/components/schemas/NoticeAction"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "default": null,
+            "description": "The platform's own words, small, for whoever helps (why a start\nfailed, as it said it).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Unique among the person's notices, and the same across reads while it\ntells the same thing: what a client keys its row by.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What it is about (`key_paused`), for tests and logs. No client reads\nit to decide what to draw.",
+            "type": "string"
+          },
+          "level": {
+            "$ref": "#/components/schemas/NoticeLevel"
+          },
+          "text": {
+            "default": null,
+            "description": "A sentence or two under it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "One short line.",
+            "type": "string"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Until"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "When what it tells ends by the clock alone (a paused key resumes)."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "level",
+          "title",
+          "actions"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "NoticeAction": {
+        "description": "What a person may do about a notice: `post` its `body` to a platform\nroute with their own credential, then read their notices again; or\n`open` a page. One of the two.",
+        "properties": {
+          "body": {
+            "default": null,
+            "description": "The JSON `post` sends (none: `{}`)."
+          },
+          "label": {
+            "type": "string"
+          },
+          "open": {
+            "default": null,
+            "description": "An `https:` page or a `mailto:` address.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "post": {
+            "default": null,
+            "description": "A platform path (`/api/computers/{id}/restart`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "NoticeLevel": {
+        "description": "How a notice is shown.\n\nOpen (`x-fragment-open`, docs/wire): a level a reader does not know is\nshown as `info`.",
+        "oneOf": [
+          {
+            "const": "info",
+            "description": "Something to know.",
+            "type": "string"
+          },
+          {
+            "const": "warn",
+            "description": "Something wrong, or about to be.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
+      "NoticeList": {
+        "description": "`GET /api/notices`: the signer's notices, the most pressing first.",
+        "properties": {
+          "notices": {
+            "items": {
+              "$ref": "#/components/schemas/Notice"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "notices"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
       "OpDecl": {
         "description": "An operation as `fragment.json` declares it.",
         "properties": {
@@ -1845,6 +1976,26 @@
           "visibility",
           "members",
           "guests"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Until": {
+        "description": "A time a notice counts down to: a client shows `said`, then how long\nuntil `at` (\" in 23 min\"), live, and drops the notice once it passes.",
+        "properties": {
+          "at": {
+            "description": "ms since the epoch.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "said": {
+            "description": "The words before the countdown (\"Calls resume\").",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "said"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -3283,6 +3434,87 @@
         ]
       }
     },
+    "/api/notices": {
+      "get": {
+        "operationId": "notices.list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoticeList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "What the signer is told now, the most pressing first: each owner's notices, in the server's words, with their actions.",
+        "tags": [
+          "notices"
+        ]
+      }
+    },
     "/api/search": {
       "get": {
         "operationId": "search.find",
@@ -3493,6 +3725,10 @@
     {
       "description": "A signer's list of the fragments they hold a role on, and their own view of each.",
       "name": "fragments"
+    },
+    {
+      "description": "What the platform tells a person, each in its own words, with what they may do about it.",
+      "name": "notices"
     },
     {
       "description": "A signer's search over their own list.",

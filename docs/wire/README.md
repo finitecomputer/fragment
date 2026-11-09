@@ -72,6 +72,18 @@ A signer's list of the fragments they hold a role on, and their own view of each
 - A WebSocket; receives: [`ListWatchFrame`](#listwatchframe)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 429 `rate_limited`; 500 `schema_refused`; 503 `deploying`
 
+### notices
+
+What the platform tells a person, each in its own words, with what they may do about it.
+
+#### `notices.list`
+
+`GET /api/notices`: What the signer is told now, the most pressing first: each owner's notices, in the server's words, with their actions.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`NoticeList`](#noticelist)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
 ### search
 
 A signer's search over their own list.
@@ -471,6 +483,46 @@ out. One record whose text matched: where it is, when it was written, and a snip
 | `seq` | `integer` | required | The record's place in its channel. |
 | `snippet` | `string` | required |  |
 
+### `Notice`
+
+out. One thing a person is told, in the server's words, with what they may do about it.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `actions` | `array` of [`NoticeAction`](#noticeaction) | required | What the person may do about it; the first is the main one. |
+| `detail` | `string` or `null` | optional | The platform's own words, small, for whoever helps (why a start failed, as it said it). |
+| `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
+| `kind` | `string` | required | What it is about (`key_paused`), for tests and logs. No client reads it to decide what to draw. |
+| `level` | [`NoticeLevel`](#noticelevel) | required |  |
+| `text` | `string` or `null` | optional | A sentence or two under it. |
+| `title` | `string` | required | One short line. |
+| `until` | [`Until`](#until) or `null` | optional | When what it tells ends by the clock alone (a paused key resumes). |
+
+### `NoticeAction`
+
+out. What a person may do about a notice: `post` its `body` to a platform route with their own credential, then read their notices again; or `open` a page. One of the two.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `body` | `any` | optional | The JSON `post` sends (none: `{}`). |
+| `label` | `string` | required |  |
+| `open` | `string` or `null` | optional | An `https:` page or a `mailto:` address. |
+| `post` | `string` or `null` | optional | A platform path (`/api/computers/{id}/restart`). |
+
+### `NoticeLevel`
+
+out, open. How a notice is shown. Open (`x-fragment-open`, docs/wire): a level a reader does not know is shown as `info`.
+
+Values: `info`, `warn`.
+
+### `NoticeList`
+
+out. `GET /api/notices`: the signer's notices, the most pressing first.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `notices` | `array` of [`Notice`](#notice) | required |  |
+
 ### `OpDecl`
 
 out. An operation as `fragment.json` declares it.
@@ -636,6 +688,15 @@ out. A fragment's sharing, in its owner's list (the platform's page): who may op
 | `members` | `integer` | required |  |
 | `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
+
+### `Until`
+
+out. A time a notice counts down to: a client shows `said`, then how long until `at` (" in 23 min"), live, and drops the notice once it passes.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `at` | `integer` | required | ms since the epoch. |
+| `said` | `string` | required | The words before the countdown ("Calls resume"). |
 
 ### `UploadLimits`
 
