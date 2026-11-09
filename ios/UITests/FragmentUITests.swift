@@ -249,6 +249,40 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Invite accepted")
         XCTAssertTrue(invite.waitForNonExistence(timeout: 10), "and the invite is told no more")
     }
+
+    /// Notices that must be answered (FIN-458) show alone over the whole app,
+    /// never in the band, the oldest first: an answer refused keeps it,
+    /// saying why in the server's words; answered, the next; the last
+    /// answered, the app as it was. No owner asks one yet: the dev stack's
+    /// registry lever asked two ahead (`FRAGMENT_UITEST_ASKED`, the first's
+    /// title; its Not now refused, the second titled "New terms").
+    func testNoticesThatMustBeAnsweredShowAloneUntilAnswered() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let title = env["FRAGMENT_UITEST_ASKED"] else {
+            throw XCTSkip("no dev stack or asked notice named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_ASKED)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let asked = { (id: String) in app.descendants(matching: .any).matching(identifier: "mustAnswer:asked:\(id)").firstMatch }
+        XCTAssertTrue(asked("move").waitForExistence(timeout: 30), "the oldest shows, over the whole app")
+        XCTAssertTrue(app.staticTexts[title].exists && asked("move").buttons["Yes"].exists && asked("move").buttons["Never"].exists, "its words and its answers")
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:asked:")).firstMatch.exists, "never in the band")
+        screenshot(app, "Must answer, light")
+        asked("move").buttons["Not now"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "answer Yes or Never")).firstMatch.waitForExistence(timeout: 20), "refused: why, in the server's words")
+        XCTAssertTrue(asked("move").exists, "and it stays")
+        asked("move").buttons["Yes"].tap()
+        XCTAssertTrue(asked("terms").waitForExistence(timeout: 30), "answered, and read again without it: the next")
+        XCUIDevice.shared.appearance = .dark
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "dark, drawn")], timeout: 2)
+        screenshot(app, "Must answer, dark")
+        asked("terms").buttons["Never"].tap()
+        XCTAssertTrue(asked("terms").waitForNonExistence(timeout: 30), "the last answered: the app as it was")
+        XCUIDevice.shared.appearance = .light
+    }
 }
 
 /// Flows against a real platform: this machine's `cargo xtask dev`, named by

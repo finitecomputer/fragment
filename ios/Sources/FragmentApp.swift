@@ -56,6 +56,9 @@ final class Library {
     var noticesFailed = false
     var failedNotices: [String: String] = [:]
     var acting: Set<String> = []
+    /// The notice that must be answered now: the first such in the list,
+    /// its owner's oldest (`MustAnswerView`).
+    var asked: Notice? { notices.first(where: \.mustAnswer) }
     /// A fragment of theirs an action's answer named, for the page to open
     /// (`FragmentRoot`): set by the first read begun after the answer if
     /// it lists it (`act`).
@@ -557,6 +560,14 @@ struct FragmentRoot: View {
                     return true
                 }
             }
+        }
+        // one that must be answered, alone over everything, until it is
+        // (what the page itself presents closes first: one at a time)
+        .fullScreenCover(item: Binding(get: { library.asked }, set: { _ in })) { notice in
+            MustAnswerView(library: library, api: api, notice: notice).interactiveDismissDisabled()
+        }
+        .onChange(of: library.asked?.id, initial: true) { _, id in
+            if id != nil { openedApp = nil; showingConnection = false; sidebar = false }
         }
         .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(scenePhase)") {
             if scenePhase == .active { await library.load(api); await library.watch(api) }

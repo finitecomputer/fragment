@@ -104,4 +104,18 @@ struct NoticesTests {
         #expect(await library.act(notice, notice.actions[0], api: api) == nil)
         #expect(library.answered == nil)
     }
+
+    /// One that must be answered (FIN-458): read as said (none said: not),
+    /// asked alone, the first of them first, and never in the band.
+    @MainActor @Test func oneThatMustBeAnsweredIsAskedAloneTheFirstFirst() throws {
+        let told = try read(#"{"notices":[{"id":"key","kind":"key_paused","level":"warn","title":"Calls paused"},{"id":"asked:move","kind":"asked","level":"info","title":"Move to finite.chat?","mustAnswer":true,"actions":[{"label":"Yes","post":"/api/notices/asked/move","body":{"answer":"Yes"}}]},{"id":"asked:terms","kind":"asked","level":"info","title":"New terms","mustAnswer":true}]}"#)
+        #expect(told.map(\.mustAnswer) == [false, true, true])
+        let library = Library()
+        library.notices = told
+        #expect(library.asked?.id == "asked:move")
+        library.notices = [told[0], told[2]]
+        #expect(library.asked?.id == "asked:terms")
+        library.notices = [told[0]]
+        #expect(library.asked == nil)
+    }
 }
