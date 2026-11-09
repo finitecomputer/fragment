@@ -5,6 +5,10 @@
 //! It decodes JSON text as `serde_json::from_slice(text.as_bytes())`, not
 //! `from_str`: the same answer, through the bytes decoder each type has in
 //! the cell's Wasm, not a second, `&str` copy of it (cell/clippy.toml).
+//! Nor does it read a type again from a `serde_json::Value`
+//! (crates/core/clippy.toml), but in its tests.
+
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod access;
 pub mod across;

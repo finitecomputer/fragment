@@ -21,7 +21,6 @@ use futures_util::future::join_all;
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::ReadJson;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::models::{embedded, Embedding};
@@ -47,7 +46,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
     let mut legs: Vec<Vec<across::Legs>> = Vec::with_capacity(answers.len());
     for (name, answer) in asked.fragments.iter().zip(answers) {
         let reply = match answer {
-            Ok((status, v)) => across::reached(status, v, space.as_ref()),
+            Ok((status, bytes)) => across::reached(status, &bytes, space.as_ref()),
             Err(e) => across::Reply { state: Reached::Failed, message: Some(e.message), hits: vec![], cosines: false, words: None },
         };
         legs.push(reply.hits.iter().enumerate().map(|(i, h)| across::legs(h, i, reply.cosines)).collect());
@@ -96,8 +95,8 @@ async fn question_vector(env: &Env, cfg: &Config, who: &Signed, asked: &Across, 
     })
 }
 
-/// `name` asked the question as the signer: its status and answer.
-async fn ask(env: &Env, url: &Url, who: &Signed, name: &str, inner: &str) -> CellResult<(u16, Value)> {
+/// `name` asked the question as the signer: its status and answer's bytes.
+async fn ask(env: &Env, url: &Url, who: &Signed, name: &str, inner: &str) -> CellResult<(u16, Vec<u8>)> {
     let make = || {
         let headers = Headers::new();
         Routed { name: name.to_string(), url: url.clone(), signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
@@ -108,5 +107,5 @@ async fn ask(env: &Env, url: &Url, who: &Signed, name: &str, inner: &str) -> Cel
     };
     let mut resp = crate::routed::send_again(env, "FRAGMENT", name, make).await?;
     let status = resp.status_code();
-    Ok((status, resp.read_json().await.unwrap_or(Value::Null)))
+    Ok((status, resp.bytes().await?))
 }
