@@ -587,8 +587,11 @@ struct EntryFields {
     at_ms: Option<i64>,
 }
 
+/// An entry's `entry`: read as an identifier, a string alone, as its
+/// reading through a `Value` took it (a derived enum also takes
+/// `{"<kind>": null}`).
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(variant_identifier, rename_all = "snake_case")]
 enum EntryKind {
     Row,
     Reservation,

@@ -1180,6 +1180,10 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     }
     assert!(read(&serde_json::json!({ "row": {} })).is_err(), "an entry names its kind");
     assert!(read(&serde_json::json!({ "entry": "hold", "at_ms": T0 })).is_err(), "a row or a reservation");
+    // its kind is a name, a string, as the reading through a Value took it
+    let mut named_by_an_object = settled.clone();
+    named_by_an_object["entry"] = serde_json::json!({ "reservation": null });
+    assert!(read(&named_by_an_object).unwrap_err().to_string().contains("invalid type: map"), "a reservation named by an object");
     let mut timeless = held;
     timeless.as_object_mut().unwrap().remove("at_ms");
     assert!(read(&timeless).is_err(), "a reservation from before has its time");
@@ -1205,6 +1209,11 @@ fn a_stored_entry_reads_from_its_text_and_writes_back_as_it_was() {
         let entry: Entry = serde_json::from_slice(line.as_bytes()).unwrap_or_else(|e| panic!("{line}: {e}"));
         assert!(matches!(entry, Entry::Row { .. }), "{line}");
         assert_eq!(serde_json::to_string(&entry).unwrap(), line);
+        // a row named by an object, not its name, is no entry
+        let object = line.replacen(r#""entry":"row""#, r#""entry":{"row":null}"#, 1);
+        assert_ne!(object, line);
+        let e = serde_json::from_slice::<Entry>(object.as_bytes()).map(|e| format!("{e:?}")).expect_err(&object).to_string();
+        assert!(e.contains("invalid type: map"), "{object}: {e}");
     }
 }
 
