@@ -102,7 +102,8 @@ const INVITED: &str = r#"{"type":"invited"}"#;
 /// (`listed`), a chat's newest search
 /// entry (`said`, and when: `said_at`), read by its place in its fragment's log, and its entries
 /// after the place its person last saw (`unread`), counted up to the one
-/// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
+/// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`). Its
+/// readers order it, and a search narrows it to the rows it names.
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, dock, pinned,
   (SELECT records FROM listed l WHERE l.fragment = m.fragment) AS listed,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
@@ -112,7 +113,7 @@ const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, do
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT COUNT(*) FROM (SELECT 1 FROM search_entries e WHERE e.fragment = m.fragment
       AND e.n > COALESCE((SELECT n FROM seen s WHERE s.fragment = m.fragment), 0) LIMIT ?)) ELSE 0 END AS unread
-  FROM memberships m WHERE role IS NOT NULL ORDER BY fragment";
+  FROM memberships m WHERE role IS NOT NULL";
 
 #[durable_object]
 pub struct PrincipalCell {
@@ -279,14 +280,14 @@ pub(crate) struct SearchApplied {
     pub applied: u64,
 }
 
-/// A search's first pass: the newest matching entries' places.
+/// A search's hit: a matching entry's place, and its snippet.
 #[derive(Deserialize)]
 struct Hit {
-    id: i64,
     fragment: String,
     channel: String,
     seq: i64,
     at: i64,
+    snippet: Option<String>,
 }
 
 impl DurableObject for PrincipalCell {
@@ -404,7 +405,7 @@ impl PrincipalCell {
             }
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
-                let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
+                let rows: Vec<Listed> = self.typed(&format!("{LISTED} ORDER BY fragment"), listed_binds())?;
                 let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
                 // what its signer's messages carry: the router names an agent's list (`?agent`)
                 let kind = if req.url()?.query() == Some("agent") { fragment_proto::IdentityKind::Agent } else { fragment_proto::IdentityKind::Person };
@@ -794,42 +795,44 @@ impl PrincipalCell {
         let Some(fts) = query.fts() else {
             return Ok(SearchAnswer { fragments: vec![], messages: vec![] });
         };
-        let rows: Vec<Listed> = self.typed(LISTED, listed_binds())?;
-        let mut fragments = Vec::with_capacity(limits::SEARCH_FRAGMENTS_MAX);
-        for row in rows {
-            if fragments.len() == limits::SEARCH_FRAGMENTS_MAX {
-                break;
-            }
-            let f = listed(row)?;
-            if query.names(&f.name, f.title.as_deref()) {
-                fragments.push(f);
-            }
+        // each row's name and title alone, then the whole rows of the first
+        // few they match
+        #[derive(Deserialize)]
+        struct Titled {
+            name: String,
+            title: Option<String>,
         }
-        // the newest hits' places first; the snippets of those alone
+        let titled: Vec<Titled> = self.typed("SELECT fragment AS name, json_extract(face, '$.title') AS title FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
+        let named: Vec<String> = titled.into_iter().filter(|t| query.names(&t.name, t.title.as_deref())).take(limits::SEARCH_FRAGMENTS_MAX).map(|t| t.name).collect();
+        let fragments = match named.is_empty() {
+            true => vec![],
+            false => {
+                let mut binds = listed_binds();
+                binds.push(serde_json::to_string(&named).expect("names serialize").into());
+                let rows: Vec<Listed> = self.typed(&format!("{LISTED} AND fragment IN (SELECT value FROM json_each(?)) ORDER BY fragment"), binds)?;
+                rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?
+            }
+        };
+        assert!(fragments.len() <= limits::SEARCH_FRAGMENTS_MAX, "a search answers a bounded page");
+        // the newest hits' places, then the snippets of those alone: one
+        // statement, each snippet a lookup by its hit's rowid (a column's
+        // INTEGER: a bound number reaches SQLite as a REAL, which FTS5
+        // takes as no rowid bound at all)
         let hits: Vec<Hit> = self.typed(
-            "SELECT e.id AS id, e.fragment AS fragment, e.channel AS channel, e.seq AS seq, e.at AS at
-             FROM search_text JOIN search_entries e ON e.id = search_text.rowid
-             JOIN memberships m ON m.fragment = e.fragment AND m.role IS NOT NULL
-             WHERE search_text MATCH ? ORDER BY e.at DESC, e.id DESC LIMIT ?",
-            vec![fts.as_str().into(), SqlStorageValue::Integer(limits::SEARCH_MESSAGES_MAX as i64)],
+            "WITH hits AS (SELECT e.id AS id, e.fragment AS fragment, e.channel AS channel, e.seq AS seq, e.at AS at
+               FROM search_text JOIN search_entries e ON e.id = search_text.rowid
+               JOIN memberships m ON m.fragment = e.fragment AND m.role IS NOT NULL
+               WHERE search_text MATCH ? ORDER BY e.at DESC, e.id DESC LIMIT ?)
+             SELECT h.fragment AS fragment, h.channel AS channel, h.seq AS seq, h.at AS at, snippet(search_text, 0, '', '', '…', 24) AS snippet
+             FROM hits h JOIN search_text ON search_text.rowid = h.id WHERE search_text MATCH ? ORDER BY h.at DESC, h.id DESC",
+            vec![fts.as_str().into(), SqlStorageValue::Integer(limits::SEARCH_MESSAGES_MAX as i64), fts.as_str().into()],
         )?;
         assert!(hits.len() <= limits::SEARCH_MESSAGES_MAX, "a search answers a bounded page");
-        let mut messages = Vec::with_capacity(hits.len());
-        for hit in hits {
-            if !fragment_proto::valid_fragment_name(&hit.fragment) {
-                continue;
-            }
-            // A bound number reaches SQLite as a REAL, and FTS5 takes a rowid
-            // bound only from an INTEGER (any other is no bound at all, every
-            // match answering): the CAST keeps it one row.
-            let shown = self.rows(
-                "SELECT rowid AS id, snippet(search_text, 0, '', '', '…', 24) AS s FROM search_text WHERE search_text MATCH ? AND rowid = CAST(? AS INTEGER)",
-                vec![fts.as_str().into(), SqlStorageValue::Integer(hit.id)],
-            )?;
-            assert!(shown.len() <= 1 && shown.iter().all(|r| r["id"].as_i64() == Some(hit.id)), "a hit's snippet is its own");
-            let snippet = shown.first().and_then(|r| r["s"].as_str()).map(|s| search::snippet(s).to_string()).unwrap_or_default();
-            messages.push(MessageHit { fragment: hit.fragment, channel: hit.channel, seq: hit.seq, at: hit.at, snippet });
-        }
+        let messages = hits
+            .into_iter()
+            .filter(|hit| fragment_proto::valid_fragment_name(&hit.fragment))
+            .map(|hit| MessageHit { snippet: search::snippet(hit.snippet.as_deref().unwrap_or_default()).to_string(), fragment: hit.fragment, channel: hit.channel, seq: hit.seq, at: hit.at })
+            .collect();
         Ok(SearchAnswer { fragments, messages })
     }
 }
