@@ -99,6 +99,7 @@ struct NoticesBand: View {
     private func row(_ notice: Notice, now: Int64) -> some View {
         card(warns: notice.warns) {
             VStack(alignment: .leading, spacing: 8) {
+                // every word it says, however little room the page leaves (the keyboard up)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(notice.title).font(.subheadline.weight(.semibold))
                     if let text = notice.text { Text(text).font(.footnote).foregroundStyle(.secondary) }
@@ -106,6 +107,7 @@ struct NoticesBand: View {
                     if library.failedNotices.contains(notice.id) { Text("Couldn't do that. Try again.").font(.footnote).foregroundStyle(.secondary) }
                     if let detail = notice.detail { Text(detail).font(.caption2).foregroundStyle(.tertiary).padding(.top, 2) }
                 }
+                .fixedSize(horizontal: false, vertical: true)
                 if !notice.actions.isEmpty {
                     HStack(spacing: 8) {
                         ForEach(Array(notice.actions.enumerated()), id: \.offset) { index, action in

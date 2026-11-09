@@ -172,9 +172,12 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(update.buttons["Restart"].exists && update.buttons["Later"].exists)
         XCTAssertTrue(unsaved.buttons["Restart now"].exists)
         screenshot(app, "Notices, light")
+        // the system's appearance applies a moment after it is set: the shot waits for it
         XCUIDevice.shared.appearance = .dark
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "dark, drawn")], timeout: 2)
         screenshot(app, "Notices, dark")
         XCUIDevice.shared.appearance = .light
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "light, drawn")], timeout: 2)
         update.buttons["Later"].tap()
         XCTAssertTrue(update.waitForNonExistence(timeout: 20), "Later: the update is told no more")
         XCTAssertTrue(unsaved.exists, "the other stays")
