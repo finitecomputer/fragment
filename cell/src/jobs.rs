@@ -669,7 +669,7 @@ impl FragmentCell {
                     "attempt": attempt,
                     "via": run.via.as_str(),
                     "fragment": self.name()?,
-                    "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                    "channels": self.declared_channel_names()?,
                     // a connector's binding, its door's (doors.rs), or null
                     "door": self.job_door()?,
                 });
@@ -1045,8 +1045,10 @@ impl FragmentCell {
     /// triggers did not start before.
     async fn step_publish(&self, run: &RunRow, index: u32, channel: &str, kind: &str, body: Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
-        // the one check a mutation's records meet too
-        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?, self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
+        // the one check a mutation's records meet too, on its channel's
+        // declaration alone
+        let decl = self.declared_channel(channel).map_err(retry)?;
+        fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), self.hosted_door().map_err(retry)?.as_ref()).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
         let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
