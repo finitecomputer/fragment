@@ -249,9 +249,9 @@ impl VaultCell {
                 let bad = |k: &str, e: serde_json::Error| CellError::host(format!("a stored secret's {k}: {e}"));
                 Ok(Secret {
                     name: field("name").to_string(),
-                    hosts: serde_json::from_str(field("hosts")).map_err(|e| bad("hosts", e))?,
-                    place: serde_json::from_str::<Place>(field("place")).map_err(|e| bad("place", e))?,
-                    agents: serde_json::from_str(field("agents")).map_err(|e| bad("agents", e))?,
+                    hosts: crate::json_text(field("hosts")).map_err(|e| bad("hosts", e))?,
+                    place: crate::json_text::<Place>(field("place")).map_err(|e| bad("place", e))?,
+                    agents: crate::json_text(field("agents")).map_err(|e| bad("agents", e))?,
                     set_at: r["set_at"].as_i64().unwrap_or_default(),
                 })
             })
