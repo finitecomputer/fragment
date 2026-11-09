@@ -1,6 +1,6 @@
 """The activity plugin says each child's start and end beside its work
 (FIN-432): a child of a person's turn of ours starts with that turn and its
-task in one line, and ends with Hermes' outcome as ours, each on its own (as
+task in one line, and ends saying so (whatever Hermes' outcome), each on its own (as
 `delegation.independent_completions` stops each child as it finishes); a
 child of no turn of ours holds the computer and is said nowhere. A child's
 end is said even when the bridge dropped the socket, on one opened again.
@@ -66,9 +66,9 @@ assert said[0]["turn"] == "m-1" and said[0]["child"] == "s-1" and said[0]["worki
 assert said[0]["goal"].startswith("Find three venues near Lisbon x") and len(said[0]["goal"]) == activity._GOAL_MAX, said[0]
 assert said[1] == {"working": True, "turn": "m-1", "child": "s-2", "goal": "Compare the quotes"}, said[1]
 assert said[2:] == [{"working": True}, {"working": True}], "no turn of ours: work alone"
-# each ends on its own, the rest still working; Hermes' outcome as ours
+# each ends on its own, the rest still working, whatever Hermes' outcome
 activity.child_stopped(child_session_id="s-2", child_status="timeout", parent_turn_id="a later turn")
-assert frames()[-1] == {"working": True, "child": "s-2", "status": "timed_out"}, frames()[-1]
+assert frames()[-1] == {"working": True, "child": "s-2", "ended": True}, frames()[-1]
 activity.child_stopped(child_session_id="s-3", child_status="completed")
 assert frames()[-1] == {"working": True}, "a child said nowhere ends nowhere"
 # the bridge drops the socket; the next end opens it again, and is said
@@ -77,20 +77,16 @@ with activity._condition:
     sockets[-1].close()
     activity.child_stopped(child_session_id="s-1", child_status="error")
 assert len(sockets) == 2, len(sockets)
-assert sockets[1].said == [{"working": True}, {"working": True, "child": "s-1", "status": "failed"}], sockets[1].said
+assert sockets[1].said == [{"working": True}, {"working": True, "child": "s-1", "ended": True}], sockets[1].said
 activity.child_stopped(child_session_id="s-4", child_status="interrupted")
 assert frames()[-1] == {"working": False}, frames()[-1]
-# a stop said twice, and an outcome Hermes may add later
+# a stop said twice, and one of an outcome Hermes may add later
 activity.child_stopped(child_session_id="s-4", child_status="completed")
 assert frames()[-1] == {"working": False}
 activity._turns["hermes-turn-2"] = ["m-2", None]
 activity.child_started(child_session_id="s-5", parent_turn_id="hermes-turn-2", child_goal="")
 activity.child_stopped(child_session_id="s-5", child_status="something new")
-assert frames()[-2:] == [{"working": True, "turn": "m-2", "child": "s-5", "goal": ""}, {"working": False, "child": "s-5", "status": "failed"}], frames()[-2:]
-for status, ours in [("completed", "completed"), ("failed", "failed"), ("interrupted", "interrupted")]:
-    activity.child_started(child_session_id="s-" + status, parent_turn_id="hermes-turn-2", child_goal="g")
-    activity.child_stopped(child_session_id="s-" + status, child_status=status)
-    assert frames()[-1]["status"] == ours
+assert frames()[-2:] == [{"working": True, "turn": "m-2", "child": "s-5", "goal": ""}, {"working": False, "child": "s-5", "ended": True}], frames()[-2:]
 assert not activity._children
 # Alex on #1086: the bridge away as a helper stops (its socket dropped, and
 # a new one refused), its end waits and is said once the bridge is back,
@@ -108,7 +104,7 @@ class Away(Socket):
 
 
 def said_end(child):
-    return [f for s in sockets for f in s.said if f.get("child") == child and "status" in f]
+    return [f for s in sockets for f in s.said if f.get("child") == child and f.get("ended")]
 
 
 def until(what, cond):
@@ -128,10 +124,10 @@ for child, last in [("s-a", False), ("s-b", True)]:
         if activity._socket is not None:
             activity._socket.close()
         activity.child_stopped(child_session_id=child, child_status="completed")
-        assert said_end(child) == [] and activity._ends == {child: "completed"}, (child, activity._ends)
+        assert said_end(child) == [] and list(activity._ends) == [child], (child, activity._ends)
         refusing[0] = False
     until(f"{child}'s end said once the bridge is back", lambda: said_end(child))
-    assert said_end(child) == [{"working": not last, "child": child, "status": "completed"}], said_end(child)
+    assert said_end(child) == [{"working": not last, "child": child, "ended": True}], said_end(child)
     until("nothing left to say", lambda: not activity._ends)
 # Alex on #1086, round 2: an end owed is never dropped. The bridge away
 # while one recorded helper runs and many more start and stop: the bound
@@ -154,6 +150,6 @@ with activity._condition:
     assert "s-first" in activity._ends and len(activity._ends) == activity._RECORDED_MAX
     refusing[0] = False
 until("every end recorded said", lambda: not activity._ends)
-assert said_end("s-first") == [{"working": False, "child": "s-first", "status": "completed"}], said_end("s-first")
-recorded = {f["child"] for s in sockets for f in s.said if f.get("status") and f.get("child", "").startswith("q-")}
+assert said_end("s-first") == [{"working": False, "child": "s-first", "ended": True}], said_end("s-first")
+recorded = {f["child"] for s in sockets for f in s.said if f.get("ended") and f.get("child", "").startswith("q-")}
 assert len(recorded) == activity._RECORDED_MAX - 1, len(recorded)

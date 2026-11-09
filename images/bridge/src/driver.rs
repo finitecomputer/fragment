@@ -1374,7 +1374,7 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
                 let tries = if channel == records::TASKS { u32::MAX } else { limits::POST_TRIES_MAX };
                 let sent = post(&api, &fragment, &agent, channel, &id, body, &[], None, tries, stop.clone()).await;
                 if sent.ended() {
-                    let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id, kept: sent == Sent::Posted, given_up: sent == Sent::GaveUp })).await;
+                    let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id, kept: sent == Sent::Posted })).await;
                 }
             }
             Job::Claim { agent, turn, id, body } => {
@@ -1482,11 +1482,7 @@ pub(crate) enum Sent {
     Posted,
     /// Another life's under the same id (409): on the chat, not this life's.
     Taken,
-    /// No longer the agent's to post in (403, 404), or refused outright.
     Refused,
-    /// Out of tries on transport errors, 429s or 5xx: not answered, and
-    /// may be tried again.
-    GaveUp,
     Stopped,
 }
 
@@ -1588,12 +1584,9 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
                 return (Sent::Taken, Vec::new());
             }
-            Err(e) if e.retryable() => {
-                crate::ev!("post.gave_up", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return (Sent::GaveUp, Vec::new());
-            }
             Err(e) => {
-                // a 403/404: it is no longer the agent's to post in
+                // Out of tries, or a 403/404: it is no longer the agent's to
+                // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
                 return (Sent::Refused, Vec::new());
             }
@@ -2113,11 +2106,10 @@ mod tests {
     /// back over SimpleX, and an inbound file's deletion, wait for one on
     /// the chat: a refusal (403, 404) is no post; another life's under the
     /// same id (409) is, as another life's (a cut turn's continuation
-    /// waits for its lost end to be this life's own). Out of tries on a
-    /// 503 it gave up, unanswered: neither (a helper's end is owed again).
+    /// waits for its lost end to be this life's own).
     #[tokio::test]
     async fn a_post_says_how_it_ended() {
-        for (status, want) in [(200u16, Sent::Posted), (409, Sent::Taken), (403, Sent::Refused), (404, Sent::Refused), (503, Sent::GaveUp)] {
+        for (status, want) in [(200u16, Sent::Posted), (409, Sent::Taken), (403, Sent::Refused), (404, Sent::Refused)] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
             let addr = listener.local_addr().expect("its address");
             let (_stop_tx, stop) = watch::channel(false);
@@ -2127,9 +2119,7 @@ mod tests {
             };
             tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
             let api = Api::new(&format!("http://{addr}")).expect("an address");
-            // (a 503's one try: its backoff is the loop's, tested apart)
-            let tries = if status == 503 { 1 } else { limits::POST_TRIES_MAX };
-            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, tries, stop).await;
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, limits::POST_TRIES_MAX, stop).await;
             assert_eq!(sent, want, "{status}");
             assert!(sent.ended());
             assert_eq!(sent.on_chat(), status == 200 || status == 409, "on the chat, ours or another life's: {status}");

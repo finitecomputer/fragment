@@ -45,9 +45,6 @@ _LIFE = os.urandom(6).hex()
 _responses = 0
 # Hermes' tool outcomes, as a step's (docs/chat-records.md).
 _STATUS = {"ok": "completed", "error": "failed", "timeout": "timed_out", "cancelled": "cancelled", "blocked": "blocked"}
-# Hermes' child outcomes (`child_status`), as a helper's end
-# (docs/chat-records.md, `turn.child`); any other is a failure.
-_CHILD_STATUS = {"completed": "completed", "failed": "failed", "interrupted": "interrupted", "timeout": "timed_out", "error": "failed"}
 # A child's task as said, at most (the bridge keeps one line of 140).
 _GOAL_MAX = 200
 
@@ -135,12 +132,12 @@ def child_started(*, child_session_id=None, parent_turn_id=None, child_goal=None
         _condition.notify_all()
 
 
-def child_stopped(*, child_session_id=None, child_status=None, **kwargs):
+def child_stopped(*, child_session_id=None, **kwargs):
     # Its `parent_turn_id` is the parent's turn now, never the one that
     # started it: its end names only the child, which the bridge keeps.
     with _condition:
         if _children.pop(child_session_id, False):
-            _ends[child_session_id] = _CHILD_STATUS.get(child_status, "failed")
+            _ends[child_session_id] = None
         if _ends:
             _say_ends()
         elif _socket is not None:
@@ -152,8 +149,8 @@ def _say_ends():
     """Called under the condition: each end not yet answered, said (with
     the work still running), until one goes unanswered; the hold worker
     says the rest again. Whether all were answered."""
-    for child, status in list(_ends.items()):
-        if _send({"working": bool(_children), "child": child, "status": status}) != "working":
+    for child in list(_ends):
+        if _send({"working": bool(_children), "child": child, "ended": True}) != "working":
             return False
         _ends.pop(child, None)
     return True

@@ -239,7 +239,7 @@ fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
     }
     let owed: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
     for (turn, id) in owed {
-        let more = e.step(Input::Posted { turn, id, kept: true, given_up: false }, now);
+        let more = e.step(Input::Posted { turn, id, kept: true }, now);
         s.dirty |= more.dirty;
         s.effects.extend(more.effects);
     }
@@ -381,7 +381,7 @@ fn a_late_message_is_told_its_age() {
     n.step(Input::Agents(vec![a.clone()]), now + minute);
     n.recover(now + minute);
     n.step(heard(Event::Connected(true)), now + minute);
-    let s = n.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true, given_up: false }, now + minute);
+    let s = n.step(Input::Posted { turn: cut.clone(), id: records::work_id(&cut, "end"), kept: true }, now + minute);
     let continued = started(&answered(&mut n, s, now + minute)).expect("its continuation, handed");
     assert_eq!(continued.continues.as_deref(), Some(cut.as_str()));
     assert_eq!(continued.age.as_deref(), Some("What that turn was answering was sent about 2 hours ago. If it may no longer be wanted, check before acting on it."));
@@ -465,7 +465,7 @@ fn a_reply_streams_then_posts() {
     let t = &e.state().turns[&turn];
     assert_eq!((t.phase, t.owed.len()), (Phase::Ended, 1));
     assert!(e.step(heard(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
-    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end"), kept: true, given_up: false }, T0 + 4);
+    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end"), kept: true }, T0 + 4);
     assert!(done.dirty && done.effects.is_empty());
     assert!(e.state().turns.is_empty(), "let go once its end is answered");
     // replay: a late event for the ended turn is dropped
@@ -514,162 +514,124 @@ fn notices_belong_to_the_chats_turn() {
     assert!(posts(&e2.step(heard(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
 }
 
-/// Goal (FIN-432): a helper a running turn starts is recorded under that
-/// turn on `work` (its task, one line), and its end, however long after the
-/// turn's own end, under the same turn. Replay: a start said again posts
+/// Goal (FIN-432, Paul 11-09): the bridge owns each chat's helpers, and
+/// says the whole set (`turn.helpers`) at every change: a helper's start
+/// (its task, one line, its turn and when it started) and its end, however
+/// long after its turn's own end. Replay: a start or end said again posts
 /// nothing more. Invalid: a start naming no running turn, an end of a
-/// helper never started, records nothing. Restart: a helper still running
-/// ends as lost in the next life, an end not yet posted is posted again as
-/// it was, and a 409 (another life's end) ends it all the same. Bound:
-/// `CHILDREN_PER_TURN_MAX` a turn.
+/// helper never started, record nothing. Each set is a record of its own,
+/// its id's number rising. Bound: `HELPERS_PER_CHAT_MAX` a chat. A state
+/// that contradicts itself is refused.
 #[test]
-fn helpers_are_recorded_under_their_turn() {
-    use crate::records::ChildOutcome;
+fn a_chats_helpers_are_one_set_said_whole() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let start = |turn: &str, child: &str| Event::Child { child: child.into(), change: ChildChange::Started { turn: turn.into(), goal: "Find three venues\nnear Lisbon".into() } };
-    let end = |child: &str, outcome| Event::Child { child: child.into(), change: ChildChange::Ended(outcome) };
+    let end = |child: &str| Event::Child { child: child.into(), change: ChildChange::Ended };
+    let sets = |s: &Step| posts(s).into_iter().filter(|(_, b)| b["kind"] == "turn.helpers").collect::<Vec<_>>();
+    let children = |b: &Value| b["helpers"].as_array().map(|l| l.iter().map(|h| h["child"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>()).unwrap_or_default();
     assert!(posts(&ev(&mut e, start("nosuchturn", "s-0"), T0)).is_empty(), "no running turn");
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "plan the trip" }), T0)).expect("started").turn;
-    let (h1, h2, h3) = (records::child_id("s-1"), records::child_id("s-2"), records::child_id("s-3"));
+    let (h1, h2) = (records::child_id("s-1"), records::child_id("s-2"));
     let s = ev(&mut e, start(&turn, "s-1"), T0 + 1);
-    assert_eq!(posts(&s), vec![(records::child_start_id(&turn, &h1), json!({ "kind": "turn.child", "parent": turn, "child": h1, "goal": "Find three venues near Lisbon" }))]);
-    assert!(s.dirty, "kept open in the state before its start is posted");
+    let one = json!({ "child": h1, "parent": turn, "goal": "Find three venues near Lisbon", "since": T0 + 1 });
+    assert_eq!(sets(&s), vec![(format!("hs:{}", T0 + 1), json!({ "kind": "turn.helpers", "helpers": [one], "until": T0 + 1 + limits::HELPERS_LEASE_MS }))]);
+    assert!(s.dirty, "held in the state before its set is posted");
     assert!(posts(&ev(&mut e, start(&turn, "s-1"), T0 + 1)).is_empty(), "said again");
-    ev(&mut e, start(&turn, "s-2"), T0 + 1);
-    ev(&mut e, start(&turn, "s-3"), T0 + 1);
-    assert!(posts(&ev(&mut e, end("s-9", ChildOutcome::Completed), T0 + 1)).is_empty(), "never started");
-    // the turn ends; its helpers go on, and end after it, under it
+    let s = ev(&mut e, start(&turn, "s-2"), T0 + 1);
+    assert_eq!(sets(&s).iter().map(|(id, b)| (id.clone(), children(b))).collect::<Vec<_>>(), vec![(format!("hs:{}", T0 + 2), vec![h1.clone(), h2.clone()])], "the whole set; a second set in the same ms takes the next number");
+    assert!(posts(&ev(&mut e, end("s-9"), T0 + 1)).is_empty(), "never started");
+    // the turn ends; its helpers go on, and end after it
     ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 2);
-    assert_eq!(e.state().children.len(), 3);
-    let s = ev(&mut e, end("s-1", ChildOutcome::Completed), T0 + 3);
-    assert_eq!(posts(&s), vec![(records::child_end_id(&turn, &h1), json!({ "kind": "turn.child", "parent": turn, "child": h1, "outcome": "completed" }))]);
-    assert!(posts(&ev(&mut e, end("s-1", ChildOutcome::Failed), T0 + 3)).is_empty(), "ended once");
-    // s-2's end is said but not yet posted when the life ends; s-3 still runs
-    let s = e.step(heard(end("s-2", ChildOutcome::TimedOut)), T0 + 4);
-    assert!(matches!(&s.effects[..], [Effect::Owed { .. }]) && s.dirty, "{:?}", s.effects);
-    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
-    assert_eq!(saved.children.iter().map(|c| (c.child.clone(), c.outcome)).collect::<Vec<_>>(), vec![(h2.clone(), Some(ChildOutcome::TimedOut)), (h3.clone(), None)]);
-    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
-    e2.step(Input::Agents(vec![a.clone()]), T0 + 5);
-    let r = e2.recover(T0 + 5);
-    let want = vec![
-        (records::child_end_id(&turn, &h2), json!({ "kind": "turn.child", "parent": turn, "child": h2, "outcome": "timed_out" })),
-        (records::child_end_id(&turn, &h3), json!({ "kind": "turn.child", "parent": turn, "child": h3, "outcome": "lost" })),
-    ];
-    assert_eq!(posts(&r), want, "its own end again, and the running one lost");
-    assert!(r.dirty);
-    e2.step(Input::Posted { turn: turn.clone(), id: want[0].0.clone(), kept: true, given_up: false }, T0 + 6);
-    e2.step(Input::Posted { turn: turn.clone(), id: want[1].0.clone(), kept: false, given_up: false }, T0 + 6);
-    assert!(e2.state().children.is_empty(), "a 409 is an end all the same");
-    assert!(posts(&e2.step(heard(end("s-3", ChildOutcome::Completed)), T0 + 7)).is_empty(), "an earlier life's helper ends nothing here");
-    // the bound, a turn's
-    e2.step(heard(Event::Connected(true)), T0 + 8);
-    let t2 = started(&said(&mut e2, &a, &v, 2, "npub1paul", json!({ "text": "many" }), T0 + 8)).expect("started").turn;
-    for n in 0..limits::CHILDREN_PER_TURN_MAX {
-        assert_eq!(posts(&ev(&mut e2, start(&t2, &format!("m-{n}")), T0 + 9)).len(), 1);
+    assert_eq!(e.state().children.len(), 2);
+    let s = ev(&mut e, end("s-1"), T0 + 3);
+    assert_eq!(sets(&s).iter().map(|(id, b)| (id.clone(), children(b))).collect::<Vec<_>>(), vec![(format!("hs:{}", T0 + 3), vec![h2.clone()])]);
+    assert!(s.dirty && e.state().children.len() == 1);
+    assert!(posts(&ev(&mut e, end("s-1"), T0 + 3)).is_empty(), "ended once");
+    let s = ev(&mut e, end("s-2"), T0 + 4);
+    assert_eq!(sets(&s).iter().map(|(_, b)| b["helpers"].clone()).collect::<Vec<_>>(), vec![json!([])], "none working: an empty set");
+    // the bound, a chat's
+    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "many" }), T0 + 5)).expect("started").turn;
+    for n in 0..limits::HELPERS_PER_CHAT_MAX {
+        assert_eq!(sets(&ev(&mut e, start(&t2, &format!("m-{n}")), T0 + 6)).len(), 1);
     }
-    assert!(posts(&ev(&mut e2, start(&t2, "one-too-many"), T0 + 9)).is_empty(), "at most {} a turn", limits::CHILDREN_PER_TURN_MAX);
-    assert!(posts(&ev(&mut e2, end("one-too-many", ChildOutcome::Completed), T0 + 9)).is_empty(), "unrecorded, so nothing to end");
-    // a state holding one helper twice contradicts itself
-    let mut twice = e2.state().clone();
-    twice.children.push(twice.children[0].clone());
-    assert!(Engine::new(twice, Settings::default(), LIFE).is_err());
-    let mut bad = e2.state().clone();
+    assert!(posts(&ev(&mut e, start(&t2, "one-too-many"), T0 + 6)).is_empty(), "at most {} a chat", limits::HELPERS_PER_CHAT_MAX);
+    assert!(posts(&ev(&mut e, end("one-too-many"), T0 + 6)).is_empty(), "unrecorded, so nothing to end");
+    // a state that contradicts itself
+    let mut twice = e.state().clone();
+    twice.children[1].child = twice.children[0].child.clone();
+    assert!(Engine::new(twice, Settings::default(), LIFE).is_err(), "one helper held twice");
+    let mut bad = e.state().clone();
     bad.children[0].child = "not-hex".into();
     assert!(Engine::new(bad, Settings::default(), LIFE).is_err());
+    let mut long = e.state().clone();
+    long.children[0].goal = "g".repeat(limits::CHILD_GOAL_MAX_CHARS + 1);
+    assert!(Engine::new(long, Settings::default(), LIFE).is_err());
+    let mut over = e.state().clone();
+    over.children.push(Helper { child: records::child_id("past"), ..over.children[0].clone() });
+    assert!(Engine::new(over, Settings::default(), LIFE).is_err(), "past a chat's bound");
 }
 
-/// Goal (Alex on #1086): a helper's end the platform did not answer
-/// within its tries (it was down: ten 503s) is no end. It stays owed, is
-/// posted again at the next tick, and by the next life; only an answer
-/// (appended, a replay, a 409, a refusal) lets it go.
+/// Goal (FIN-432, Paul 11-09): a chat's set holds until its `until`, and
+/// while it names a helper the bridge says it again before then
+/// (`HELPERS_RENEW_BEFORE_MS`), so a reader needs no clock of its own and a
+/// computer that crashed shows none once its last set lapses. Replay:
+/// ticks within a period post nothing, ticks missed post once. An empty set
+/// is never renewed. Restart: the next life tells each chat an earlier
+/// life's helpers ran in that none run (an empty set), keeps none, and an
+/// earlier life's helper's end ends nothing. An agent gone from the chat
+/// or from this computer posts none.
 #[test]
-fn a_helpers_end_not_answered_is_owed_again() {
-    use crate::records::ChildOutcome;
+fn a_chats_set_is_renewed_while_any_run_and_a_restart_says_none() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
-    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "go" }), T0)).expect("started").turn;
-    e.step(heard(Event::Child { child: "s-1".into(), change: ChildChange::Started { turn: turn.clone(), goal: "Find venues".into() } }), T0 + 1);
-    let s = e.step(heard(Event::Child { child: "s-1".into(), change: ChildChange::Ended(ChildOutcome::Completed) }), T0 + 2);
-    let end = records::child_end_id(&turn, &records::child_id("s-1"));
-    assert_eq!(posts(&s).iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), vec![end.clone()]);
-    let gave_up = e.step(Input::Posted { turn: turn.clone(), id: end.clone(), kept: false, given_up: true }, T0 + 3);
-    assert!(posts(&gave_up).is_empty() && e.state().children.len() == 1, "still owed");
-    let again = e.step(Input::Tick, T0 + 4);
-    assert_eq!(posts(&again).into_iter().filter(|(id, _)| *id == end).count(), 1, "posted again at the next tick");
-    assert!(posts(&e.step(Input::Tick, T0 + 5)).iter().all(|(id, _)| *id != end), "once a give-up, not every tick");
-    // the life ends before it lands: the next life posts it, as it was
-    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
-    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
-    e2.step(Input::Agents(vec![a.clone()]), T0 + 6);
-    let r = e2.recover(T0 + 6);
-    assert!(posts(&r).iter().any(|(id, body)| *id == end && body["outcome"] == "completed"), "{:?}", posts(&r));
-    e2.step(Input::Posted { turn: turn.clone(), id: end, kept: true, given_up: false }, T0 + 7);
-    assert!(e2.state().children.is_empty());
-}
-
-/// Goal (FIN-432, Paul's (b) of 11-07): a helper still running is noted on
-/// `work` every `CHILD_NOTE_EVERY_MS` from its start, as its start again
-/// with when it started (`since`), so a page that reads back only the last
-/// `CHILD_READ_BACK_MS` of records finds it however old its start is, and
-/// after its turn's end too. Replay: a tick within a period posts nothing
-/// more, and ticks missed post the latest note alone, so a helper's notes
-/// never double. Bound: `CHILD_NOTES_MAX` a helper. Its end stops them.
-/// Restart: the next life ends it lost and notes nothing; no note's state
-/// is saved.
-#[test]
-fn a_long_helper_is_noted_while_it_works() {
-    use crate::records::ChildOutcome;
-    let a = agent("juniper");
-    let v = view(&[&a]);
-    let mut e = engine(std::slice::from_ref(&a));
-    let every = limits::CHILD_NOTE_EVERY_MS;
-    let notes = |s: &Step| posts(s).into_iter().filter(|(id, _)| id.contains(":cw:")).collect::<Vec<_>>();
-    let ids = |s: &Step| notes(s).into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    let sets = |s: &Step| posts(s).into_iter().filter(|(_, b)| b["kind"] == "turn.helpers").collect::<Vec<_>>();
+    let (lease, before) = (limits::HELPERS_LEASE_MS, limits::HELPERS_RENEW_BEFORE_MS);
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "plan the trip" }), T0)).expect("started").turn;
     let since = T0 + 1;
-    for (child, goal) in [("s-1", "Find three venues\nnear Lisbon"), ("s-2", "Compare the quotes")] {
-        ev(&mut e, Event::Child { child: child.into(), change: ChildChange::Started { turn: turn.clone(), goal: goal.into() } }, since);
-    }
-    let (h1, h2) = (records::child_id("s-1"), records::child_id("s-2"));
-    assert!(notes(&e.step(Input::Tick, since + every - 1)).is_empty(), "none before a period has passed");
-    let first = e.step(Input::Tick, since + every);
-    assert_eq!(notes(&first), vec![
-        (records::child_note_id(&turn, &h1, 1), json!({ "kind": "turn.child", "parent": turn, "child": h1, "goal": "Find three venues near Lisbon", "since": since })),
-        (records::child_note_id(&turn, &h2, 1), json!({ "kind": "turn.child", "parent": turn, "child": h2, "goal": "Compare the quotes", "since": since })),
-    ]);
-    assert!(!first.dirty, "a note is this life's alone: nothing saved");
-    assert!(notes(&e.step(Input::Tick, since + every + 1000)).is_empty(), "once a period");
-    // the turn ends; its helpers still work, noted under it; one ends, and
-    // is noted no more
-    ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, since + every + 2000);
-    ev(&mut e, Event::Child { child: "s-1".into(), change: ChildChange::Ended(ChildOutcome::Completed) }, since + 2 * every - 1);
-    // ticks missed: the latest note alone
-    assert_eq!(ids(&e.step(Input::Tick, since + 4 * every + 5)), vec![records::child_note_id(&turn, &h2, 4)], "the ended helper none; the running one its 4th alone");
-    // the bound
-    let last = since + u64::from(limits::CHILD_NOTES_MAX) * every;
-    assert_eq!(ids(&e.step(Input::Tick, last)), vec![records::child_note_id(&turn, &h2, limits::CHILD_NOTES_MAX)]);
-    assert!(notes(&e.step(Input::Tick, last + 10 * every)).is_empty(), "at most {} notes a helper", limits::CHILD_NOTES_MAX);
-    // restart: the next life ends s-2 lost, and notes nothing
+    ev(&mut e, Event::Child { child: "s-1".into(), change: ChildChange::Started { turn: turn.clone(), goal: "Find venues".into() } }, since);
+    let until = since + lease;
+    assert!(sets(&e.step(Input::Tick, until - before - 1)).is_empty(), "none before its renewal is due");
+    let renewed = e.step(Input::Tick, until - before);
+    assert_eq!(sets(&renewed).iter().map(|(id, b)| (id.clone(), b["until"].clone(), b["helpers"][0]["since"].clone())).collect::<Vec<_>>(), vec![(format!("hs:{}", until - before), json!(until - before + lease), json!(since))]);
+    assert!(!renewed.dirty, "a renewal is this life's alone: nothing saved");
+    assert!(sets(&e.step(Input::Tick, until - before + 1000)).is_empty(), "once a period");
+    let missed = until - before + lease * 3;
+    assert_eq!(sets(&e.step(Input::Tick, missed)).len(), 1, "ticks missed: once");
+    assert!(sets(&e.step(Input::Tick, missed + 1)).is_empty());
+    // its end: an empty set, never renewed
+    let s = ev(&mut e, Event::Child { child: "s-1".into(), change: ChildChange::Ended }, missed + 2);
+    assert_eq!(sets(&s)[0].1["helpers"], json!([]));
+    let later = missed + 2 + lease * 2;
+    assert!(sets(&e.step(Input::Tick, later)).is_empty(), "none working: no renewal");
+    // restart with a helper running: the next life says none run there
+    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), later + 1)).expect("started").turn;
+    ev(&mut e, Event::Child { child: "s-2".into(), change: ChildChange::Started { turn: t2, goal: "Draft".into() } }, later + 2);
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
-    assert!(saved.children.iter().all(|c| c.since.is_none() && c.goal.is_empty() && c.notes == 0), "no note's state is saved, nor a task");
+    assert_eq!(saved.children.iter().map(|c| (c.goal.as_str(), c.since)).collect::<Vec<_>>(), vec![("Draft", later + 2)], "the owner's set is saved");
     let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
-    let restarted = last + 11 * every;
+    let restarted = later + 10;
     e2.step(Input::Agents(vec![a.clone()]), restarted);
     let r = e2.recover(restarted);
-    assert!(posts(&r).iter().any(|(id, b)| *id == records::child_end_id(&turn, &h2) && b["outcome"] == "lost"), "{:?}", posts(&r));
-    for k in 1..4 {
-        assert!(notes(&e2.step(Input::Tick, restarted + k * every)).is_empty(), "a helper an earlier life started is never noted");
-    }
-    // an agent gone from this computer: its helper is noted no more
+    assert_eq!(sets(&r), vec![(format!("hs:{restarted}"), json!({ "kind": "turn.helpers", "helpers": [], "until": restarted + lease }))], "{:?}", posts(&r));
+    assert!(r.dirty && e2.state().children.is_empty());
+    e2.step(heard(Event::Connected(true)), restarted);
+    assert!(posts(&e2.step(heard(Event::Child { child: "s-2".into(), change: ChildChange::Ended }), restarted + 1)).is_empty(), "an earlier life's helper ends nothing here");
+    assert!(sets(&e2.step(Input::Tick, restarted + lease * 2)).is_empty(), "nothing to renew");
+    // an agent gone from the chat: its helpers there go, unsaid; one gone from this computer posts none
     let mut e3 = engine(std::slice::from_ref(&a));
     let t3 = started(&said(&mut e3, &a, &v, 1, "npub1paul", json!({ "text": "go" }), T0)).expect("started").turn;
-    ev(&mut e3, Event::Child { child: "s-3".into(), change: ChildChange::Started { turn: t3, goal: "Draft".into() } }, since);
-    e3.step(Input::Agents(Vec::new()), since + 1);
-    assert!(notes(&e3.step(Input::Tick, since + every)).is_empty(), "its agent left");
+    ev(&mut e3, Event::Child { child: "s-3".into(), change: ChildChange::Started { turn: t3.clone(), goal: "Draft".into() } }, since);
+    let gone = e3.step(Input::Gone { agent: a.fragment.clone(), fragment: "talk--k3x9".into() }, since + 1);
+    assert!(sets(&gone).is_empty() && gone.dirty && e3.state().children.is_empty());
+    assert!(sets(&e3.step(Input::Tick, until)).is_empty());
+    let mut e4 = engine(std::slice::from_ref(&a));
+    let t4 = started(&said(&mut e4, &a, &v, 1, "npub1paul", json!({ "text": "go" }), T0)).expect("started").turn;
+    ev(&mut e4, Event::Child { child: "s-4".into(), change: ChildChange::Started { turn: t4, goal: "Draft".into() } }, since);
+    e4.step(Input::Agents(Vec::new()), since + 1);
+    assert!(sets(&e4.step(Input::Tick, until)).is_empty(), "its agent left this computer");
 }
 
 /// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
@@ -1131,7 +1093,7 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
             let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
             for (turn, id) in owed {
                 // a 409 too: that life ended it
-                e.step(Input::Posted { turn, id, kept: false, given_up: false }, T0 + 1);
+                e.step(Input::Posted { turn, id, kept: false }, T0 + 1);
             }
         }
         claims
@@ -2150,7 +2112,7 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
     assert_eq!((by.as_str(), on.as_str()), (juniper.fragment.as_str(), juniper.fragment.as_str()), "posted as juniper, on its own tasks");
     assert_eq!((&body["outcome"], &body["error"], &body["by"]), (&json!("error"), &json!(LEFT), &json!(rowan.identity)), "{body}");
     assert!(posts(&left).iter().all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?}", posts(&left));
-    let landed = e.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true, given_up: false }, T0 + 2);
+    let landed = e.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
     assert!(landed.dirty && e.state().turns.is_empty(), "let go once its answer landed");
 
     // over, its answer not yet landed: kept, and owed again by the next life
@@ -2192,7 +2154,7 @@ fn an_asked_turn_answers_after_its_agent_leaves() {
             assert_eq!((&body["turn"], &body["error"], &body["by"], &body["name"]), (&json!(t), &json!(LEFT), &json!(rowan.identity), &json!(rowan.name)), "running {running}: {body}");
         }
         assert!(posts(&roster).iter().chain(&posts(&recovered)).all(|(_, b)| b["kind"] == "answer"), "nothing of talk's: {:?} {:?}", posts(&roster), posts(&recovered));
-        next.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true, given_up: false }, T0 + 2);
+        next.step(Input::Posted { turn: t.clone(), id: records::answer_id(&t), kept: true }, T0 + 2);
         assert!(next.state().turns.is_empty(), "let go once its answer landed: {:?}", next.state().turns);
     }
 
@@ -2887,7 +2849,7 @@ impl World {
             Effect::Fence { turn, prompt, .. } => self.step(Input::Fenced { turn: turn.clone(), prompt: prompt.clone(), answer }),
             // this life's on the journal when appended or replayed, not
             // another life's (409)
-            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: matches!(answer, ClaimAnswer::Ours { .. }), given_up: false }),
+            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: matches!(answer, ClaimAnswer::Ours { .. }) }),
             _ => {}
         }
     }
@@ -2965,7 +2927,7 @@ impl World {
             Effect::Owed { turn, id, .. } => {
                 self.lane.pop_front();
                 self.given_up.push(id.clone());
-                self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: false, given_up: false });
+                self.step(Input::Posted { turn: turn.clone(), id: id.clone(), kept: false });
             }
             Effect::Post { id, .. } => {
                 self.lane.pop_front();
@@ -3739,9 +3701,9 @@ fn a_cut_turn_is_continued_once() {
     next.step(Input::Agents(vec![a.clone()]), T0 + 1);
     let r = next.recover(T0 + 1);
     let end = r.effects.iter().find_map(|x| match x { Effect::Owed { turn, id, .. } if *turn == ran.turn => Some(id.clone()), _ => None }).expect("its lost end");
-    let posted = next.step(Input::Posted { turn: ran.turn.clone(), id: end.clone(), kept: true, given_up: false }, T0 + 2);
+    let posted = next.step(Input::Posted { turn: ran.turn.clone(), id: end.clone(), kept: true }, T0 + 2);
     assert!(!posted.effects.iter().any(|x| matches!(x, Effect::Claim { .. })), "a command is not continued: {posted:?}");
-    let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true, given_up: false }, T0 + 3);
+    let again = next.step(Input::Posted { turn: ran.turn.clone(), id: end, kept: true }, T0 + 3);
     assert_eq!(again, Step::default(), "answered again: nothing");
 }
 
@@ -3924,7 +3886,7 @@ fn a_late_answer_to_a_cut_turns_card_is_its_next_turn_wherever_its_read_falls() 
         if when == "before its lost end lands" {
             take(next.step(late.clone(), T0 + 2));
         }
-        let landed = take(next.step(Input::Posted { turn: old.clone(), id: end, kept: true, given_up: false }, T0 + 2));
+        let landed = take(next.step(Input::Posted { turn: old.clone(), id: end, kept: true }, T0 + 2));
         let asked = landed.effects.iter().any(|x| matches!(x, Effect::ReadCut { turn, .. } if *turn == old));
         assert_eq!(asked, when != "before its lost end lands", "{when}: its read asked for once its end is this life's, unless its card was closed late already");
         match when {

@@ -691,7 +691,7 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     // no delegation.max_tokens setting. Older cells name no Deep slot,
     // so their children continue to inherit the parent's route.
     // independent_completions: each background child ends (its
-    // subagent_stop, the chat's `turn.child` end) and reports as it
+    // subagent_stop, which takes it from its chat's set) and reports as it
     // finishes, not when the last of its batch does (Paul, 2026-11-07);
     // a `group` of tasks the model asks for ends and reports as one.
     y.push_str("delegation:\n  max_concurrent_children: 3\n  independent_completions: true\n");

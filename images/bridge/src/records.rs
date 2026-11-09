@@ -722,78 +722,47 @@ pub fn turn_notice(turn: &str, category: NoticeCategory, text: &str) -> Value {
     json!({ "kind": "turn.notice", "turn": turn, "category": category.as_str(), "text": cut(text, limits::NOTICE_TEXT_MAX_CHARS) })
 }
 
-/// How a helper ended (docs/chat-records.md, `turn.child`): as its runtime
-/// said, or `Lost` when the process running it died first (a restart).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChildOutcome {
-    Completed,
-    Failed,
-    Interrupted,
-    TimedOut,
-    Lost,
-}
-
-impl ChildOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ChildOutcome::Completed => "completed",
-            ChildOutcome::Failed => "failed",
-            ChildOutcome::Interrupted => "interrupted",
-            ChildOutcome::TimedOut => "timed_out",
-            ChildOutcome::Lost => "lost",
-        }
-    }
-}
-
-/// A helper's id in its records: the first 24 hex digits of SHA-256 of its
-/// runtime's id for it (Hermes' child session id, which runs long and is no
-/// post id).
+/// A helper's id in its chat's set: the first 24 hex digits of SHA-256 of
+/// its runtime's id for it (Hermes' child session id, which runs long and
+/// is said nowhere else).
 pub fn child_id(runtime_id: &str) -> String {
     hex(&Sha256::digest(runtime_id.as_bytes()))[..24].to_string()
 }
 
-/// A helper's start record id (`c:<child>`), its end's (`ce:<child>`), and
-/// its `n`th note that it still works (`cw:<child>:<n>`, from 1).
-pub fn child_start_id(turn: &str, child: &str) -> String {
-    work_id(turn, &format!("c:{child}"))
-}
-
-pub fn child_end_id(turn: &str, child: &str) -> String {
-    work_id(turn, &format!("ce:{child}"))
-}
-
-pub fn child_note_id(turn: &str, child: &str, n: u32) -> String {
-    work_id(turn, &format!("cw:{child}:{n}"))
-}
-
-/// A helper's task, as its records say it: one line, cut.
+/// A helper's task, as its set says it: one line, cut.
 pub fn child_goal(goal: &str) -> String {
     cut(&goal.split_whitespace().collect::<Vec<_>>().join(" "), limits::CHILD_GOAL_MAX_CHARS)
 }
 
-// A helper's records name the turn that started it `parent`, never
-// `turn`: every reader from before `turn.child` passes over a `work` record
-// with no `turn` (chat.js `onWork`, the iOS app's `Timeline.learn` and
-// `WorkingActivity`), so no page or app already out there takes a helper's
-// record for its turn's (Codex and Alex on #1086: a helper's end read as
-// the turn going on hid its question in words).
-
-/// A helper the turn's agent started: its task in one line.
-pub fn turn_child_start(turn: &str, child: &str, goal: &str) -> Value {
-    json!({ "kind": "turn.child", "parent": turn, "child": child, "goal": child_goal(goal) })
+/// A chat's helpers set's post id: `hs:<n>`, `n` rising with each set the
+/// agent posts there, across lives (`Engine::post_helpers`).
+pub fn helpers_id(n: u64) -> String {
+    format!("hs:{n}")
 }
 
-/// That helper, still working (`limits::CHILD_NOTE_EVERY_MS`): its start
-/// again, with when it started (`since`, ms), so a page that reads only
-/// the last minutes of `work` finds it and how long it has run.
-pub fn turn_child_note(turn: &str, child: &str, goal: &str, since: u64) -> Value {
-    json!({ "kind": "turn.child", "parent": turn, "child": child, "goal": child_goal(goal), "since": since })
+/// One helper in a chat's set: the turn that started it, its id, its task,
+/// and when the bridge saw it start (ms).
+pub struct HelperSaid<'a> {
+    pub parent: &'a str,
+    pub child: &'a str,
+    pub goal: &'a str,
+    pub since: u64,
 }
 
-/// That helper, ended.
-pub fn turn_child_end(turn: &str, child: &str, outcome: ChildOutcome) -> Value {
-    json!({ "kind": "turn.child", "parent": turn, "child": child, "outcome": outcome.as_str() })
+/// The helpers an agent has working in a chat, all of them, as its bridge
+/// holds them now (docs/chat-records.md, `turn.helpers`): posted at each
+/// start and end, and again before `until` while any run. A reader shows
+/// a poster's newest set until `until`; an empty one shows none.
+///
+/// It names no `turn`: every reader from before it passes over a `work`
+/// record with no `turn` (chat.js `onWork`, the iOS app's `Timeline.learn`
+/// and `WorkingActivity`), so none takes it for a turn's going on (Codex
+/// and Alex on #1086: a helper's record read as its turn's hid the turn's
+/// question in words).
+pub fn turn_helpers(helpers: &[HelperSaid<'_>], until: u64) -> Value {
+    assert!(helpers.len() <= limits::HELPERS_PER_CHAT_MAX, "a chat's set is bounded");
+    let helpers: Vec<Value> = helpers.iter().map(|h| json!({ "child": h.child, "parent": h.parent, "goal": child_goal(h.goal), "since": h.since })).collect();
+    json!({ "kind": "turn.helpers", "helpers": helpers, "until": until })
 }
 
 fn cut_or_empty(text: &str, max: usize) -> String {
@@ -1255,19 +1224,25 @@ mod tests {
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
         assert_eq!([NoticeCategory::Info, NoticeCategory::Warning, NoticeCategory::Memory].map(NoticeCategory::as_str), ["info", "warning", "memory"]);
         let h = child_id("20261107_014500_ab12cd");
-        assert!(h.len() == 24 && valid_post_id(&child_end_id(&"t".repeat(24), &h)), "{h}");
-        assert_eq!(turn_child_start("t", &h, " Find three\nvenues  near Lisbon "), json!({ "kind": "turn.child", "parent": "t", "child": h, "goal": "Find three venues near Lisbon" }), "one line");
-        assert_eq!(turn_child_start("t", &h, &"g".repeat(400))["goal"].as_str().map(|g| g.chars().count()), Some(limits::CHILD_GOAL_MAX_CHARS));
-        assert_eq!(turn_child_end("t", &h, ChildOutcome::TimedOut), json!({ "kind": "turn.child", "parent": "t", "child": h, "outcome": "timed_out" }));
-        assert_eq!(turn_child_note("t", &h, " Find three\nvenues ", 1_790_000_000_000), json!({ "kind": "turn.child", "parent": "t", "child": h, "goal": "Find three venues", "since": 1_790_000_000_000u64 }), "its start again, and when");
-        // no reader from before helpers takes one for its turn's: none names a `turn`
-        assert!([turn_child_start("t", &h, "g"), turn_child_note("t", &h, "g", 1), turn_child_end("t", &h, ChildOutcome::Lost)].iter().all(|b| b.get("turn").is_none()));
-        let longest = child_note_id(&"t".repeat(24), &h, limits::CHILD_NOTES_MAX);
-        assert!(valid_post_id(&longest) && longest.ends_with(&format!(":cw:{h}:{}", limits::CHILD_NOTES_MAX)), "{longest}");
-        let outcomes = [ChildOutcome::Completed, ChildOutcome::Failed, ChildOutcome::Interrupted, ChildOutcome::TimedOut, ChildOutcome::Lost];
-        assert_eq!(outcomes.map(ChildOutcome::as_str), ["completed", "failed", "interrupted", "timed_out", "lost"], "docs/chat-records.md's five");
-        assert!(outcomes.iter().all(|o| serde_json::to_value(o).unwrap() == o.as_str()), "saved as said");
-        assert_eq!((child_start_id("t", "c1"), child_end_id("t", "c1")), ("wk:t:c:c1".to_string(), "wk:t:ce:c1".to_string()));
+        assert!(h.len() == 24 && h.bytes().all(|b| b.is_ascii_hexdigit()), "{h}");
+        let set = [
+            HelperSaid { parent: "t1", child: &h, goal: " Find three\nvenues  near Lisbon ", since: 1_790_000_000_000 },
+            HelperSaid { parent: "t2", child: "c2", goal: &"g".repeat(400), since: 1_790_000_000_001 },
+        ];
+        let body = turn_helpers(&set, 1_790_000_900_000);
+        assert_eq!(body["helpers"][0], json!({ "child": h, "parent": "t1", "goal": "Find three venues near Lisbon", "since": 1_790_000_000_000u64 }), "one line");
+        assert_eq!(body["helpers"][1]["goal"].as_str().map(|g| g.chars().count()), Some(limits::CHILD_GOAL_MAX_CHARS));
+        assert_eq!((body["kind"].clone(), body["until"].clone()), (json!("turn.helpers"), json!(1_790_000_900_000u64)));
+        assert_eq!(turn_helpers(&[], 5), json!({ "kind": "turn.helpers", "helpers": [], "until": 5 }), "none working");
+        // no reader from before helpers takes one for its turn's: it names no `turn`
+        assert!(body.get("turn").is_none());
+        assert!(valid_post_id(&helpers_id(u64::MAX)) && helpers_id(7) == "hs:7");
+        // the bound's whole set fits a record, each goal at its worst
+        let worst: Vec<String> = (0..limits::HELPERS_PER_CHAT_MAX).map(|i| format!("{i:024}")).collect();
+        let goal = "\u{1}".repeat(limits::CHILD_GOAL_MAX_CHARS);
+        let parent = "t".repeat(128);
+        let full: Vec<HelperSaid<'_>> = worst.iter().map(|c| HelperSaid { parent: &parent, child: c, goal: &goal, since: u64::MAX }).collect();
+        assert!(turn_helpers(&full, u64::MAX).to_string().len() < 64 * 1024);
         let every = [Category::Shell, Category::Web, Category::Read, Category::Write, Category::Browser, Category::Image, Category::Delegate, Category::Memory, Category::Other];
         assert_eq!(every.map(Category::as_str), ["shell", "web", "read", "write", "browser", "image", "delegate", "memory", "other"], "docs/chat-records.md's nine");
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));

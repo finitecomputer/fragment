@@ -82,32 +82,25 @@ pub const NOTICE_TEXT_MAX_CHARS: usize = 300;
 /// one longest unused goes.
 pub const NOTICE_CHATS_MAX: usize = AGENTS_MAX * 64;
 
-/// Helpers one turn's agent starts that its records name, at most
-/// (`turn.child`); the rest go unrecorded, and their work still holds the
-/// computer.
-pub const CHILDREN_PER_TURN_MAX: u32 = 32;
-/// Helpers the bridge's state keeps open, at most (each until its end is
-/// posted). Derived: every agent's turns at their bound at once.
-pub const CHILDREN_OPEN_MAX: usize = AGENTS_MAX * CHILDREN_PER_TURN_MAX as usize;
+/// Helpers running in one chat (one agent's there) that its set names, at
+/// most (`turn.helpers`); the rest go unrecorded, and their work still
+/// holds the computer.
+pub const HELPERS_PER_CHAT_MAX: usize = 32;
+/// Helpers the bridge's state keeps, at most: every agent's chats at once.
+pub const CHILDREN_OPEN_MAX: usize = AGENTS_MAX * HELPERS_PER_CHAT_MAX;
 /// A helper's task, at most: one line, cut as a step's arguments are.
 pub const CHILD_GOAL_MAX_CHARS: usize = STEP_ARGS_MAX_CHARS;
-/// How often a helper still running is noted on `work` (`turn.child` with
-/// `since`), so a page opened later finds it in the last
-/// `CHILD_READ_BACK_MS` of records, however long ago its start was
-/// (FIN-432, Paul's (b) of 11-07). The bounded version: a durable listing
-/// of the helpers running may come later.
-pub const CHILD_NOTE_EVERY_MS: u64 = 10 * 60 * 1000;
-/// What a reader reads back of `work` for helpers, and how old a helper's
-/// newest start or note may be for it to show as working: a note's period
-/// and five minutes to spare (docs/chat-records.md, `turn.child`; the
-/// readers' own copies, `HELPERS_READ_BACK_MS` in chat.js and
-/// `Helpers.readBack` in the iOS app, are this contract's).
-pub const CHILD_READ_BACK_MS: u64 = 15 * 60 * 1000;
-const _: () = assert!(CHILD_NOTE_EVERY_MS < CHILD_READ_BACK_MS, "a running helper has a record in every window a reader reads back");
-/// Notes one helper gets, at most: a day's. Past it the helper still runs
-/// and its end still comes, but a page opened then no longer finds it, so
-/// its records grow by at most this many.
-pub const CHILD_NOTES_MAX: u32 = 144;
+/// How long a chat's helpers set holds (`turn.helpers`' `until`): a reader
+/// shows it until then. While any helper runs it is posted again
+/// `HELPERS_RENEW_BEFORE_MS` before it lapses, so a computer that crashed
+/// and sleeps shows none at most this long after its last set, and a set
+/// whose post was lost misleads no longer than this.
+pub const HELPERS_LEASE_MS: u64 = 15 * 60 * 1000;
+pub const HELPERS_RENEW_BEFORE_MS: u64 = 5 * 60 * 1000;
+const _: () = assert!(HELPERS_RENEW_BEFORE_MS < HELPERS_LEASE_MS, "a set is renewed before it lapses");
+// a whole set, each helper's goal at its bound (a char escaped as \uXXXX at
+// most), its turn and child ids and start, fits one record's body
+const _: () = assert!(HELPERS_PER_CHAT_MAX * (CHILD_GOAL_MAX_CHARS * 6 + 300) < 64 * 1024, "a chat's set is one record");
 
 /// Prompts one turn asks, at most.
 pub const PROMPTS_PER_TURN_MAX: usize = 16;

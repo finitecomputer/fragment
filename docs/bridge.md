@@ -278,44 +278,33 @@ it, and the hook returns only then:
   the whole group joins (no supported hook says one child of a group
   finished), so its helpers end together.
 - Beside `working`, optionally, a helper (docs/chat-records.md,
-  `turn.child`): `{working, turn, child, goal}` as a child of a person's
+  `turn.helpers`): `{working, turn, child, goal}` as a child of a person's
   turn starts (Hermes' `subagent_start`: `turn` is ours, the plugin's map
   of Hermes' `parent_turn_id`; `child` its session id; `goal` its
-  `child_goal`), and `{working, child, status}` as it stops
+  `child_goal`), and `{working, child, ended: true}` as it stops
   (`subagent_stop`, which names no goal and, by then, no turn of its).
-  `status` is a `turn.child` outcome, `lost` aside (the plugin maps
-  `timeout` to `timed_out`, `error` and any other to `failed`). The
-  answer is `working` still; a helper said wrongly is recorded nowhere,
-  and its work holds all the same. An older bridge reads `working` alone.
-  The engine posts the start under that turn while it runs, and keeps the
-  helper in its state (`State::children`, at most `CHILDREN_OPEN_MAX`)
-  until its end is posted: under the same turn, after its `turn.end` if
-  it outlived it, owed as a turn's end is. A child of no turn of ours (a
-  nested one's) holds the computer, and is recorded nowhere.
-- **A helper's end, however its process ends.** The plugin keeps each
-  end it said until the bridge answers it, and says it again on the
-  socket opened again. It never drops one: at most 256 recorded helpers
-  run or wait to say their end, and a helper started past that holds the
-  computer and is recorded nowhere. The engine keeps an end the platform did not
-  answer within its tries (`driver::Sent::GaveUp`) and posts it again at
-  the next tick. A new bridge life ends each helper its state holds still
-  running as `lost`, and posts again an end not yet posted (a 409,
-  another life's end of it, ends it all the same); a later stop of one
-  ends nothing. The bridge never outlives the
-  gateway: `hermes-boot` stops it and exits when the gateway exits, so the
-  next start ends those helpers. A bridge restarted under a live gateway
-  ends them as lost too; their results still come back as replies.
-- **A helper still working is noted.** On its tick, the engine posts a
-  note (docs/chat-records.md, `turn.child`) for each helper this life saw
-  start that has not ended, every `CHILD_NOTE_EVERY_MS` (10 minutes) from
-  its start, at most `CHILD_NOTES_MAX` (144) a helper. When it started
-  and its task are kept in memory alone (`OpenChild::since`, `goal`), so
-  a new life, which ends that helper lost, notes nothing. A page reads
-  back 15 minutes of `work` and shows a helper only while it has a start
-  or note that new, so a page opened at any time finds a long helper, and
-  a computer that crashed and stays asleep shows none 15 minutes after
-  its last note. The bounded version: a durable listing of the helpers
-  running may come later.
+  The answer is `working` still; a helper said wrongly is recorded
+  nowhere, and its work holds all the same. An older bridge reads
+  `working` alone. A child of no turn of ours (a nested one's) holds the
+  computer, and is recorded nowhere.
+- **The bridge owns each chat's helpers.** It keeps those running in its
+  state (`State::children`, at most `HELPERS_PER_CHAT_MAX` a chat and
+  `CHILDREN_OPEN_MAX` in all) and posts the chat's whole set, with an
+  `until` lease (`HELPERS_LEASE_MS`, 15 minutes), at each start and end,
+  and again `HELPERS_RENEW_BEFORE_MS` (5 minutes) before `until` while it
+  names any. Readers hold no clock of their own: a set lost on the way,
+  or a computer that crashed and sleeps, misleads until its `until` at
+  most. A new life posts an empty set to each chat its state names (those
+  helpers died with the earlier runtime) and keeps none; a later stop of
+  one ends nothing. The bridge never outlives the gateway: `hermes-boot`
+  stops it and exits when the gateway exits, so the next start says none
+  run. A bridge restarted under a live gateway says none too; their
+  results still come back as replies.
+- **A helper's end reaches the bridge.** The plugin keeps each end it
+  said until the bridge answers it, and says it again on the socket
+  opened again. It never drops one: at most 256 recorded helpers run or
+  wait to say their end, and a helper started past that holds the
+  computer and is recorded nowhere.
 - A call the model asked for, before Hermes runs any call of its
   response (Hermes' `post_api_request`): `{turn, response, call:
   {position, tool_call_id, tool, args}}` → `called`. It is the call's

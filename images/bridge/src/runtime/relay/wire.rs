@@ -708,8 +708,8 @@ const CHILD_RUNTIME_ID_MAX_BYTES: usize = 256;
 /// A helper's start or end said beside a `working` frame (our image's
 /// plugin, at Hermes' `subagent_start` and `subagent_stop`): `child` (its
 /// session id) with `turn` (ours, the Relay message's) and `goal` as it
-/// starts, or with `status` (how it ended) as it stops. `Ok(None)`: the
-/// frame says no helper (an older plugin's).
+/// starts, or with `ended: true` as it stops. `Ok(None)`: the frame says no
+/// helper (an older plugin's, or one recorded nowhere).
 pub fn activity_child(v: &Value) -> Result<Option<(String, crate::runtime::ChildChange)>, ChildRefused> {
     #[derive(Deserialize)]
     struct Said {
@@ -717,7 +717,8 @@ pub fn activity_child(v: &Value) -> Result<Option<(String, crate::runtime::Child
         turn: Option<String>,
         #[serde(default)]
         goal: String,
-        status: Option<crate::records::ChildOutcome>,
+        #[serde(default)]
+        ended: bool,
     }
     use crate::runtime::ChildChange;
     let said = Said::deserialize(v).map_err(|_| ChildRefused)?;
@@ -725,10 +726,9 @@ pub fn activity_child(v: &Value) -> Result<Option<(String, crate::runtime::Child
     if child.is_empty() || child.len() > CHILD_RUNTIME_ID_MAX_BYTES {
         return Err(ChildRefused);
     }
-    let change = match (said.turn, said.status) {
-        (Some(turn), None) if valid_post_id(&turn) => ChildChange::Started { turn, goal: said.goal },
-        // `lost` is the bridge's to say, never a runtime's
-        (None, Some(outcome)) if outcome != crate::records::ChildOutcome::Lost => ChildChange::Ended(outcome),
+    let change = match (said.turn, said.ended) {
+        (Some(turn), false) if valid_post_id(&turn) => ChildChange::Started { turn, goal: said.goal },
+        (None, true) => ChildChange::Ended,
         _ => return Err(ChildRefused),
     };
     Ok(Some((child, change)))
@@ -739,28 +739,24 @@ mod tests {
     use super::*;
 
     /// A helper said beside `working`: its start names its turn and task,
-    /// its end how it ended; a frame naming none says no helper. Invalid: no
-    /// id, a long one, a turn that is no post id, both a turn and a status,
-    /// neither, an outcome not ours or the bridge's own `lost`.
+    /// its end that it ended; a frame naming none says no helper. Invalid:
+    /// no id, a long one, a turn that is no post id, both a turn and an
+    /// end, neither.
     #[test]
     fn a_helper_beside_working() {
-        use crate::records::ChildOutcome;
         use crate::runtime::ChildChange;
         assert_eq!(activity_child(&json!({ "working": true })), Ok(None), "an older plugin's");
         let started = activity_child(&json!({ "working": true, "turn": "t-1", "child": "20261107_x", "goal": "Find venues" }));
         assert_eq!(started, Ok(Some(("20261107_x".into(), ChildChange::Started { turn: "t-1".into(), goal: "Find venues".into() }))));
-        for (status, outcome) in [("completed", ChildOutcome::Completed), ("failed", ChildOutcome::Failed), ("interrupted", ChildOutcome::Interrupted), ("timed_out", ChildOutcome::TimedOut)] {
-            assert_eq!(activity_child(&json!({ "working": false, "child": "c", "status": status })), Ok(Some(("c".into(), ChildChange::Ended(outcome)))), "{status}");
-        }
+        assert_eq!(activity_child(&json!({ "working": false, "child": "c", "ended": true })), Ok(Some(("c".into(), ChildChange::Ended))));
         for bad in [
             json!({ "working": true, "child": "", "turn": "t" }),
             json!({ "working": true, "child": "c".repeat(CHILD_RUNTIME_ID_MAX_BYTES + 1), "turn": "t" }),
             json!({ "working": true, "child": "c", "turn": "has space" }),
-            json!({ "working": true, "child": "c", "turn": "t", "status": "completed" }),
+            json!({ "working": true, "child": "c", "turn": "t", "ended": true }),
             json!({ "working": true, "child": "c" }),
-            json!({ "working": false, "child": "c", "status": "timeout" }),
-            json!({ "working": false, "child": "c", "status": "lost" }),
-            json!({ "working": false, "child": 7, "status": "failed" }),
+            json!({ "working": false, "child": "c", "ended": "yes" }),
+            json!({ "working": false, "child": 7, "ended": true }),
         ] {
             assert_eq!(activity_child(&bad), Err(ChildRefused), "{bad}");
         }

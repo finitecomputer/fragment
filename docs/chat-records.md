@@ -242,8 +242,9 @@ messages and replies alone, by their `text` (docs/api.md, Search).
 
 ## `work`
 
-The agent posts each record with the id `wk:<turn>:<part>`, so a step
-posted again is the same record.
+The agent posts each record of a turn with the id `wk:<turn>:<part>`, so
+a step posted again is the same record. A chat's helpers set
+(`turn.helpers`) is no turn's.
 
 **`turn.start`**, part `start`:
 
@@ -370,64 +371,48 @@ notice the runtime sends after the turn's end still belongs to that turn,
 and is posted after its `turn.end`. If the agent has run no turn in that
 chat in this life, the notice is not posted. A notice is never pushed.
 
-**`turn.child`**, part `c:<child>` as a helper starts, `cw:<child>:<n>`
-for its `n`th note that it still works (from 1), and `ce:<child>` as it
-ends: a helper (a child the agent's runtime delegated work to) that the
-turn started.
+**`turn.helpers`**, id `hs:<n>`: the helpers (children the agent's
+runtime delegated work to) the agent has working in this chat, all of
+them, as its computer's bridge holds them now.
 
 ```json
-{ "kind": "turn.child", "parent": "…", "child": "<child>",
-  "goal": "Find three venues near Lisbon for a team offsite" }
-{ "kind": "turn.child", "parent": "…", "child": "<child>",
-  "goal": "Find three venues near Lisbon for a team offsite", "since": 1790000000000 }
-{ "kind": "turn.child", "parent": "…", "child": "<child>", "outcome": "completed" }
+{ "kind": "turn.helpers", "until": 1790000900000,
+  "helpers": [{ "child": "<child>", "parent": "…", "since": 1790000000000,
+                "goal": "Find three venues near Lisbon for a team offsite" }] }
 ```
 
-`parent` is the turn that started it. It is named so, not `turn`, because
-a reader from before `turn.child` passes over a `work` record without
-`turn`: no page or app already out there takes a helper's record for its
-turn going on (as one that hid the turn's question in words would).
-`child` is the first 24 hex digits of SHA-256 of the runtime's id for the
-helper (Hermes' child session id). A start has `goal`: its task, one line
-of at most 140 characters. The goal is the chat's content, read by whoever
-reads the turn's steps: its whitespace made single spaces and cut, never
-scrubbed. An end has `outcome`: `completed`, `failed`,
-`interrupted`, `timed_out`, or `lost` (the process running it died first:
-the next start of the computer's bridge ends it so). A reader treats any
-other outcome as ended. A helper outlives its turn: its end is posted
-under the turn that started it, after that turn's `turn.end`, as a late
-notice is. Helpers the agent grouped (Hermes' task `group`) end
-together, when their group reports. A turn records at most 32 helpers;
-a computer's bridge keeps at most 1,024 open (each until its end is
-posted), and our image's plugin records at most 256 running or waiting
-to say their end. A helper past a bound holds the computer and is
-recorded nowhere.
+The bridge posts the whole set each time a helper starts or ends, and
+again 5 minutes before `until` while it names any. A restart of the
+computer's bridge posts an empty set to each chat its helpers ran in,
+since they died with the process. `n` rises with each set. A helper
+outlives the turn that started it. Helpers the agent grouped (Hermes'
+task `group`) end together, when their group reports.
 
-**A note** is a running helper's start again, with `since`: when its
-bridge saw it start (ms). The bridge that saw it start posts one every 10
-minutes from then (`limits::CHILD_NOTE_EVERY_MS`), the latest alone after
-a pause, at most 144 a helper (a day's), until its end. A restart ends
-the helper (`lost`), and its notes stop with the life. So a helper's
-records grow by at most 144 notes, and every 15 minutes of `work` holds a
-record of each helper running, however long ago its start was.
+- `until` (ms): the set holds until then, 15 minutes after it was posted.
+  A set that lapsed says nothing, so a computer that crashed and sleeps
+  shows no helpers 15 minutes after its last set.
+- `child`: the first 24 hex digits of SHA-256 of the runtime's id for the
+  helper (Hermes' child session id).
+- `parent`: the turn that started it. The record names no `turn`: a
+  reader from before `turn.helpers` passes over a `work` record without
+  one, so no page or app already out there takes it for a turn going on.
+- `since` (ms): when the bridge saw it start.
+- `goal`: its task, one line of at most 140 characters. It is the chat's
+  content, read by whoever reads the turn's steps: its whitespace made
+  single spaces and cut, never scrubbed.
 
-**A reader** reads back 15 minutes of `work` as a page opens
-(`limits::CHILD_READ_BACK_MS`), whatever window of history it shows, and
-takes as working a helper started (a start or a note) and not ended, whose
-newest start or note is at most 15 minutes old. A helper is its poster's,
-whatever a body names; its records count in any order and however often
-(a note read again, or after its end, starts nothing). A note whose
-`since` is not a positive whole number of ms at or before its record's
-`at`, or with no `goal`, is no record of it. So a page opened at any time
-shows the helpers working, with how long each has run (`since`); a
-computer that crashed shows none, once 15 minutes pass with no note. A
-page shows them in a bar above the composer; a helper's result comes back
-as a reply of the agent's own. Only our Hermes image's helpers are
-recorded; older bridges post none.
+A set names at most 32 helpers; a computer's bridge keeps at most 1,024,
+and our image's plugin records at most 256 running or waiting to say their
+end. A helper past a bound holds the computer and is named nowhere. Only
+our Hermes image's helpers are recorded; older bridges post none.
 
-This is the bounded version: a reader finds a running helper from 15
-minutes of records, never a listing. A durable listing of the helpers
-running (one a page asks for, however busy the chat) may come later.
+**A reader** asks for each poster's newest set as a chat opens (`work`
+keeps it: docs/api.md, Newest records), then takes each set `work`
+brings live, the newest of each poster winning. It shows a poster's
+newest set while `until` is ahead of its clock, and a set is its
+poster's, whatever a body names. A page shows the helpers in a bar above
+the composer, with how long each has run (`since`); a helper's result
+comes back as a reply of the agent's own.
 
 **`turn.end`**, part `end`:
 

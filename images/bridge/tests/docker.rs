@@ -1140,18 +1140,19 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
     assert!(fake.with(|w| !w.bodies(&chat, "work", "turn.step").iter().any(|s| s["args"].as_str().is_some_and(|a| a.contains("delegate-started")))), "no child's call is a step");
     assert_eq!(delivered.len(), 1, "the background result arrives in the chat once");
     assert_ne!(delivered[0]["turn"], parent, "its completion has a turn of its own");
-    // the helper as the chat's bar reads it (FIN-432): started under the
-    // parent's turn with its task in one line, ended under it once it
-    // finished, after the parent's own end
-    within(&fake, &chat, &c, 10_000, "the helper's start and end", |w| w.bodies(&chat, "work", "turn.child").len() >= 2).await;
+    // the helper as the chat's bar reads it (FIN-432): its chat's set names
+    // it as it starts (under the parent's turn, its task in one line), and
+    // a later set names none once it finished, after the parent's own end
+    within(&fake, &chat, &c, 10_000, "the helper's set, then none", |w| w.bodies(&chat, "work", "turn.helpers").last().is_some_and(|b| b["helpers"] == json!([]))).await;
     let work = fake.with(|w| w.records(&chat, "work"));
-    let helpers: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).filter(|b| b["kind"] == "turn.child").collect();
-    assert_eq!(helpers.len(), 2, "one start, one end: {helpers:?}");
-    let goal = helpers[0]["goal"].as_str().unwrap_or_default();
-    assert!(helpers[0]["parent"] == parent && goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{helpers:?}");
-    assert_eq!(*helpers[1], json!({ "kind": "turn.child", "parent": parent, "child": helpers[0]["child"], "outcome": "completed" }));
+    let sets: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).filter(|b| b["kind"] == "turn.helpers").collect();
+    let named: Vec<&serde_json::Value> = sets.iter().flat_map(|b| b["helpers"].as_array().unwrap().iter()).collect();
+    assert!(!named.is_empty() && named.iter().all(|h| h["child"] == named[0]["child"] && h["parent"] == parent), "one helper, under its parent's turn: {sets:?}");
+    let goal = named[0]["goal"].as_str().unwrap_or_default();
+    assert!(goal.starts_with("run: touch /data/work/juniper--k3x9/delegate-started; sleep 12;") && goal.ends_with('…') && goal.chars().count() == fragment_bridge::limits::CHILD_GOAL_MAX_CHARS, "{sets:?}");
+    assert!(sets.iter().all(|b| b.get("turn").is_none() && b["until"].as_u64().is_some()), "{sets:?}");
     let at = |pred: &dyn Fn(&serde_json::Value) -> bool| work.iter().position(|r| pred(&r["body"])).expect("recorded");
-    assert!(at(&|b| b["kind"] == "turn.end" && b["turn"] == parent) < at(&|b| b["kind"] == "turn.child" && b.get("outcome").is_some()), "its end comes after its parent's");
+    assert!(at(&|b| b["kind"] == "turn.end" && b["turn"] == parent) < at(&|b| b["kind"] == "turn.helpers" && b["helpers"] == json!([])), "it ends after its parent");
     assert!(held, "the computer stays awake throughout the background delegate");
     if let Some(tier) = tier {
         let deep = if tier == "cheap" { ROUTE_FALLBACK_ID } else { "deepseek/deepseek-v4.1-flash" };
@@ -1189,43 +1190,40 @@ async fn background_delegate_gate(deploying: bool, tier: Option<&str>, fallback:
 
 /// Goal (Alex on #1086): a `group` Hermes runs as one completion unit.
 /// Two background tasks of one group, independent completions on: both
-/// helpers start under the parent's turn; the fast one, finished, shows as
-/// working while its sibling runs, as Hermes stops a group's children only
-/// once it joins (no supported hook says one child of a group finished:
-/// docs/bridge.md); then both end, completed, after the parent's end, and
-/// the group reports.
+/// helpers start under the parent's turn; the fast one, finished, stays in
+/// its chat's set while its sibling runs, as Hermes stops a group's
+/// children only once it joins (no supported hook says one child of a
+/// group finished: docs/bridge.md); then the set names none, after the
+/// parent's end, and the group reports.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_groups_helpers_end_together() {
     let (fake, _model, chat, c) = hermes_running_with_modes(None).await;
     let parent = asked(&fake, &chat, &c, "delegate the grouped work", |w, t| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
-    let helpers = |w: &support::fake::World| w.bodies(&chat, "work", "turn.child");
-    within(&fake, &chat, &c, 60_000, "both helpers started", |w| helpers(w).iter().filter(|h| h.get("goal").is_some()).count() >= 2).await;
+    let newest = |w: &support::fake::World| w.bodies(&chat, "work", "turn.helpers").last().map(|b| b["helpers"].as_array().unwrap().len());
+    within(&fake, &chat, &c, 60_000, "both helpers started", |w| newest(w) == Some(2)).await;
     let t0 = Instant::now();
     while !c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-fast-done"]) {
         assert!(t0.elapsed() < Duration::from_secs(90), "the fast task ran; {}", told(&fake, &chat, &c));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    // the fast one done, its sibling still running: no end yet
+    // the fast one done, its sibling still running: both still in the set
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let early: Vec<serde_json::Value> = fake.with(|w| helpers(w).into_iter().filter(|h| h.get("outcome").is_some()).collect());
+    let early = fake.with(|w| newest(w));
     assert!(!c.exec(&["test", "-f", "/data/work/juniper--k3x9/group-slow-done"]), "the slow task still runs");
-    assert!(early.is_empty(), "a group's helpers end together: {early:?}");
-    within(&fake, &chat, &c, 120_000, "both helpers ended", |w| helpers(w).iter().filter(|h| h.get("outcome").is_some()).count() >= 2).await;
+    assert_eq!(early, Some(2), "a group's helpers end together");
+    within(&fake, &chat, &c, 120_000, "both helpers ended", |w| newest(w) == Some(0)).await;
     let work = fake.with(|w| w.records(&chat, "work"));
     let bodies: Vec<&serde_json::Value> = work.iter().map(|r| &r["body"]).collect();
-    let starts: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("goal").is_some()).collect();
-    let ends: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.child" && b.get("outcome").is_some()).collect();
-    assert_eq!(starts.len(), 2, "{starts:?}");
-    assert!(starts.iter().all(|b| b["parent"] == parent), "{starts:?}");
-    let mut started: Vec<&str> = starts.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
-    let mut ended: Vec<&str> = ends.iter().map(|b| b["child"].as_str().unwrap_or("")).collect();
-    started.sort();
-    ended.sort();
-    assert_eq!(started, ended, "each ends once");
-    assert!(ends.iter().all(|b| b["parent"] == parent && b["outcome"] == "completed"), "{ends:?}");
+    let sets: Vec<&&serde_json::Value> = bodies.iter().filter(|b| b["kind"] == "turn.helpers").collect();
+    let mut named: Vec<&str> = sets.iter().flat_map(|b| b["helpers"].as_array().unwrap().iter()).map(|h| h["child"].as_str().unwrap_or("")).collect();
+    named.sort();
+    named.dedup();
+    assert_eq!(named.len(), 2, "{sets:?}");
+    assert!(sets.iter().flat_map(|b| b["helpers"].as_array().unwrap().iter()).all(|h| h["parent"] == parent), "{sets:?}");
     let parent_end = bodies.iter().position(|b| b["kind"] == "turn.end" && b["turn"] == parent).expect("its end");
-    assert!(bodies.iter().enumerate().filter(|(_, b)| b["kind"] == "turn.child" && b.get("outcome").is_some()).all(|(i, _)| i > parent_end));
+    let none = bodies.iter().position(|b| b["kind"] == "turn.helpers" && b["helpers"] == json!([])).expect("none working");
+    assert!(none > parent_end, "they end after their parent");
     within(&fake, &chat, &c, 60_000, "the group's one report", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["text"].as_str().is_some_and(|t| t.contains("the group reported")))).await;
     within(&fake, &chat, &c, 10_000, "the hold to end", |w| w.keepalive_open == 0).await;
 }

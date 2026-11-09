@@ -467,8 +467,8 @@ pub enum Event {
     Notice { agent: String, fragment: String, category: crate::records::NoticeCategory, text: String },
     /// A helper (a child the runtime delegated work to), by the runtime's
     /// own id for it: started by a running turn, with its task, or ended
-    /// (`turn.child`). Its end names no turn: it may come long after its
-    /// turn's, and belongs to the turn that started it.
+    /// (its chat's set, `turn.helpers`). Its end names no turn: it may come
+    /// long after its turn's.
     Child { child: String, change: ChildChange },
 }
 
@@ -476,7 +476,7 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChildChange {
     Started { turn: String, goal: String },
-    Ended(crate::records::ChildOutcome),
+    Ended,
 }
 
 /// Why a runtime stopped.
