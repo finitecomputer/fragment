@@ -56,6 +56,9 @@ pub struct Source {
     /// What was not read as a file, each in a few words (a name that is
     /// not text, a folder that could not be read).
     pub unread: Vec<String>,
+    /// What was left out unread for what its path says (`skip`): a file
+    /// that may hold a secret. No reader finds it.
+    pub skipped: Vec<Entry>,
 }
 
 enum Backing {
@@ -227,12 +230,29 @@ impl Source {
             true
         });
         let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
-        Source { origin: origin.to_path_buf(), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
+        Source { origin: origin.to_path_buf(), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread, skipped: Vec::new() }
     }
 
     /// The folder or the zip it was opened from, as named.
     pub fn origin(&self) -> &Path {
         &self.origin
+    }
+
+    /// Leaves out every file `skip` names: listed in `skipped`, never read,
+    /// since no reader finds a file the source no longer lists.
+    pub fn skip(&mut self, skip: impl Fn(&str) -> bool) {
+        let mut at = HashMap::with_capacity(self.at.len());
+        let mut kept = Vec::with_capacity(self.entries.len());
+        for e in std::mem::take(&mut self.entries) {
+            if skip(&e.path) {
+                self.skipped.push(e);
+                continue;
+            }
+            let (_, index) = self.at[&e.path];
+            at.insert(e.path.clone(), (kept.len(), index));
+            kept.push(e);
+        }
+        (self.entries, self.at) = (kept, at);
     }
 
     /// Every file, by path.

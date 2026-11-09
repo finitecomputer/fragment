@@ -25,6 +25,8 @@ const CONFIG_MAX_BYTES: u64 = 256 * 1024;
 const LINE_SHOWN_MAX_CHARS: usize = 200;
 /// The lines of one text listed, at most.
 const LINES_MAX: usize = 100;
+/// The files left out for their names the survey names, at most.
+const SKIPPED_SHOWN: usize = 1_000;
 
 /// A line of a text that names the old platform: its file, its number,
 /// the words it holds, and the line.
@@ -95,6 +97,10 @@ pub struct SourceFacts {
     pub bytes: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unread: Vec<String>,
+    /// The files left out unread, their names saying they may hold a
+    /// password or key, at most `SKIPPED_SHOWN` (`skipped_count` is all).
+    pub skipped: Vec<String>,
+    pub skipped_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,7 +219,14 @@ pub fn survey(src: &Source, layout: &Layout, now_s: i64) -> Result<Survey> {
     Ok(Survey {
         format: FORMAT,
         layout: layout.name.clone(),
-        source: SourceFacts { kind: src.kind(), files: src.entries().len(), bytes: src.entries().iter().map(|e| e.size).sum(), unread: src.unread.clone() },
+        source: SourceFacts {
+            kind: src.kind(),
+            files: src.entries().len(),
+            bytes: src.entries().iter().map(|e| e.size).sum(),
+            unread: src.unread.clone(),
+            skipped: src.skipped.iter().take(SKIPPED_SHOWN).map(|e| e.path.clone()).collect(),
+            skipped_count: src.skipped.len(),
+        },
         sessions: fact(src, &layout.in_home("state.db")),
         soul: fact(src, &layout.in_home("SOUL.md")),
         memories: memories(src, layout),
@@ -262,6 +275,9 @@ pub fn print(s: &Survey) {
     }
     for (name, list) in &s.parts {
         println!("{name}: {}", if list.is_empty() { "none".to_string() } else { list.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ") });
+    }
+    if s.source.skipped_count > 0 {
+        println!("Left out unread, their names saying they may hold a password or key: {} ({})", s.source.skipped_count, s.source.skipped.iter().take(5).cloned().collect::<Vec<_>>().join(", "));
     }
     let f = &s.files;
     println!("Files: {} brought ({}), {} left behind ({})", f.brought.files, size(f.brought.bytes), f.left.files, size(f.left.bytes));

@@ -67,11 +67,16 @@ pub fn home(s: &mut Suite, api: &Api) -> Result<()> {
     let again = s.cli_json(api, &home, &["home", "files", &zip, "--layout", &layout, "--into", &name, "--json"])?;
     s.ok("the same again sends nothing twice", again["files"] == 0 && again["already"] == 8 && head.is_some() && s.fake.branch(&repo, "main") == head, &again);
 
-    // invalid: a home holding a secret is read not at all
+    // a home holding files that may hold secrets (by the layout's path, by
+    // a name) reads whole less those: skipped unread, and named; the
+    // fixture's own 7 files brought (no photo in this zip)
     let secret = s.dir("home-secret").join("stage.zip");
-    fragment_fakes::old_home::stage(&secret, &[("agent/identity/identity.json", b"{}".to_vec())])?;
-    let out = s.cli(api, &home, &["home", "survey", secret.to_str().expect("a utf-8 path"), "--layout", &layout, "--json"]);
-    let said = String::from_utf8_lossy(&out.stdout).to_string();
-    s.ok("a stage holding a secret's path is refused whole", !out.status.success() && said.contains("invalid_request") && said.contains("agent/identity/identity.json"), &said);
+    fragment_fakes::old_home::stage(&secret, &[("agent/identity/identity.json", b"{}".to_vec()), ("workspace/projects/app/.npmrc", b"//r/:_authToken=x".to_vec())])?;
+    let skipped = s.cli_json(api, &home, &["home", "survey", secret.to_str().expect("a utf-8 path"), "--layout", &layout, "--json"])?;
+    s.ok(
+        "a zip holding files that may hold secrets surveys the rest, and names them skipped",
+        skipped["source"]["skipped"] == json!(["agent/identity/identity.json", "workspace/projects/app/.npmrc"]) && skipped["files"]["brought"]["files"] == 7,
+        &skipped["source"],
+    );
     Ok(())
 }
