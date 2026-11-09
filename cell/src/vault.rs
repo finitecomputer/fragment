@@ -17,12 +17,18 @@
 //!   (what every answer names), so a list is those texts, read nowhere.
 //! - **Its wipe** (wipe.rs, the ledger's step): emptied in one step, and a
 //!   row kept that says so; nothing is put after.
+//! - **Its agents' use** (`names`, `fill`): its person's computer asks
+//!   which secrets each agent may use, toward which hosts (its guest's
+//!   view, and the hosts its egress catches), and, for one request, each
+//!   secret it names: filled toward one of its hosts, for an agent bound to
+//!   it. A Nostr key is never answered: the Vault signs the request.
 
 use std::cell::Cell;
 
 use fragment_core::vault::{self as rules, Placing};
 use fragment_proto::vault::{PutSecret, Secret, SecretRemoved};
 use fragment_proto::{ErrorCode, IdentityKind};
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::Value;
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -40,6 +46,81 @@ const SEAL_CLASS: &str = "Vault";
 /// The marker every call into a Vault carries (routed.rs `marker`): only
 /// the platform's own code calls one, and the router passes no such header.
 pub(crate) const VAULT_HEADER: &str = "x-fragment-vault";
+
+/// `vault/names`' body: which of `agents` may use which secrets.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamesAsk {
+    agents: Vec<String>,
+}
+
+/// A secret an agent may use, as its computer lists it: its name and its
+/// hosts (never a parked one's: it fills nothing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Usable {
+    pub name: String,
+    pub hosts: Vec<String>,
+}
+
+/// `vault/names`' answer: by agent fragment.
+#[derive(Serialize, Deserialize)]
+struct ByAgent {
+    agents: std::collections::BTreeMap<String, Vec<Usable>>,
+}
+
+/// `vault/fill`'s body: `names` for `agent`'s request to `host`; a
+/// signature's `request` as it goes (its URL, method and body's SHA-256).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FillAsk {
+    pub agent: String,
+    pub host: String,
+    pub names: Vec<String>,
+    pub request: Signable,
+}
+
+/// What a signature covers: the request as it is sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct Signable {
+    pub method: String,
+    pub url: String,
+    /// Its body's SHA-256, hex; none, an empty body.
+    pub body_sha256: Option<String>,
+}
+
+/// One secret, filled: what goes where its placement says (`secret`, the
+/// value or a signed event), toward its hosts. `signed`: an event, made
+/// for this request alone.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Filled {
+    pub name: String,
+    pub secret: String,
+    pub hosts: Vec<String>,
+    pub placement: fragment_core::catalog::Placement,
+    pub signed: bool,
+}
+
+/// `vault/fill`'s answer, in the order asked.
+#[derive(Serialize, Deserialize)]
+struct Fills {
+    secrets: Vec<Filled>,
+}
+
+/// The secrets each of `agents` (fragments of `person`'s) may use, toward
+/// which hosts: none for an agent no secret names. What a computer's view
+/// lists and its egress catches.
+pub(crate) async fn names(env: &Env, person: &str, agents: &[String]) -> CellResult<std::collections::BTreeMap<String, Vec<Usable>>> {
+    let named: ByAgent = crate::routed::ask_object(env, "VAULT", person, "vault/names", &NamesAsk { agents: agents.to_vec() }).await?;
+    Ok(named.agents)
+}
+
+/// `ask`'s secrets in `person`'s Vault, each filled for its request, or
+/// the refusal of the first that may not be.
+pub(crate) async fn fill(env: &Env, person: &str, ask: &FillAsk) -> CellResult<Vec<Filled>> {
+    let filled: Fills = crate::routed::ask_object(env, "VAULT", person, "vault/fill", ask).await?;
+    Ok(filled.secrets)
+}
 
 /// `vault/<op>[/<name>]` on `person`'s Vault, `body` its JSON: its answer,
 /// as it wrote it.
@@ -147,6 +228,8 @@ impl VaultCell {
             ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "list"] => self.list()?,
             ["vault", "delete", name] => self.delete(name)?,
+            ["vault", "names"] => self.names(&crate::json_body(&req.bytes().await?)?)?,
+            ["vault", "fill"] => self.fill(&crate::json_body(&req.bytes().await?)?).await?,
             _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         };
         Ok(Response::from_bytes(answer.into_bytes())?)
@@ -192,6 +275,86 @@ impl VaultCell {
         Ok(format!("{{\"secrets\":[{}]}}", texts.join(",")))
     }
 
+    /// Which secrets each of `b.agents` may use, toward which hosts:
+    /// `ByAgent`'s JSON.
+    fn names(&self, b: &NamesAsk) -> CellResult<String> {
+        let mut agents: std::collections::BTreeMap<String, Vec<Usable>> = b.agents.iter().map(|a| (a.clone(), vec![])).collect();
+        for r in self.rows("SELECT secret FROM secrets ORDER BY name", vec![])? {
+            let s: Secret = stored(&r)?;
+            if s.hosts.is_empty() {
+                continue;
+            }
+            for a in &s.agents {
+                if let Some(list) = agents.get_mut(a) {
+                    list.push(Usable { name: s.name.clone(), hosts: s.hosts.clone() });
+                }
+            }
+        }
+        serde_json::to_string(&ByAgent { agents }).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// Each secret `b` names, filled for `b.agent`'s request to `b.host`:
+    /// one bound to that agent, toward one of its hosts, as `Fills`' JSON. A
+    /// value opens here and goes to the egress alone; a Nostr key signs
+    /// here, and never leaves.
+    async fn fill(&self, b: &FillAsk) -> CellResult<String> {
+        if b.names.is_empty() || b.names.len() > fragment_core::swap::PLACEHOLDERS_MAX {
+            return Err(CellError::invalid(format!("fill 1 to {} secrets", fragment_core::swap::PLACEHOLDERS_MAX)));
+        }
+        let mut out = Vec::with_capacity(b.names.len());
+        for name in &b.names {
+            let rows = self.rows("SELECT sealed, secret FROM secrets WHERE name = ?", vec![name.as_str().into()])?;
+            let not_its = || CellError::new(ErrorCode::NotConnected, format!("{name} is no secret of {}'s: its person keeps it in their vault, for this agent (PUT /api/vault/{name})", b.agent));
+            let row = rows.first().ok_or_else(not_its)?;
+            let s: Secret = stored(row)?;
+            if !s.agents.contains(&b.agent) {
+                return Err(not_its());
+            }
+            if s.hosts.is_empty() {
+                return Err(CellError::new(ErrorCode::NotConnected, format!("{name} is parked: it goes to no host until its person sets one")));
+            }
+            if !s.hosts.contains(&b.host) {
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{name} goes to {}, not {}", s.hosts.join(", "), b.host)));
+            }
+            let (placing, _) = rules::placing(&s.place).map_err(|e| CellError::host(format!("a stored secret's place: {e}")))?;
+            let sealed = row["sealed"].as_str().unwrap_or_default().to_string();
+            let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
+            if let Some(resealed) = opened.resealed {
+                // only over the value opened: its person may have set another meanwhile
+                self.sql().exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![resealed.into(), name.as_str().into(), sealed.into()])?;
+            }
+            let value = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a secret that is not text"))?;
+            let (secret, signed) = match placing {
+                Placing::Fill(_) => (value, false),
+                Placing::Nip98 => (self.sign(&value, &b.request, &b.host)?, true),
+            };
+            out.push(Filled { name: name.clone(), secret, hosts: s.hosts, placement: placing.placement(), signed });
+        }
+        serde_json::to_string(&Fills { secrets: out }).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// A NIP-98 event over `request`, by the Nostr key `key`, as it goes in
+    /// `Authorization: Nostr {}`: made now, its URL the request's to `host`.
+    fn sign(&self, key: &str, request: &Signable, host: &str) -> CellResult<String> {
+        let url = url::Url::parse(&request.url).map_err(|e| CellError::invalid(format!("a signed request's URL: {e}")))?;
+        if url.scheme() != "https" || url.host_str() != Some(host) {
+            return Err(CellError::invalid(format!("a signed request goes over https to {host}, not {}", request.url)));
+        }
+        let method = request.method.to_ascii_uppercase();
+        if !matches!(method.as_str(), "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS") {
+            return Err(CellError::invalid(format!("no method {method:?} to sign")));
+        }
+        if let Some(sha) = &request.body_sha256 {
+            if sha.len() != 64 || !sha.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+                return Err(CellError::invalid("a signed request's body hash is 64 hex"));
+            }
+        }
+        let keys = fragment_nip98::Keys::from_secret_hex(key).ok_or_else(|| CellError::host("a stored Nostr key that is no key"))?;
+        let header = keys.header_for_payload(&method, url.as_str(), request.body_sha256.as_deref(), js::now_ms() / 1000);
+        let event = header.strip_prefix("Nostr ").ok_or_else(|| CellError::host("a NIP-98 header is `Nostr <event>`"))?;
+        Ok(event.to_string())
+    }
+
     /// `name` removed: `SecretRemoved`'s JSON.
     fn delete(&self, name: &str) -> CellResult<String> {
         let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
@@ -221,4 +384,9 @@ impl VaultCell {
             other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
+}
+
+/// A row's `Secret`, as it was kept.
+fn stored(row: &Value) -> CellResult<Secret> {
+    crate::json_text(row["secret"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored secret: {e}")))
 }

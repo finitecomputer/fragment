@@ -606,6 +606,14 @@ impl Catalog {
         Ok(Catalog { providers: rows })
     }
 
+    /// This catalog and a person's Vault's secrets beside it, each a row
+    /// of its own (`vault::row`), for one request's swap: their names are
+    /// none of the catalog's (`vault::name_ok`).
+    pub fn with(&self, vault: Vec<Provider>) -> Catalog {
+        assert!(vault.iter().all(|v| self.get(&v.name).is_none()), "a vault's secret is named apart from the catalog's providers");
+        Catalog { providers: self.providers.iter().cloned().chain(vault).collect() }
+    }
+
     pub fn providers(&self) -> &[Provider] {
         &self.providers
     }
