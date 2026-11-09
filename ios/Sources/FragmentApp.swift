@@ -48,6 +48,14 @@ final class Library {
     var pages: FragmentPages?
     /// Their computer's `phase` as last read (`ComputerView`), or nil.
     var computerPhase: String?
+    /// What they are told (`GET /api/notices`, `NoticesBand`), as last read;
+    /// whether that read failed (what it said before stays); the notices
+    /// whose last action failed, by id, until one goes through or the
+    /// notice is gone; and those with an action under way.
+    var notices: [Notice] = []
+    var noticesFailed = false
+    var failedNotices: Set<String> = []
+    var acting: Set<String> = []
     @ObservationIgnored private var loadID = UUID()
     @ObservationIgnored private var settle: Task<Void, Never>?
     @ObservationIgnored private var titling: Set<String> = []
@@ -215,6 +223,7 @@ final class Library {
             }
             if loadID == requestID { error = nil }
         } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
+        await loadNotices(api, requestID)
         await loadImported(api, requestID)
         await loadPages(api)
         await titleUntitled(api)
@@ -238,6 +247,36 @@ final class Library {
         let phase = read.computers.first?.phase
         if computerPhase != phase { computerPhase = phase }
         for agent in taken where identities[agent.fragment] != agent.identity { identities[agent.fragment] = agent.identity }
+    }
+    /// What they are told now, each owner's notices in its own words. A
+    /// platform from before notices (404) tells none; any other failure
+    /// keeps what the last read said, and the band says it couldn't refresh.
+    private func loadNotices(_ api: FragmentAPI, _ requestID: UUID) async {
+        struct Read: Decodable { let notices: [Notice] }
+        let read: Read??
+        do { read = try await api.optional(Read.self, "api/notices") } catch { read = nil }
+        guard loadID == requestID, !Task.isCancelled else { return }
+        noticesFailed = read == nil
+        guard let read else { return }
+        let told = read?.notices ?? []
+        if notices != told { notices = told }
+        failedNotices.formIntersection(told.map(\.id))
+    }
+    /// A notice's action: its route posted with its body, then everything
+    /// read again (`load`, whose newest read wins), which decides what
+    /// shows whatever the post answered. Failed, the notice says so, as
+    /// that read finds it, to tap again.
+    func act(_ notice: Notice, _ action: Notice.Action, api: FragmentAPI) async {
+        guard let post = action.post, !acting.contains(notice.id) else { return }
+        acting.insert(notice.id)
+        defer { acting.remove(notice.id) }
+        do {
+            let _: JSONValue = try await api.request(String(post.drop { $0 == "/" }), method: "POST", body: action.body ?? .object([:]))
+            failedNotices.remove(notice.id)
+        } catch {
+            failedNotices.insert(notice.id)
+        }
+        await load(api)
     }
     private func loadPages(_ api: FragmentAPI) async {
         guard pages == nil, let mine = fragments.first(where: { $0.role == "owner" }) else { return }
@@ -400,6 +439,8 @@ struct FragmentRoot: View {
     @State private var sidebar = false
     @State private var showingApps = false
     @State private var openedApp: FragmentSummary?
+    /// The page's height, of which the notices take at most a share.
+    @State private var pageHeight: CGFloat = 800
 
     var body: some View {
         Group {
@@ -427,7 +468,13 @@ struct FragmentRoot: View {
     }
     private func shell(_ api: FragmentAPI) -> some View {
         ZStack(alignment: .leading) {
-            Group {
+            // What they are told sits above the whole stack, so every page
+            // and every page pushed on it (Your Apps, Settings' own) has it,
+            // as the web's band is over every chat and Settings: one band,
+            // never one per page.
+            VStack(spacing: 0) {
+                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                    .background(FragmentStyle.background.ignoresSafeArea(edges: .top))
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
@@ -455,6 +502,7 @@ struct FragmentRoot: View {
                     }
             }
             .accessibilityHidden(sidebar)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
             SidebarDrawer(isPresented: $sidebar, library: library, page: page, api: api) { destination in
                 page = destination; showingApps = false; toggleSidebar()
             }
@@ -473,7 +521,10 @@ struct FragmentRoot: View {
                 }
             }
         }
-        .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(scenePhase)") {
+        // the library's reads and its watch, for the account as it is now: a
+        // library made anew (`resetNavigation`: its identity or approval
+        // changed, as a check of the key finds them) reads and watches anew
+        .task(id: "\(api.baseURL)|\(api.identity.publicKey)|\(connection.account?.identity ?? "")|\(connection.account?.approved == true)|\(scenePhase)") {
             if scenePhase == .active { await library.load(api); await library.watch(api) }
         }
         .onChange(of: page) { left, _ in
