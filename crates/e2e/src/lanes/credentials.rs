@@ -76,6 +76,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "while it is paused, another key's call goes on: the key pauses, not the account",
     "its owner sees it over the agent's chat: the key, and what it spent this hour",
     "as the hour passes, its oldest charges go: the key's calls go again, and its notice with them",
+    "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
+    "its owner taps Allow: unconfirmed (its ask refused, the computer's read failing), the pause stays with its button and a short line; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
+    "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -482,13 +485,69 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
     s.ok(SWAP_CHECKS[40], went, &other);
     let notices = || api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None).map(|r| r.body["notices"].clone()).unwrap_or(Value::Null);
+    let paused_now = || notices().as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused"));
+    // its cap is its person's (FIN-448): set on their computer, never by an agent
+    let key_cap = |who: &crate::Keys, provider: &str, body: Value| api.signed(who, "POST", &format!("/api/computers/{}/key-caps/{provider}", w.id), Some(&body));
+    let (agent_keys, _) = api.own_agent(w.stranger)?;
+    let by_agent = key_cap(&agent_keys, "elevenlabs", json!({}))?;
+    let unsigned = api.unsigned("POST", &format!("/api/computers/{}/key-caps/elevenlabs", w.id), Some(&json!({})))?;
+    let no_key = key_cap(w.owner, SWAP_CONNECTION, json!({}))?;
+    let out = key_cap(w.owner, "elevenlabs", json!({ "micros": 0 }))?;
+    let both = key_cap(w.owner, "elevenlabs", json!({ "from": cap, "micros": cap }))?;
+    s.ok(
+        SWAP_CHECKS[43],
+        by_agent.status == 403 && unsigned.status == 401 && no_key.status == 404 && out.status == 400 && both.status == 400 && paused_now(),
+        json!({ "agent": by_agent.status, "unsigned": unsigned.status, "noKey": no_key.status, "out": out.body, "both": both.body }),
+    );
     let told = notices();
     let in_chat = key_notice_in_chat(s, api, w.owner)?;
     s.ok(
         SWAP_CHECKS[41],
-        told.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused" && n["provider"] == "elevenlabs" && n["capMicros"] == cap))
-            && in_chat == Some(json!({ "said": "ElevenLabs calls paused: $5.03 this hour", "buttons": [] })),
+        told.as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "key_paused" && n["provider"] == "elevenlabs" && n["capMicros"] == cap && n["allowMicros"] == 4 * cap))
+            && in_chat.as_ref().is_some_and(|(shown, _, _)| *shown == json!({ "said": "ElevenLabs calls paused: $5.03 this hour", "buttons": ["Allow up to $20 an hour"] })),
         json!({ "told": told, "inChat": in_chat }),
+    );
+    let lifted = say(s, 160, &speak(SPOKEN))?;
+    let unconfirmed = json!({ "lines": ["Couldn't confirm that. Try again."], "button": "Allow up to $20 an hour" });
+    s.ok(
+        SWAP_CHECKS[44],
+        in_chat.as_ref().is_some_and(|(_, failed, gone)| *failed == unconfirmed && *gone) && !paused_now() && lifted.starts_with("fetched 200"),
+        json!({ "lifted": lifted, "inChat": in_chat, "notices": notices() }),
+    );
+    // a page still showing the $5 notice taps again: nothing changes, so
+    // $20 holds and the next call goes through
+    let stale = key_cap(w.owner, "elevenlabs", json!({ "from": cap }))?;
+    let kept = say(s, 161, &speak(SPOKEN))?;
+    // its person's CLI, as its own: $1, so the key pauses at it; then the default
+    let home = s.dir("key-cap-cli");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": w.owner.secret_hex() }).to_string())?;
+    let cli = |s: &Suite, usd: &str| {
+        let out = s.cli(api, &home, &["ledger", "key-cap", "elevenlabs", usd]);
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).trim().to_string())
+    };
+    let low = cli(s, "1");
+    let held_low = say(s, 162, &speak(SPOKEN))?;
+    let back = cli(s, "default");
+    // a page still showing a $20 notice taps: the $5 the computer holds stays
+    let late = key_cap(w.owner, "elevenlabs", json!({ "from": 4 * cap }))?;
+    let repaused = say(s, 163, &speak(SPOKEN))?;
+    s.ok(
+        SWAP_CHECKS[45],
+        stale.status == 200
+            && kept.starts_with("fetched 200")
+            && low.0
+            && low.1 == "elevenlabs: $1.00 an hour"
+            && held_low.starts_with("fetched 429")
+            && held_low.contains("its limit $1.00 an hour")
+            && back.0
+            && back.1 == "elevenlabs: back to the default"
+            && late.status == 200
+            && repaused.starts_with("fetched 429")
+            && repaused.contains("its limit $5.00 an hour")
+            && paused_now(),
+        json!({ "stale": stale.status, "kept": kept, "low": low, "heldLow": held_low, "back": back, "late": late.status, "repaused": repaused }),
     );
     // two hours on, by the computer's clock (its uses' month stays)
     let moved = super::computers::lever_with(api, w.id, json!({ "op": "clock", "offsetMs": super::ledger::mid_month_offset_ms() + 2 * fragment_core::key_hour::HOUR_MS }))?;
@@ -503,10 +562,20 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 /// words and its buttons; null while it is not shown.
 const KEY_NOTICE: &str = "(() => { const box = document.getElementById('computer-notices'); const r = box?.querySelector('.computer-notice[data-kind=\"key_paused\"]'); if (!r || box.hidden) return null; return { said: r.querySelector('strong')?.textContent ?? null, buttons: [...r.querySelectorAll('button')].map((x) => x.textContent) }; })()";
 
+/// Taps a paused key's Allow, enabled: whether it was.
+const ALLOW: &str = "(() => { const x = document.querySelector('#computer-notices [data-action=\"allow-key\"]'); if (!x || x.disabled) return false; x.click(); return true; })()";
+/// The page's asks of Allow refused (503) and its reads of the computer
+/// failing as a network fails, until `__restoreFetch()`.
+const KEY_ASKS_FAIL: &str = "(() => { const f = window.fetch; window.__restoreFetch = () => { window.fetch = f; }; window.fetch = async (url, o) => { const path = new URL(String(url), location.href).pathname; const method = o?.method ?? 'GET'; if (method === 'POST' && path.includes('/key-caps/')) return new Response(JSON.stringify({ error: 'unavailable', message: 'refused (a test)' }), { status: 503, headers: { 'content-type': 'application/json' } }); if (method === 'GET' && /^\\/api\\/computers\\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch'); return f(url, o); }; return true; })()";
+/// A paused key's notice whose tap went unconfirmed: its lines, and its
+/// button, enabled; null while that button is not.
+const KEY_UNCONFIRMED: &str = "(() => { const r = document.querySelector('#computer-notices .computer-notice[data-kind=\"key_paused\"]'); const b = r?.querySelector('[data-action=\"allow-key\"]'); return r && b && !b.disabled ? { lines: [...r.querySelectorAll('.notice-copy p')].map((p) => p.textContent), button: b.textContent } : null; })()";
 /// The person's chat page in Chrome (the shell, signed in as `owner`): the
 /// paused key's notice as it shows, shot at 1280 and 390 wide, light, in
-/// the run's `key-guard/`. None without Chrome.
-fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<Value>> {
+/// the run's `key-guard/`; its Allow tapped while its ask and the
+/// computer's read fail, and the notice then (shot); tapped again, whether
+/// the notice went (shot again). None without Chrome.
+fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<Option<(Value, Value, bool)>> {
     let Some(mut b) = s.browser()? else { return Ok(None) };
     let shots = s.dir("key-guard");
     let session = api.sign_in(&Api::email_of(owner))?;
@@ -519,8 +588,22 @@ fn key_notice_in_chat(s: &mut Suite, api: &Api, owner: &crate::Keys) -> Result<O
         !shown.is_null()
     });
     super::telegram_settings::shoot(&mut b, &page, &shots, "k1-paused", Some("#computer-notices"))?;
+    // tapped while its ask is refused and the computer's read fails: the
+    // pause stays as last read, its button back with a short line
+    b.eval(&page, KEY_ASKS_FAIL)?;
+    b.eval(&page, ALLOW)?;
+    let mut failed = Value::Null;
+    s.eventually(Duration::from_secs(30), || {
+        failed = b.eval(&page, KEY_UNCONFIRMED).unwrap_or(Value::Null);
+        failed["lines"].as_array().is_some_and(|l| !l.is_empty())
+    });
+    super::telegram_settings::shoot(&mut b, &page, &shots, "k1b-unconfirmed", Some("#computer-notices"))?;
+    b.eval(&page, "(window.__restoreFetch(), true)")?;
+    let tapped = b.eval(&page, ALLOW)? == true;
+    let gone = tapped && b.until(&page, &format!("{KEY_NOTICE} === null"), Duration::from_secs(30));
+    super::telegram_settings::shoot(&mut b, &page, &shots, "k2-allowed", None)?;
     b.close(page)?;
-    Ok(Some(shown))
+    Ok(Some((shown, failed, gone)))
 }
 
 /// The checks `model_checks` makes, as a run without the stub or the fakes
