@@ -18,7 +18,8 @@ step 4 (personality). Load `brain-finite` before the brains, and
 
 ### Brains, as brains
 
-For each brain folder `<id>`:
+For each brain folder `<id>` (make each brain once, as `SKILL.md`'s rules
+say: its full name in `progress.md` right after `fragment create`):
 
 ```sh
 fragment home extract <source> workspace/finitebrain/<id> --to ~/home-import/home --layout <L>
@@ -59,6 +60,7 @@ teammates once those teammates have moved.
 ### Sites, as apps
 
 Each `sites/<site>/` is the site's files, as its repository held them.
+Make each app once, as `SKILL.md`'s rules say.
 If its `finite.toml` names a `path`, that folder is the one served; `.`
 or none means the whole folder. Leave out `finite.toml` itself.
 
