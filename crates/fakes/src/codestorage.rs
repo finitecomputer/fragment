@@ -148,6 +148,10 @@ struct State {
     /// what each sabotaging commit writes (none: `competitor.txt`)
     #[serde(skip)]
     competitor: Option<Vec<(String, Option<Vec<u8>>)>>,
+    /// another writer's commit to main, landed just before the next commit
+    /// pack, which is then served as ever (`land_before_next_commit`)
+    #[serde(skip)]
+    before_commit: Option<Vec<(String, Option<Vec<u8>>)>>,
     /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
     #[serde(skip)]
     sabotage_after: u32,
@@ -742,6 +746,9 @@ impl Inner {
         if st.packs_failing {
             return problem(503, "commits are unavailable (the fake's commit outage lever)");
         }
+        if let Some(theirs) = st.before_commit.take() {
+            st.commit(url, Write { branch: "main", message: "another writer", author: "another", changes: &theirs, from: None });
+        }
         if st.sabotage > 0 && st.sabotage_after > 0 {
             st.sabotage_after -= 1;
         } else if st.sabotage > 0 {
@@ -1264,6 +1271,14 @@ impl CodeStorage {
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// Another writer's commit of `files` (path, bytes; `None` deletes) to
+    /// main lands just before the next commit pack, which is then served as
+    /// ever: its CAS, if it names one, sees the moved head; one naming none
+    /// lands on it.
+    pub fn land_before_next_commit(&self, files: Vec<(String, Option<Vec<u8>>)>) {
+        self.with(|st| st.before_commit = Some(files));
     }
 
     /// `sabotage_commit_packs(n)`, each competitor's commit writing `files`
