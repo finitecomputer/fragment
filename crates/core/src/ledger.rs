@@ -310,8 +310,12 @@ pub struct Swept {
 }
 
 /// Why a mutation or a question was refused. A refusal changes nothing.
+/// Written tagged by `refused`; read as its fields (`RefusedFields`), not
+/// as serde's internally tagged reading, which buffers each refusal to find
+/// its tag: about 20 KB more of the cell's Wasm. Both read every form a
+/// release has written (a batch's stored answer holds its rows' refusals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "refused", rename_all = "snake_case")]
+#[serde(tag = "refused", rename_all = "snake_case", try_from = "RefusedFields")]
 pub enum Refused {
     /// The request breaks a rule of its shape.
     Invalid { what: Invalid },
@@ -355,6 +359,71 @@ pub enum Refused {
     /// the cell answers it for a ledger it emptied, so a row still on its
     /// way (a meter batch in the queue) is acknowledged, not retried.
     Wiped,
+}
+
+/// A `Refused` as it is read: every kind's fields, flat. A field it does
+/// not name is passed over, as the tagged reading passed it over.
+#[derive(Deserialize)]
+struct RefusedFields {
+    refused: RefusedKind,
+    what: Option<Invalid>,
+    current: Option<u64>,
+    why: Option<Why>,
+    cap: Option<i64>,
+    spent: Option<i64>,
+    budget: Option<i64>,
+}
+
+/// A refusal's `refused`: read as an identifier, a string alone, as the
+/// tagged reading read its tag (a derived enum also takes `{"<kind>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "snake_case")]
+enum RefusedKind {
+    Invalid,
+    ConflictingBody,
+    StaleBook,
+    StaleSeat,
+    NoPrice,
+    TooLarge,
+    Stale,
+    GuestPayer,
+    GuestCreates,
+    AgentsStopped,
+    ReadOnly,
+    CapReached,
+    PersonsOnly,
+    OrgsOnly,
+    BudgetReached,
+    Wiped,
+}
+
+impl TryFrom<RefusedFields> for Refused {
+    type Error = String;
+
+    /// The refusal its `refused` names, with each of its fields.
+    fn try_from(f: RefusedFields) -> Result<Refused, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
+        }
+        Ok(match f.refused {
+            RefusedKind::Invalid => Refused::Invalid { what: need(f.what, "what")? },
+            RefusedKind::ConflictingBody => Refused::ConflictingBody,
+            RefusedKind::StaleBook => Refused::StaleBook { current: u32::try_from(need(f.current, "current")?).map_err(|_| "a book's version is a u32".to_string())? },
+            RefusedKind::StaleSeat => Refused::StaleSeat { current: need(f.current, "current")? },
+            RefusedKind::NoPrice => Refused::NoPrice,
+            RefusedKind::TooLarge => Refused::TooLarge,
+            RefusedKind::Stale => Refused::Stale,
+            RefusedKind::GuestPayer => Refused::GuestPayer,
+            RefusedKind::GuestCreates => Refused::GuestCreates,
+            RefusedKind::AgentsStopped => Refused::AgentsStopped { why: need(f.why, "why")? },
+            RefusedKind::ReadOnly => Refused::ReadOnly { why: need(f.why, "why")? },
+            RefusedKind::CapReached => Refused::CapReached { cap: need(f.cap, "cap")?, spent: need(f.spent, "spent")? },
+            RefusedKind::PersonsOnly => Refused::PersonsOnly,
+            RefusedKind::OrgsOnly => Refused::OrgsOnly,
+            RefusedKind::BudgetReached => Refused::BudgetReached { budget: need(f.budget, "budget")?, spent: need(f.spent, "spent")? },
+            RefusedKind::Wiped => Refused::Wiped,
+        })
+    }
 }
 
 /// The rule a request broke.
@@ -468,17 +537,20 @@ fn valid_names(names: [&Option<String>; 3]) -> bool {
 }
 
 /// A reference's record in the store, `{"entry": "row", …}` (or, from
-/// before, `{"entry": "reservation", …}`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// before, `{"entry": "reservation", …}`). Read as its fields
+/// (`EntryFields`), once, from the stored text.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "EntryFields")]
 pub enum Entry {
     /// A meter row: its price under the book of the time (`book`, its
     /// version; the book itself is kept by its digest, `book:<digest>`), and
     /// its charge (the price's, or nothing for a waived meter).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
     /// A reservation of the releases before decision 62 (held, settled or
-    /// released), kept as it was written: never charged here, a row under
-    /// its reference another body, forgotten by its time as any.
-    Before(serde_json::Value),
+    /// released): never charged here, a row under its reference another
+    /// body, forgotten by its time as any. Its store keeps it as it was
+    /// written (no ledger writes one again); what it is read for is its time.
+    Before { at_ms: i64 },
 }
 
 impl Serialize for Entry {
@@ -491,32 +563,51 @@ impl Serialize for Entry {
             charge: i64,
             book: u32,
         }
+        #[derive(Serialize)]
+        struct Before {
+            entry: &'static str,
+            at_ms: i64,
+        }
         match self {
             Entry::Row { row, priced, charge, book } => Row { entry: "row", row, priced, charge: *charge, book: *book }.serialize(s),
-            Entry::Before(v) => v.serialize(s),
+            Entry::Before { at_ms } => Before { entry: "reservation", at_ms: *at_ms }.serialize(s),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for Entry {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Entry, D::Error> {
-        use serde::de::Error;
-        #[derive(Deserialize)]
-        struct Row {
-            row: MeterRow,
-            priced: Priced,
-            charge: i64,
-            book: u32,
+/// An `Entry` as it is read: a row's fields, or a reservation's time; a
+/// reservation's other fields are passed over.
+#[derive(Deserialize)]
+struct EntryFields {
+    entry: EntryKind,
+    row: Option<MeterRow>,
+    priced: Option<Priced>,
+    charge: Option<i64>,
+    book: Option<u32>,
+    at_ms: Option<i64>,
+}
+
+/// An entry's `entry`: read as an identifier, a string alone, as its
+/// reading through a `Value` took it (a derived enum also takes
+/// `{"<kind>": null}`).
+#[derive(Deserialize)]
+#[serde(variant_identifier, rename_all = "snake_case")]
+enum EntryKind {
+    Row,
+    Reservation,
+}
+
+impl TryFrom<EntryFields> for Entry {
+    type Error = String;
+
+    fn try_from(f: EntryFields) -> Result<Entry, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
         }
-        let v = serde_json::Value::deserialize(d)?;
-        match v.get("entry").and_then(serde_json::Value::as_str) {
-            Some("row") => {
-                let r: Row = serde_json::from_value(v).map_err(D::Error::custom)?;
-                Ok(Entry::Row { row: r.row, priced: r.priced, charge: r.charge, book: r.book })
-            }
-            Some("reservation") if v.get("at_ms").is_some_and(serde_json::Value::is_i64) => Ok(Entry::Before(v)),
-            other => Err(D::Error::custom(format!("an entry is a row or a reservation from before, not {other:?}"))),
-        }
+        Ok(match f.entry {
+            EntryKind::Row => Entry::Row { row: need(f.row, "row")?, priced: need(f.priced, "priced")?, charge: need(f.charge, "charge")?, book: need(f.book, "book")? },
+            EntryKind::Reservation => Entry::Before { at_ms: f.at_ms.ok_or("a reservation from before has its time (`at_ms`)")? },
+        })
     }
 }
 
@@ -526,7 +617,7 @@ impl Entry {
     pub fn at_ms(&self) -> i64 {
         match self {
             Entry::Row { row, .. } => row.at_ms,
-            Entry::Before(v) => v["at_ms"].as_i64().expect("a reservation from before has its time"),
+            Entry::Before { at_ms } => *at_ms,
         }
     }
 
@@ -534,7 +625,7 @@ impl Entry {
     pub fn charge(&self) -> Option<i64> {
         match self {
             Entry::Row { charge, .. } => Some(*charge),
-            Entry::Before(_) => None,
+            Entry::Before { .. } => None,
         }
     }
 }

@@ -1,0 +1,7 @@
+# A type read again from a `serde_json::Value` compiles another copy of its
+# decoder into the cell's Wasm (crates/core runs there) and walks what was
+# read once a second time: read it from its bytes, once (FIN-453 M7). The
+# tests build their cases as `Value`s, and may (src/lib.rs).
+disallowed-methods = [
+    { path = "serde_json::from_value", reason = "read the type from its bytes, once (serde_json::from_slice); pass on what is not read as RawValue" },
+]

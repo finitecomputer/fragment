@@ -248,6 +248,13 @@ pub async fn workos<'a>(env: &Env, cfg: &'a Config) -> CellResult<WorkOs<'a>> {
 /// read whole within `VENDOR_TIMEOUT`. Not reaching the host in time is
 /// `UpstreamFailed`; an answer over `VENDOR_ANSWER_MAX_BYTES` is null.
 async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option<&Value>, host: &str) -> CellResult<(u16, Value)> {
+    let (status, bytes) = post(url, method, bearer, body, host).await?;
+    Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
+}
+
+/// `post_json`'s request: (status, the answer's bytes, none when it was cut
+/// at `VENDOR_ANSWER_MAX_BYTES`), for a caller that reads its own type.
+async fn post(url: &str, method: Method, bearer: Option<&str>, body: Option<&Value>, host: &str) -> CellResult<(u16, Vec<u8>)> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     if let Some(key) = bearer {
@@ -260,8 +267,7 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
     }
     let req = Request::new_with_init(url, &init)?;
     let a = crate::cs::fetch_all(req, VENDOR_TIMEOUT, VENDOR_ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {}", e.message)))?;
-    let answer = if a.cut { Value::Null } else { serde_json::from_slice(&a.body).unwrap_or(Value::Null) };
-    Ok((a.status, answer))
+    Ok((a.status, if a.cut { vec![] } else { a.body }))
 }
 
 /// An own key's sign-in code exchanged at its provider for the person's
@@ -272,15 +278,12 @@ pub async fn own_key_exchange(url: &str, body: &Value, host: &str) -> CellResult
 }
 
 /// WorkOS's code exchange with the API key added: (status, WorkOS's
-/// answer, its refresh token dropped: the platform keeps its own session).
-pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Value)> {
+/// answer's bytes, which its caller reads as the fields it keeps: never
+/// the refresh token, as the platform keeps its own session).
+pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Vec<u8>)> {
     let key = required(env, store::WORKOS_KEY).await?;
     let payload = json!({ "client_id": client_id, "client_secret": key, "grant_type": "authorization_code", "code": code });
-    let (status, mut answer) = post_json(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await?;
-    if let Some(o) = answer.as_object_mut() {
-        o.remove("refresh_token");
-    }
-    Ok((status, answer))
+    post(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await
 }
 
 /// A WorkOS Pipes access token for `user`'s account at `provider`
