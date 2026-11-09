@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use fragment_proto::limits::BLOB_MAX_BYTES;
 use fragment_proto::RepoPath;
 use serde::Serialize;
@@ -189,22 +189,31 @@ pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Br
     let mut batch_bytes = 0;
     let (total, total_bytes) = (plan.picked.len(), plan.picked.iter().map(|p| p.bytes).sum::<u64>());
     let (mut files, mut bytes, mut already) = (0, 0u64, 0);
+    // chosen by the cap's order (the plan); read in the source's own
+    // (`read_all`: a stage's in its zip's, neighbours in one range)
+    let mut todo: Vec<&plan::Picked> = Vec::new();
     for p in &plan.picked {
         if held_already(c, &mut held, &there, head.as_deref(), p)? {
             already += 1;
-            continue;
+        } else {
+            todo.push(p);
         }
-        let read = src.read_max(&p.from, BLOB_MAX_BYTES).with_context(|| format!("reading {}", p.from))?;
+    }
+    let to: HashMap<&str, &plan::Picked> = todo.iter().map(|p| (p.from.as_str(), *p)).collect();
+    let from: Vec<&str> = todo.iter().map(|p| p.from.as_str()).collect();
+    src.read_all(&from, BLOB_MAX_BYTES, |path, read| {
+        let p = to[path];
         let stored = blobs.store(read)?;
         batch_bytes += stored.len();
         batch.push(Change::Upsert { path: RepoPath::parse(&p.to).map_err(|e| anyhow!("{e}"))?, bytes: stored });
         (files, bytes) = (files + 1, bytes + p.bytes);
         if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
-            head = commit(c, &mut held, &author, head, &format!("home files: {} of {total}", files + already), &batch)?;
+            head = commit(c, &mut held, &author, head.take(), &format!("home files: {} of {total}", files + already), &std::mem::take(&mut batch))?;
             eprintln!("{} of {total} files ({} of {})", files + already, size(bytes), size(total_bytes));
-            (batch, batch_bytes) = (Vec::new(), 0);
+            batch_bytes = 0;
         }
-    }
+        Ok(())
+    })?;
     batch.push(Change::Upsert { path: RepoPath::parse(LEFT_BEHIND).expect("a repo path"), bytes: blobs.store(left_behind(&plan, &counted).into_bytes())? });
     let head = commit(c, &mut held, &author, head, &format!("home files: {total} files, and what stayed behind"), &batch)?;
     if !there.contains_key(MANIFEST) {

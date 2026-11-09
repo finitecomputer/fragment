@@ -10,8 +10,8 @@
 //! whole (`open`): the import never reads a secret, and whatever staged the
 //! home should have left it out.
 
-mod files;
-mod layout;
+pub mod files;
+pub mod layout;
 mod plan;
 mod routines;
 mod rules;

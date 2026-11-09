@@ -340,6 +340,71 @@ impl Source {
         }
     }
 
+    /// Each of `paths`, read whole (at most `max` bytes each), handed to `f`
+    /// with its path. A stage's in the zip's order, whatever order they are
+    /// named in, neighbours in one range of at most `stage::RANGE_MAX`
+    /// (what lies between them read too, up to `stage::GAP_MAX`), several
+    /// ranges at once: N small files cost about their bytes over a range,
+    /// not N requests. A folder's and a local zip's in the order named.
+    pub fn read_all(&self, paths: &[&str], max: u64, mut f: impl FnMut(&str, Vec<u8>) -> Result<()>) -> Result<()> {
+        let staged = match &self.backing {
+            Backing::Zip(archive) => match archive.clone().into_inner() {
+                ZipReader::Stage(r) => Some((archive, r.blocks)),
+                ZipReader::File(_) => None,
+            },
+            Backing::Dir(_) => None,
+        };
+        let Some((archive, blocks)) = staged else {
+            for p in paths {
+                f(p, self.read_max(p, max)?)?;
+            }
+            return Ok(());
+        };
+        // a file's bytes, its local header first, run to the next file's
+        // local header, or to the central directory after the last
+        let mut starts: Vec<u64> = (0..archive.len()).filter_map(|i| archive.by_index_data(i).ok().map(|e| e.header_start())).collect();
+        starts.sort_unstable();
+        let directory = archive.central_directory_start();
+        let mut ones = Vec::with_capacity(paths.len());
+        for p in paths {
+            let (_, index) = *self.at.get(*p).ok_or_else(|| anyhow!("{p}: no such file"))?;
+            let e = archive.by_index_data(index).with_context(|| format!("reading {p}'s entry"))?;
+            if e.size() > max {
+                bail!("{p} is {} bytes: more than {max} to read whole", e.size());
+            }
+            let start = e.header_start();
+            let end = starts.get(starts.partition_point(|s| *s <= start)).copied().unwrap_or(directory);
+            let alone = e.compression() != zip::CompressionMethod::Stored || end - start > stage::RANGE_MAX;
+            ones.push(Placed { path: p, start, end, size: e.size(), crc: e.crc32(), alone });
+        }
+        ones.sort_by_key(|o| o.start);
+        // the reads: ranges of neighbours, and the rest alone, in the zip's order
+        let mut reads: Vec<(u64, u64, Vec<usize>)> = Vec::new();
+        for (k, o) in ones.iter().enumerate() {
+            match reads.last_mut() {
+                _ if o.alone => reads.push((o.start, o.end, vec![k])),
+                Some((s, e, ks)) if !ones[ks[0]].alone && o.start >= *e && o.start - *e <= stage::GAP_MAX && o.end - *s <= stage::RANGE_MAX => {
+                    *e = o.end;
+                    ks.push(k);
+                }
+                _ => reads.push((o.start, o.end, vec![k])),
+            }
+        }
+        let mut spans = stage::Spans::new(blocks, reads.iter().filter(|(_, _, ks)| !ones[ks[0]].alone).map(|(s, e, _)| (*s, *e)));
+        for (s, _, ks) in &reads {
+            if ones[ks[0]].alone {
+                f(ones[ks[0]].path, self.read_max(ones[ks[0]].path, max)?)?;
+                continue;
+            }
+            let bytes = spans.next_span().expect("a span for each range")?;
+            for k in ks {
+                let o = &ones[*k];
+                f(o.path, o.stored(&bytes[(o.start - s) as usize..(o.end - s) as usize])?)?;
+            }
+        }
+        Ok(())
+    }
+
     /// One file's bytes, whole: at most `READ_MAX_BYTES`.
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
         self.read_max(path, READ_MAX_BYTES)
@@ -395,6 +460,35 @@ impl Source {
                 Ok(to)
             }
         }
+    }
+}
+
+/// A stage's file placed in its zip, for `Source::read_all`.
+struct Placed<'p> {
+    path: &'p str,
+    /// Its local header, and the next file's (or the central directory).
+    start: u64,
+    end: u64,
+    size: u64,
+    crc: u32,
+    /// Read on its own: deflated, or past a range.
+    alone: bool,
+}
+
+impl Placed<'_> {
+    /// A stored file's bytes, out of its place in the zip (`region`, from
+    /// its local header on), checked against the directory's CRC-32.
+    fn stored(&self, region: &[u8]) -> Result<Vec<u8>> {
+        if region.len() < 30 || region[..4] != *b"PK\x03\x04" {
+            bail!("{}: no local header where the zip's directory says", self.path);
+        }
+        let (name, extra) = (u16::from_le_bytes([region[26], region[27]]) as usize, u16::from_le_bytes([region[28], region[29]]) as usize);
+        let at = 30 + name + extra;
+        let data = region.get(at..at + self.size as usize).ok_or_else(|| anyhow!("{}: its bytes run past its place in the zip", self.path))?;
+        if crc32fast::hash(data) != self.crc {
+            bail!("{}: its bytes read with another CRC-32 than the zip's", self.path);
+        }
+        Ok(data.to_vec())
     }
 }
 

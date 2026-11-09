@@ -33,6 +33,11 @@ const CACHED: usize = 16;
 pub const PARALLEL_MIN: u64 = 16 * 1024 * 1024;
 /// One range of such a file, and how many are in flight at once.
 const CHUNK: u64 = 8 * 1024 * 1024;
+/// Neighbouring files read together (`Source::read_all`) are one range of
+/// at most this, and what lies between two of them is read too while it
+/// is at most `GAP_MAX`: cheaper than another request.
+pub const RANGE_MAX: u64 = 16 * 1024 * 1024;
+pub const GAP_MAX: u64 = 1024 * 1024;
 const IN_FLIGHT: usize = 8;
 
 fn usage(msg: String) -> anyhow::Error {
@@ -191,51 +196,77 @@ impl Seek for Ranged {
     }
 }
 
+/// Spans of the zip (`start..end` each), fetched `IN_FLIGHT` at once and
+/// yielded in their order.
+pub struct Spans {
+    blocks: Arc<Blocks>,
+    todo: VecDeque<(u64, u64)>,
+    pending: VecDeque<JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+impl Spans {
+    pub fn new(blocks: Arc<Blocks>, spans: impl IntoIterator<Item = (u64, u64)>) -> Spans {
+        Spans { blocks, todo: spans.into_iter().collect(), pending: VecDeque::new() }
+    }
+
+    fn fill(&mut self) {
+        while self.pending.len() < IN_FLIGHT {
+            let Some((start, end)) = self.todo.pop_front() else { break };
+            let blocks = Arc::clone(&self.blocks);
+            self.pending.push_back(std::thread::spawn(move || blocks.fetch(start, end)));
+        }
+    }
+
+    /// The next span's bytes, or `None` when every one was yielded.
+    pub fn next_span(&mut self) -> Option<io::Result<Vec<u8>>> {
+        self.fill();
+        let next = self.pending.pop_front()?;
+        let got = next.join().map_err(|_| io::Error::other("a range read panicked")).and_then(|r| r);
+        self.fill();
+        Some(got)
+    }
+}
+
 /// A stored file's bytes, `start..start + len` of the zip, read `CHUNK` at
 /// a time with `IN_FLIGHT` ranges at once, in order; its CRC-32 is checked
 /// when its last byte is read.
 pub struct Parallel {
-    blocks: Arc<Blocks>,
-    next: u64,
-    end: u64,
-    pending: VecDeque<JoinHandle<io::Result<Vec<u8>>>>,
+    spans: Spans,
     cur: Vec<u8>,
     at: usize,
     crc: crc32fast::Hasher,
     want: u32,
+    checked: bool,
 }
 
 impl Parallel {
     pub fn new(blocks: Arc<Blocks>, start: u64, len: u64, crc32: u32) -> Parallel {
-        Parallel { blocks, next: start, end: start + len, pending: VecDeque::new(), cur: Vec::new(), at: 0, crc: crc32fast::Hasher::new(), want: crc32 }
-    }
-
-    fn fill(&mut self) {
-        while self.pending.len() < IN_FLIGHT && self.next < self.end {
-            let (blocks, start, end) = (Arc::clone(&self.blocks), self.next, (self.next + CHUNK).min(self.end));
-            self.pending.push_back(std::thread::spawn(move || blocks.fetch(start, end)));
-            self.next = end;
-        }
+        let end = start + len;
+        let chunks = (start..end).step_by(CHUNK as usize).map(|a| (a, (a + CHUNK).min(end)));
+        Parallel { spans: Spans::new(blocks, chunks), cur: Vec::new(), at: 0, crc: crc32fast::Hasher::new(), want: crc32, checked: false }
     }
 }
 
 impl Read for Parallel {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.at == self.cur.len() {
-            self.fill();
-            let Some(next) = self.pending.pop_front() else {
-                let got = std::mem::take(&mut self.crc).finalize();
-                if got != self.want {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a file of the stage read with CRC-32 {got:08x}, not its {:08x}", self.want)));
+            match self.spans.next_span() {
+                Some(next) => {
+                    self.cur = next?;
+                    self.at = 0;
+                    self.crc.update(&self.cur);
                 }
-                self.crc = crc32fast::Hasher::new();
-                self.want = 0;
-                return Ok(0);
-            };
-            self.cur = next.join().map_err(|_| io::Error::other("a range read panicked"))??;
-            self.at = 0;
-            self.crc.update(&self.cur);
-            self.fill();
+                None => {
+                    if !self.checked {
+                        self.checked = true;
+                        let got = std::mem::take(&mut self.crc).finalize();
+                        if got != self.want {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a file of the stage read with CRC-32 {got:08x}, not its {:08x}", self.want)));
+                        }
+                    }
+                    return Ok(0);
+                }
+            }
         }
         let k = buf.len().min(self.cur.len() - self.at);
         buf[..k].copy_from_slice(&self.cur[self.at..self.at + k]);
@@ -357,11 +388,52 @@ mod tests {
         f.spoil_from.store((bytes.len() / 2) as u32, Ordering::Relaxed);
         let e = staged.read_max("big.bin", u64::MAX).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("CRC-32"), "{e}");
+        // a small file read with its neighbours, its byte spoiled
+        let at = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap().by_index_raw(0).unwrap().data_start().unwrap();
+        f.spoil_from.store(at as u32, Ordering::Relaxed);
+        let e = staged.read_all(&["a.md"], u64::MAX, |_, _| Ok(())).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("a.md: its bytes read with another CRC-32"), "{e}");
         f.spoil_from.store(u32::MAX, Ordering::Relaxed);
         let fresh = Source::named(Path::new(&format!("stage:{ID}")), Some(&c));
         f.whole.store(true, Ordering::Relaxed);
         let e = fresh.and_then(|s| s.read("a.md")).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("reading the stage: answered"), "{e}");
+    }
+
+    /// Goal: what `home files` brings of a stage is read in the zip's
+    /// order, neighbours in one range, whatever order the cap chose it in:
+    /// N small files cost about their bytes over `RANGE_MAX` requests, not
+    /// N. Method: 2,000 documents of 16 KiB (32 MB, past the blocks a
+    /// reader keeps), written to the zip in another order than the cap's
+    /// (by path), brought into the code.storage fake; the stage's ranges
+    /// counted while it runs.
+    #[test]
+    fn a_stages_picks_are_read_in_its_order() {
+        use crate::home::layout::Layout;
+        let t = Temp::new();
+        let zip = t.0.join("stage.zip");
+        let n = 2_000usize;
+        let body = |i: usize| format!("{i:05}").repeat(16 * 1024 / 5).into_bytes();
+        // the zip's order: a stride through them, not theirs by path
+        let files: Vec<(String, Vec<u8>)> = (0..n).map(|k| (k * 7919) % n).map(|i| (format!("work/notes/{i:05}.md"), body(i))).collect();
+        let total: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
+        fragment_fakes::old_home::zip(&zip, &files).unwrap();
+        let f = fake(std::fs::read(&zip).unwrap());
+        let staged = Source::named(Path::new(&format!("stage:{ID}")), Some(&client(&f))).unwrap();
+        let mock = crate::mockcs::start();
+        mock.seed_repo("old-files--k3x9", &[]);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let layout = Layout { work: Some("work".into()), ..Layout::hermes() };
+        let before = f.ranges.load(Ordering::Relaxed);
+        let b = crate::home::files::bring(&c, &staged, &layout, "old-files--k3x9").unwrap();
+        let ranges = (f.ranges.load(Ordering::Relaxed) - before) as u64;
+        assert_eq!(b.files, n);
+        let bound = total.div_ceil(RANGE_MAX) + 2;
+        println!("      ({n} files of {total} bytes, chosen by path and stored in another order: {ranges} ranges)");
+        assert!(ranges <= bound, "{n} files of {total} bytes: {ranges} ranges, at most {bound}");
+        for i in [0, 1, 999, 1_999] {
+            assert_eq!(mock.file_at("old-files--k3x9", "main", &format!("files/notes/{i:05}.md")), Some(body(i)), "{i}");
+        }
     }
 
     /// `fragment stage open|done`: the manifest, then the end, its report's
