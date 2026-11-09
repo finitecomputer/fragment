@@ -1163,12 +1163,11 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let project = devstack::stage_project(&scratch.join("cell"))?;
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
-    // kills it and all else it started (the Chromes), then removes the
-    // containers it left
+    // kills it and all else it started (the Chromes: `on_termination`),
+    // then removes the containers it left
     let leftovers = project.clone();
     devstack::signals::on_termination(move |signal| {
-        println!("\nsignal {signal}: the run stops its node and browsers, and removes its containers");
-        devstack::kill_started();
+        println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
         match devstack::containers::remove(&leftovers) {
             Ok(r) => println!("      (removed {} containers of this run)", r.containers),
             Err(e) => println!("      could not remove this run's containers: {e:#}"),

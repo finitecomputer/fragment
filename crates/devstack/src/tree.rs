@@ -45,16 +45,20 @@ fn signal(pid: u32, signal: libc::c_int) {
 /// vouches that `root` is still its own: this process, or a child of it not
 /// yet reaped, whose pid the kernel cannot have given another. Returns how
 /// many it killed (`root` among them). A walk cut short (`ps` failed, or
-/// past `TREE_MAX`) still kills what it stopped: none is left stopped.
+/// past `TREE_MAX`) still kills what it stopped: none is left stopped. Each
+/// dies after every process found below it, so none it stopped is ever
+/// handed, stopped, to init.
 pub fn kill(root: u32) -> io::Result<usize> {
     let me = std::process::id();
     let mut tree = BTreeSet::from([root]);
-    let mut stopped = BTreeSet::new();
+    // in the order stopped: a process before those below it
+    let mut stopped = Vec::new();
     // bounded: each round finds a process not yet in the tree, or ends
     let walked = loop {
         for &pid in &tree {
-            if pid != me && stopped.insert(pid) {
+            if pid != me && !stopped.contains(&pid) {
                 signal(pid, libc::SIGSTOP);
+                stopped.push(pid);
             }
         }
         let found: Vec<u32> = match parents() {
@@ -69,7 +73,7 @@ pub fn kill(root: u32) -> io::Result<usize> {
             break Err(io::Error::other(format!("more than {TREE_MAX} processes below {root}")));
         }
     };
-    for &pid in &stopped {
+    for &pid in stopped.iter().rev() {
         signal(pid, libc::SIGKILL);
     }
     walked.map(|()| stopped.len())

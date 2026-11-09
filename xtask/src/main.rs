@@ -380,10 +380,9 @@ fn dev(args: &[String]) -> Result<()> {
     devstack::signals::outlive_interrupt()?;
     // SIGTERM or SIGHUP to xtask alone, which the node never hears: it would
     // run on, orphaned, starting Chromes; so all xtask started dies with it
-    // (Ctrl-C, ignored here, still reaches the node itself)
+    // (`on_termination`; Ctrl-C, ignored here, still reaches the node itself)
     devstack::signals::on_termination(|signal| {
-        println!("\nsignal {signal}: dev stops its node and browsers, and removes its containers");
-        devstack::kill_started();
+        println!("\nsignal {signal}: dev stopped its node and browsers, and removes its containers");
         match devstack::containers::remove(&devstack::cell_dir()) {
             Ok(r) => println!("removed {} containers the dev node left", r.containers),
             Err(e) => println!("could not remove the dev node's containers: {e:#}"),

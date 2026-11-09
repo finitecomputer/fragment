@@ -765,11 +765,11 @@ static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new() }
 /// SIGKILLs every process this process started and every one those
 /// started (tree.rs): its nodes, the Chromes they started detached, a
 /// lane's own Chrome, which no `Drop` closes on the way out; and refuses
-/// to start another node: the process is ending (a signal;
-/// `signals::on_termination`), and a node started now would make
-/// containers after they were removed. The killed nodes' `Node`s are
-/// dropped with the process.
-pub fn kill_started() {
+/// to start another node: the process is ending (a signal, which
+/// `signals::on_termination` handles with this first), and a node started
+/// now would make containers after they were removed. The killed nodes'
+/// `Node`s are dropped with the process.
+pub(crate) fn kill_started() {
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.ending = true;
     if let Err(e) = tree::kill(std::process::id()) {
