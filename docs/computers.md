@@ -290,7 +290,7 @@ preview proved, promoted by Paul.
    logs and spend.
 3. Run the hosted lanes on preview, then `--sweep`: `cargo xtask e2e
    --hosted --config <preview config> --branch preview --only
-   computers,agent-restart,agent-smoke,agent-ask,bot-mode
+   computers,agent-restart,agent-smoke,agent-ask
    --max-paid-calls 190`.
 4. Prove the upgrade from production's image: name production's digest
    in the preview config as an image of its own (`production`, in the
