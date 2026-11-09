@@ -3475,6 +3475,31 @@ mod tests {
         assert_eq!(sent.as_object().unwrap().len(), step.input.as_object().unwrap().len() + 2, "a step sends nothing the allowlist drops");
     }
 
+    /// Goal: the bytes a call to an OpenAI-compatible API sends are pinned:
+    /// its fields in their order, numbers, escapes and other scripts as
+    /// they are written. Method: a call with a picture, a float, a newline
+    /// and a quote in its words, bounded on OpenRouter's tier, with its
+    /// slot's body and without.
+    #[test]
+    fn a_calls_request_bytes_are_pinned() {
+        let models = openrouter();
+        let tier = models.capped(Named::Tier(Tier::Cheap)).unwrap();
+        let Upstream::Openai { model, body, .. } = tier.model.upstream else { panic!("OpenRouter's tier is an OpenAI-compatible API's") };
+        let asked = json!({
+            "model": "cheap", "temperature": 0.7, "seed": 7, "provider": { "order": ["dear"] },
+            "messages": [
+                { "role": "system", "content": "say \"hi\"\nthen stop" },
+                { "role": "user", "content": [{ "type": "text", "text": "héllo, 世界 \u{1F600}" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }] },
+            ],
+            "tools": [{ "type": "function", "function": { "name": "terminal", "parameters": { "type": "object", "properties": { "command": { "type": "string" } } } } }],
+        });
+        let b = bound(tier, asked, true).unwrap();
+        let routed = r#"{"max_tokens":16384,"messages":[{"content":"say \"hi\"\nthen stop","role":"system"},{"content":[{"text":"héllo, 世界 😀","type":"text"},{"image_url":{"url":"data:image/png;base64,iVBORw0KGgo="},"type":"image_url"}],"role":"user"}],"model":"z-ai/glm-5.3-flash","provider":{"max_price":{"completion":0.5,"prompt":0.15},"quantizations":["fp8","bf16"],"require_parameters":true,"sort":"throughput","zdr":true},"reasoning_effort":"low","seed":7,"stream":true,"stream_options":{"include_usage":true},"temperature":0.7,"tools":[{"function":{"name":"terminal","parameters":{"properties":{"command":{"type":"string"}},"type":"object"}},"type":"function"}]}"#;
+        assert_eq!(openai_request(&b.input, model, body.as_ref()).to_string(), routed);
+        let plain = openai_request(&b.input, FINITE_PRIVATE_FLASH, None).to_string();
+        assert!(plain.contains(&format!(r#""model":{}"#, json!(FINITE_PRIVATE_FLASH))) && !plain.contains("provider"), "{plain}");
+    }
+
     /// Goal: OpenRouter's stream meters as any OpenAI-compatible API's: its
     /// usage comes on a last chunk that keeps a content-free choice (its
     /// accounting frame), which is metered, and which the client gets as
