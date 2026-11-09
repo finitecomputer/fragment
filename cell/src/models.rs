@@ -246,6 +246,24 @@ async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InF
     })
 }
 
+/// The bytes `body` encodes to, counted as it is written, not kept: a body
+/// `route` read within the cap may write longer (`1e-5` is `0.00001`).
+fn encoded_len(body: &Value) -> usize {
+    struct Counted(usize);
+    impl std::io::Write for Counted {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Counted(0);
+    serde_json::to_writer(&mut n, body).expect("a JSON value writes");
+    n.0
+}
+
 /// A refusal of the model's, passed on as it came: the call used nothing,
 /// and is charged nothing.
 fn passed(status: u16, text: String) -> CellResult<Response> {
@@ -260,7 +278,7 @@ fn passed(status: u16, text: String) -> CellResult<Response> {
 /// end).
 pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) -> CellResult<Response> {
     let cfg = Config::from_env(env);
-    let body_bytes = serde_json::to_vec(&call.body).expect("a JSON value serializes").len();
+    let body_bytes = encoded_len(&call.body);
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
@@ -496,18 +514,18 @@ async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, met
 /// nothing of the client's or of the payer's. A key the deployment does
 /// not bind is a model not reached (its call falls back), said in the log
 /// without it.
-async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
+async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &str) -> CellResult<Response> {
     let key = crate::keys::model_key(env, slot).await?;
     keyed(&key, base_url, path, body).await
 }
 
 /// `openai`, its key read already.
-async fn keyed(key: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
+async fn keyed(key: &str, base_url: &str, path: &str, body: &str) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(h).with_body(Some(body.to_string().into()));
+    init.with_method(Method::Post).with_headers(h).with_body(Some(body.into()));
     let req = Request::new_with_init(&format!("{base_url}{path}"), &init)?;
     Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
 }
@@ -753,7 +771,7 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
             let key = crate::keys::model_key(env, embed::EMBEDDINGS).await?;
             took("key", t0);
             t0 = js::now_ms();
-            keyed(&key, base_url, "/embeddings", &request).await
+            keyed(&key, base_url, "/embeddings", &request.to_string()).await
         }
     };
     drop(request);
