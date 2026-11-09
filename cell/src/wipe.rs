@@ -34,7 +34,7 @@ use fragment_nip98::Payload;
 use fragment_proto::wipe::{Cleaning, ComputerFound, Found, Ran, WipeAsk, WipeReport, WipeState};
 use fragment_proto::{limits, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use worker::*;
 
 use crate::config::Config;
@@ -247,18 +247,20 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                     }
                     return Ok(Did { done: false, note: Some(note), cleaning: shown(busy), ..Did::default() });
                 }
-                let v = match crate::fragment::ask(env, name, "wipe/end", &wipe_end(facts)).await {
-                    Ok(v) => v,
+                /// What a fragment's `wipe/end` says is left (ended.rs).
+                #[derive(Deserialize)]
+                struct Ended {
+                    left: u64,
+                    lives: Vec<LifeLeft>,
+                }
+                let ended: Ended = match routed::ask_object(env, "FRAGMENT", name, "wipe/end", &wipe_end(facts)).await {
+                    Ok(ended) => ended,
                     // a row they left, of someone else's: nothing of theirs to clean
                     Err(e) if e.code == ErrorCode::Forbidden => continue,
                     Err(e) => return Err(e),
                 };
-                if v["left"].as_u64() != Some(0) {
-                    let lives: Vec<LifeLeft> = match &v["lives"] {
-                        serde_json::Value::Null => vec![],
-                        lives => serde_json::from_value(lives.clone()).map_err(|e| CellError::host(format!("{name}'s ended lives: {e}")))?,
-                    };
-                    busy.push(rules::cleaning(name, &lives));
+                if ended.left != 0 {
+                    busy.push(rules::cleaning(name, &ended.lives));
                 }
             }
             match busy.is_empty() {
@@ -269,20 +271,20 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         // their ledger, and their Vault's secrets with it (vault.rs): each
         // a person's object of one row's worth once wiped
         Step::Ledger => {
-            let v = routed::ask_object(env, "LEDGER", person, "wipe/end", &json!({})).await?;
-            let vault = routed::ask_object(env, "VAULT", person, "wipe/end", &json!({})).await?;
+            let v: Value = routed::ask_object(env, "LEDGER", person, "wipe/end", &json!({})).await?;
+            let vault: Value = routed::ask_object(env, "VAULT", person, "wipe/end", &json!({})).await?;
             Ok(Did::finished(u64::from(v["held"] == true) + u64::from(vault["held"] == true)))
         }
         Step::Lists => {
             // their export first: its upload aborted and its archive deleted,
             // which the list's own end (one step, no await) cannot
-            let e = routed::ask_object(env, "PRINCIPAL", person, "wipe/exports", &json!({ "person": person })).await?;
+            let e: Value = routed::ask_object(env, "PRINCIPAL", person, "wipe/exports", &json!({ "person": person })).await?;
             if e["more"] == true {
                 return Ok(Did::going(0, "their export's objects hold more: the next call deletes on".into()));
             }
             let mut rows = 0u64;
             for (principal, _) in whom(facts) {
-                let v = routed::ask_object(env, "PRINCIPAL", &principal, "wipe/end", &json!({})).await?;
+                let v: Value = routed::ask_object(env, "PRINCIPAL", &principal, "wipe/end", &json!({})).await?;
                 rows += v["rows"].as_u64().unwrap_or(0);
             }
             Ok(Did::finished(rows))
@@ -334,15 +336,19 @@ async fn list(env: &Env, principal: &str) -> CellResult<Vec<(String, Option<Role
         fragment: String,
         role: Option<Role>,
     }
+    #[derive(Deserialize)]
+    struct Page {
+        rows: Vec<Row>,
+        more: bool,
+    }
     let mut rows = vec![];
     let mut after: Option<String> = None;
     // bounded: LIST_PAGES_MAX pages
     for _ in 0..LIST_PAGES_MAX {
-        let v = routed::ask_object(env, "PRINCIPAL", principal, "wipe/view", &json!({ "after": after })).await?;
-        let page: Vec<Row> = serde_json::from_value(v["rows"].clone()).map_err(|e| CellError::host(format!("a list's wipe view: {e}")))?;
-        after = page.last().map(|r| r.fragment.clone());
-        rows.extend(page.into_iter().map(|r| (r.fragment, r.role)));
-        if v["more"] != true {
+        let page: Page = routed::ask_object(env, "PRINCIPAL", principal, "wipe/view", &json!({ "after": after })).await?;
+        after = page.rows.last().map(|r| r.fragment.clone());
+        rows.extend(page.rows.into_iter().map(|r| (r.fragment, r.role)));
+        if !page.more {
             return Ok(rows);
         }
     }
@@ -406,8 +412,8 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
     }
     let computer = fragment_core::computer::default_computer_of(&facts.identity);
     let c = crate::computer::ask(env, &computer, "computer/wipe-view", &json!({})).await?;
-    let ledger = routed::ask_object(env, "LEDGER", &facts.identity, "wipe/view", &json!({})).await?;
-    let vault = routed::ask_object(env, "VAULT", &facts.identity, "wipe/view", &json!({})).await?;
+    let ledger: Value = routed::ask_object(env, "LEDGER", &facts.identity, "wipe/view", &json!({})).await?;
+    let vault: Value = routed::ask_object(env, "VAULT", &facts.identity, "wipe/view", &json!({})).await?;
     Ok(Found {
         sign_ins: facts.sign_ins,
         keys: facts.keys,

@@ -440,7 +440,7 @@ impl FragmentCell {
     /// rollback).
     pub(crate) fn kind(&self) -> CellResult<FragmentKind> {
         let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text(&f).ok());
-        Ok(face.and_then(|f| serde_json::from_value(f["kind"].clone()).ok()).unwrap_or_default())
+        Ok(face.map(|f| face_kind(&f)).unwrap_or_default())
     }
 
     /// A chat's own agent: its lead, the first agent added, which answers
@@ -1307,4 +1307,11 @@ pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, 
         face["picture"] = json!(p);
     }
     face.to_string()
+}
+
+/// A kept face's kind (`face`), as serde reads a `FragmentKind`: one this
+/// release knows, `Other` for one a newer release kept (read after a
+/// rollback), an app's when it names none.
+pub(crate) fn face_kind(face: &Value) -> FragmentKind {
+    face["kind"].as_str().map_or(FragmentKind::default(), |k| FragmentKind::parse(k).unwrap_or(FragmentKind::Other))
 }

@@ -1450,7 +1450,6 @@ impl ComputerCell {
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
-        let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
         // a wipe that began while this start awaited starts nothing: the
         // check and the start are one turn (the host's start is synchronous)
         if self.wiped.get() {
@@ -2877,12 +2876,9 @@ impl ComputerCell {
                 json_response(&crate::fragment::ask(&self.env, fragment, "computer/door-ticket", &asked).await?)
             }
             (Method::Put, ["agents", fragment, "connections"]) => {
-                let v: Value = body_json(&mut req).await?;
                 // a body that forgot the field is not a reset to every provider
-                if v.get("connections").is_none() {
-                    return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
-                }
-                let AgentConnections { mut connections } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let named = body_json::<AgentConnections>(&mut req).await;
+                let AgentConnections { mut connections } = named.map_err(|e| CellError::invalid(format!("name connections: a list of providers, or null for every provider its owner has ({})", e.message)))?;
                 if let Some(list) = connections.as_mut() {
                     if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
                         return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
@@ -2904,12 +2900,9 @@ impl ComputerCell {
                 json_response(&self.view()?)
             }
             (Method::Put, ["agents", fragment, "accounts", provider]) => {
-                let v: Value = body_json(&mut req).await?;
                 // a body that forgot the field is not a reset to the default
-                if v.get("account").is_none() {
-                    return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
-                }
-                let AgentAccount { account } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let named = body_json::<AgentAccount>(&mut req).await;
+                let AgentAccount { account } = named.map_err(|e| CellError::invalid(format!("name an account: its id, as GET /api/connections lists it, or null for the default ({})", e.message)))?;
                 if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
                     return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
                 }
@@ -3284,6 +3277,8 @@ impl SignedIn {
 /// The sign-in `signed` finishes, taken from its computer (once, and gone
 /// whatever comes of it): its verifier.
 pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+    // a Value, so `ask` stays one copy for every body (FIN-453 M7: a body
+    // type of its own is about 1.4 KB more of the Wasm, for a rare call)
     let body = serde_json::to_value(signed).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
     let answer = ask(env, &signed.computer, "computer/signed-in", &body).await?;
     let verifier = answer["verifier"].as_str().unwrap_or_default().to_string();

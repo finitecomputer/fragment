@@ -53,19 +53,24 @@ struct Named {
     name: Option<String>,
 }
 
+/// `vault/delete`'s answer.
+#[derive(Serialize, Deserialize)]
+struct Removed {
+    removed: bool,
+}
+
 /// Puts `put` into `person`'s Vault under `name`, sealed there: the same
 /// rules and answer as the person's own `PUT /api/vault/{name}`. Set
 /// again, it is replaced whole. The seam for the platform's own code
 /// (FIN-463's hand-off): it never answers the value.
 pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &PutSecret) -> CellResult<Secret> {
-    let v = crate::routed::ask_object(env, "VAULT", person, "vault/put", &serde_json::to_value(PutAsk { person: person.into(), name: name.into(), put: put.clone() }).expect("a put serializes")).await?;
-    serde_json::from_value(v).map_err(|e| CellError::host(format!("the vault's answer to a put: {e}")))
+    crate::routed::ask_object(env, "VAULT", person, "vault/put", &PutAsk { person: person.into(), name: name.into(), put: put.clone() }).await
 }
 
 /// Removes `name` from `person`'s Vault: whether there was one.
 pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<bool> {
-    let v = crate::routed::ask_object(env, "VAULT", person, "vault/delete", &json!(Named { person: person.into(), name: Some(name.into()) })).await?;
-    Ok(v["removed"] == true)
+    let r: Removed = crate::routed::ask_object(env, "VAULT", person, "vault/delete", &Named { person: person.into(), name: Some(name.into()) }).await?;
+    Ok(r.removed)
 }
 
 /// `/api/vault[/{name}]`, signed by `signed`: the person's own, never an
@@ -77,8 +82,7 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
     let person = signed.identity.id.as_str();
     match (method, rest) {
         (Method::Get, []) => {
-            let v = crate::routed::ask_object(env, "VAULT", person, "vault/list", &json!(Named { person: person.into(), name: None })).await?;
-            let list: SecretList = serde_json::from_value(v).map_err(|e| CellError::host(format!("the vault's list: {e}")))?;
+            let list: SecretList = crate::routed::ask_object(env, "VAULT", person, "vault/list", &Named { person: person.into(), name: None }).await?;
             json_response(&list)
         }
         (Method::Put, [name]) => {
@@ -118,7 +122,7 @@ impl DurableObject for VaultCell {
             return Ok(probed);
         }
         match self.route(req).await {
-            Ok(answer) => Response::from_json(&answer),
+            Ok(answer) => Ok(answer),
             Err(e) => e.response(),
         }
     }
@@ -137,33 +141,40 @@ impl VaultCell {
         crate::keys::scope(SEAL_CLASS, &self.state)
     }
 
-    async fn route(&self, mut req: Request) -> CellResult<Value> {
+    async fn route(&self, mut req: Request) -> CellResult<Response> {
         // a wipe ends a vault that refuses its schema too
         if let Some(route) = req.path().strip_prefix("/wipe/") {
             // only a wipe's orchestrator sets the header (routed.rs `marker`)
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")));
             }
-            return self.wipe(route).await;
+            return Ok(Response::from_json(&self.wipe(route).await?)?);
         }
         if req.headers().get(VAULT_HEADER)?.is_none() {
             return Err(CellError::new(ErrorCode::NotFound, format!("no route {}", req.path())));
         }
         self.schema.ready()?;
-        let body: Value = req.json().await.map_err(|e| CellError::invalid(format!("a vault's call is JSON: {e}")))?;
-        let parse = |what: &str, e: serde_json::Error| CellError::invalid(format!("vault/{what}: {e}"));
-        match req.path().as_str() {
+        let path = req.path();
+        // each call reads its own type from the call's bytes, once
+        let body = req.bytes().await?;
+        fn read<'a, T: Deserialize<'a>>(path: &str, body: &'a [u8]) -> CellResult<T> {
+            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{path}: {e}")))
+        }
+        fn answer(a: &impl Serialize) -> CellResult<Response> {
+            Ok(Response::from_json(a)?)
+        }
+        match path.as_str() {
             "/vault/put" => {
-                let b: PutAsk = serde_json::from_value(body).map_err(|e| parse("put", e))?;
-                Ok(serde_json::to_value(self.put(&b.person, &b.name, &b.put).await?).expect("a secret serializes"))
+                let b: PutAsk = read(&path, &body)?;
+                answer(&self.put(&b.person, &b.name, &b.put).await?)
             }
             "/vault/list" => {
-                let b: Named = serde_json::from_value(body).map_err(|e| parse("list", e))?;
+                let b: Named = read(&path, &body)?;
                 self.person_is(&b.person, false)?;
-                Ok(serde_json::to_value(SecretList { secrets: self.secrets()? }).expect("a list serializes"))
+                answer(&SecretList { secrets: self.secrets()? })
             }
             "/vault/delete" => {
-                let b: Named = serde_json::from_value(body).map_err(|e| parse("delete", e))?;
+                let b: Named = read(&path, &body)?;
                 self.person_is(&b.person, false)?;
                 let name = b.name.ok_or_else(|| CellError::invalid("vault/delete names its secret"))?;
                 let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.as_str().into()])?.is_empty();
@@ -171,7 +182,7 @@ impl VaultCell {
                 if removed {
                     console_log!("{}", json!({ "vault": "removed", "name": name }));
                 }
-                Ok(json!({ "removed": removed }))
+                answer(&Removed { removed })
             }
             other => Err(CellError::new(ErrorCode::NotFound, format!("no route {other}"))),
         }
@@ -217,7 +228,7 @@ impl VaultCell {
         self.sql().exec(
             "INSERT INTO secrets (name, sealed, hosts, place, agents, set_at) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, hosts = excluded.hosts, place = excluded.place, agents = excluded.agents, set_at = excluded.set_at",
-            vec![name.into(), sealed.into(), json!(checked.hosts).to_string().into(), json!(checked.place).to_string().into(), json!(checked.agents).to_string().into(), SqlStorageValue::Integer(at)],
+            vec![name.into(), sealed.into(), text(&checked.hosts).into(), text(&checked.place).into(), text(&checked.agents).into(), SqlStorageValue::Integer(at)],
         )?;
         // what was set, never the value
         console_log!("{}", json!({ "vault": "set", "name": name, "hosts": checked.hosts.len(), "agents": checked.agents.len() }));
@@ -265,4 +276,9 @@ impl VaultCell {
             other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
+}
+
+/// A stored field's JSON text, written once.
+fn text(v: &impl Serialize) -> String {
+    serde_json::to_string(v).expect("a stored field serializes")
 }

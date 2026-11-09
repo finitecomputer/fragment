@@ -27,6 +27,7 @@ use std::ops::Deref;
 
 use fragment_core::{npub, release};
 use fragment_proto::{routed, valid_fragment_name, ErrorBody, ErrorCode, Identity, IdentityKind};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
@@ -334,28 +335,35 @@ pub(crate) async fn send_again(env: &Env, binding: &str, name: &str, make: impl 
 }
 
 /// The internal call `path` with a JSON `body` on the Durable Object
-/// `name` of `binding`: its JSON answer, or its refusal as it named it.
-pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str, body: &serde_json::Value) -> CellResult<serde_json::Value> {
-    let body = body.to_string();
+/// `name` of `binding`: its answer, read from its bytes once as `T`, or its
+/// refusal as it named it (`refusal`).
+pub(crate) async fn ask_object<T: DeserializeOwned>(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<T> {
+    let body = serde_json::to_string(body).map_err(|e| CellError::host(format!("{path}'s body: {e}")))?;
+    let bytes = object_answer(env, binding, name, path, body).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{binding} {name}'s answer to {path}: {e}")))
+}
+
+/// `ask_object`'s round trip, one copy for every answer's type: its 200's
+/// bytes, or its refusal.
+async fn object_answer(env: &Env, binding: &str, name: &str, path: &str, body: String) -> CellResult<Vec<u8>> {
     let mut resp = send_again(env, binding, name, || internal_request(path, &body)).await?;
     let status = resp.status_code();
-    let v: serde_json::Value = resp.read_json().await.unwrap_or(serde_json::Value::Null);
+    let bytes = resp.bytes().await?;
     if status == 200 {
-        return Ok(v);
+        return Ok(bytes);
     }
-    let code = v["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(serde_json::json!(c)).ok()).unwrap_or(ErrorCode::HostFailed);
-    let message = v["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("{binding} {name} answered {status}"));
-    // its reason too, for whoever reads the refusal (FIN-352's, through a
-    // computer's door ticket)
-    let mut refused = CellError::new(code, message);
-    // and how long to wait (a paused shared key's: FIN-448)
-    if let Some(ms) = v["retry_after_ms"].as_u64() {
-        refused = refused.retry_after(ms);
+    Err(refusal(&bytes, || format!("{binding} {name} answered {status}")))
+}
+
+/// A refusal another object (or a fragment's handler) answered, read from
+/// its bytes as `CellError::response` wrote it: its code, message, reason
+/// (FIN-352's, through a computer's door ticket) and wait (a paused shared
+/// key's: FIN-448); or, not one, a host failure saying who answered what.
+pub(crate) fn refusal(bytes: &[u8], what: impl FnOnce() -> String) -> CellError {
+    match serde_json::from_slice::<ErrorBody>(bytes) {
+        Ok(e) => CellError { reason: e.reason, retry_after_ms: e.retry_after_ms, ..CellError::new(e.error, e.message) },
+        Err(_) => CellError::host(what()),
     }
-    Err(match v["reason"].as_str().and_then(fragment_proto::Reason::parse) {
-        Some(reason) => refused.because(reason),
-        None => refused,
-    })
 }
 
 /// The internal call `path` on the Durable Object `name` of `binding`, its

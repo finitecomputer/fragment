@@ -199,7 +199,7 @@ fn listing() -> Result<Vec<(String, String)>> {
 
 /// Removes the containers the project's nodes left (`doomed`), whatever
 /// left them: wrangler's teardown, a crash, a signal. Call it once its
-/// nodes are gone (stopped, or `kill_nodes`): a running node makes them
+/// nodes are gone (stopped, or `kill_started`): a running node makes them
 /// again. Errs naming any still there after `PASSES_MAX` passes.
 pub fn remove(project: &Path) -> Result<Removed> {
     let _one = REMOVING.lock().unwrap_or_else(PoisonError::into_inner);
