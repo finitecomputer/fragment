@@ -147,7 +147,7 @@ final class FragmentUITests: XCTestCase {
     /// stack (`cargo xtask dev`, its port forwarded to this Mac) whose
     /// person's computer has an update ready and saves that fail, signed as
     /// that person by a key it approved ahead. Its notices show over Home in
-    /// the server's words, the warning with its countdown and the platform's
+    /// the server's words, the warning saying when it stops and the platform's
     /// own words, each with its actions; Later is the update's, and the
     /// update goes. Named by `TEST_RUNNER_FRAGMENT_UITEST_SERVER` and
     /// `TEST_RUNNER_FRAGMENT_UITEST_KEY` (the key's 64 hex); skipped without.
@@ -168,7 +168,7 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(unsaved.waitForExistence(timeout: 10), "and the saves failing")
         XCTAssertTrue(app.staticTexts["An update is ready for your computer"].exists)
         XCTAssertTrue(app.staticTexts["Your computer can't save right now"].exists)
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "If it still can't save, it stops in")).firstMatch.exists, "its countdown")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "If it still can't, it stops in about")).firstMatch.exists, "when it stops, in the server's words")
         XCTAssertTrue(update.buttons["Restart"].exists && update.buttons["Later"].exists)
         XCTAssertTrue(unsaved.buttons["Restart now"].exists)
         screenshot(app, "Notices, light")
