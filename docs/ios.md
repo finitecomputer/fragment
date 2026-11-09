@@ -55,6 +55,7 @@ The live service uses these routes already (`docs/api.md` is authoritative):
 | Stream/catch-up | `GET /f/{chat}/__live`, subscribe to `chat` and `work` with `last` initially, `after` on reconnect; follow `subscribed.more` until caught up |
 | Earlier messages | `GET /api/f/{chat}/channels/chat?before=&limit=50`; never advance live cursors from this page |
 | List invalidation | `GET /api/fragments/watch`; refetch the authenticated list on `changed`, a burst as one read 200 ms after (the web's `LIST_SETTLE_MS`) |
+| What the person is told | `GET /api/notices` with every list read (a 404, a platform from before it: none): each notice drawn the same way whatever its `kind`, which is never read; an action posts its `body` to its `post` route, then reads again, or opens its `open` page; `until` is counted down to and the notice dropped as it passes (`ios/Sources/Notices.swift`, as the web's band) |
 | Chat title | A chat of the person's still titled "New chat" with a message: `GET /api/f/{chat}/channels/chat?after=0&limit=20`, then its manifest's `meta.title` from its first line with words (48 characters at most), written and deployed only if the manifest still says "New chat" (the web's `titleFromFirst`) |
 | Launcher search | `GET /api/search?q=` → fragments by title/label and messages by text, archived included; a message result opens its conversation |
 | Read marker | `PUT /api/fragments/{chat}/seen`, after the visible chat catches up |
