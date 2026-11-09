@@ -861,7 +861,48 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let r = page_put_from(&editor_site, "application/json", Some("cross-site"), "123456:from-elsewhere")?;
     let after = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("and changes no secret (no secret.set event)", r.status != 200 && after.text.matches("secret.set").count() == set_count, &r);
+
+    // a secret of its owner's Vault moved here (FIN-466): kept here, gone
+    // from the Vault, never in an answer; theirs alone to move
+    let bot = format!("123456:vault-moved-{}", &Keys::generate().pubkey_hex()[..16]);
+    let vault = |keys: &Keys, method: &'static str, path: &str, body: Option<Value>| api.signed(keys, method, path, body.as_ref());
+    let parked = vault(&owner, "PUT", "/api/vault/telegram-e2e", Some(json!({ "value": bot, "hosts": [], "agents": [agent_id_name(&name)] })))?;
+    let signer = vault(&owner, "PUT", "/api/vault/nostr-e2e", Some(json!({ "value": Keys::generate().secret_hex(), "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": [agent_id_name(&name)] })))?;
+    anyhow::ensure!(parked.status == 200 && signer.status == 200, "the owner's vault: {parked} {signer}");
+    // its agent an editor here, so only its being an agent refuses it
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the owner's agent its editor: {r}");
+    let both = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "value": "123456:x", "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let by_agent = put(&viewer, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let a_signer = put(&owner, "NOSTR_KEY", json!({ "fromVault": "nostr-e2e", "hosts": ["finite.site"] }))?;
+    let held = vault(&owner, "GET", "/api/vault", None)?;
+    s.ok(
+        "a value and fromVault both, an agent's move, and a Nostr key's move are each refused, the Vault keeping both",
+        both.status == 400 && by_agent.status == 403 && by_agent.text.contains("only a person") && a_signer.status == 400 && a_signer.text.contains("never leaves") && held.text.contains("telegram-e2e") && held.text.contains("nostr-e2e"),
+        format!("{both} {by_agent} {a_signer}"),
+    );
+    let moved = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    let held = vault(&owner, "GET", "/api/vault", None)?;
+    let again = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    s.ok(
+        "its person moves a Vault secret into their fragment: its secret now, gone from the Vault, its value in no answer; again, nothing is there (404)",
+        moved.status == 200
+            && listed.body["secrets"].as_array().is_some_and(|l| l.iter().any(|x| x == &json!({ "name": "TELEGRAM_BOT_TOKEN", "hosts": ["api.telegram.org"] })))
+            && !held.text.contains("telegram-e2e")
+            && again.status == 404
+            && ![&moved, &listed, &held, &again].iter().any(|r| r.text.contains(&bot)),
+        format!("{moved} {held} {again}"),
+    );
+    vault(&owner, "DELETE", "/api/vault/nostr-e2e", None)?;
     Ok(())
+}
+
+/// A name a Vault secret binds to: an agent fragment's form, this lane's
+/// own (the move checks bind no agent that runs).
+fn agent_id_name(name: &str) -> String {
+    let (_, suffix) = fragment_proto::split_fragment_name(name).expect("a fragment's name");
+    format!("agent--{suffix}")
 }
 
 const FIRST_ROW: &str = "a chat made with its agent while its seed is held (code.storage slow): every row its owner's list shows of it, the first while the seed runs, names its agent";

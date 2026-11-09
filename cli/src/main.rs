@@ -932,6 +932,10 @@ enum SecretCmd {
         /// `--host`: that names the fragment host)
         #[arg(long = "to", required = true, value_name = "HOST")]
         hosts: Vec<String>,
+        /// Move this secret of your Vault here instead (`fragment vault
+        /// list`): kept here, gone from your Vault, no value read
+        #[arg(long = "from-vault", value_name = "SECRET")]
+        from_vault: Option<String>,
     },
     List { name: String },
     Rm { name: String, key: String },
@@ -2270,9 +2274,12 @@ fn run(cli: Cli) -> Result<()> {
             println!("New share link: {}", share_link(&st.urls.canonical, &v.view_token));
         }
         Cmd::Secret { sub } => match sub {
-            SecretCmd::Set { name, key, hosts } => {
-                let value = from_env_or_stdin(&key, &format!("value for {key}"))?;
-                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts })?)?;
+            SecretCmd::Set { name, key, hosts, from_vault } => {
+                let value = match &from_vault {
+                    Some(_) => String::new(),
+                    None => from_env_or_stdin(&key, &format!("value for {key}"))?,
+                };
+                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts, from_vault })?)?;
                 // names and hosts only — values never travel back
                 json_exit(j, &json!({ "name": name, "key": key, "set": true, "hosts": set["hosts"] }));
                 println!("secret {key} set on {name}, for {}", set["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));

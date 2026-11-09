@@ -1148,7 +1148,7 @@ fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
-fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
+fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]

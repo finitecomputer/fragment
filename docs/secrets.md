@@ -81,6 +81,12 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
 - **Only its person writes it**, from their session or their own key;
   their agents are refused every route.
 - **A wipe empties it** with their ledger, and keeps the row that says so.
+- **A secret moves out once, whole**: its person may move one into a
+  fragment they edit as that fragment's secret (`fromVault` on `PUT
+  /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as
+  a Telegram bot's token moves into its connector. The fragment keeps it,
+  then the Vault removes it, so it has one home and is never lost between.
+  A Nostr key never moves.
 
 ## The Secrets Store
 

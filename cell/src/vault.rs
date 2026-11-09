@@ -21,7 +21,7 @@
 use std::cell::Cell;
 
 use fragment_core::vault::{self as rules, Placing};
-use fragment_proto::vault::{PutSecret, Secret, SecretRemoved};
+use fragment_proto::vault::{Place, PutSecret, Secret, SecretRemoved};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -54,6 +54,32 @@ async fn ask(env: &Env, person: &str, op: &str, body: Option<&RawValue>) -> Cell
 /// set, as JSON, never its value.
 pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &RawValue) -> CellResult<Vec<u8>> {
     ask(env, person, &format!("vault/put/{name}"), Some(put)).await
+}
+
+/// What a move reads of a kept `Secret`: where it goes.
+#[derive(serde::Deserialize)]
+struct Placed {
+    place: Place,
+}
+
+/// `vault/take`'s answer: a secret's value, for its move, and which value
+/// it is (its revision: its sealed text's SHA-256). A tuple on the wire.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Taken(pub String, pub String);
+
+/// `name`'s value in `person`'s Vault, for its move into a fragment of
+/// theirs as that fragment's secret (members.rs, `fromVault`): the mover
+/// keeps it, then removes that revision here (`delete_taken`), so it has
+/// one home at the end and is never lost between. A Nostr key is refused:
+/// it never leaves.
+pub(crate) async fn take(env: &Env, person: &str, name: &str) -> CellResult<Taken> {
+    crate::routed::ask_object(env, "VAULT", person, &format!("vault/take/{name}"), &None::<&RawValue>).await
+}
+
+/// Removes `name` from `person`'s Vault only while it holds the value a
+/// `take` answered as `revision`: one its person set since stays.
+pub(crate) async fn delete_taken(env: &Env, person: &str, name: &str, revision: &str) -> CellResult<()> {
+    crate::routed::ask_bytes(env, "VAULT", person, &format!("vault/delete/{name}"), &Some(revision)).await.map(drop)
 }
 
 /// Removes `name` from `person`'s Vault: its answer, a `SecretRemoved`.
@@ -146,7 +172,8 @@ impl VaultCell {
         let answer = match path.trim_start_matches('/').split('/').collect::<Vec<_>>()[..] {
             ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "list"] => self.list()?,
-            ["vault", "delete", name] => self.delete(name)?,
+            ["vault", "delete", name] => self.delete(name, crate::json_body::<Option<String>>(&req.bytes().await?)?.as_deref())?,
+            ["vault", "take", name] => self.take(name).await?,
             _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         };
         Ok(Response::from_bytes(answer.into_bytes())?)
@@ -192,10 +219,30 @@ impl VaultCell {
         Ok(format!("{{\"secrets\":[{}]}}", texts.join(",")))
     }
 
-    /// `name` removed: `SecretRemoved`'s JSON.
-    fn delete(&self, name: &str) -> CellResult<String> {
-        let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
-        self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
+    /// `name`'s value, opened for its move, and its revision: `Taken`'s
+    /// JSON. None, or a Nostr key, refused.
+    async fn take(&self, name: &str) -> CellResult<String> {
+        let rows = self.rows("SELECT sealed, secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no secret {name} in your vault (GET /api/vault lists them)")))?;
+        let kept: Placed = crate::json_text(row["secret"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored secret: {e}")))?;
+        if kept.place.sign.is_some() {
+            return Err(CellError::invalid(format!("{name} is a key that signs: it never leaves your vault")));
+        }
+        let sealed = row["sealed"].as_str().unwrap_or_default().to_string();
+        let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
+        let value = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a secret that is not text"))?;
+        serde_json::to_string(&Taken(value, revision_of(&sealed))).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// `name` removed (a move's: only while it holds `revision`):
+    /// `SecretRemoved`'s JSON.
+    fn delete(&self, name: &str, revision: Option<&str>) -> CellResult<String> {
+        let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
+        let held = rows.first().and_then(|r| r["sealed"].as_str()).filter(|sealed| revision.is_none_or(|rev| revision_of(sealed) == rev));
+        let removed = held.is_some();
+        if let Some(sealed) = held {
+            self.sql().exec("DELETE FROM secrets WHERE name = ? AND sealed = ?", vec![name.into(), sealed.into()])?;
+        }
         serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))
     }
 
@@ -221,4 +268,11 @@ impl VaultCell {
             other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
+}
+
+/// Which value a stored secret holds: its sealed text's SHA-256, which a
+/// new seal (its random nonce) always changes.
+fn revision_of(sealed: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(sealed.as_bytes()))
 }

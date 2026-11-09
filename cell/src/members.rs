@@ -1188,7 +1188,20 @@ impl FragmentCell {
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }
-        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}}: {e}")))?;
+        let mut put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}} or {{fromVault, hosts}}: {e}")))?;
+        // a secret of the caller's own Vault, moved here (FIN-466): theirs
+        // alone to move, never an agent's
+        let moved = match put.from_vault.take() {
+            Some(_) if !put.value.is_empty() => return Err(CellError::invalid("a secret is its value or fromVault, not both")),
+            Some(name) => {
+                let person = caller.signed.as_ref().filter(|s| s.identity.kind == fragment_proto::IdentityKind::Person).map(|s| s.identity.id.clone());
+                let person = person.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only a person moves a secret of their vault, from their own session or key"))?;
+                let taken = crate::vault::take(&self.env, &person, &name).await?;
+                put.value = taken.0;
+                Some((person, name, taken.1))
+            }
+            None => None,
+        };
         if put.value.is_empty() {
             return Err(CellError::invalid("a secret's value is empty"));
         }
@@ -1225,6 +1238,14 @@ impl FragmentCell {
         // its owner's row says it has reach (`Sharing::reach`)
         if !exists {
             self.sharing_changed()?;
+        }
+        // kept here: gone from the Vault, so it has one home. Should that
+        // fail, it stays parked there too, to be removed by its person
+        // (only the value taken: one its person set since stays theirs there)
+        if let Some((person, name, revision)) = moved {
+            if let Err(e) = crate::vault::delete_taken(&self.env, &person, &name, &revision).await {
+                console_error!("{}", json!({ "secret": key, "moved": name, "vault": "kept", "error": e.message }));
+            }
         }
         json_response(&json!({ "ok": true, "name": key, "hosts": hosts }))
     }
