@@ -562,13 +562,6 @@ struct AlwaysOnBody {
     on: bool,
 }
 
-#[derive(Deserialize)]
-struct Assign {
-    fragment: String,
-    identity: String,
-    owner: String,
-}
-
 /// `computer/unassign`'s body: the agent fragment it runs no more, and,
 /// from that fragment's ended life (ended.rs), its agent: only that life's
 /// row goes, never one a life made again under the name was assigned.
@@ -2623,23 +2616,6 @@ impl ComputerCell {
                 }
                 json_response(&self.view()?)
             }
-            "computer/assign" => {
-                let b: Assign = body_json(&mut req).await?;
-                if self.must(MetaKey::Owner)? != b.owner {
-                    return Err(CellError::new(ErrorCode::Forbidden, "an agent runs on its owner's computer"));
-                }
-                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![b.fragment.as_str().into()])?;
-                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
-                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
-                }
-                // a new agent may use every connection its owner has (decision
-                // 44); assigned again, it keeps what its owner narrowed it to
-                self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
-                    vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into()],
-                )?;
-                json_response(&self.view()?)
-            }
             // an operator's pin (orgs.rs); its owner's is `PUT …/image`
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
@@ -2647,21 +2623,7 @@ impl ComputerCell {
             }
             "computer/unassign" => {
                 let b: Unassign = body_json(&mut req).await?;
-                let gone = match &b.identity {
-                    Some(identity) => self.rows("DELETE FROM agents WHERE fragment = ? AND identity = ? RETURNING fragment", vec![b.fragment.as_str().into(), identity.as_str().into()])?,
-                    None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
-                };
-                assert!(gone.len() <= 1, "a computer runs a fragment once");
-                if !gone.is_empty() {
-                    self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![b.fragment.as_str().into()])?;
-                }
-                let view = self.view()?;
-                if !gone.is_empty() {
-                    // its owner's pages read its agents again (an agent
-                    // fragment's delete unassigns it unseen: ended.rs)
-                    self.tell_owner().await;
-                }
-                json_response(&view)
+                json_response(&self.unassign(&b.fragment, b.identity.as_deref()).await?)
             }
             "computer/credentials" => {
                 let b: CredentialsAsk = body_json(&mut req).await?;
@@ -2885,6 +2847,44 @@ impl ComputerCell {
                 self.set_key_cap(provider, body_json(&mut req).await?).await?;
                 json_response(&self.view()?)
             }
+            (Method::Put, ["agents", fragment]) => {
+                // the agent fragment takes the computer first (its owner must
+                // be the computer's), and its key becomes the agent's identity
+                let took = crate::fragment::ask(&self.env, fragment, "computer/assign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await?;
+                let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
+                let n = self.rows("SELECT COUNT(*) AS n FROM agents WHERE fragment != ?", vec![(*fragment).into()])?;
+                if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
+                    return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
+                }
+                // a new agent may use every connection its owner has (decision
+                // 44); assigned again, it keeps what its owner narrowed it to
+                self.exec(
+                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
+                    vec![(*fragment).into(), identity.into(), who.as_str().into(), js::now_ms().into()],
+                )?;
+                let view = self.view()?;
+                // it comes in where its person is (decision 64), once both the
+                // fragment and the computer hold it, so its computer hears each
+                // join; a replay joins nothing twice
+                crate::members::agent_made(&self.env, &who, identity).await;
+                json_response(&view)
+            }
+            (Method::Delete, ["agents", fragment]) => {
+                // an agent fragment gone (deleted: its own delete unassigns it,
+                // ended.rs) has nothing to say: its computer runs it no more
+                match crate::fragment::ask(&self.env, fragment, "computer/unassign", &json!({ "computer": self.must(MetaKey::Id)?, "owner": who })).await {
+                    Err(e) if e.code != ErrorCode::NotFound => return Err(e),
+                    _ => {}
+                }
+                json_response(&self.unassign(fragment, None).await?)
+            }
+            (Method::Post, ["agents", fragment, "door"]) => {
+                // a ticket to link or unlink the agent's door, its owner's alone
+                // (fragment_core::door): the agent fragment makes and signs it
+                let v: Value = body_json(&mut req).await?;
+                let asked = json!({ "computer": self.must(MetaKey::Id)?, "owner": who, "door": v["door"], "act": v["act"] });
+                json_response(&crate::fragment::ask(&self.env, fragment, "computer/door-ticket", &asked).await?)
+            }
             (Method::Put, ["agents", fragment, "connections"]) => {
                 let v: Value = body_json(&mut req).await?;
                 // a body that forgot the field is not a reset to every provider
@@ -2949,6 +2949,26 @@ impl ComputerCell {
             (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
         }
+    }
+
+    /// Runs `fragment` no more (only while its agent is `identity`, when
+    /// named): its view after.
+    async fn unassign(&self, fragment: &str, identity: Option<&str>) -> CellResult<ComputerView> {
+        let gone = match identity {
+            Some(identity) => self.rows("DELETE FROM agents WHERE fragment = ? AND identity = ? RETURNING fragment", vec![fragment.into(), identity.into()])?,
+            None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![fragment.into()])?,
+        };
+        assert!(gone.len() <= 1, "a computer runs a fragment once");
+        if !gone.is_empty() {
+            self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![fragment.into()])?;
+        }
+        let view = self.view()?;
+        if !gone.is_empty() {
+            // its owner's pages read its agents again (an agent
+            // fragment's delete unassigns it unseen: ended.rs)
+            self.tell_owner().await;
+        }
+        Ok(view)
     }
 
     /// Refuses an agent fragment that does not run here.
@@ -3284,38 +3304,6 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             // where its owner gets help when it will not start
             let cfg = Config::from_env(env);
             json_response(&json!({ "computers": list, "support": cfg.support_url }))
-        }
-        (Method::Put, [id, "agents", fragment]) => {
-            owned(env, who, id).await?;
-            // the agent fragment takes the computer first (its owner must be the
-            // computer's), and its key becomes the agent's identity
-            let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
-            let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
-            let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
-            let view = view_of(ask(env, id, "computer/assign", &body).await?)?;
-            // it comes in where its person is (decision 64), once both the
-            // fragment and the computer hold it, so its computer hears each
-            // join; a replay joins nothing twice
-            crate::members::agent_made(env, who, identity).await;
-            json_response(&view)
-        }
-        (Method::Post, [id, "agents", fragment, "door"]) => {
-            // a ticket to link or unlink the agent's door, its owner's alone
-            // (fragment_core::door): the agent fragment makes and signs it
-            owned(env, who, id).await?;
-            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let asked = json!({ "computer": id, "owner": who, "door": v["door"], "act": v["act"] });
-            json_response(&crate::fragment::ask(env, fragment, "computer/door-ticket", &asked).await?)
-        }
-        (Method::Delete, [id, "agents", fragment]) => {
-            owned(env, who, id).await?;
-            // an agent fragment gone (deleted: its own delete unassigns it,
-            // ended.rs) has nothing to say: its computer runs it no more
-            match crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await {
-                Err(e) if e.code != ErrorCode::NotFound => return Err(e),
-                _ => {}
-            }
-            json_response(&view_of(ask(env, id, "computer/unassign", &json!({ "fragment": fragment })).await?)?)
         }
         (Method::Post, [id, "ports", port, "ticket"]) => {
             let v = owned(env, who, id).await?;
