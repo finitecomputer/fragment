@@ -211,12 +211,12 @@ fn telegram_page(s: &mut Suite, api: &Api, owner: &Keys, session: &str) -> Resul
     // it starts, every module it imports served (Alex's review: the chat's
     // `control.js`): the chat's page live and its composer open to its
     // owner, the still-loading line gone, and no setup in it
-    let started = b.until(&page, "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('text').disabled && !document.getElementById('still-loading')", wait);
+    let started = b.until(&page, "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('text').disabled && !document.getElementById('still-loading') && document.getElementById('helpers')?.hidden === true", wait);
     let seen = b.eval(&page, "({ setup: !!document.querySelector('.telegram, .setup, .setup-tag, input[type=password]') })")?;
     let chat = fragment_templates::blessed::site_file("chat", "site/index.html").map(|f| f.sha256);
     let telegram = fragment_templates::blessed::site_file("telegram", "site/index.html").map(|f| f.sha256);
     s.ok(
-        "the Telegram connector's page is the chat's own page, and starts as a chat, no setup in it",
+        "the Telegram connector's page is the chat's own page, and starts as a chat (its helpers' bar there, hidden while none work), no setup in it",
         started && seen == json!({ "setup": false }) && chat.is_some() && chat == telegram,
         json!({ "seen": seen, "chat": chat, "telegram": telegram }),
     );
