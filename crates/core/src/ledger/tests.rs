@@ -1324,7 +1324,7 @@ fn what_a_ledger_stored_and_answered_reads_back_byte_for_byte() {
         .iter()
         .filter_map(|e| match e {
             Entry::Row { row, .. } => serde_json::to_value(&row.usage).ok().and_then(|u| u["kind"].as_str().map(str::to_string)),
-            Entry::Before(_) => None,
+            Entry::Before { .. } => None,
         })
         .collect();
     assert_eq!(kinds.len(), 9, "every kind of usage is among the stored rows: {kinds:?}");
