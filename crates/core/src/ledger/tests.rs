@@ -1161,29 +1161,30 @@ fn a_head_kept_with_its_book_loads_and_charges_with_the_configured_one() {
 }
 
 /// Goal: an entry those releases kept (a reservation, held, settled or
-/// released) reads as one from before, kept as it was written: never
-/// charged again, a row under its reference another body, forgotten by
-/// its own time as any is. Valid and invalid shapes. Method: each as it
-/// was written.
+/// released) reads as one from before, by its time: never charged again,
+/// a row under its reference another body, forgotten by its own time as
+/// any is. Valid and invalid shapes, each read from its stored text.
+/// Method: each as it was written.
 #[test]
 fn an_old_reservation_entry_reads_as_one_from_before() {
+    let read = |v: &serde_json::Value| serde_json::from_slice::<Entry>(v.to_string().as_bytes());
     let settled = old_reservation("aig:old", T0);
     let mut held = settled.clone();
     held["end"] = serde_json::Value::Null;
     let mut released = settled.clone();
     released["end"] = serde_json::json!({ "end": "released" });
     for old in [settled.clone(), held.clone(), released] {
-        let read = serde_json::from_value::<Entry>(old.clone()).unwrap();
-        assert_eq!(read, Entry::Before(old.clone()), "{old}");
-        assert_eq!((read.charge(), read.at_ms()), (None, T0));
-        assert_eq!(serde_json::to_value(&read).unwrap(), old, "written back as it was");
+        let entry = read(&old).unwrap();
+        assert_eq!(entry, Entry::Before { at_ms: T0 }, "{old}");
+        assert_eq!((entry.charge(), entry.at_ms()), (None, T0));
     }
-    assert!(serde_json::from_value::<Entry>(serde_json::json!({ "row": {} })).is_err(), "an entry names its kind");
+    assert!(read(&serde_json::json!({ "row": {} })).is_err(), "an entry names its kind");
+    assert!(read(&serde_json::json!({ "entry": "hold", "at_ms": T0 })).is_err(), "a row or a reservation");
     let mut timeless = held;
     timeless.as_object_mut().unwrap().remove("at_ms");
-    assert!(serde_json::from_value::<Entry>(timeless).is_err(), "a reservation from before has its time");
+    assert!(read(&timeless).is_err(), "a reservation from before has its time");
     let mut w = World::seat();
-    w.store.put_entry("aig:old", Entry::Before(settled));
+    w.store.put_entry("aig:old", read(&settled).unwrap());
     let Outcome::Metered(m) = w.ok(meter("b1", vec![row("aig:old", turn(), None, T0)])) else { panic!() };
     assert_eq!((m.charged, m.refused.clone()), (0, vec![RowRefused { index: 0, why: Refused::ConflictingBody }]));
     w.now = T0 + REF_KEEP_MS;
@@ -1192,6 +1193,19 @@ fn an_old_reservation_entry_reads_as_one_from_before() {
     w.now += 1;
     w.ok(Op::Sweep);
     assert_eq!(w.store.entry("aig:old"), None, "forgotten as any is");
+}
+
+/// Goal: an entry a ledger stored reads as its fields, once, from its
+/// text, and writes back as it was (FIN-453 M7: no `Value` between).
+/// Method: `stored/entries.jsonl`, rows of every kind of usage that a
+/// local e2e run's ledgers stored (each identity in them that run's own).
+#[test]
+fn a_stored_entry_reads_from_its_text_and_writes_back_as_it_was() {
+    for line in include_str!("stored/entries.jsonl").lines().filter(|l| !l.is_empty()) {
+        let entry: Entry = serde_json::from_slice(line.as_bytes()).unwrap_or_else(|e| panic!("{line}: {e}"));
+        assert!(matches!(entry, Entry::Row { .. }), "{line}");
+        assert_eq!(serde_json::to_string(&entry).unwrap(), line);
+    }
 }
 
 /// The two bodies the ledger queue carries, as this release and the one

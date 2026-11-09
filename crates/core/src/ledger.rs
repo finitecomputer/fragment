@@ -537,17 +537,20 @@ fn valid_names(names: [&Option<String>; 3]) -> bool {
 }
 
 /// A reference's record in the store, `{"entry": "row", …}` (or, from
-/// before, `{"entry": "reservation", …}`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// before, `{"entry": "reservation", …}`). Read as its fields
+/// (`EntryFields`), once, from the stored text.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "EntryFields")]
 pub enum Entry {
     /// A meter row: its price under the book of the time (`book`, its
     /// version; the book itself is kept by its digest, `book:<digest>`), and
     /// its charge (the price's, or nothing for a waived meter).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
     /// A reservation of the releases before decision 62 (held, settled or
-    /// released), kept as it was written: never charged here, a row under
-    /// its reference another body, forgotten by its time as any.
-    Before(serde_json::Value),
+    /// released): never charged here, a row under its reference another
+    /// body, forgotten by its time as any. Its store keeps it as it was
+    /// written (no ledger writes one again); what it is read for is its time.
+    Before { at_ms: i64 },
 }
 
 impl Serialize for Entry {
@@ -560,32 +563,48 @@ impl Serialize for Entry {
             charge: i64,
             book: u32,
         }
+        #[derive(Serialize)]
+        struct Before {
+            entry: &'static str,
+            at_ms: i64,
+        }
         match self {
             Entry::Row { row, priced, charge, book } => Row { entry: "row", row, priced, charge: *charge, book: *book }.serialize(s),
-            Entry::Before(v) => v.serialize(s),
+            Entry::Before { at_ms } => Before { entry: "reservation", at_ms: *at_ms }.serialize(s),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for Entry {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Entry, D::Error> {
-        use serde::de::Error;
-        #[derive(Deserialize)]
-        struct Row {
-            row: MeterRow,
-            priced: Priced,
-            charge: i64,
-            book: u32,
+/// An `Entry` as it is read: a row's fields, or a reservation's time; a
+/// reservation's other fields are passed over.
+#[derive(Deserialize)]
+struct EntryFields {
+    entry: EntryKind,
+    row: Option<MeterRow>,
+    priced: Option<Priced>,
+    charge: Option<i64>,
+    book: Option<u32>,
+    at_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EntryKind {
+    Row,
+    Reservation,
+}
+
+impl TryFrom<EntryFields> for Entry {
+    type Error = String;
+
+    fn try_from(f: EntryFields) -> Result<Entry, String> {
+        fn need<T>(v: Option<T>, name: &str) -> Result<T, String> {
+            v.ok_or_else(|| format!("missing field `{name}`"))
         }
-        let v = serde_json::Value::deserialize(d)?;
-        match v.get("entry").and_then(serde_json::Value::as_str) {
-            Some("row") => {
-                let r: Row = serde_json::from_value(v).map_err(D::Error::custom)?;
-                Ok(Entry::Row { row: r.row, priced: r.priced, charge: r.charge, book: r.book })
-            }
-            Some("reservation") if v.get("at_ms").is_some_and(serde_json::Value::is_i64) => Ok(Entry::Before(v)),
-            other => Err(D::Error::custom(format!("an entry is a row or a reservation from before, not {other:?}"))),
-        }
+        Ok(match f.entry {
+            EntryKind::Row => Entry::Row { row: need(f.row, "row")?, priced: need(f.priced, "priced")?, charge: need(f.charge, "charge")?, book: need(f.book, "book")? },
+            EntryKind::Reservation => Entry::Before { at_ms: f.at_ms.ok_or("a reservation from before has its time (`at_ms`)")? },
+        })
     }
 }
 
@@ -595,7 +614,7 @@ impl Entry {
     pub fn at_ms(&self) -> i64 {
         match self {
             Entry::Row { row, .. } => row.at_ms,
-            Entry::Before(v) => v["at_ms"].as_i64().expect("a reservation from before has its time"),
+            Entry::Before { at_ms } => *at_ms,
         }
     }
 
@@ -603,7 +622,7 @@ impl Entry {
     pub fn charge(&self) -> Option<i64> {
         match self {
             Entry::Row { charge, .. } => Some(*charge),
-            Entry::Before(_) => None,
+            Entry::Before { .. } => None,
         }
     }
 }

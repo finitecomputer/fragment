@@ -111,7 +111,10 @@ fn usage_of(item: &Planned, models: &Models) -> Result<Usage, (Option<String>, U
             };
             Ok(Usage::Tokens { model: id, input: m.input, cached_input: m.cached_input, cache_write: m.cache_write, output: m.output })
         }
-        Planned::Usage(u) => serde_json::from_value(u.usage.clone()).map_err(|_| (None, Unquoted::Invalid)),
+        // proto holds it as JSON (it cannot name a `Usage`, and the CLI's
+        // MCP tool reads a quote from a `Value`): read as text through the
+        // one decoder a usage has, not a second one over a `Value`
+        Planned::Usage(u) => serde_json::from_slice(u.usage.to_string().as_bytes()).map_err(|_| (None, Unquoted::Invalid)),
     }
 }
 

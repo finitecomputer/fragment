@@ -253,7 +253,9 @@ pub fn slot_of(models: &mut Value) -> Result<Slot, String> {
             return Err(format!("models.embeddings: {key} is a chat slot's, not an embeddings slot's"));
         }
     }
-    let upstream: Upstream = serde_json::from_value(row).map_err(|e| format!("models.embeddings: {e}"))?;
+    // through the one decoder an `Upstream` has (`SliceRead`), as the chat
+    // slots' (models.rs, `extras_of`): read once, as an isolate starts
+    let upstream: Upstream = serde_json::from_slice(row.to_string().as_bytes()).map_err(|e| format!("models.embeddings: {e}"))?;
     if let Upstream::Openai { body: Some(_), .. } = &upstream {
         return Err("models.embeddings: body is a chat slot's (an API's own fields for its chat completions)".into());
     }

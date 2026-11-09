@@ -81,23 +81,37 @@ pub struct Reply {
     pub words: Option<wire::WordStats>,
 }
 
-/// What one fragment's answer says (`status`, `answer`). Its cosines
-/// compare only if it names the question's `space` (none: the question
-/// was not embedded) and the one `SCHEME`.
-pub fn reached(status: u16, mut answer: Value, space: Option<&wire::Space>) -> Reply {
-    let message = answer["message"].as_str().map(str::to_string);
+/// A fragment's answer to `search/asked` (or its refusal), as the merge
+/// reads it: once, from its bytes. Its hits pass through (the merge writes
+/// into each), and its words are read by hand (`word_stats`). One that does
+/// not read as this (no JSON) says none of it.
+#[derive(Default, serde::Deserialize)]
+struct Answer {
+    message: Option<String>,
+    indexed: Option<bool>,
+    space: Option<wire::Space>,
+    scheme: Option<String>,
+    #[serde(default)]
+    results: Vec<Value>,
+    #[serde(default)]
+    words: Value,
+}
+
+/// What one fragment's answer says (`status`, `answer`, its bytes). Its
+/// cosines compare only if it names the question's `space` (none: the
+/// question was not embedded) and the one `SCHEME`.
+pub fn reached(status: u16, answer: &[u8], space: Option<&wire::Space>) -> Reply {
+    let answer: Answer = serde_json::from_slice(answer).unwrap_or_default();
     let none = |state, message| Reply { state, message, hits: vec![], cosines: false, words: None };
     match status {
-        200 if answer["indexed"] == false => none(Reached::NoIndex, None),
+        200 if answer.indexed == Some(false) => none(Reached::NoIndex, None),
         200 => {
-            let named = serde_json::from_value::<wire::Space>(answer["space"].clone()).ok();
-            let cosines = space.is_some_and(|s| named.as_ref() == Some(s)) && answer["scheme"] == wire::SCHEME;
-            let hits = answer.get_mut("results").and_then(Value::as_array_mut).map(std::mem::take).unwrap_or_default();
-            Reply { state: Reached::Searched, message: None, hits, cosines, words: word_stats(&answer["words"]) }
+            let cosines = space.is_some_and(|s| answer.space.as_ref() == Some(s)) && answer.scheme.as_deref() == Some(wire::SCHEME);
+            Reply { state: Reached::Searched, message: None, hits: answer.results, cosines, words: word_stats(&answer.words) }
         }
-        401 | 403 => none(Reached::Denied, message),
-        404 => none(Reached::Missing, message),
-        _ => none(Reached::Failed, Some(message.unwrap_or_else(|| format!("it answered {status}")))),
+        401 | 403 => none(Reached::Denied, answer.message),
+        404 => none(Reached::Missing, answer.message),
+        _ => none(Reached::Failed, Some(answer.message.unwrap_or_else(|| format!("it answered {status}")))),
     }
 }
 
@@ -236,6 +250,11 @@ pub fn merge(answers: &[Vec<Legs>], limit: usize) -> Vec<Placed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `reached`, of an answer's JSON text.
+    fn reached_v(status: u16, answer: Value, space: Option<&wire::Space>) -> Reply {
+        reached(status, answer.to_string().as_bytes(), space)
+    }
     use fragment_proto::search::Mode;
     use std::collections::BTreeMap;
 
@@ -315,29 +334,29 @@ mod tests {
     }
 
     #[test]
-    fn each_answer_says_how_its_fragment_was_reached() {
+    fn each_answer_says_how_its_fragment_was_reached_v() {
         use serde_json::json;
         let space = wire::Space { model: "@cf/baai/bge-m3".into(), dimensions: 1024, version: None, document_prefix: None, query_prefix: None };
         let named = json!({ "model": "@cf/baai/bge-m3", "dimensions": 1024 });
         let hit = json!({ "rank": 1, "source": "s", "section": "t0" });
         let answer = |space: &Value, scheme: &str| json!({ "results": [hit.clone()], "semantic": "on", "indexed": true, "space": space, "scheme": scheme });
-        let searched = reached(200, answer(&named, wire::SCHEME), Some(&space));
+        let searched = reached_v(200, answer(&named, wire::SCHEME), Some(&space));
         assert_eq!((searched.state, searched.hits.len(), searched.cosines), (Reached::Searched, 1, true));
         let null_version = json!({ "model": "@cf/baai/bge-m3", "dimensions": 1024, "version": null });
-        assert!(reached(200, answer(&null_version, wire::SCHEME), Some(&space)).cosines, "a space is compared as one, not as its JSON");
+        assert!(reached_v(200, answer(&null_version, wire::SCHEME), Some(&space)).cosines, "a space is compared as one, not as its JSON");
         let other = json!({ "model": "@cf/baai/bge-m3", "dimensions": 1024, "version": "2" });
-        assert!(!reached(200, answer(&other, wire::SCHEME), Some(&space)).cosines, "another space's cosines");
-        assert!(!reached(200, answer(&named, "f32"), Some(&space)).cosines, "another scheme's");
-        assert!(!reached(200, answer(&named, wire::SCHEME), None).cosines, "a question not embedded");
-        assert!(!reached(200, json!({ "results": [hit.clone()], "semantic": "on", "indexed": true }), Some(&space)).cosines, "an answer naming no space");
-        assert_eq!(reached(200, json!({ "results": [], "semantic": "on", "indexed": false }), Some(&space)).state, Reached::NoIndex);
-        let indexed_empty = reached(200, json!({ "results": [], "semantic": "on", "indexed": true }), Some(&space));
+        assert!(!reached_v(200, answer(&other, wire::SCHEME), Some(&space)).cosines, "another space's cosines");
+        assert!(!reached_v(200, answer(&named, "f32"), Some(&space)).cosines, "another scheme's");
+        assert!(!reached_v(200, answer(&named, wire::SCHEME), None).cosines, "a question not embedded");
+        assert!(!reached_v(200, json!({ "results": [hit.clone()], "semantic": "on", "indexed": true }), Some(&space)).cosines, "an answer naming no space");
+        assert_eq!(reached_v(200, json!({ "results": [], "semantic": "on", "indexed": false }), Some(&space)).state, Reached::NoIndex);
+        let indexed_empty = reached_v(200, json!({ "results": [], "semantic": "on", "indexed": true }), Some(&space));
         assert_eq!((indexed_empty.state, indexed_empty.hits.len()), (Reached::Searched, 0), "an index whose only write failed");
-        let denied = reached(403, json!({ "error": "forbidden", "message": "viewers and up" }), None);
+        let denied = reached_v(403, json!({ "error": "forbidden", "message": "viewers and up" }), None);
         assert_eq!((denied.state, denied.message.as_deref()), (Reached::Denied, Some("viewers and up")));
-        assert_eq!(reached(404, json!({ "error": "not_found", "message": "no fragment" }), None).state, Reached::Missing);
-        assert_eq!(reached(502, Value::Null, None).message.as_deref(), Some("it answered 502"));
-        assert!(reached(200, Value::Null, None).hits.is_empty());
+        assert_eq!(reached_v(404, json!({ "error": "not_found", "message": "no fragment" }), None).state, Reached::Missing);
+        assert_eq!(reached_v(502, Value::Null, None).message.as_deref(), Some("it answered 502"));
+        assert!(reached_v(200, Value::Null, None).hits.is_empty());
     }
 
     /// The question's words in these tests.
@@ -357,7 +376,7 @@ mod tests {
 
     /// Answers read as the route reads them, each hit's legs with them.
     fn read(answers: Vec<Value>) -> (Vec<Reply>, Vec<Vec<Legs>>) {
-        let replies: Vec<Reply> = answers.into_iter().map(|a| reached(200, a, None)).collect();
+        let replies: Vec<Reply> = answers.into_iter().map(|a| reached_v(200, a, None)).collect();
         let all = replies.iter().map(|r| r.hits.iter().enumerate().map(|(i, h)| legs(h, i, r.cosines)).collect()).collect();
         (replies, all)
     }

@@ -475,7 +475,7 @@ impl RegistryCell {
         }
         let (status, answer) = crate::keys::workos_authenticate(&self.env, &self.cfg.workos()?.api, &b.client_id, &b.code).await?;
         if status != 200 {
-            let refusal = serde_json::from_value::<Refusal>(answer).ok();
+            let refusal = serde_json::from_slice::<Refusal>(&answer).ok();
             let why = refusal.and_then(|r| r.error_description.or(r.message)).unwrap_or_else(|| "no reason given".into());
             // a 400 is the code's: used (a callback sent again), expired, or
             // never WorkOS's. The browser starts again; the Registry answered,
@@ -483,7 +483,7 @@ impl RegistryCell {
             let code = if status == 400 { ErrorCode::InvalidRequest } else { ErrorCode::UpstreamFailed };
             return Err(CellError::new(code, format!("WorkOS refused the sign-in ({status}): {why}")));
         }
-        let signed_in = serde_json::from_value::<Authenticated>(answer)
+        let signed_in = serde_json::from_slice::<Authenticated>(&answer)
             .ok()
             .filter(|a| !a.user.id.is_empty())
             .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;

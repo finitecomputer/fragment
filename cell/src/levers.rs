@@ -270,8 +270,7 @@ async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
     if lent > levers::E2E_PAID_CALLS_MAX {
         return Err(CellError::invalid(format!("an e2e person makes at most {} paid calls", levers::E2E_PAID_CALLS_MAX)));
     }
-    let answer = ask_registry(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
-    let signed: calls::E2eSignedIn = serde_json::from_value(answer).map_err(|e| CellError::host(format!("the registry's e2e sign-in: {e}")))?;
+    let signed: calls::E2eSignedIn = crate::ask_registry_as(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
     assert!(npub::is_identity(&signed.identity), "the registry answers an identity");
     ledger::ask(env, &signed.identity, &SetPlan { id: E2E_SEAT_ID.into(), plan: Plan::Seat }).await?;
     let cap = ledger::ask(env, &signed.identity, &ledger::TestHook::PaidCalls { max: asked.paid_calls }).await?;
