@@ -446,23 +446,30 @@ export function closed(handler) {
 
 /// Who this page is to the fragment: { id, principal, role, platform,
 /// limits } (`platform` the platform's origin, the one page that frames it
-/// with its person's session; `limits` as `limits()` reads them).
-export async function me() {
+/// with its person's session; `limits` as `limits()` reads them), once the
+/// socket's hello comes. `me({ email: true })` adds `email` for a signed-in
+/// member, as `__people` gives it (a member's, to a member: decision 48),
+/// none for an anonymous visitor, a link holder or an agent: one more ask,
+/// so a page that only needs its role does not wait on it.
+export async function me({ email = false } = {}) {
   connect();
   const h = hello ?? (await new Promise((resolve) => helloWaiters.push(resolve)));
-  const email = await emailOf(h.principal);
-  return email ? { ...h, email } : h;
+  if (!email) return h;
+  const mine = await emailOf(h.principal);
+  return mine ? { ...h, email: mine } : h;
 }
 
-// The signed-in caller's own email, as `__people` gives it (a member's,
-// to a member: decision 48), asked once per principal: none for an
-// anonymous visitor, a link holder or an agent. An ask that fails is
-// asked again by the next `me()`.
+// How long `me({ email: true })` waits on `__people` before it answers
+// without the email: a page that asked for it is never held by a slow ask.
+const EMAIL_WAIT_MS = 5_000;
+// The caller's own email, asked once a principal; an ask that fails or is
+// cut short is asked again by the next `me({ email: true })`.
 const emails = new Map(); // principal -> Promise<string | null>
 function emailOf(principal) {
   if (principal.startsWith("anon:")) return Promise.resolve(null);
   if (!emails.has(principal)) {
-    const asked = fetch(new URL(`__people?id=${encodeURIComponent(principal)}`, base), { credentials: "same-origin" })
+    const url = new URL(`__people?id=${encodeURIComponent(principal)}`, base);
+    const asked = fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(EMAIL_WAIT_MS) })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`__people answered ${r.status}`))))
       .then((r) => r.profiles?.[principal]?.email ?? null)
       .catch((e) => {

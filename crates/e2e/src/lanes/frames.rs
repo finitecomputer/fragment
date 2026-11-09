@@ -34,14 +34,15 @@ use crate::api::{Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
-/// A page that shows who it is to its fragment (`me()`, with its email,
-/// or `email:none`) and whom an operation it calls acts as, once each
+/// A page that shows who it is to its fragment (`me({ email: true })`,
+/// with its email, or `email:none`; a plain `me()`, the hello alone) and whom an operation it calls acts as, once each
 /// answers.
-const WHO_PAGE: &str = r#"<p>inside TEXT</p><p id="me">me?</p><p id="op">op?</p>
+const WHO_PAGE: &str = r#"<p>inside TEXT</p><p id="me">me?</p><p id="plain">plain?</p><p id="op">op?</p>
 <script type="module">
 import * as fragment from "./__fragment.js";
 const show = (id, text) => { document.getElementById(id).textContent = text; };
-fragment.me().then((m) => show("me", "me:" + m.principal + " email:" + (m.email ?? "none")));
+fragment.me({ email: true }).then((m) => show("me", "me:" + m.principal + " email:" + (m.email ?? "none")));
+fragment.me().then((m) => show("plain", "plain-email:" + (m.email ?? "none")));
 fragment.call("whoami", {}).then((r) => show("op", "op:" + r.principal), (e) => show("op", "op refused " + e.status));
 </script>"#;
 const WHO_APP: &str = r#"import { DurableObject } from "cloudflare:workers";
@@ -517,7 +518,8 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session, 
     let text = chrome.eval_in_frame(&shell, &host(n.own), "document.body.innerText").unwrap_or_default();
     s.ok("the platform's page frames the owner's members-only fragment signed in through its mint: its page's me() is the owner, and so is whom its operation call acts as", me && op, &text);
     let email = frame_says(s, &mut chrome, &shell, &host(n.own), &format!("me:{owner_id} email:{owner_email}"), wait);
-    s.ok("and its me() carries the owner's email, as `__people` gives it to a member (decision 48)", email, &text);
+    let plain = frame_says(s, &mut chrome, &shell, &host(n.own), "plain-email:none", wait);
+    s.ok("and its me({ email: true }) carries the owner's email, as `__people` gives it to a member (decision 48); a plain me() answers with the hello alone", email && plain, &text);
     let top_site = reqwest::Url::parse(&platform).ok().and_then(|u| u.host_str().map(|h| format!("http://{h}"))).unwrap_or_default();
     let partitioned = |chrome: &mut Browser, name: &str| {
         let own_host = api.site_url(name, "").split("//").nth(1).and_then(|h| h.split(':').next()).unwrap_or("").to_string();
@@ -594,7 +596,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session, 
         chrome.eval_in_frame(&theirs_page, &host(n.shared), "document.body.innerText").unwrap_or_default(),
     );
     s.ok(
-        "a member shared in (a viewer) gets their own email from me()",
+        "a member shared in (a viewer) gets their own email from me({ email: true })",
         frame_says(s, &mut chrome, &theirs_page, &host(n.shared), &format!("me:{guest_id} email:{guest_email}"), wait),
         chrome.eval_in_frame(&theirs_page, &host(n.shared), "document.body.innerText").unwrap_or_default(),
     );
@@ -606,7 +608,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session, 
     let shown = frame_says(s, &mut chrome, &home, &host(n.open), "inside open", wait) && frame_says(s, &mut chrome, &home, &host(n.open), "me:anon:", wait);
     let shown = shown && frame_says(s, &mut chrome, &home, &host(n.open), "email:none", wait);
     s.ok(
-        "a public fragment frames for someone signed out, as a stranger sees it, with no mint (and me() no email)",
+        "a public fragment frames for someone signed out, as a stranger sees it, with no mint (and me({ email: true }) no email)",
         shown,
         chrome.eval_in_frame(&home, &host(n.open), "document.body.innerText").unwrap_or_default(),
     );

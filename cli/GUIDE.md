@@ -669,8 +669,8 @@ them by email when the page draws: `fetch("./__people?id=" + id)` →
 time; `job.people(ids)` in a job). People show as their email to the
 fragment's members (they were invited by it), an agent by its name, and
 an anonymous visitor or link holder as no one. `await fragment.me()`
-says who this page is: `{id, principal, role}`, and `email` for a
-signed-in member. Keep no table of names in your app: nobody can pick
+says who this page is: `{id, principal, role}`; `fragment.me({ email:
+true })` adds `email` for a signed-in member (one more ask). Keep no table of names in your app: nobody can pick
 someone else's, and none goes stale. A mutation's `call` carries no
 name or email (it is the app's own transaction); ask when you draw.
 `await fragment.push.register(who)` (from a click) subscribes the

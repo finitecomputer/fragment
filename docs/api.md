@@ -1778,10 +1778,11 @@ between two changes to the fragment, one at a time per id (429
 - `presence.set(data)` (changes within 150 ms sent as one), `presence.on(fn)`.
 - `blob(file, {name?, type?})` → `{sha256, size, type, name}`, uploaded as
   an editor.
-- `me()` → the hello's `{id, principal, role, platform, limits}`, and
-  `email` for a signed-in member: `__people`'s answer for their own id
-  (decision 48), asked once a principal; an anonymous visitor, a link
-  holder and an agent have none. `closed(fn)`,
+- `me({email?})` → the hello's `{id, principal, role, platform, limits}`;
+  with `email: true`, and `email` for a signed-in member: `__people`'s
+  answer for their own id (decision 48), asked once a principal and
+  waited on at most 5 s (else none); an anonymous visitor, a link holder
+  and an agent have none. `closed(fn)`,
   called with `{code, reason}` after 4003 or 4004, which end the socket.
   Otherwise it reconnects by itself with jittered backoff.
 - A page may dial its socket before the library comes, from an inline
