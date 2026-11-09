@@ -66,10 +66,11 @@ final class Library {
     @ObservationIgnored private var loadID = UUID()
     /// Reads begun (`load`), and a page an action's answer named with the
     /// number of the first read begun after the answer: the first such
-    /// read to take its list decides it, once (`load` lets the newest read
-    /// begun win, so the action's own may give way to a newer one); a read
-    /// after that never opens it, the person maybe elsewhere by then. It
-    /// goes with this library, and so with the account it was asked in.
+    /// read to take its list, or fail to, decides it there and then, once
+    /// (`decide`; `load` lets the newest read begun win, so the action's own
+    /// may give way to a newer one); a read after that never opens it, the
+    /// person maybe elsewhere by then. It goes with this library, and so
+    /// with the account it was asked in.
     @ObservationIgnored private var begun = 0
     @ObservationIgnored private var held: (page: URL, after: Int)?
     @ObservationIgnored private var settle: Task<Void, Never>?
@@ -225,7 +226,11 @@ final class Library {
         defer { if loadID == requestID { loading = false } }
         do {
             var response = try await api.fragments()
-            guard loadID == requestID, !Task.isCancelled else { return }
+            guard loadID == requestID, !Task.isCancelled else {
+                // cancelled while the newest: no list, and so no page opened
+                if loadID == requestID { decide(number, listed: false) }
+                return
+            }
             for index in response.indices {
                 if let picture = response[index].picture { response[index].picture = URL(string: picture, relativeTo: api.baseURL)?.absoluteString }
             }
@@ -233,22 +238,32 @@ final class Library {
             // chat's view draws from it (its agents, their faces) is not
             // drawn again for each message the list is told of.
             if fragments != response { fragments = response }
+            // its list taken, it decides a page held for it, there and then
+            decide(number, listed: true)
             await loadComputer(api, requestID)
             for agent in agents.prefix(32) where identities[agent.name] == nil {
                 let status: FragmentStatus = try await api.request("api/f/\(agent.name)/status")
                 identities[agent.name] = status.npub
             }
             if loadID == requestID { error = nil }
-        } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
-        // its list read (or not), it decides a page held for it or an older read
-        if loadID == requestID, let page = held, number >= page.after {
-            held = nil
-            answered = fragment(linkedBy: page.page)
+        } catch {
+            if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription }
+            // its list not read: a page held for it opens never
+            if loadID == requestID { decide(number, listed: false) }
         }
         await loadNotices(api, requestID)
         await loadImported(api, requestID)
         await loadPages(api)
         await titleUntitled(api)
+    }
+    /// A page held for the read numbered `number` or an older one
+    /// (`held`), decided once as that read takes its list (`listed`) or
+    /// fails to: listed, the page is `answered`; else nothing opens, now
+    /// or after.
+    private func decide(_ number: Int, listed: Bool) {
+        guard let page = held, number >= page.after else { return }
+        held = nil
+        if listed { answered = fragment(linkedBy: page.page) }
     }
     /// The person's agents in their computer's order (`ComputerView.agents`,
     /// docs/api.md), as the web's sidebar takes them (cell/shell/chat-list.js
