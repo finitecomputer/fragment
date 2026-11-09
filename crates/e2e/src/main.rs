@@ -920,6 +920,14 @@ impl Suite {
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
     }
 
+    /// Deletes live through the fake, then refreshes: the fragment runs no
+    /// code. Local only.
+    pub fn undeploy(&self, created: &Value) {
+        assert!(!self.hosted(), "live is deleted through the fake");
+        self.fake.delete_branch(&self.repo_of(created), "live");
+        self.refresh(created);
+    }
+
     /// The repo `created` names; a chat's, made after its create answers
     /// (docs/api.md, Names: `""` until then), the one its storage token
     /// names, which as a writer of the repo makes it first.

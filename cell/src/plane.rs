@@ -486,7 +486,9 @@ impl FragmentCell {
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
-            clear_installed(&self.sql())?;
+            // none installed, through the one path every install takes (so
+            // what was kept of a kind goes too: `newest`)
+            store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &BTreeMap::new(), triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::FilesLive)?;
