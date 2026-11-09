@@ -126,11 +126,11 @@ impl FragmentCell {
     }
 
     /// `computer/…`: the internal calls a computer's routes and egress make.
-    pub(crate) async fn runs_on(&self, route: &str, body: &Value) -> CellResult<Value> {
+    pub(crate) async fn runs_on(&self, route: &str, body: &[u8]) -> CellResult<Value> {
         self.must(MetaKey::CreatedAt).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))?;
         match route {
             "assign" => {
-                let b: Assign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Assign = crate::json_body(body)?;
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner runs it on their computer"));
                 }
@@ -157,7 +157,7 @@ impl FragmentCell {
                 Ok(json!({ "identity": identity }))
             }
             "unassign" => {
-                let b: Assign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Assign = crate::json_body(body)?;
                 if self.must(MetaKey::Owner)? != b.owner {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent fragment's owner moves it"));
                 }
@@ -174,12 +174,13 @@ impl FragmentCell {
             // agents, for an operator's census (reach.rs): no names
             "reach" => Ok(json!({ "kind": self.kind()?, "reach": self.reaches()?, "beyond": self.sharing_counts()?.beyond() })),
             "identity" => {
+                let body: Value = crate::json_body(body)?;
                 let computer = body["computer"].as_str().unwrap_or("");
                 self.assigned_to(computer)?;
                 Ok(json!({ "identity": self.must(MetaKey::AgentIdentity)? }))
             }
             "sign" => {
-                let b: Sign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Sign = crate::json_body(body)?;
                 self.assigned_to(&b.computer)?;
                 let header = self.own_keys().await?.header_for_payload(&b.method, &b.url, b.payload.as_deref(), crate::js::now_ms() / 1000);
                 Ok(json!({ "header": header }))
@@ -189,6 +190,7 @@ impl FragmentCell {
             // Their bodies are read field by field, with no derive: the
             // cell's wasm budget (xtask/src/build.rs)
             "door-ticket" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 if self.must(MetaKey::Owner)? != text("owner") {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner opens or closes its door"));
@@ -224,6 +226,7 @@ impl FragmentCell {
                 Ok(json!({ "door": ticket.door, "act": act.as_str(), "agent": ticket.agent, "computer": ticket.computer, "nonce": ticket.nonce, "exp": ticket.exp, "sig": sig }))
             }
             "door-key" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 self.assigned_to(text("computer"))?;
                 let (door, key) = (text("door"), text("key"));
@@ -247,6 +250,7 @@ impl FragmentCell {
                 Ok(json!({ "door": door, "key": key }))
             }
             "door-check" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("a relayed record {why}"));
                 if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
@@ -267,6 +271,7 @@ impl FragmentCell {
             // a connector fragment of its owner's, bound as one of its doors
             // by them (doors.rs): it is theirs, and an agent, and says so
             "door-actor" => {
+                let body: Value = crate::json_body(body)?;
                 let text = |k: &str| body[k].as_str().unwrap_or("");
                 if self.must(MetaKey::Owner)? != text("owner") {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner binds a connector as its door"));
@@ -278,7 +283,7 @@ impl FragmentCell {
                 Ok(json!({ "identity": identity }))
             }
             "subscribe" => {
-                let b: Subscribe = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Subscribe = crate::json_body(body)?;
                 if !valid_channel_name(&b.channel) {
                     return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
                 }
@@ -294,7 +299,7 @@ impl FragmentCell {
             "joined" => {
                 // this agent was added to `fragment`: its guest hears so on
                 // `tasks`, when it declares one it can post to
-                let b: Joined = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let b: Joined = crate::json_body(body)?;
                 self.assigned_to(&b.computer)?;
                 if !valid_fragment_name(&b.fragment) || b.at <= 0 {
                     return Err(CellError::invalid("a join names a fragment and when it joined"));

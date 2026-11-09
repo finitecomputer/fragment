@@ -236,12 +236,18 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// answer (2026-10-20: an old Registry exchanged a WorkOS code and answered
 /// a shape the new Worker could not read).
 pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::Answer> {
+    C::checked(ask_registry_as(env, call).await?)
+}
+
+/// `ask_registry`, its answer read as `A`: for a call whose answer is each
+/// of its kinds' own (a test hook's: `calls::TestHook`), read once as the
+/// one its caller asked.
+pub(crate) async fn ask_registry_as<C: Call, A: serde::de::DeserializeOwned>(env: &Env, call: &C) -> CellResult<A> {
     let body = serde_json::to_string(call).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
     // the one generic step is reading the answer: every call type costs
     // the cell's Wasm a parse, not a copy of the round trip
     let bytes = registry_round_trip(env, C::PATH, body).await?;
-    let answer = serde_json::from_slice::<C::Answer>(&bytes).map_err(|e| registry_unavailable(format!("its answer: {e}")))?;
-    C::checked(answer)
+    serde_json::from_slice::<A>(&bytes).map_err(|e| registry_unavailable(format!("its answer: {e}")))
 }
 
 fn registry_unavailable(why: String) -> CellError {
@@ -1502,6 +1508,13 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
 /// of each type's decoder in the Wasm.
 pub(crate) fn json_text<'a, T: serde::Deserialize<'a>>(text: &'a str) -> serde_json::Result<T> {
     serde_json::from_slice(text.as_bytes())
+}
+
+/// A call's body, read from its bytes once as `T`: one that does not fit is
+/// the caller's (400). A dispatcher hands each route the bytes, and the
+/// route reads its own type, never a `Value` read again as one.
+pub(crate) fn json_body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
+    serde_json::from_slice(bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
 }
 
 /// `worker::Response::json`, its text read through `json_text`: the same
