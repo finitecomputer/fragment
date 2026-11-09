@@ -26,7 +26,7 @@
 
 use fragment_core::listed::{self, Kept, Shown};
 use fragment_core::npub;
-use fragment_proto::{limits, ListedDecl, ListedRecord, Role};
+use fragment_proto::{limits, ChannelDecl, ListedDecl, ListedRecord, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -58,16 +58,18 @@ impl Row {
 }
 
 impl FragmentCell {
-    /// A record just appended to `channel`, which lists `decl`'s kinds, in
+    /// A record just appended to `channel`, declared `decl` (as its append
+    /// holds it), which lists the kinds its `listed` names, in
     /// its append's turn: kept as its poster's newest when it shows
     /// something the lists do not (`fragment_core::listed::moves`), and then
     /// the rows of the members who read the channel go (`listed_send`). One
     /// that shows nothing new is still seen: its poster is not the first to
     /// go from a full channel. Only a member's records count: a list shows
     /// what the people and agents in a fragment are doing.
-    pub(crate) fn list_record(&self, channel: &str, decl: &ListedDecl, principal: &str, seq: i64, at: i64, body: &Value) -> CellResult<()> {
+    pub(crate) fn list_record(&self, channel: &str, decl: &ChannelDecl, principal: &str, seq: i64, at: i64, body: &Value) -> CellResult<()> {
         assert!(seq >= 1, "a listed record has its place");
-        let Some(shown) = listed::shown(decl, body) else { return Ok(()) };
+        let Some(listing) = &decl.listed else { return Ok(()) };
+        let Some(shown) = listed::shown(listing, body) else { return Ok(()) };
         if self.member_role(principal)?.is_none() {
             return Ok(());
         }
@@ -77,8 +79,7 @@ impl FragmentCell {
             return Ok(());
         }
         keep(&self.sql(), channel, principal, &shown, seq, at)?;
-        let read = self.channel_read_role(channel)?;
-        self.listed_send(read)
+        self.listed_send(decl.read)
     }
 
     /// A member's newest listed record of `channel`, as kept.
@@ -148,7 +149,7 @@ impl FragmentCell {
         // bounded by the manifest's channels
         for (channel, decl) in self.declared_channels()? {
             if let Some(l) = decl.listed {
-                let read = self.channel_read_role(&channel)?;
+                let read = decl.read;
                 installed.push((channel, read, l));
             }
         }
@@ -182,7 +183,7 @@ impl FragmentCell {
         // bounded by the manifest's channels
         for (channel, decl) in self.declared_channels()? {
             if let Some(l) = decl.listed {
-                let read = self.channel_read_role(&channel)?;
+                let read = decl.read;
                 now.push(json!({ "channel": channel, "read": read, "kinds": l.kinds, "fields": l.fields }));
                 channels.push((channel, l.kinds));
             }
