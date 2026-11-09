@@ -150,8 +150,10 @@ fn named<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<
     T::deserialize(d).map(Some)
 }
 
+/// A usage's `kind`: read as an identifier, a string alone, as the tagged
+/// reading read its tag (a derived enum also takes `{"<kind>": null}`).
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(variant_identifier, rename_all = "snake_case")]
 enum UsageKind {
     Tokens,
     Neurons,
@@ -1799,6 +1801,34 @@ mod tests {
         assert!(serde_json::from_value::<Usage>(serde_json::json!({ "kind": "requests", "count": -1 })).is_err(), "quantities are unsigned");
         let billed = serde_json::json!({ "kind": "billed", "vendor": "openrouter", "micros": 1 });
         assert!(serde_json::from_value::<Usage>(billed).is_err(), "a vendor's own bill went with OpenRouter: every meter is Cloudflare's");
+    }
+
+    /// A usage's `kind` is a name, a string, as the tagged reading's tag
+    /// was: serde's other spelling of a variant, an object
+    /// (`{"requests": null}`), is no kind, for every kind (FIN-453 M7,
+    /// review: it was charged).
+    #[test]
+    fn a_usage_kind_is_named_by_a_string_alone() {
+        let every = [
+            tokens(FLASH, 1, 2, 3, 4),
+            Usage::Neurons { milli: 1 },
+            Usage::Awake { instance: INSTANCE.into(), ms: 1 },
+            Usage::Storage { class: StorageClass::R2, byte_hours: 1 },
+            Usage::Requests { count: 1_000_000 },
+            Usage::DynamicWorkers { count: 1 },
+            Usage::Browser { ms: 1 },
+            Usage::Images { count: 1 },
+            Usage::Key { key: "brave".into(), units: 1 },
+        ];
+        for usage in every {
+            let text = serde_json::to_string(&usage).unwrap();
+            assert_eq!(serde_json::from_slice::<Usage>(text.as_bytes()).ok(), Some(usage.clone()), "{text}");
+            let kind = serde_json::to_value(&usage).unwrap()["kind"].as_str().unwrap().to_string();
+            let object = text.replacen(&format!("\"kind\":\"{kind}\""), &format!("\"kind\":{{\"{kind}\":null}}"), 1);
+            assert_ne!(object, text);
+            let e = serde_json::from_slice::<Usage>(object.as_bytes()).map(|u| format!("{u:?}")).expect_err(&object).to_string();
+            assert!(e.contains("invalid type: map"), "{object}: {e}");
+        }
     }
 
     /// Read as its fields, a usage is as strict as the tagged reading was:

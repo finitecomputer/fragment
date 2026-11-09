@@ -374,8 +374,10 @@ struct RefusedFields {
     budget: Option<i64>,
 }
 
+/// A refusal's `refused`: read as an identifier, a string alone, as the
+/// tagged reading read its tag (a derived enum also takes `{"<kind>": null}`).
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(variant_identifier, rename_all = "snake_case")]
 enum RefusedKind {
     Invalid,
     ConflictingBody,

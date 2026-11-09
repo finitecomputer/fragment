@@ -1292,6 +1292,17 @@ fn a_queued_batch_missing_or_malformed_is_still_refused() {
         let (text, e) = refused(from, to);
         assert!(e.contains(says), "{text}: {e}");
     }
+    // a usage's kind an object, not its name, for every kind the outbox carries
+    let mut kinds = 0;
+    for kind in ["tokens", "neurons", "awake", "storage", "requests", "dynamic_workers", "browser", "images", "key"] {
+        let named = format!(r#""kind":"{kind}""#);
+        if OUTBOX.contains(&named) {
+            kinds += 1;
+            let (text, e) = refused(&named, &format!(r#""kind":{{"{kind}":null}}"#));
+            assert!(e.contains("invalid type: map"), "{text}: {e}");
+        }
+    }
+    assert_eq!(kinds, 9, "the outbox carries every kind");
     assert!(MeterBatch::from_queue(b"{}").is_err());
     assert!(MeterBatch::from_queue(br#"{"meter":7,"payer":"p","seq":0,"source":""}"#).is_err());
     assert!(MeterBatch::from_queue(b"not json").is_err());
@@ -1349,4 +1360,18 @@ fn what_a_ledger_stored_and_answered_reads_back_byte_for_byte() {
         assert_eq!(serde_json::json!({ "error": body.error, "message": body.message, "refused": body.refused }).to_string(), line);
     }
     assert_eq!(refused.len(), 23, "every refusal, each `Invalid` its own");
+}
+
+/// A refusal's `refused` is a name, a string, as the tagged reading's tag
+/// was: an object (`{"no_price": null}`) is no refusal, for every one
+/// (FIN-453 M7, review).
+#[test]
+fn a_refusal_is_named_by_a_string_alone() {
+    for line in include_str!("stored/refused.jsonl").lines().filter(|l| !l.is_empty()) {
+        let kind = serde_json::from_str::<serde_json::Value>(line).unwrap()["refused"].as_str().unwrap().to_string();
+        let object = line.replacen(&format!("\"refused\":\"{kind}\""), &format!("\"refused\":{{\"{kind}\":null}}"), 1);
+        assert_ne!(object, line);
+        let e = serde_json::from_slice::<Refused>(object.as_bytes()).map(|r| format!("{r:?}")).expect_err(&object).to_string();
+        assert!(e.contains("invalid type: map"), "{object}: {e}");
+    }
 }

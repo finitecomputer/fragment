@@ -160,6 +160,31 @@ mod tests {
         Planned::Usage(PlannedUsage { usage: v, calls })
     }
 
+    /// A usage whose kind is an object, not its name, is no usage: quoted
+    /// as invalid, charged nothing (FIN-453 M7, review: it was priced).
+    #[test]
+    fn a_usage_named_by_an_object_is_quoted_invalid() {
+        let every = [
+            json!({ "kind": "tokens", "model": "@cf/zai-org/glm-5.3-flash", "input": 1, "cached_input": 0, "cache_write": 0, "output": 1 }),
+            json!({ "kind": "neurons", "milli": 1 }),
+            json!({ "kind": "awake", "instance": crate::price::INSTANCE, "ms": 60_000 }),
+            json!({ "kind": "storage", "class": "r2", "byte_hours": 1 }),
+            json!({ "kind": "requests", "count": 1_000_000 }),
+            json!({ "kind": "dynamic_workers", "count": 1 }),
+            json!({ "kind": "browser", "ms": 1 }),
+            json!({ "kind": "images", "count": 1 }),
+            json!({ "kind": "key", "key": "perplexity", "units": 1 }),
+        ];
+        for named in every {
+            let (quoted, _) = quote(&[usage(named.clone(), None)], &book(), &Models::defaults(), Plan::Seat);
+            assert_eq!(quoted[0].unknown, None, "{named}: {quoted:?}");
+            let mut object = named.clone();
+            object["kind"] = json!({ named["kind"].as_str().unwrap(): null });
+            let (quoted, total) = quote(&[usage(object.clone(), None)], &book(), &Models::defaults(), Plan::Seat);
+            assert_eq!((quoted[0].unknown, total), (Some(Unquoted::Invalid), 0), "{object}: {quoted:?}");
+        }
+    }
+
     /// A seat's ledger (or another plan's), whose rows the tests meter.
     struct Payer {
         ledger: Ledger,
