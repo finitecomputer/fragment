@@ -179,20 +179,33 @@ impl FragmentCell {
     /// in the caller's turn, beside the membership write it mirrors. Their
     /// search cursor follows it (search.rs).
     pub(crate) fn index_change(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
+        let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        self.index_rows("SELECT ? AS principal, ? AS role", vec![principal.into(), stored])?;
+        self.search_follows(principal, role)
+    }
+
+    /// Records an index change for each (`principal`, `role`) row that
+    /// `rows` selects, all of them at one new version: one statement,
+    /// however many (a list orders the changes it takes of one fragment by
+    /// version, and each of these is newer than any sent it before).
+    fn index_rows(&self, rows: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
         let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
         self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
-        let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        let mut all = vec![SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())];
+        all.extend(binds);
         self.exec(
-            "INSERT INTO index_outbox (principal, role, version, attempts, next_at) VALUES (?, ?, ?, 0, ?)
-             ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at",
-            vec![principal.into(), stored, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
+            &format!(
+                "INSERT INTO index_outbox (principal, role, version, attempts, next_at) SELECT principal, role, ?, 0, ? FROM ({rows}) WHERE true
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at"
+            ),
+            all,
         )?;
         // it goes after the answer (`after_answer`), never left for the
         // alarm's next pass, which may be a poll away; a request that must
         // see it taken before it answers flushes in its own turn as well
         self.listed_moved.set(true);
         self.later();
-        self.search_follows(principal, role)
+        Ok(())
     }
 
     /// What its members' lists show of it, at each install of live: its
@@ -218,15 +231,16 @@ impl FragmentCell {
     /// they read moved: listed.rs). The others' rows carry nothing of it.
     pub(crate) fn reindex_readers(&self, read: Role) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
-        self.index_change(&owner, Some(Role::Owner))?;
-        // bounded by MEMBERS_MAX
-        for r in self.rows("SELECT principal, role FROM members", vec![])? {
-            let (Some(p), Some(role)) = (r["principal"].as_str(), r["role"].as_str().and_then(Role::parse)) else { continue };
-            if p != owner && role >= read {
-                self.index_change(p, Some(role))?;
-            }
-        }
-        Ok(())
+        // the roles at least `read`, as rows store them
+        let roles: Vec<&str> = [Role::Public, Role::Viewer, Role::Editor, Role::Owner].into_iter().filter(|r| *r >= read).map(Role::as_str).collect();
+        let roles = serde_json::to_string(&roles).expect("names serialize");
+        // its owner's row and each such member's (at most MEMBERS_MAX): one
+        // statement for their changes, one for their search cursors
+        let readers = "SELECT ? AS principal, ? AS role UNION ALL
+                       SELECT principal, role FROM members WHERE principal != ? AND role IN (SELECT value FROM json_each(?))";
+        let binds = || vec![owner.as_str().into(), Role::Owner.as_str().into(), owner.as_str().into(), roles.as_str().into()];
+        self.index_rows(readers, binds())?;
+        self.search_follow_rows(readers, binds())
     }
 
     /// Who is in, or who may open it, changed: the owner's row in their
