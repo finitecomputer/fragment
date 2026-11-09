@@ -89,7 +89,7 @@ use serde_json::Value;
 
 use crate::limits;
 use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, NoticeCategory, Outcome, PromptOption, Record, Said, Task};
-use crate::runtime::{Agent, Attached, Command, Event, How, LocalFile, MenuItem, TurnStart};
+use crate::runtime::{Agent, Attached, ChildChange, Command, Event, How, LocalFile, MenuItem, TurnStart};
 
 /// The state file's formats. 2: one life per turn (no `handed` phase). 3:
 /// a turn holding an ask's return (`Turn::ret`) and the answer it owes,
@@ -213,11 +213,35 @@ pub struct State {
     /// earlier bridge's) starts each chat's count afresh.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_turns: BTreeMap<String, Vec<i64>>,
+    /// The helpers its turns started (`Event::Child`) running now, oldest
+    /// first: the owner of each chat's set (`turn.helpers`, posted whole at
+    /// each change). A new life finds only an earlier life's, which died
+    /// with its runtime: their chats are told none run, and they go
+    /// (`recover`). A state without it (an earlier bridge's) holds none; an
+    /// earlier bridge reading one drops it, and its sets lapse at their
+    /// `until` (`limits::HELPERS_LEASE_MS`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<Helper>,
+}
+
+/// A helper running (`State::children`): the chat its set goes to (its
+/// agent's there), the turn that started it, and what its set says of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Helper {
+    pub agent: String,
+    pub fragment: String,
+    pub turn: String,
+    /// Its id in the set (`records::child_id`).
+    pub child: String,
+    /// Its task, one line (`records::child_goal`).
+    pub goal: String,
+    /// When this bridge saw it start (ms).
+    pub since: u64,
 }
 
 impl Default for State {
     fn default() -> State {
-        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new() }
+        State { version: 2, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new(), children: Vec::new() }
     }
 }
 
@@ -658,6 +682,16 @@ pub struct Engine {
     /// `NOTICE_CHATS_MAX`). Never written to `/data`: a turn runs in one
     /// life, and a notice no turn of this life's is there for goes unposted.
     noticed: VecDeque<Noticed>,
+    /// Each chat's helpers set this life posted last that names any, by
+    /// (agent, chat): its `until`, posted again before it lapses (`tick`).
+    /// One that names none goes. Never written to `/data`: a new life tells
+    /// each chat none run. At most `CHILDREN_OPEN_MAX`.
+    helpers_said: BTreeMap<(String, String), u64>,
+    /// The helpers sets this life posted, in any chat: the next one's id
+    /// is this life's and its number (`records::helpers_id`), so no two
+    /// sets share one, however a chat's set comes and goes, and whatever
+    /// the clock does across a restart.
+    helpers_n: u64,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
@@ -741,6 +775,8 @@ impl Engine {
             published: BTreeSet::new(),
             relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
+            helpers_said: BTreeMap::new(),
+            helpers_n: 0,
             out: Vec::new(),
             dirty: false,
             now: 0,
@@ -807,6 +843,14 @@ impl Engine {
         for (agent, fragment, turn, o) in owed {
             crate::ev!("owed.again", { "turn": turn, "id": o.id });
             self.owe(&agent, &fragment, &turn, o);
+        }
+        // the helpers an earlier life knew of died with its runtime: each
+        // chat they ran in is told none run there now
+        let lost: BTreeSet<(String, String)> = self.state.children.drain(..).map(|h| (h.agent, h.fragment)).collect();
+        for (agent, fragment) in lost {
+            crate::ev!("helpers.lost", { "agent": agent, "fragment": fragment });
+            self.dirty = true;
+            self.post_helpers(&agent, &fragment);
         }
         let earlier: Vec<String> = self.state.turns.values().filter(|t| t.active()).map(|t| t.id.clone()).collect();
         for id in &earlier {
@@ -2117,7 +2161,8 @@ impl Engine {
             match e {
                 Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } | Event::Interim { turn, .. } => Some(turn.clone()),
                 Event::Called { turn, .. } | Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
-                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } => None,
+                Event::Child { change: ChildChange::Started { turn, .. }, .. } => Some(turn.clone()),
+                Event::Connected(_) | Event::Working(_) | Event::Say { .. } | Event::Notice { .. } | Event::Child { change: ChildChange::Ended, .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -2238,7 +2283,79 @@ impl Engine {
                 self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), files);
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
+            Event::Child { child, change: ChildChange::Started { turn, goal } } => self.child_started(&turn, &child, &goal),
+            Event::Child { child, change: ChildChange::Ended } => self.child_ended(&child),
         }
+    }
+
+    /// A helper the running turn `turn` started: kept in the state, and its
+    /// chat's set posted. One said again is one; past
+    /// `HELPERS_PER_CHAT_MAX` in its chat, or `CHILDREN_OPEN_MAX` in all,
+    /// it goes unrecorded (its end then finds nothing to end).
+    fn child_started(&mut self, turn: &str, runtime_id: &str, goal: &str) {
+        let child = records::child_id(runtime_id);
+        if self.state.children.iter().any(|c| c.child == child) {
+            crate::ev!("child.again", { "turn": turn, "child": child });
+            return;
+        }
+        let t = self.state.turns.get(turn).expect("checked");
+        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+        let there = self.state.children.iter().filter(|c| c.agent == agent && c.fragment == fragment).count();
+        if there >= limits::HELPERS_PER_CHAT_MAX || self.state.children.len() >= limits::CHILDREN_OPEN_MAX {
+            crate::ev!("child.unrecorded", { "turn": turn, "child": child, "why": "past the helpers a chat's set names, or the bridge keeps" });
+            return;
+        }
+        crate::ev!("child.started", { "turn": turn, "child": child });
+        self.state.children.push(Helper { agent: agent.clone(), fragment: fragment.clone(), turn: turn.to_string(), child, goal: records::child_goal(goal), since: self.now });
+        self.dirty = true;
+        self.post_helpers(&agent, &fragment);
+    }
+
+    /// A helper ended: it goes, and its chat's set is posted. One this life
+    /// never started (an earlier life's, told none at this one's start; one
+    /// unrecorded) ends nothing.
+    fn child_ended(&mut self, runtime_id: &str) {
+        let child = records::child_id(runtime_id);
+        let Some(at) = self.state.children.iter().position(|c| c.child == child) else {
+            crate::ev!("child.stale", { "child": child, "why": "no helper running by that id" });
+            return;
+        };
+        let h = self.state.children.remove(at);
+        self.dirty = true;
+        crate::ev!("child.ended", { "turn": h.turn, "child": child });
+        self.post_helpers(&h.agent, &h.fragment);
+    }
+
+    /// The agent's helpers set in a chat (`turn.helpers`): every helper it
+    /// has running there, held until `HELPERS_LEASE_MS` from now. Each set
+    /// is a record of its own, newest last on `work` (its lane posts in
+    /// order), each its own id (`helpers_n`). A set lost on the way
+    /// misleads until its
+    /// `until` at most. An agent no longer on this computer posts none.
+    fn post_helpers(&mut self, agent: &str, fragment: &str) {
+        let key = (agent.to_string(), fragment.to_string());
+        if self.agent(agent).is_none() {
+            self.helpers_said.remove(&key);
+            return;
+        }
+        let until = self.now + limits::HELPERS_LEASE_MS;
+        let running: Vec<records::HelperSaid<'_>> = self
+            .state
+            .children
+            .iter()
+            .filter(|c| c.agent == agent && c.fragment == fragment)
+            .map(|c| records::HelperSaid { parent: &c.turn, child: &c.child, goal: &c.goal, since: c.since })
+            .collect();
+        let body = records::turn_helpers(&running, until);
+        if running.is_empty() {
+            self.helpers_said.remove(&key);
+        } else {
+            self.helpers_said.insert(key, until);
+        }
+        self.helpers_n += 1;
+        let id = records::helpers_id(&self.life, self.helpers_n);
+        assert!(self.helpers_said.len() <= limits::CHILDREN_OPEN_MAX, "a chat's set is said only while it names a helper");
+        self.post(agent, fragment, records::WORK, id, body, Vec::new());
     }
 
     /// A notice of the runtime's in a chat (`Event::Notice`): a `turn.notice`
@@ -2427,6 +2544,12 @@ impl Engine {
 
     fn tick(&mut self) {
         let now = self.now;
+        // each chat's set while it names a helper, posted again before it
+        // lapses (ticks missed, once)
+        let renew: Vec<(String, String)> = self.helpers_said.iter().filter(|(_, until)| **until <= now + limits::HELPERS_RENEW_BEFORE_MS).map(|(k, _)| k.clone()).collect();
+        for (agent, fragment) in renew {
+            self.post_helpers(&agent, &fragment);
+        }
         let mut expired: Vec<(String, String)> = Vec::new();
         let mut quiet: Vec<String> = Vec::new();
         for t in self.state.turns.values() {
@@ -2488,6 +2611,11 @@ impl Engine {
         }
         self.noticed.retain(|n| !(n.agent == agent && n.fragment == fragment));
         self.views.remove(fragment);
+        // its helpers there: no set to post where it may not
+        let held = self.state.children.len();
+        self.state.children.retain(|c| !(c.agent == agent && c.fragment == fragment));
+        self.helpers_said.remove(&(agent.to_string(), fragment.to_string()));
+        self.dirty |= self.state.children.len() != held;
     }
 }
 
@@ -2564,6 +2692,30 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
                 return Err(Corrupt(format!("turn {id}'s return is not one an ask makes")));
             }
         }
+    }
+    if state.children.len() > limits::CHILDREN_OPEN_MAX {
+        return Err(Corrupt(format!("{} helpers is past the bound", state.children.len())));
+    }
+    for (i, c) in state.children.iter().enumerate() {
+        let whole = records::fragment_name_ok(&c.agent)
+            && records::fragment_name_ok(&c.fragment)
+            && records::valid_post_id(&c.turn)
+            && c.child.len() == 24
+            && c.child.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && c.goal.chars().count() <= limits::CHILD_GOAL_MAX_CHARS;
+        if !whole {
+            return Err(Corrupt(format!("helper {i} is not one a turn starts")));
+        }
+        if state.children[..i].iter().any(|o| o.child == c.child) {
+            return Err(Corrupt(format!("helper {} is held twice", c.child)));
+        }
+    }
+    let mut chats: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for c in &state.children {
+        *chats.entry((&c.agent, &c.fragment)).or_default() += 1;
+    }
+    if chats.values().any(|n| *n > limits::HELPERS_PER_CHAT_MAX) {
+        return Err(Corrupt("a chat's helpers are past the bound".into()));
     }
     if state.agent_turns.len() > limits::AGENT_TURN_CHATS_MAX {
         return Err(Corrupt(format!("{} chats' agent turns is past the bound", state.agent_turns.len())));
