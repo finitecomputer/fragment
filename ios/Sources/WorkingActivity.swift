@@ -125,7 +125,7 @@ struct WorkingActivity: Equatable {
     var cards: [String: ToolCard] = [:]
     var hints: [WorkingHint] = []
     /// The `work` kinds of a turn this reads (docs/chat-records.md); any
-    /// other (a helper's `turn.child`, a later bridge's) changes nothing.
+    /// other (a helpers set, `turn.helpers`; a later bridge's) changes nothing.
     static let turnKinds: Set<String> = ["turn.start", "turn.step", "turn.call", "turn.notice", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"]
     /// Those that say a turn went on past its question in words
     /// (`turn.asked`); its asker's answer is read from the chat.

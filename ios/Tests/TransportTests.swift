@@ -968,28 +968,27 @@ struct TransportTests {
         #expect(!session.timeline.records.contains { $0.id == "work:500" }, "older work only says which turns run")
     }
 
-    /// FIN-432, Paul's (b) of 11-07: a helper whose start is long out of
-    /// the backlog, with more than a backlog of other work since its last
-    /// note, is found as the chat opens: `work` read back 15 minutes for
-    /// helpers' records alone, timed from the note's `since`. A malformed
-    /// note is none, and the window, the turns and where earlier work goes
-    /// on from are as the backlog left them.
-    @Test func aLongHelpersNoteIsFoundPastTheBacklog() async throws {
+    /// FIN-432, Paul 11-09: as a chat opens it asks once for each agent's
+    /// newest helpers set, however far back it was said (here, before a
+    /// backlog of 1,000 other records), and reads no `work` back for it.
+    /// A set whose `until` passed is none; the window, the turns and where
+    /// earlier work goes on from are as the backlog left them.
+    @Test func theNewestSetsAreAskedForOnceAsAChatOpens() async throws {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let since = now - 40 * 60_000
-        // work 1 to 1100, all in the last two minutes: h1's note at 1, a
-        // malformed one at 2, then other work; the backlog is the last 1000
-        let work: @Sendable (Int64) -> String = { seq in
-            let body = seq == 1 ? #"{"kind":"turn.child","parent":"t1","child":"h1","goal":"Read every review","since":\#(since)}"#
-                : seq == 2 ? #"{"kind":"turn.child","parent":"t1","child":"h2","goal":"x","since":"soon"}"#
-                : #"{"kind":"turn.busy","n":\#(seq)}"#
-            return #"{"channel":"work","seq":\#(seq),"at":\#(now - (1100 - seq) * 100),"principal":"npub1agent","kind":"message","body":\#(body)}"#
+        let busy: @Sendable (Int64) -> String = { seq in
+            #"{"channel":"work","seq":\#(seq),"at":\#(now - (1100 - seq) * 100),"principal":"npub1agent","kind":"message","body":{"kind":"turn.busy","n":\#(seq)}}"#
         }
+        let sets = #"{"channel":"work","records":[{"channel":"work","seq":2,"at":\#(since),"principal":"npub1agent","kind":"message","body":{"kind":"turn.helpers","helpers":[{"child":"h1","parent":"t1","goal":"Read every review","since":\#(since)}],"until":\#(now + 15 * 60_000)}},{"channel":"work","seq":1,"at":\#(since),"principal":"npub1gone","kind":"message","body":{"kind":"turn.helpers","helpers":[{"child":"g1","parent":"t9","goal":"x","since":\#(since)}],"until":\#(now - 60_000)}}]}"#
         let stub = Stub { seen, _ in
-            guard seen.route == "GET /api/f/chat--abc123/channels/work" else { return (404, "{}") }
-            let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
-            let page = (max(1, before - limit)..<before).map(work).joined(separator: ",")
-            return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/work/newest": return (200, sets)
+            case "GET /api/f/chat--abc123/channels/work":
+                let before = Int64(seen.query["before"] ?? "") ?? 0, limit = Int64(seen.query["limit"] ?? "") ?? 0
+                let page = (max(3, before - limit)..<before).map(busy).joined(separator: ",")
+                return (200, #"{"channel":"work","records":[\#(page)],"next":null}"#)
+            default: return (404, "{}")
+            }
         }
         let api = try stub.api()
         defer { try? ChatDraftStore.removeAccount(api: api) }
@@ -1000,16 +999,14 @@ struct TransportTests {
         let socket = stub.sockets[0]
         socket.push(hello)
         try await waitUntil("its subscriptions") { socket.sent.count == 2 }
-        for seq: Int64 in 101...1100 { socket.push(#"{"type":"record",\#(work(seq).dropFirst())"#) }
+        for seq: Int64 in 101...1100 { socket.push(#"{"type":"record",\#(busy(seq).dropFirst())"#) }
         socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
         socket.push(#"{"type":"subscribed","channel":"work","next":1100,"more":false}"#)
-        try await waitUntil("the helper found") { session.helpers.map(\.child) == ["h1"] }
-        #expect(session.helpers.first?.at == since && session.helpers.first?.goal == "Read every review")
-        #expect(Helpers.working(session.helpers, at: now).count == 1)
-        let asked = stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/work" }.map(\.query)
-        #expect(asked.first == ["before": "101", "limit": "50"] && asked.count <= 3, "\(asked)")
+        try await waitUntil("the helper found") { session.helpers.working(at: now).map(\.child) == ["h1"] }
+        #expect(session.helpers.working(at: now).first?.since == since && session.helpers.working(at: now).first?.goal == "Read every review")
+        #expect(stub.seen.filter { $0.route == "GET /api/f/chat--abc123/channels/work/newest" }.count == 1, "asked once")
         #expect(session.timeline.oldestWork?.seq == 101, "where earlier work goes on from, as it was")
-        #expect(!session.timeline.records.contains { $0.id == "work:1" }, "nothing read back for helpers enters the window")
+        #expect(!session.timeline.records.contains { $0.id == "work:2" }, "a set asked for enters no window")
         #expect(session.error == nil)
     }
 

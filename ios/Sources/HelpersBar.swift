@@ -1,87 +1,48 @@
 import SwiftUI
 
-/// The helpers (children an agent's runtime delegated work to) its turns
-/// started (`turn.child`, docs/chat-records.md), from every `work` record
-/// read, in any order and however often (an earlier page, a window paged
-/// back to, earlier work read again, `ChatSession.recentHelpers`): a start
-/// or note read after its end, or again after it, stays ended. A helper is
-/// its poster's, whatever a body names, and works from its start (or a
-/// note, its start again with `since`) until any outcome, shown while its
-/// newest start or note is at most `readBack` old (`working`).
+/// Each agent's newest helpers set (`turn.helpers`, docs/chat-records.md):
+/// every helper (a child its runtime delegated work to) it has working in
+/// this chat, as its computer's bridge holds them, shown until `until`. A
+/// set is its poster's, whatever a body names, and the newest of each
+/// poster wins, however records come (the newest asked for as a chat
+/// opens, `ChatSession.newestHelpers`, the live stream, earlier pages).
 struct Helpers: Equatable, Sendable {
     struct Helper: Equatable, Identifiable, Sendable {
         let agent: String
-        /// The turn that started it (a record's `parent`).
-        let turn: String
         let child: String
-        var goal: String?
-        /// When it started: its start record's time, else a note's `since`.
-        var at: Int64 = 0
-        var started = false
-        /// Its newest start or note's time: it works while this is at most
-        /// `readBack` old, its bridge noting it more often than that.
-        var seen: Int64 = 0
-        var ended = false
-        /// The newest of its records learned: what goes first past `keptMax`.
-        var seq: Int64 = 0
-        var id: String { "\(agent)|\(turn)|\(child)" }
+        let goal: String
+        /// When its bridge saw it start (ms).
+        let since: Int64
+        var id: String { "\(agent)|\(child)" }
     }
-    /// Every helper read, ended ones too: an ended one kept is what keeps
-    /// its start, read again, from working once more. Past `keptMax` (as
-    /// many as the turns a timeline keeps), those learned longest ago go.
-    private(set) var known: [String: Helper] = [:]
-    static let keptMax = 4_096
-    /// How old a helper's newest start or note may be for it to work, and
-    /// how far back a chat opening reads `work` for them: its bridge notes
-    /// a running helper every 10 minutes (docs/chat-records.md,
-    /// `turn.child`; the contract's `CHILD_READ_BACK_MS`, images/bridge's
-    /// limits.rs). The bounded version: a durable listing may come later.
-    static let readBack: Int64 = 15 * 60 * 1000
-
-    /// A note's `since`: none on a start; on a note, a whole number of ms
-    /// above 0, at or before its record's `at`, else the record is none.
-    private enum Since { case none, at(Int64), malformed }
-    private static func since(_ record: ChannelRecord) -> Since {
-        guard case .object(let body) = record.body, let value = body["since"] else { return .none }
-        guard case .number(let ms) = value, ms >= 1, ms <= Double(record.at), ms.rounded() == ms else { return .malformed }
-        return .at(Int64(ms))
+    private struct Said: Equatable, Sendable {
+        let seq: Int64
+        let until: Int64
+        let helpers: [Helper]
     }
+    /// One a poster: as many as the chat's agents.
+    private var sets: [String: Said] = [:]
 
     /// Whether the record changed what is known.
     mutating func learn(_ record: ChannelRecord) -> Bool {
-        guard record.channel == "work", record.body["kind"].string == "turn.child",
-              let turn = record.body["parent"].string, let child = record.body["child"].string, !child.isEmpty else { return false }
-        let id = "\(record.principal)|\(turn)|\(child)"
-        var helper = known[id] ?? Helper(agent: record.principal, turn: turn, child: child)
-        if record.body["outcome"].string != nil { helper.ended = true }
-        else if let goal = record.body["goal"].string {
-            switch Self.since(record) {
-            case .malformed: return false
-            case .none: helper.at = record.at; helper.started = true
-            case .at(let since): if !helper.started { helper.at = since }
-            }
-            helper.goal = goal
-            helper.seen = max(helper.seen, record.at)
+        guard record.channel == "work", record.body["kind"].string == "turn.helpers", case .number(let until) = record.body["until"],
+              case .array(let list) = record.body["helpers"], (sets[record.principal]?.seq ?? 0) < record.seq else { return false }
+        let helpers = list.compactMap { h -> Helper? in
+            guard let child = h["child"].string, let goal = h["goal"].string, case .number(let since) = h["since"] else { return nil }
+            return Helper(agent: record.principal, child: child, goal: goal, since: Int64(since))
         }
-        else { return false }
-        helper.seq = max(helper.seq, record.seq)
-        guard known[id] != helper else { return false }
-        known[id] = helper
-        if known.count > Self.keptMax, let oldest = known.values.min(by: { ($0.seq, $0.id) < ($1.seq, $1.id) }) { known.removeValue(forKey: oldest.id) }
+        sets[record.principal] = Said(seq: record.seq, until: Int64(until), helpers: helpers)
         return true
     }
 
-    /// The helpers started and not ended, the oldest first.
-    var running: [Helper] {
-        known.values.filter { $0.goal != nil && !$0.ended }.sorted { ($0.at, $0.id) < ($1.at, $1.id) }
+    /// The helpers working at `now` (ms): each agent's newest set until its
+    /// `until`, the oldest first. A set that lapsed (its computer crashed)
+    /// says nothing.
+    func working(at now: Int64) -> [Helper] {
+        sets.values.filter { $0.until > now }.flatMap(\.helpers).sorted { ($0.since, $0.id) < ($1.since, $1.id) }
     }
 
-    /// Of `running`, those working at `now` (ms): a start or note of theirs
-    /// at most `readBack` old. One no note has come for since (its computer
-    /// crashed) is none.
-    static func working(_ running: [Helper], at now: Int64) -> [Helper] {
-        running.filter { now - $0.seen <= readBack }
-    }
+    var isEmpty: Bool { sets.values.allSatisfy(\.helpers.isEmpty) }
 }
 
 /// The helpers working now, in one quiet row just above the composer: how
@@ -89,9 +50,9 @@ struct Helpers: Equatable, Sendable {
 /// has run, at most `shownMax`, then how many more. In a chat of several
 /// agents, whose they are, by face. None working, nothing shows.
 struct HelpersBar: View {
-    /// The helpers started and not ended (`Helpers.running`); the bar shows
-    /// those working now (`Helpers.working`).
-    let helpers: [Helpers.Helper]
+    /// Each agent's newest set; the bar shows those working now
+    /// (`Helpers.working`).
+    let helpers: Helpers
     let library: Library
     /// The chat has several agents (or its helpers are several agents').
     let several: Bool
@@ -102,11 +63,10 @@ struct HelpersBar: View {
     var body: some View {
         if !helpers.isEmpty {
             // which work, and their minutes: looked at again every 30 s,
-            // never per frame (one no note came for in `Helpers.readBack`
-            // leaves)
+            // never per frame (a set whose `until` passed leaves)
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 let now = Int64(context.date.timeIntervalSince1970 * 1000)
-                let working = Helpers.working(helpers, at: now)
+                let working = helpers.working(at: now)
                 if !working.isEmpty { bar(working, now: now) }
             }
         }
@@ -134,8 +94,8 @@ struct HelpersBar: View {
             if open {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(working.prefix(Self.shownMax)) { helper in
-                        let goal = helper.goal?.isEmpty == false ? helper.goal! : "A task"
-                        let ran = Self.minutes(now - helper.at)
+                        let goal = helper.goal.isEmpty ? "A task" : helper.goal
+                        let ran = Self.minutes(now - helper.since)
                         HStack(spacing: 8) {
                             if group { AgentAvatar(agent: library.agent(for: helper.agent), size: 16) }
                             Text(goal).foregroundStyle(.primary).lineLimit(1).truncationMode(.tail)

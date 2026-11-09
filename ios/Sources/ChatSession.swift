@@ -43,8 +43,8 @@ final class ChatSession {
     /// Replies being written, the earliest first.
     private(set) var drafts: [ReplyDraft] = []
     private(set) var activeTurns: [String] = []
-    /// The helpers working now (`turn.child`), once this connection read its `work`.
-    private(set) var helpers: [Helpers.Helper] = []
+    /// Each agent's newest helpers set (`turn.helpers`), once this connection read its `work`.
+    private(set) var helpers = Helpers()
     /// Each agent's menu, its commands' names (`Timeline.menus`), as the
     /// composer observes it: a menu that comes or changes alone redraws Steer.
     private(set) var menus: [String: [String]] = [:]
@@ -148,7 +148,7 @@ final class ChatSession {
         if writing != drafts { drafts = writing }
         let running = workRead ? timeline.activeTurns : []
         if running != activeTurns { activeTurns = running }
-        let working = workRead ? timeline.helpers.running : []
+        let working = workRead ? timeline.helpers : Helpers()
         if working != helpers { helpers = working }
         let offered = timeline.menus.mapValues(\.commands)
         if offered != menus { menus = offered }
@@ -291,7 +291,7 @@ final class ChatSession {
                                 if !workRead { workRead = true; timelineChanged() }
                                 if chatReadNow && !read { read = true }
                                 await earlierWork()
-                                await recentHelpers()
+                                await newestHelpers()
                                 // drafts kept across the reconnect go once their turn is read to have ended
                                 timeline.settleDrafts()
                             }
@@ -361,9 +361,6 @@ final class ChatSession {
     static let workBatch = 50
     /// Earlier `work` read back at most, a visit.
     static let earlierWorkMax = 1_000
-    /// `work` read back for the helpers working at most, a visit, past
-    /// what the backlog and `earlierWork` read (chat.js's four pages).
-    static let helpersReadMax = 4_000
 
     /// The next batch, sized by what the last one's records took: as many
     /// as half the answer's bound holds at twice their mean, between
@@ -412,33 +409,14 @@ final class ChatSession {
         }
     }
 
-    /// The helpers working as the chat opens, whatever it shows: `work`
-    /// read back to `Helpers.readBack` ago, past what the backlog and
-    /// `earlierWork` read, for helpers' records alone (chat.js
-    /// `recentHelpers`). A running helper is noted more often than that
-    /// (docs/chat-records.md, `turn.child`), so this finds each one however
-    /// old its start. Its own cursor: the window, the turns and where
-    /// earlier work goes on from stay as they were. Bounded by
-    /// `helpersReadMax`; a failure, or a helper past it, shows at its next
-    /// note.
-    private func recentHelpers() async {
-        let since = Int64(Date().timeIntervalSince1970 * 1000) - Helpers.readBack
-        guard var oldest = timeline.oldestWork else { return }
-        var read = 0
-        var batch = Self.workBatch
-        while read < Self.helpersReadMax, oldest.at >= since, oldest.seq > 1 {
-            let limit = min(batch, Self.helpersReadMax - read)
-            let page: (records: [ChannelRecord], bytes: Int)
-            do { page = try await api.historyPage(fragment.name, channel: "work", before: oldest.seq, limit: limit) }
-            catch APIError.limitExceeded where limit > Self.workBatch { batch = Self.workBatch; continue }
-            catch { return }
-            for record in page.records { timeline.learnHelper(record) }
-            guard let first = page.records.first else { return }
-            oldest = (first.seq, first.at)
-            read += page.records.count
-            if page.records.count < limit { return }
-            batch = Self.nextBatch(after: page.records.count, bytes: page.bytes)
-        }
+    /// The helpers working as the chat opens, however long ago each agent
+    /// last said so: its newest set, asked for once (`work` keeps it:
+    /// docs/api.md, Newest records); the live stream brings the next. It
+    /// touches nothing of the window, the turns or where earlier work goes
+    /// on from. A failure shows none until the next set.
+    private func newestHelpers() async {
+        guard let records = try? await api.newest(fragment.name, channel: "work") else { return }
+        for record in records { timeline.learnHelper(record) }
     }
 
     /// The message's files: attached, being put, or failed to be put (which
