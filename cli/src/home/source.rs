@@ -154,6 +154,12 @@ impl Source {
                     continue;
                 };
                 let path = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+                // a name a zip could not hold either (a backslash, a control
+                // character) is not read: every path a source lists is plain
+                if !plain(&path) {
+                    unread.push(format!("{}: its name is not a plain path", path.escape_debug()));
+                    continue;
+                }
                 // a link is neither followed nor read: what it names is not the home's
                 let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
                 if meta.is_dir() {
@@ -463,8 +469,11 @@ pub mod tests {
         std::os::unix::fs::symlink(t.0.join("outside.txt"), dir.join("link.txt")).unwrap();
         std::os::unix::fs::symlink(&t.0, dir.join("up")).unwrap();
         std::fs::write(dir.join("in.txt"), "in").unwrap();
+        std::fs::create_dir_all(dir.join("notes")).unwrap();
+        std::fs::write(dir.join("notes/a\\b.txt"), "odd").unwrap();
         let d = Source::open(&dir).unwrap();
-        assert_eq!(d.entries().iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["in.txt"], "links are left");
+        assert_eq!(d.entries().iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["in.txt"], "links are left, and a name no path is plain is not read");
+        assert_eq!(d.unread, ["notes/a\\\\b.txt: its name is not a plain path"]);
         std::fs::write(t.0.join("plain.txt"), "not a zip").unwrap();
         let e = Source::open(&t.0.join("plain.txt")).err().expect("refused");
         assert!(format!("{e:#}").contains("is no folder and no zip"), "{e:#}");
