@@ -210,6 +210,10 @@ final class ChatSession {
     static let deleted = "This chat was deleted."
     static let accessChanged = "Your access to this chat changed."
     @ObservationIgnored private var reconnectNotice: Task<Void, Never>?
+    /// The newest helpers sets asked for at the latest `work` catch-up
+    /// (`newestHelpers`): apart from the receive loop, so a slow answer
+    /// holds no live record back; the next catch-up's replaces it.
+    @ObservationIgnored private var helpersRead: Task<Void, Never>?
 
     /// Why the chat is closed for good (deleted, its access changed, the
     /// key ended), once it is: nothing opens it again, not a return to the
@@ -291,7 +295,8 @@ final class ChatSession {
                                 if !workRead { workRead = true; timelineChanged() }
                                 if chatReadNow && !read { read = true }
                                 await earlierWork()
-                                await newestHelpers()
+                                helpersRead?.cancel()
+                                helpersRead = Task { [weak self] in await self?.newestHelpers() }
                                 // drafts kept across the reconnect go once their turn is read to have ended
                                 timeline.settleDrafts()
                             }
@@ -415,7 +420,7 @@ final class ChatSession {
     /// touches nothing of the window, the turns or where earlier work goes
     /// on from. A failure shows none until the next set.
     private func newestHelpers() async {
-        guard let records = try? await api.newest(fragment.name, channel: "work") else { return }
+        guard let records = try? await api.newest(fragment.name, channel: "work"), !Task.isCancelled else { return }
         for record in records { timeline.learnHelper(record) }
     }
 

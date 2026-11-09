@@ -52,6 +52,13 @@ struct HelpersTests {
         #expect(timeline.helpers.working(at: 5000).map(\.child) == ["h4"])
         timeline.insert(ChannelRecord(channel: "chat", seq: 9, at: 9, principal: "npub1ada", kind: "message", body: try JSONDecoder().decode(JSONValue.self, from: Data(#"{"kind":"turn.helpers","helpers":[],"until":9000000}"#.utf8))))
         #expect(timeline.helpers.working(at: 5000).map(\.child) == ["h4"])
+        // Codex on this PR: a time out of range is none, never a trap
+        timeline.insert(try work(10, #"{"kind":"turn.helpers","helpers":[],"until":1e20}"#))
+        timeline.insert(try work(11, #"{"kind":"turn.helpers","helpers":[],"until":-1}"#))
+        #expect(timeline.helpers.working(at: 5000).map(\.child) == ["h4"])
+        timeline.insert(try work(12, #"{"kind":"turn.helpers","until":9000000,"helpers":[{"child":"h5","goal":"x","since":1e300},{"child":"h6","goal":"y","since":-1e300},{"child":"h7","goal":"z","since":8}]}"#))
+        #expect(timeline.helpers.working(at: 5000).map(\.child) == ["h7"])
+        #expect(HelpersBar.minutes(5000 - timeline.helpers.working(at: 5000)[0].since) == "<1 min")
     }
 
     /// Restart: a set whose `until` passed (its computer crashed and

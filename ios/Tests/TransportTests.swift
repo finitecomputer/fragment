@@ -973,6 +973,44 @@ struct TransportTests {
     /// backlog of 1,000 other records), and reads no `work` back for it.
     /// A set whose `until` passed is none; the window, the turns and where
     /// earlier work goes on from are as the backlog left them.
+    /// Codex on this PR: the newest sets' read holds no live record back.
+    /// Its answer held, a set that comes live shows at once; the held answer,
+    /// older, changes nothing once it comes.
+    @Test func aHeldNewestReadHoldsNothingLiveBack() async throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let set: @Sendable (Int64, String) -> String = { seq, child in
+            #"{"channel":"work","seq":\#(seq),"at":\#(now),"principal":"npub1agent","kind":"message","body":{"kind":"turn.helpers","helpers":[{"child":"\#(child)","parent":"t1","goal":"\#(child)","since":\#(now)}],"until":\#(now + 15 * 60_000)}}"#
+        }
+        let gate = Gate()
+        let stub = Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/f/chat--abc123/channels/work/newest":
+                gate.pass()
+                return (200, #"{"channel":"work","records":[\#(set(1, "old"))]}"#)
+            case "GET /api/f/chat--abc123/channels/work": return (200, #"{"channel":"work","records":[],"next":null}"#)
+            default: return (404, "{}")
+            }
+        }
+        let api = try stub.api()
+        defer { try? ChatDraftStore.removeAccount(api: api) }
+        let session = ChatSession(fragment: chat, api: api)
+        let run = Task { await session.run() }
+        defer { run.cancel(); gate.open() }
+        try await waitUntil("a socket") { stub.sockets.count == 1 }
+        let socket = stub.sockets[0]
+        socket.push(hello)
+        try await waitUntil("its subscriptions") { socket.sent.count == 2 }
+        socket.push(#"{"type":"subscribed","channel":"chat","next":0,"more":false}"#)
+        socket.push(#"{"type":"subscribed","channel":"work","next":1,"more":false}"#)
+        try await waitUntil("the newest asked for") { stub.seen.contains { $0.route == "GET /api/f/chat--abc123/channels/work/newest" } }
+        socket.push(#"{"type":"record",\#(set(2, "live").dropFirst())"#)
+        try await waitUntil("the live set, its read still held", timeout: .seconds(3)) { session.helpers.working(at: now).map(\.child) == ["live"] }
+        gate.open()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(session.helpers.working(at: now).map(\.child) == ["live"], "the held answer, older, changes nothing")
+        #expect(session.error == nil)
+    }
+
     @Test func theNewestSetsAreAskedForOnceAsAChatOpens() async throws {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let since = now - 40 * 60_000

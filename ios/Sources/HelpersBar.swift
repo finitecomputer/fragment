@@ -23,15 +23,22 @@ struct Helpers: Equatable, Sendable {
     /// One a poster: as many as the chat's agents.
     private var sets: [String: Said] = [:]
 
+    /// A time a set says (ms): 0 to 2^53 (a reader's safe integer), else
+    /// none: never a trap converting it, nor an overflow subtracting it.
+    private static func ms(_ value: JSONValue) -> Int64? {
+        guard case .number(let ms) = value, ms >= 0, ms <= 9_007_199_254_740_991 else { return nil }
+        return Int64(ms)
+    }
+
     /// Whether the record changed what is known.
     mutating func learn(_ record: ChannelRecord) -> Bool {
-        guard record.channel == "work", record.body["kind"].string == "turn.helpers", case .number(let until) = record.body["until"],
+        guard record.channel == "work", record.body["kind"].string == "turn.helpers", let until = Self.ms(record.body["until"]),
               case .array(let list) = record.body["helpers"], (sets[record.principal]?.seq ?? 0) < record.seq else { return false }
         let helpers = list.compactMap { h -> Helper? in
-            guard let child = h["child"].string, let goal = h["goal"].string, case .number(let since) = h["since"] else { return nil }
-            return Helper(agent: record.principal, child: child, goal: goal, since: Int64(since))
+            guard let child = h["child"].string, let goal = h["goal"].string, let since = Self.ms(h["since"]) else { return nil }
+            return Helper(agent: record.principal, child: child, goal: goal, since: since)
         }
-        sets[record.principal] = Said(seq: record.seq, until: Int64(until), helpers: helpers)
+        sets[record.principal] = Said(seq: record.seq, until: until, helpers: helpers)
         return true
     }
 
