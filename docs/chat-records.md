@@ -245,8 +245,9 @@ messages and replies alone, by their `text` (docs/api.md, Search).
 
 ## `work`
 
-The agent posts each record with the id `wk:<turn>:<part>`, so a step
-posted again is the same record.
+The agent posts each record of a turn with the id `wk:<turn>:<part>`, so
+a step posted again is the same record. A chat's helpers set
+(`turn.helpers`) is no turn's.
 
 **`turn.start`**, part `start`:
 
@@ -373,6 +374,50 @@ A notice from the runtime, neither a step nor a reply. `category` is
 notice the runtime sends after the turn's end still belongs to that turn,
 and is posted after its `turn.end`. If the agent has run no turn in that
 chat in this life, the notice is not posted. A notice is never pushed.
+
+**`turn.helpers`**, id `hs:<life>:<n>`: the helpers (children the agent's
+runtime delegated work to) the agent has working in this chat, all of
+them, as its computer's bridge holds them now.
+
+```json
+{ "kind": "turn.helpers", "until": 1790000900000,
+  "helpers": [{ "child": "<child>", "parent": "…", "since": 1790000000000,
+                "goal": "Find three venues near Lisbon for a team offsite" }] }
+```
+
+The bridge posts the whole set each time a helper starts or ends, and
+again 5 minutes before `until` while it names any. A restart of the
+computer's bridge posts an empty set to each chat its helpers ran in,
+since they died with the process. `<life>` is the bridge process's
+(`turn.start`'s), and `n` numbers its sets from 1. A helper
+outlives the turn that started it. Helpers the agent grouped (Hermes'
+task `group`) end together, when their group reports.
+
+- `until` (ms): the set holds until then, 15 minutes after it was posted.
+  A set that lapsed says nothing, so a computer that crashed and sleeps
+  shows no helpers 15 minutes after its last set.
+- `child`: the first 24 hex digits of SHA-256 of the runtime's id for the
+  helper (Hermes' child session id).
+- `parent`: the turn that started it. The record names no `turn`: a
+  reader from before `turn.helpers` passes over a `work` record without
+  one, so no page or app already out there takes it for a turn going on.
+- `since` (ms): when the bridge saw it start.
+- `goal`: its task, one line of at most 140 characters. It is the chat's
+  content, read by whoever reads the turn's steps: its whitespace made
+  single spaces and cut, never scrubbed.
+
+A set names at most 32 helpers; a computer's bridge keeps at most 1,024,
+and our image's plugin records at most 256 running or waiting to say their
+end. A helper past a bound holds the computer and is named nowhere. Only
+our Hermes image's helpers are recorded; older bridges post none.
+
+**A reader** asks for each poster's newest set as a chat opens (`work`
+keeps it: docs/api.md, Newest records), then takes each set `work`
+brings live, the newest of each poster winning. It shows a poster's
+newest set while `until` is ahead of its clock, and a set is its
+poster's, whatever a body names. A page shows the helpers in a bar above
+the composer, with how long each has run (`since`); a helper's result
+comes back as a reply of the agent's own.
 
 **`turn.end`**, part `end`:
 
