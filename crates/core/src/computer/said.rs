@@ -159,6 +159,9 @@ mod tests {
         assert_eq!(back(true, Some(2), Some(60 * MIN)).text.as_deref(), Some("When it starts again, changes made in the 40 minutes before it stopped won't be there. Your chats are all here."));
         assert_eq!(back(true, Some(2), None).text.as_deref(), Some("When it starts again, changes on it since its last save won't be there. Your chats are all here."));
         assert_eq!(back(false, None, None).text.as_deref(), Some("Nothing on it was saved yet, so it started fresh. Your chats are all here."));
+        // a loss within a minute of its save reads as words too (the e2e's shot: "in the a minute")
+        let quick = said(&[ComputerNotice::WentBack { life: 6, cause: LossCause::Crash, ended_at: Some(20 * MIN + 30_000), pending: false, save: Some(2), saved_at: Some(20 * MIN), at: None }], &f);
+        assert_eq!(quick[0].text.as_deref(), Some("Changes made in the 1 minute before it stopped weren't kept. Your chats are all here."));
         assert_eq!(back(true, None, Some(60 * MIN)).title, "Your computer stopped");
 
         let update = &said(&[ComputerNotice::Update { version: "0123456789ab".into() }], &f)[0];

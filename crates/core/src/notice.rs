@@ -37,12 +37,13 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// A span of time as a person reads it, whole and rounded down: "a minute"
+/// A span of time as a person reads it, a count whole and rounded down
+/// ("the 40 minutes before it stopped" reads with any of them): "1 minute"
 /// under two, then minutes, hours from two, days from two.
 pub fn span(ms: i64) -> String {
     let minutes = ms.max(0) / 60_000;
     let (n, unit) = match minutes {
-        0..=1 => return "a minute".to_string(),
+        0..=1 => return "1 minute".to_string(),
         2..=119 => (minutes, "minutes"),
         120..=2879 => (minutes / 60, "hours"),
         _ => (minutes / 1440, "days"),
@@ -85,13 +86,13 @@ mod tests {
         assert_eq!(size(3_240_662_016), "3.2 GB");
         assert_eq!(size(420_000_000), "420 MB");
         assert_eq!(size(10), "1 MB");
-        assert_eq!(span(0), "a minute");
-        assert_eq!(span(119_999), "a minute");
+        assert_eq!(span(0), "1 minute");
+        assert_eq!(span(119_999), "1 minute");
         assert_eq!(span(12 * 60_000 + 59_000), "12 minutes");
         assert_eq!(span(119 * 60_000), "119 minutes");
         assert_eq!(span(3 * 3_600_000), "3 hours");
         assert_eq!(span(3 * 86_400_000), "3 days");
-        assert_eq!(span(-5), "a minute", "a clock behind says the least");
+        assert_eq!(span(-5), "1 minute", "a clock behind says the least");
         assert_eq!(provider_name("elevenlabs"), "ElevenLabs");
         assert_eq!(provider_name("google-places"), "Google Places");
         assert_eq!(provider_name("perplexity"), "Perplexity");
