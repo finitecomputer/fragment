@@ -2628,29 +2628,6 @@ impl ComputerCell {
                 self.wake(b.why).await?;
                 json_response(&self.view()?)
             }
-            "computer/notices-seen" => {
-                let b: NoticeSeen = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                if !self.update_saves(|s| s.saw(b.life))? {
-                    return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
-                }
-                // its owner's other pages read it again, and tell it no more
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
-            "computer/notices-later" => {
-                let b: UpdateLater = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                if !valid_version(&b.version) {
-                    return Err(CellError::invalid(format!("a version is {} hex digits, as an update notice names it", fragment_core::computer::VERSION_HEX)));
-                }
-                if !self.update_images(|i| i.later(&b.version))? {
-                    return Err(CellError::invalid(format!("no update to {} here: read the computer again", b.version)));
-                }
-                // its owner's other pages read it again, and tell it no more
-                self.tell_owner().await;
-                json_response(&self.view()?)
-            }
             // its owner's seat, as the registry pushes it (registry/orgs.rs)
             "computer/always-on" => {
                 let b: AlwaysOnBody = body_json(&mut req).await?;
@@ -2749,14 +2726,6 @@ impl ComputerCell {
             "computer/credentials" => {
                 let b: CredentialsAsk = body_json(&mut req).await?;
                 json_response(&self.credentials(b).await?)
-            }
-            "computer/key-cap" => {
-                // `{provider, from, micros}`: the router's, from a `KeyCapAsk`
-                let b: Value = body_json(&mut req).await?;
-                self.must(MetaKey::Id)?;
-                let ask = KeyCapAsk { from: b["from"].as_i64(), micros: b["micros"].as_i64() };
-                self.set_key_cap(b["provider"].as_str().unwrap_or_default(), ask).await?;
-                json_response(&self.view()?)
             }
             "computer/used" => {
                 let b: UsedAsk = body_json(&mut req).await?;
@@ -2951,6 +2920,31 @@ impl ComputerCell {
                 json_response(&self.restart(asked.generation.unwrap_or(0)).await?)
             }
             (Method::Put, ["image"]) => json_response(&self.pin(&image_named(&req.bytes().await?)?).await?),
+            (Method::Post, ["notices", "seen"]) => {
+                let b: NoticeSeen = body_json(&mut req).await?;
+                if !self.update_saves(|s| s.saw(b.life))? {
+                    return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
+                }
+                // its owner's other pages read it again, and tell it no more
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["notices", "later"]) => {
+                let b: UpdateLater = body_json(&mut req).await?;
+                if !valid_version(&b.version) {
+                    return Err(CellError::invalid(format!("a version is {} hex digits, as an update notice names it", fragment_core::computer::VERSION_HEX)));
+                }
+                if !self.update_images(|i| i.later(&b.version))? {
+                    return Err(CellError::invalid(format!("no update to {} here: read the computer again", b.version)));
+                }
+                // its owner's other pages read it again, and tell it no more
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            (Method::Post, ["key-caps", provider]) => {
+                self.set_key_cap(provider, body_json(&mut req).await?).await?;
+                json_response(&self.view()?)
+            }
             (Method::Get, ["uses"]) => json_response(&self.uses(Month::of(js::now_ms() + self.offset_ms()?))?),
             (Method::Get, ["uses", month]) => json_response(&self.uses(Month::parse(month).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?)?),
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/computers/{}", m.as_ref(), segments[2..].join("/")))),
@@ -3282,21 +3276,6 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             // where its owner gets help when it will not start
             let cfg = Config::from_env(env);
             json_response(&json!({ "computers": list, "support": cfg.support_url }))
-        }
-        (Method::Post, [id, "notices", "seen"]) => {
-            owned(env, who, id).await?;
-            let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_response(&view_of(ask(env, id, "computer/notices-seen", &json!(seen)).await?)?)
-        }
-        (Method::Post, [id, "key-caps", provider]) => {
-            owned(env, who, id).await?;
-            let cap: KeyCapAsk = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_response(&view_of(ask(env, id, "computer/key-cap", &json!({ "provider": provider, "from": cap.from, "micros": cap.micros })).await?)?)
-        }
-        (Method::Post, [id, "notices", "later"]) => {
-            owned(env, who, id).await?;
-            let later: UpdateLater = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_response(&view_of(ask(env, id, "computer/notices-later", &json!(later)).await?)?)
         }
         (Method::Put, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
