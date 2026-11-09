@@ -1376,6 +1376,34 @@ mod tests {
         assert_eq!(read_as_agent(&their_zip).unwrap(), 1, "another agent's, in the same place, reads");
     }
 
+    /// Goal: a database's sidecar the home skips (a layout naming it a
+    /// secret) is not read: SQLite reads a WAL beside a database by
+    /// itself, so the database it opens is a copy beside what the source
+    /// still lists, a folder's as a zip's. Method: a folder home whose
+    /// database holds one conversation in its file and one only in its
+    /// live WAL, the layout skipping the WAL.
+    #[test]
+    fn a_skipped_wal_is_not_read() {
+        let dir = tempdir();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let row = |id: &str| format!("INSERT INTO sessions VALUES ('{id}','cli',NULL,NULL,'m',NULL,NULL,100,200,NULL,'T',NULL,NULL); INSERT INTO messages (session_id, role, content, timestamp) VALUES ('{id}','user','hi',100);");
+        hermes::tests::database(&home.join("state.db"), &row("in-file"));
+        // a writer holds the WAL open, its row not checkpointed into the file
+        let writer = rusqlite::Connection::open(home.join("state.db")).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer.execute_batch(&row("in-wal")).unwrap();
+        assert!(home.join("state.db-wal").is_file());
+        let layout = dir.join("layout.json");
+        std::fs::write(&layout, r#"{"format":"fragment-home-layout/1","name":"x","hermes_home":".","secret":["state.db-wal"]}"#).unwrap();
+        let mut spool = Spool::new(BTreeSet::new()).unwrap();
+        read(source(&home, Some(layout.to_str().unwrap())).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
+        let ids: Vec<String> = hermes::tests::spooled(&spool).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["in-file"], "the skipped WAL's conversation is not read");
+        drop(writer);
+    }
+
     /// Goal: a spool holds what an import read within an archive's limits,
     /// the newer of two copies of one, refusing the rest as it reads.
     /// Method: two copies of one, an id that is no id (said escaped), and a
