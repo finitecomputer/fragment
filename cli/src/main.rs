@@ -4,6 +4,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod home;
 mod mcp;
 mod notice;
 mod operator;
@@ -431,6 +432,12 @@ enum Cmd {
     Schedule {
         #[command(subcommand)]
         sub: ScheduleCmd,
+    },
+    /// An agent's home brought here from wherever it ran: what an import
+    /// would bring (`survey`), and its files copied out (`extract`)
+    Home {
+        #[command(subcommand)]
+        sub: home::HomeCmd,
     },
     /// An agent's past conversations, in your Session Archive
     Session {
@@ -1670,6 +1677,13 @@ fn run(cli: Cli) -> Result<()> {
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
         }
+        // read here, changing nothing: no platform, no key
+        Cmd::Home { sub } => {
+            let done = home::run(sub)?;
+            json_exit(j, &done);
+            home::print(&done);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -2656,7 +2670,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Home { .. } => unreachable!(),
     }
     Ok(())
 }

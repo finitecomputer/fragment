@@ -1,0 +1,9 @@
+timezone: America/New_York
+agent:
+  personality: warm
+model:
+  default: old/model-large
+gateway:
+  platforms:
+    telegram:
+      enabled: true

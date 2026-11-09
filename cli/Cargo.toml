@@ -40,6 +40,19 @@ fs2 = "=0.4.3"
 # Hermes' session database (`fragment session import`), read-only; the
 # bundled SQLite, as crates/core's host side pins it
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# an agent's home to import (`fragment home`), as a zip: one old agent's
+# stage (zip64), read in place, locally or by HTTP ranges; deflate only,
+# by flate2, already in the lock
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2"] }
+# a scheduled job's time zone, to say its schedule in UTC (`fragment home
+# survey`): the zone database bundled, so a computer without one reads it too
+jiff = { version = "=0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
+# a layout's secret paths, as globs (`fragment home`); already in the
+# lock, through ignore
+globset = "=0.4.20"
+# Hermes' own hash of a bundled skill (its `.bundled_manifest`), to tell
+# one an agent edited from one as shipped (`fragment home survey`)
+md-5 = "=0.10.6"
 tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 
 

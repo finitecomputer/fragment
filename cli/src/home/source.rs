@@ -1,0 +1,369 @@
+//! Where an agent's home is read from (`fragment home`): a folder, or a
+//! zip of one, read in place (an old agent's stage is one zip64 file,
+//! FIN-463). Every reader works on either: the survey, the files it
+//! brings, and the files it copies out.
+//!
+//! **Paths.** Every file is named by its path relative to the root,
+//! `/`-separated, as text. A zip entry that would leave the root (`..`, an
+//! absolute name) refuses the whole source: what made it is not to be
+//! trusted with the rest. Links and folders are not files: a folder's
+//! links are left where they are, never followed.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
+
+use crate::api::{Code, CodedError};
+
+/// Files one source holds, at most: an old agent's stage holds about
+/// 100,000 at the most (FIN-463), and each is a row in memory here.
+pub const ENTRIES_MAX: usize = 1_000_000;
+/// A file read whole (`Source::read`), at most: a SOUL, a memory, a skill's
+/// file, a job list. Anything larger is streamed (`Source::with_reader`).
+pub const READ_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Names said in a refusal, at most.
+const SAID_MAX: usize = 10;
+
+/// One file of a source.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Entry {
+    /// Relative to the source's root, `/`-separated.
+    pub path: String,
+    pub size: u64,
+    /// When it last changed, in seconds since 1970 (a zip's own time has
+    /// no zone: it is read as UTC, which orders files all the same).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<i64>,
+}
+
+/// A source: its files, and how their bytes are read.
+pub struct Source {
+    backing: Backing,
+    /// Every file, by path.
+    entries: Vec<Entry>,
+    /// Each file's place in `entries`, and in a zip its index there.
+    at: HashMap<String, (usize, usize)>,
+    /// What was not read as a file, each in a few words (a name that is
+    /// not text, a folder that could not be read).
+    pub unread: Vec<String>,
+}
+
+enum Backing {
+    Dir(PathBuf),
+    Zip(zip::ZipArchive<At>),
+}
+
+/// A file read at an offset of its own, so that each clone of a zip reads
+/// it apart from the others (`zip::ZipArchive` is `Clone` when its reader
+/// is: one parse of the central directory serves every reader).
+#[derive(Clone)]
+pub struct At {
+    file: Arc<File>,
+    pos: u64,
+    len: u64,
+}
+
+impl Read for At {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.file.read_at(buf, self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for At {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(p) => Some(p),
+            SeekFrom::End(d) => self.len.checked_add_signed(d),
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = pos.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a seek before the start"))?;
+        Ok(self.pos)
+    }
+}
+
+fn usage(msg: String) -> anyhow::Error {
+    anyhow::Error::new(CodedError { code: Code::InvalidUsage, msg })
+}
+
+fn refused(msg: String) -> anyhow::Error {
+    anyhow::Error::new(CodedError { code: Code::InvalidRequest, msg })
+}
+
+/// Some of `names`, for a refusal.
+pub fn said(names: &[String]) -> String {
+    let mut out = names.iter().take(SAID_MAX).map(|n| format!("{:?}", n)).collect::<Vec<_>>().join(", ");
+    if names.len() > SAID_MAX {
+        out.push_str(&format!(" and {} more", names.len() - SAID_MAX));
+    }
+    out
+}
+
+impl Source {
+    /// The source a person names: a folder, or a zip file.
+    pub fn open(path: &Path) -> Result<Source> {
+        let meta = std::fs::metadata(path).map_err(|e| usage(format!("{}: {e}", path.display())))?;
+        if meta.is_dir() {
+            return Source::dir(path);
+        }
+        let mut head = [0u8; 4];
+        let is_zip = File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && (head == *b"PK\x03\x04" || head == *b"PK\x05\x06");
+        if !meta.is_file() || !is_zip {
+            bail!(usage(format!("{} is no folder and no zip: name an agent's home, or a zip of one", path.display())));
+        }
+        Source::zip(path)
+    }
+
+    fn dir(root: &Path) -> Result<Source> {
+        let mut entries = Vec::new();
+        let mut unread = Vec::new();
+        let mut folders = vec![(root.to_path_buf(), String::new())];
+        while let Some((dir, rel)) = folders.pop() {
+            let listed = match std::fs::read_dir(&dir) {
+                Ok(l) => l,
+                Err(e) => {
+                    unread.push(format!("{}: {e}", if rel.is_empty() { "." } else { &rel }));
+                    continue;
+                }
+            };
+            for e in listed.flatten() {
+                let Some(name) = e.file_name().to_str().map(str::to_string) else {
+                    unread.push(format!("{}/{}: its name is not text", rel, e.file_name().to_string_lossy()));
+                    continue;
+                };
+                let path = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+                // a link is neither followed nor read: what it names is not the home's
+                let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
+                if meta.is_dir() {
+                    folders.push((e.path(), path));
+                } else if meta.is_file() {
+                    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+                    entries.push(Entry { path, size: meta.len(), mtime });
+                    if entries.len() > ENTRIES_MAX {
+                        bail!(refused(format!("{} holds more than {ENTRIES_MAX} files", root.display())));
+                    }
+                }
+            }
+        }
+        Ok(Source::with(Backing::Dir(root.to_path_buf()), entries.into_iter().map(|e| (e, 0)).collect(), unread))
+    }
+
+    fn zip(path: &Path) -> Result<Source> {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let len = file.metadata()?.len();
+        let archive = zip::ZipArchive::new(At { file: Arc::new(file), pos: 0, len }).with_context(|| format!("reading {} as a zip", path.display()))?;
+        Source::from_archive(archive, &path.display().to_string())
+    }
+
+    /// A zip's files, from its central directory (no file's bytes are read).
+    pub fn from_archive(archive: zip::ZipArchive<At>, said_as: &str) -> Result<Source> {
+        if archive.len() > ENTRIES_MAX {
+            bail!(refused(format!("{said_as} holds more than {ENTRIES_MAX} files")));
+        }
+        let mut entries = Vec::with_capacity(archive.len());
+        let mut leaving = Vec::new();
+        let mut unread = Vec::new();
+        for i in 0..archive.len() {
+            let e = archive.by_index_data(i).with_context(|| format!("reading {said_as}'s entry {i}"))?;
+            let name = match e.name() {
+                Ok(n) => n.to_string(),
+                Err(_) => {
+                    unread.push(format!("entry {i}: its name is not text"));
+                    continue;
+                }
+            };
+            if e.enclosed_name().is_none() || name.starts_with('/') || name.split('/').any(|p| p == "..") {
+                leaving.push(name);
+                continue;
+            }
+            if e.is_dir() || e.is_symlink() {
+                continue;
+            }
+            let path = name.trim_start_matches("./").to_string();
+            entries.push((Entry { path, size: e.size(), mtime: e.last_modified().and_then(dos_seconds) }, i));
+        }
+        if !leaving.is_empty() {
+            bail!(refused(format!("{said_as} names files outside itself ({}): it is not read", said(&leaving))));
+        }
+        Ok(Source::with(Backing::Zip(archive), entries, unread))
+    }
+
+    fn with(backing: Backing, mut entries: Vec<(Entry, usize)>, unread: Vec<String>) -> Source {
+        entries.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+        // a zip may name one path twice: the last written is the file
+        entries.dedup_by(|later, earlier| later.0.path == earlier.0.path && {
+            *earlier = later.clone();
+            true
+        });
+        let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
+        Source { backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
+    }
+
+    /// Every file, by path.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn get(&self, path: &str) -> Option<&Entry> {
+        self.at.get(path).map(|(n, _)| &self.entries[*n])
+    }
+
+    /// The files under `folder` (`""` for all), by path.
+    pub fn under<'a>(&'a self, folder: &str) -> impl Iterator<Item = &'a Entry> + 'a {
+        let prefix = if folder.is_empty() || folder == "." { String::new() } else { format!("{}/", folder.trim_end_matches('/')) };
+        let start = self.entries.partition_point(|e| e.path.as_str() < prefix.as_str());
+        self.entries[start..].iter().take_while(move |e| e.path.starts_with(&prefix))
+    }
+
+    /// Whether any file is under `folder`.
+    pub fn has_folder(&self, folder: &str) -> bool {
+        self.under(folder).next().is_some()
+    }
+
+    /// What kind of source this is, as the survey says it.
+    pub fn kind(&self) -> &'static str {
+        match self.backing {
+            Backing::Dir(_) => "folder",
+            Backing::Zip(_) => "zip",
+        }
+    }
+
+    /// One file's bytes as they are read.
+    pub fn with_reader<T>(&self, path: &str, f: impl FnOnce(&mut dyn Read) -> Result<T>) -> Result<T> {
+        let (_, index) = *self.at.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
+        match &self.backing {
+            Backing::Dir(root) => {
+                let mut file = File::open(root.join(path)).with_context(|| format!("opening {path}"))?;
+                f(&mut file)
+            }
+            Backing::Zip(archive) => {
+                let mut archive = archive.clone();
+                let mut member = archive.by_index(index).with_context(|| format!("opening {path} in the zip"))?;
+                f(&mut member)
+            }
+        }
+    }
+
+    /// One file's bytes, whole: at most `READ_MAX_BYTES`.
+    pub fn read(&self, path: &str) -> Result<Vec<u8>> {
+        let size = self.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?.size;
+        if size > READ_MAX_BYTES {
+            bail!("{path} is {size} bytes: more than {READ_MAX_BYTES} to read whole");
+        }
+        self.with_reader(path, |r| {
+            let mut out = Vec::with_capacity(size as usize);
+            r.take(READ_MAX_BYTES + 1).read_to_end(&mut out).with_context(|| format!("reading {path}"))?;
+            if out.len() as u64 != size {
+                bail!("{path} read as {} bytes, not the {size} listed", out.len());
+            }
+            Ok(out)
+        })
+    }
+
+    /// One file's text, or `None` when it holds bytes that are not text.
+    pub fn text(&self, path: &str) -> Result<Option<String>> {
+        let bytes = self.read(path)?;
+        if bytes.iter().take(8192).any(|b| *b == 0) {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    }
+}
+
+/// A zip's time of a file (no zone), as seconds since 1970 in UTC.
+fn dos_seconds(t: zip::DateTime) -> Option<i64> {
+    let civil = jiff::civil::DateTime::new(t.year() as i16, t.month() as i8, t.day() as i8, t.hour() as i8, t.minute() as i8, t.second() as i8, 0).ok()?;
+    civil.to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_second())
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A temporary folder, removed with it.
+    pub struct Temp(pub PathBuf);
+    impl Temp {
+        pub fn new() -> Temp {
+            let dir = std::env::temp_dir().join(format!("fragment-home-test-{}-{:016x}", std::process::id(), rand::random::<u64>()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Temp(dir)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `files` (path, bytes) as a zip at `to`, stored and deflated in turn.
+    pub fn zip_of(to: &Path, files: &[(&str, &[u8])]) {
+        let mut w = zip::ZipWriter::new(File::create(to).unwrap());
+        for (n, (path, bytes)) in files.iter().enumerate() {
+            let method = if n % 2 == 0 { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+            let options = zip::write::SimpleFileOptions::default().compression_method(method).last_modified_time(zip::DateTime::from_date_and_time(2026, 3, 1 + n as u8 % 27, 12, 0, 0).unwrap());
+            w.start_file(*path, options).unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    /// A folder and the zip of it read the same: the same files, sizes and
+    /// bytes.
+    #[test]
+    fn a_folder_and_its_zip_read_the_same() {
+        let t = Temp::new();
+        let files: &[(&str, &[u8])] = &[("a/b.txt", b"hello"), ("a/c/d.bin", &[0, 1, 2, 3]), ("e.md", b"# e\n"), ("big.dat", &[7u8; 70_000])];
+        let dir = t.0.join("home");
+        for (path, bytes) in files {
+            std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(path), bytes).unwrap();
+        }
+        let zip = t.0.join("home.zip");
+        zip_of(&zip, files);
+        let (d, z) = (Source::open(&dir).unwrap(), Source::open(&zip).unwrap());
+        assert_eq!((d.kind(), z.kind()), ("folder", "zip"));
+        let paths = |s: &Source| s.entries().iter().map(|e| (e.path.clone(), e.size)).collect::<Vec<_>>();
+        assert_eq!(paths(&d), paths(&z));
+        assert_eq!(paths(&d), vec![("a/b.txt".into(), 5), ("a/c/d.bin".into(), 4), ("big.dat".into(), 70_000), ("e.md".into(), 4)]);
+        for (path, bytes) in files {
+            assert_eq!(d.read(path).unwrap(), *bytes);
+            assert_eq!(z.read(path).unwrap(), *bytes, "{path} out of the zip");
+        }
+        assert_eq!(z.text("a/c/d.bin").unwrap(), None, "bytes with a NUL are not text");
+        assert_eq!(z.under("a").map(|e| e.path.as_str()).collect::<Vec<_>>(), ["a/b.txt", "a/c/d.bin"]);
+        assert!(z.has_folder("a/c") && !z.has_folder("a/b"));
+        assert!(z.get("a").is_none(), "a folder is not a file");
+        assert_eq!(z.get("e.md").unwrap().mtime, Some(1772539200), "a zip's time read as UTC (2026-03-03 12:00, its third file's)");
+    }
+
+    /// A zip that names a file outside itself is not read at all; a link in
+    /// a folder is not followed; something that is neither is refused.
+    #[test]
+    fn what_leaves_the_root_is_refused() {
+        let t = Temp::new();
+        let zip = t.0.join("bad.zip");
+        zip_of(&zip, &[("ok.txt", b"ok"), ("../escape.txt", b"no")]);
+        let e = Source::open(&zip).err().expect("refused");
+        assert!(format!("{e:#}").contains("names files outside itself (\"../escape.txt\")"), "{e:#}");
+        let dir = t.0.join("home");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(t.0.join("outside.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(t.0.join("outside.txt"), dir.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&t.0, dir.join("up")).unwrap();
+        std::fs::write(dir.join("in.txt"), "in").unwrap();
+        let d = Source::open(&dir).unwrap();
+        assert_eq!(d.entries().iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["in.txt"], "links are left");
+        std::fs::write(t.0.join("plain.txt"), "not a zip").unwrap();
+        let e = Source::open(&t.0.join("plain.txt")).err().expect("refused");
+        assert!(format!("{e:#}").contains("is no folder and no zip"), "{e:#}");
+        assert!(Source::open(&t.0.join("missing")).is_err());
+    }
+}
