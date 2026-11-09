@@ -122,14 +122,25 @@ impl FragmentCell {
     /// An agent member gets none. Runs in the index change's turn.
     pub(crate) fn search_follows(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
         match role {
-            Some(_) => self.exec(
-                "INSERT INTO search_outbox (principal, sent, attempts, next_at)
-                 SELECT principal, 0, 0, ? FROM members WHERE principal = ? AND (kind IS NULL OR kind != 'agent')
-                 ON CONFLICT (principal) DO NOTHING",
-                vec![SqlStorageValue::Integer(js::now_ms()), principal.into()],
-            ),
+            Some(_) => self.search_follow_rows("principal = ?", vec![principal.into()]),
             None => self.exec("DELETE FROM search_outbox WHERE principal = ?", vec![principal.into()]),
         }
+    }
+
+    /// Each person among the members `who` (a condition on `members`)
+    /// picks gets a cursor, as `search_follows` makes one: one statement,
+    /// one pass over the members, however many.
+    pub(crate) fn search_follow_rows(&self, who: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
+        let mut all = vec![SqlStorageValue::Integer(js::now_ms())];
+        all.extend(binds);
+        self.exec(
+            &format!(
+                "INSERT INTO search_outbox (principal, sent, attempts, next_at)
+                 SELECT principal, 0, 0, ? FROM members WHERE ({who}) AND (kind IS NULL OR kind != 'agent')
+                 ON CONFLICT (principal) DO NOTHING"
+            ),
+            all,
+        )
     }
 
     /// When a cursor is next due (for the alarm): the MIN of an index.
