@@ -54,6 +54,9 @@ NUL and the cut turn's id; it has the cut turn's `cause` and asker, and
 a `turn.notice` (part `continued`) as it starts (docs/bridge.md, "A cut
 turn is continued once").
 
+A reader ignores a `work` kind it does not know: it starts, ends or moves
+no turn, and answers no question. Later bridges add kinds.
+
 One turn of an agent runs in a chat at a time; the rest wait in order, at
 most 16. A turn's records are its `turn.start` on `work` (its claim), any
 number of steps, replies, cards and their closings, `turn.asked` and
@@ -242,8 +245,9 @@ messages and replies alone, by their `text` (docs/api.md, Search).
 
 ## `work`
 
-The agent posts each record with the id `wk:<turn>:<part>`, so a step
-posted again is the same record.
+The agent posts each record of a turn with the id `wk:<turn>:<part>`, so
+a step posted again is the same record. A chat's helpers set
+(`turn.helpers`) is no turn's.
 
 **`turn.start`**, part `start`:
 
@@ -353,8 +357,9 @@ The turn asks `asks` (its asker) something to answer in words, reply
 `<part>` being the question, and waits, running, for their next message
 to the agent. It is posted once per question. Nothing records the answer:
 a page takes the turn as waiting until `asks` posts a message on `chat`
-at or after the record's `at`, or a later record of the turn's on `work`
-says it went on.
+at or after the record's `at`, or a later step, call or end of the turn's
+on `work` says it went on. Any other record (a notice, a card's closing,
+a kind the page does not know) leaves it waiting.
 
 **`turn.notice`**, part `n<k>`, from 1:
 
@@ -369,6 +374,50 @@ A notice from the runtime, neither a step nor a reply. `category` is
 notice the runtime sends after the turn's end still belongs to that turn,
 and is posted after its `turn.end`. If the agent has run no turn in that
 chat in this life, the notice is not posted. A notice is never pushed.
+
+**`turn.helpers`**, id `hs:<life>:<n>`: the helpers (children the agent's
+runtime delegated work to) the agent has working in this chat, all of
+them, as its computer's bridge holds them now.
+
+```json
+{ "kind": "turn.helpers", "until": 1790000900000,
+  "helpers": [{ "child": "<child>", "parent": "…", "since": 1790000000000,
+                "goal": "Find three venues near Lisbon for a team offsite" }] }
+```
+
+The bridge posts the whole set each time a helper starts or ends, and
+again 5 minutes before `until` while it names any. A restart of the
+computer's bridge posts an empty set to each chat its helpers ran in,
+since they died with the process. `<life>` is the bridge process's
+(`turn.start`'s), and `n` numbers its sets from 1. A helper
+outlives the turn that started it. Helpers the agent grouped (Hermes'
+task `group`) end together, when their group reports.
+
+- `until` (ms): the set holds until then, 15 minutes after it was posted.
+  A set that lapsed says nothing, so a computer that crashed and sleeps
+  shows no helpers 15 minutes after its last set.
+- `child`: the first 24 hex digits of SHA-256 of the runtime's id for the
+  helper (Hermes' child session id).
+- `parent`: the turn that started it. The record names no `turn`: a
+  reader from before `turn.helpers` passes over a `work` record without
+  one, so no page or app already out there takes it for a turn going on.
+- `since` (ms): when the bridge saw it start.
+- `goal`: its task, one line of at most 140 characters. It is the chat's
+  content, read by whoever reads the turn's steps: its whitespace made
+  single spaces and cut, never scrubbed.
+
+A set names at most 32 helpers; a computer's bridge keeps at most 1,024,
+and our image's plugin records at most 256 running or waiting to say their
+end. A helper past a bound holds the computer and is named nowhere. Only
+our Hermes image's helpers are recorded; older bridges post none.
+
+**A reader** asks for each poster's newest set as a chat opens (`work`
+keeps it: docs/api.md, Newest records), then takes each set `work`
+brings live, the newest of each poster winning. It shows a poster's
+newest set while `until` is ahead of its clock, and a set is its
+poster's, whatever a body names. A page shows the helpers in a bar above
+the composer, with how long each has run (`since`); a helper's result
+comes back as a reply of the agent's own.
 
 **`turn.end`**, part `end`:
 
@@ -427,6 +476,9 @@ above, it relies on:
 - **The window it reads**: the last `CHAT_LAST` records of `chat` and,
   for a viewer, the last `WORK_LAST` of `work` (the reason a menu is
   posted again each life).
+- **The helpers working** (`turn.helpers`): each agent's newest set,
+  read once as it opens (`fragment.newest("work")`, past any window), then
+  each set `work` brings live; shown while its `until` is ahead.
 - **The launcher's chat**: `?sent=1` shows no new chat's start, only the
   message just sent and its waiting line.
 - **The first run**: `?setup=1` shows the making as the shell reports
