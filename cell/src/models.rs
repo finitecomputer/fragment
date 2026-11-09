@@ -85,8 +85,6 @@
 //! as `route`, charged at the input tokens it counted; no fallback (a
 //! decision's answer is its model's).
 
-use std::pin::Pin;
-
 use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
@@ -248,6 +246,24 @@ async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InF
     })
 }
 
+/// The bytes `body` encodes to, counted as it is written, not kept: a body
+/// `route` read within the cap may write longer (`1e-5` is `0.00001`).
+fn encoded_len(body: &Value) -> usize {
+    struct Counted(usize);
+    impl std::io::Write for Counted {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Counted(0);
+    serde_json::to_writer(&mut n, body).expect("a JSON value writes");
+    n.0
+}
+
 /// A refusal of the model's, passed on as it came: the call used nothing,
 /// and is charged nothing.
 fn passed(status: u16, text: String) -> CellResult<Response> {
@@ -262,7 +278,7 @@ fn passed(status: u16, text: String) -> CellResult<Response> {
 /// end).
 pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) -> CellResult<Response> {
     let cfg = Config::from_env(env);
-    let body_bytes = serde_json::to_vec(&call.body).expect("a JSON value serializes").len();
+    let body_bytes = encoded_len(&call.body);
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
@@ -305,47 +321,74 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         charge.later(after, None, log_id);
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's stream had no body"));
     };
-    // one branch for the client, one read to its end for the meter: a
-    // client that goes away mid-answer does not leave the call uncharged.
-    // The call is charged at its `[DONE]`, where its usage is whole: a
-    // gateway has held a stream open ~150 s past it, and a charge at the
-    // stream's end came that late, or was cut with the Worker's waitUntil.
-    // Both branches are read on to the end, as before: a branch dropped at
-    // `[DONE]` changed nothing for the client in the e2e's held stream, and
-    // how a tee's branches part is the runtime's.
-    let (client, meter) = js::tee(source)?;
+    // One reader, read to its end: each chunk is read once, the client sent
+    // its lines in OpenAI's shape (`Stream`) as they come, and the call
+    // metered from the same lines, so a client that goes away mid-answer
+    // does not leave the call uncharged. The call is charged at its
+    // `[DONE]`, where its usage is whole: a gateway has held a stream open
+    // ~150 s past it, and a charge at the stream's end came that late, or
+    // was cut with the Worker's waitUntil. The stream is read on to its
+    // end after `[DONE]` while the charge is made, as it always was, and
+    // the client's answer ends with it, never waiting on the charge.
+    let source = source.clone();
+    let (to_client, client) = futures_channel::mpsc::unbounded::<Result<Vec<u8>>>();
     after.later(Box::pin(async move {
         let mut stream = Stream::default().on(api);
-        let mut bytes = ByteStream::from(meter);
-        let mut broke = false;
-        let mut charge = Some(charge);
-        // bounded by the model's answer: at most the tier's max_tokens, then
-        // the stream's end (nothing after `[DONE]` is read into it)
-        while let Some(chunk) = bytes.next().await {
+        let mut bytes = ByteStream::from(source);
+        let (mut broke, mut ended) = (false, false);
+        let mut charge = charge;
+        // a client gone away is sent nothing more, and the call read on
+        let send = |out: Vec<u8>| {
+            if !out.is_empty() {
+                let _ = to_client.unbounded_send(Ok(out));
+            }
+        };
+        // bounded by the model's answer: at most the tier's max_tokens,
+        // then its `[DONE]` or the stream's end
+        while !stream.done() {
+            let Some(chunk) = bytes.next().await else {
+                ended = true;
+                break;
+            };
             match chunk {
-                Ok(c) => stream.push(&c, None),
-                Err(_) => {
+                Ok(c) => {
+                    let mut out = Vec::new();
+                    stream.push(&c, Some(&mut out));
+                    send(out);
+                }
+                Err(e) => {
+                    let _ = to_client.unbounded_send(Err(e));
                     broke = true;
                     break;
                 }
             }
-            if let Some(c) = charge.as_mut().filter(|c| c.first_ms.is_none() && stream.began()) {
-                c.first_ms = Some(js::now_ms() - c.t0);
+            if charge.first_ms.is_none() && stream.began() {
+                charge.first_ms = Some(js::now_ms() - charge.t0);
             }
-            if stream.done() {
-                if let Some(c) = charge.take() {
-                    c.charge(stream.usage().and_then(|u| bounds::usage_of(model, u)), log_id.clone()).await;
+        }
+        if !broke && !stream.done() {
+            let mut out = Vec::new();
+            stream.finish(Some(&mut out));
+            send(out);
+        }
+        let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
+        // bounded by the stream's end: nothing after `[DONE]` is the answer's
+        let read_on = async {
+            while stream.done() && !ended {
+                match bytes.next().await {
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        let _ = to_client.unbounded_send(Err(e));
+                        break;
+                    }
+                    None => break,
                 }
             }
-        }
-        if let Some(c) = charge {
-            stream.finish(None);
-            let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
-            c.charge(usage, log_id).await;
-        }
+            drop(to_client);
+        };
+        futures_util::future::join(charge.charge(usage, log_id), read_on).await;
     }));
-    let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default().on(api), done: false };
-    let mut resp = Response::from_stream(normalized)?;
+    let mut resp = Response::from_stream(client)?;
     resp.headers_mut().set("content-type", "text/event-stream")?;
     resp.headers_mut().set("cache-control", "no-cache")?;
     Ok(resp)
@@ -450,49 +493,6 @@ pub(crate) async fn run_form(env: &Env, model: &str, fields: &Value, payer: &str
     Ok((status, bytes, neurons))
 }
 
-/// The client's branch of a streamed answer, in OpenAI's shape
-/// (`fragment_core::models::Stream`).
-struct Normalized {
-    source: Pin<Box<ByteStream>>,
-    stream: Stream,
-    done: bool,
-}
-
-impl futures_util::Stream for Normalized {
-    type Item = Result<Vec<u8>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
-        use std::task::Poll;
-        let this = &mut *self;
-        // bounded by the source: each pass takes one chunk of it, and a
-        // chunk that completes no line yields nothing and asks again
-        loop {
-            if this.done {
-                return Poll::Ready(None);
-            }
-            match futures_util::ready!(this.source.as_mut().poll_next(cx)) {
-                Some(Ok(chunk)) => {
-                    let mut out = Vec::new();
-                    this.stream.push(&chunk, Some(&mut out));
-                    if !out.is_empty() {
-                        return Poll::Ready(Some(Ok(out)));
-                    }
-                }
-                Some(Err(e)) => {
-                    this.done = true;
-                    return Poll::Ready(Some(Err(e)));
-                }
-                None => {
-                    this.done = true;
-                    let mut out = Vec::new();
-                    this.stream.finish(Some(&mut out));
-                    return Poll::Ready((!out.is_empty()).then_some(Ok(out)));
-                }
-            }
-        }
-    }
-}
-
 /// The AI Gateway's metadata for a call: opaque ids only.
 struct Metadata {
     user_id: String,
@@ -514,18 +514,18 @@ async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, met
 /// nothing of the client's or of the payer's. A key the deployment does
 /// not bind is a model not reached (its call falls back), said in the log
 /// without it.
-async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
+async fn openai(env: &Env, slot: &str, base_url: &str, path: &str, body: &str) -> CellResult<Response> {
     let key = crate::keys::model_key(env, slot).await?;
     keyed(&key, base_url, path, body).await
 }
 
 /// `openai`, its key read already.
-async fn keyed(key: &str, base_url: &str, path: &str, body: &Value) -> CellResult<Response> {
+async fn keyed(key: &str, base_url: &str, path: &str, body: &str) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(h).with_body(Some(body.to_string().into()));
+    init.with_method(Method::Post).with_headers(h).with_body(Some(body.into()));
     let req = Request::new_with_init(&format!("{base_url}{path}"), &init)?;
     Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
 }
@@ -771,7 +771,7 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
             let key = crate::keys::model_key(env, embed::EMBEDDINGS).await?;
             took("key", t0);
             t0 = js::now_ms();
-            keyed(&key, base_url, "/embeddings", &request).await
+            keyed(&key, base_url, "/embeddings", &request.to_string()).await
         }
     };
     drop(request);

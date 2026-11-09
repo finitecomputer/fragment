@@ -56,7 +56,7 @@ use serde_json::{json, Value};
 use super::ai_tools;
 use super::app::ship;
 use super::jobs::{settle, started};
-use super::ledger::{charged, entries, logged, quiet, usage};
+use super::ledger::{charged, entries, ids_masked, logged, quiet, usage};
 use crate::api::{Api, Call};
 use crate::{Suite, FINITE_PRIVATE_KEY, TINFOIL_KEY};
 
@@ -90,6 +90,26 @@ fn cached(model: &str, input: u64, cached_input: u64, output: u64) -> Usage {
 fn chat(model: &str, stream: bool) -> Value {
     json!({ "model": model, "stream": stream, "messages": [{ "role": "user", "content": "hello" }] })
 }
+
+/// The agent's bytes of OpenRouter's streamed tool call (prompt 45,
+/// completion 13), ids masked: its accounting frame, without its usage,
+/// then OpenAI's last chunk.
+const STREAMED_OPENROUTER: &str = "\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"z-ai/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"echo routed\\\"}\",\"name\":\"terminal\"},\"id\":\"call_#\",\"index\":0,\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"z-ai/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"z-ai/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"tool_calls\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"z-ai/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"id\":\"fake#\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":13,\"cost\":0.0,\"prompt_tokens\":45,\"prompt_tokens_details\":{\"cache_write_tokens\":0,\"cached_tokens\":0},\"total_tokens\":58}}\n\n\
+    data: [DONE]\n\n";
+
+/// The agent's bytes of Finite Private's streamed tool call (prompt 40,
+/// completion 12), ids masked.
+const STREAMED_PRIVATE: &str = "\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"glm-5-3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"echo private\\\"}\",\"name\":\"terminal\"},\"id\":\"call_#\",\"index\":0,\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"glm-5-3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"glm-5-3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"glm-5-3-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":12,\"prompt_tokens\":40,\"prompt_tokens_details\":null,\"total_tokens\":52}}\n\n\
+    data: [DONE]\n\n";
 
 /// A streamed answer's data lines, `[DONE]` left out.
 fn lines(text: &str) -> Vec<Value> {
@@ -519,6 +539,7 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && called.as_deref() == Some("terminal") && shaped && tried(s, calls) == routed(1) && call.as_ref().is_some_and(|c| c.body["provider"] == routing["provider"] && c.body["tools"] == tools && c.body["stream"] == true) && settled,
         json!({ "status": r.status, "called": called, "last": last, "entries": aig(), "charge": priced }),
     );
+    s.ok("its bytes are the ones pinned", ids_masked(&r.text) == STREAMED_OPENROUTER, ids_masked(&r.text));
 
     // streamed, calling a tool
     s.ai.transcripts(true);
@@ -539,6 +560,7 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && called.as_deref() == Some("terminal") && shaped && tried(s, calls) == private(1) && settled,
         json!({ "status": r.status, "called": called, "last": last, "entries": aig().len() - before }),
     );
+    s.ok("its bytes are the ones pinned", ids_masked(&r.text) == STREAMED_PRIVATE, ids_masked(&r.text));
 
     // ---- failed before answering: Standard's once more on Workers AI, without OpenRouter's routing
     let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));

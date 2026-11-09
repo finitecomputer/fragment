@@ -104,6 +104,10 @@ pub mod limits {
     /// minute, for good (FIN-415: about 150 MB a channel at a chat's
     /// typical 1.5 KB a record).
     pub const POSTED_KEPT: i64 = 100_000;
+    /// Records one call of the `records` test lever fills (cell
+    /// channels.rs `fill_records`): an e2e fixture's thousands in a few
+    /// calls, each within a request's body.
+    pub const RECORDS_FILL_MAX: usize = 1_000;
     /// Bytes of record bodies such a channel keeps, whichever bound comes
     /// first: a safety bound, not the policy (that is `POSTED_KEPT`).
     /// `POSTED_KEPT` records of `RECORD_BODY_MAX_BYTES` would be 6.1 GiB a
