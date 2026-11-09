@@ -67,6 +67,15 @@ an image may rely on this:
   stopped before it was ready) is tried again after a growing pause. It
   is one strike however its failure is heard: a start that fails
   destroys its container, and that container's end is not a crash too.
+  The lifecycle keeps that it is destroying (`Phase::Starting`'s
+  `destroying`, stored before the destroy), so an isolate that comes up
+  after it knows it as well; one that finds the start's own report gone
+  with the isolate before it destroys that container (whatever runs: its
+  host owns no start yet; an event coming meanwhile waits for it) and
+  counts the start failed, once, or, the
+  container still running, tells nothing and tries again at the next
+  event, an alarm it keeps a minute on at the latest (on its last strike
+  nothing else may come).
 - **A start's deadline is fixed** (`START_DEADLINE_MS`, its restore's
   share `RESTORE_MS`), never one that follows a restore's progress: a
   restore moves about 40 MB/s (5.7 GB to ready in 147 s on production,
@@ -201,6 +210,14 @@ DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
   done on the lost life after that save (Paul, 2026-10-23).
 - `update`: it is awake, with no keepalive open, on another version than
   its next start runs, until its owner puts that version off.
+- `key_paused`: a shared key's charges this last hour reached its owner's
+  cap on it (`fragment_core::key_hour`; FIN-448), so the swap refuses its
+  calls (429 `rate_limited`, reason `key_paused`, with `retry_after_ms`)
+  until `resumesAt`, when the shell draws again. Worked out on read from
+  the computer's `key_hour`, and told as a charge reaches the cap. Its
+  button lifts the cap a step (`allowMicros`, `key_hour::next_lift`),
+  worked out by the computer from the cap it holds, so a stale page
+  changes nothing; at the most it says so.
 
 The platform posts none of them in a chat: a chat's records are its
 people's and agents' (docs/chat-records.md). The shell shows them over
@@ -251,10 +268,8 @@ preview proved, promoted by Paul.
   name goes.
 - **Preview follows master.** Each green master push deploys, as
   `hermes`, the image its checkout's inputs make, reused by its input key
-  when it was built before (`xtask/src/image/preview.rs`). The merge
-  queue builds it first (`preview-image.yml`, under queue tags, never
-  deploying and never a required check); master's job alone writes an
-  input tag.
+  when it was built before (`xtask/src/image/preview.rs`), else built
+  beside the push's e2e by master's job, the only writer of an input tag.
 - **What changes a version.** Only the image's inputs (Paul, 2026-10-14:
   a change to the cell or the shell needs no image rollout); a host test
   holds that list to the Dockerfile.
@@ -283,7 +298,7 @@ preview proved, promoted by Paul.
    logs and spend.
 3. Run the hosted lanes on preview, then `--sweep`: `cargo xtask e2e
    --hosted --config <preview config> --branch preview --only
-   computers,agent-restart,agent-smoke,agent-ask,bot-mode
+   computers,agent-restart,agent-smoke,agent-ask
    --max-paid-calls 190`.
 4. Prove the upgrade from production's image: name production's digest
    in the preview config as an image of its own (`production`, in the

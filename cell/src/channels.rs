@@ -623,6 +623,42 @@ impl FragmentCell {
         Ok((record, appended))
     }
 
+    /// Posts filled in as `principal`, a member, made them (`records`, a
+    /// test lever: on fleets with test hooks only), at most
+    /// `limits::RECORDS_FILL_MAX` a call: each appended under its post's key and
+    /// published as a post is (`post`), without the poster's checks. A
+    /// lane's fixture of thousands of records would otherwise take one call
+    /// a record (FIN-452: 11,100 took about two minutes). An id filled
+    /// before is refused, as no fixture posts one twice. Answers the newest
+    /// record's seq.
+    pub(crate) async fn fill_records(&self, channel: &str, principal: &str, posts: &[Value]) -> CellResult<Option<i64>> {
+        if posts.len() > limits::RECORDS_FILL_MAX {
+            return Err(CellError::invalid(format!("records: at most {} a call", limits::RECORDS_FILL_MAX)));
+        }
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        if decl.post.is_none() {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts")));
+        }
+        if self.rows("SELECT 1 AS x FROM members WHERE principal = ?", vec![principal.into()])?.is_empty() {
+            return Err(CellError::invalid(format!("{principal} is no member of this fragment")));
+        }
+        let mut newest = None;
+        for post in posts {
+            let id = post["id"].as_str().filter(|id| valid_op_id(id)).ok_or_else(|| CellError::invalid("each record has an id matching ^[A-Za-z0-9._:-]{1,128}$"))?;
+            let body = &post["body"];
+            let size = body.to_string().len();
+            if size > limits::RECORD_BODY_MAX_BYTES {
+                return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
+            }
+            let record = self
+                .append(channel, principal, POST_KIND, body, Some((&post_key(principal, id), POST_INDEX)))?
+                .ok_or_else(|| CellError::invalid(format!("post {id} was filled before")))?;
+            self.published(&record, true, POST_TRIGGERS_DEPTH, &mut js::Laps::start()).await?;
+            newest = Some(record.seq);
+        }
+        Ok(newest)
+    }
+
     /// The record an earlier post under `key` appended, when it is this
     /// post again: the same channel and the same body. Anything else is
     /// the poster reusing an id (409), as a call with another input is.

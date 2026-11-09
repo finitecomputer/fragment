@@ -979,6 +979,37 @@ async fn a_crash_mid_tool_is_told_never_rerun() {
     s.done();
 }
 
+/// Goal: a reply's words reach its chat as the draft growing, newest
+/// text at most 4 times a second, the words before a pause among them
+/// while it lasts; then the reply, and a Write's call and step show its
+/// path alone. Script: 40 words, 20 ms apart, a 700 ms pause after the
+/// 30th; then the reply, a Write of a 10 KB file, and the last words.
+#[tokio::test]
+async fn a_replys_words_stream_as_its_draft_and_a_write_shows_its_path() {
+    let s = Scenario::composed("drafts", 5_000, Duration::from_secs(5)).await;
+    let bridge = s.start();
+    s.following().await;
+    let t0 = std::time::Instant::now();
+    s.say(json!({ "text": "Write the notes" }));
+    s.ended(1, "the turn's end").await;
+    let took = t0.elapsed();
+    let words: Vec<String> = (0..40).map(|i| format!("word{i} ")).collect();
+    let (text, paused) = (words.concat(), words[..30].concat());
+    assert_eq!(s.replies(), vec![text.clone(), "Saved the notes.".to_string()]);
+    let drafts: Vec<String> = s.with(|w| w.drafts.iter().filter_map(|(_, _, _, t)| t.clone()).collect());
+    assert!(!drafts.is_empty() && drafts.windows(2).all(|d| d[1].starts_with(&d[0])) && drafts.iter().all(|d| text.starts_with(d.as_str())), "each draft the words so far: {drafts:?}");
+    assert!(drafts.contains(&paused), "the words before the pause are the draft while it lasts: {drafts:?}");
+    let most = usize::try_from(took.as_millis() / u128::from(fragment_bridge::limits::DRAFT_INTERVAL_MS)).unwrap() + 2;
+    assert!(drafts.len() <= most, "at most 4 drafts a second: {} in {took:?}", drafts.len());
+    let calls = s.with(|w| w.bodies(&s.chat, "work", "turn.call"));
+    assert_eq!(calls.iter().map(|c| (c["tool"].clone(), c["args"].clone(), c["category"].clone())).collect::<Vec<_>>(), vec![(json!("Write"), json!("/data/work/notes.md"), json!("write"))], "{calls:?}");
+    let steps = s.with(|w| w.bodies(&s.chat, "work", "turn.step"));
+    let step: Vec<Value> = steps.iter().map(|b| json!([b["tool"], b["args"], b["category"], b["ok"], b["status"], b["tool_call_id"], b["response"]])).collect();
+    assert_eq!(step, vec![json!(["Write", "/data/work/notes.md", "write", true, "completed", "toolu_01write", "msg_01drafts"])], "{steps:?}");
+    bridge.stop().await;
+    s.done();
+}
+
 /// The bridge lets a turn go (here: it went quiet past its bound) while
 /// the next message waits, then hands that one at once. Goal: the let-go
 /// turn's late output, still to come from its process, is never the next

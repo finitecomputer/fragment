@@ -688,6 +688,17 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
         let who = signer(env, &req, url, &body).await?;
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
     }
+    // a quote (FIN-448): a planned job priced with this release's book, as
+    // its payer's ledger would charge it, beside that ledger; it reads and
+    // keeps nothing
+    if let (Method::Post, ["quote"]) = (req.method(), rest) {
+        let who = signer(env, &req, url, &body).await?;
+        let ask: fragment_proto::ledger::QuoteAsk = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a quote is {{items}}, each {{key, units?, calls?}}, {{model, input?, cachedInput?, cacheWrite?, output?, calls?}} or {{usage, calls?}}: {e}")))?;
+        fragment_core::ledger::quote::check(&ask.items).map_err(|f| CellError::invalid(f.to_string()))?;
+        let ledger = ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?;
+        let (items, total_micros) = fragment_core::ledger::quote::quote(&ask.items, &cfg.book, &cfg.models, ledger.plan);
+        return json_answer(&fragment_proto::ledger::Quote { items, total_micros, left_micros: ledger.balance_micros.max(0), ledger });
+    }
     let (Method::Post, [person, command]) = (req.method(), rest) else {
         return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), url.path())));
     };

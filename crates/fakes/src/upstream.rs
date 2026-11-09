@@ -3,7 +3,8 @@
 //! with what arrived (its host, from `x-fragment-upstream-host`, its
 //! method, path, query and auth headers, and any platform header that
 //! leaked), so a test reads what the provider would have seen, and each is
-//! recorded. A vendor faked in full (`start_with`: OpenRouter's) answers
+//! recorded; with `?e2e_status=<4xx>`, at that status, as a provider
+//! refusing it. A vendor faked in full (`start_with`: OpenRouter's) answers
 //! its own host's requests, each still recorded here.
 
 use std::sync::{Arc, Mutex};
@@ -57,6 +58,11 @@ impl Upstream {
             // a redirect, for the test that the swap never follows one
             if req.path == "/redirect" {
                 return Response::bytes(302, "text/plain", b"elsewhere".to_vec()).with_header("location", "https://elsewhere.test/");
+            }
+            // a provider refusing the call (`?e2e_status=429`), for the
+            // tests of what a refused call is charged
+            if let Some(code) = req.query.get("e2e_status").and_then(|c| c.parse::<u16>().ok()).filter(|c| (400..500).contains(c)) {
+                return Response::json(code, &v);
             }
             Response::json(200, &v)
         });

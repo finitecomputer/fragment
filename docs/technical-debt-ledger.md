@@ -5,6 +5,29 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## A computer's lifecycle writes its old flags too
+
+- **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
+  phase into the phases that own it (`fragment_core::computer::Phase`:
+  `Asleep`'s `retry`, `Sleeping`'s `owner`, `restarting` and
+  `owes_start`, `Failed`'s `since_ms`). The previous release reads only
+  the old fields (`wake_after_sleep`, `retry_at_ms`, `failed_ms`,
+  `owner_sleep`, `restarting`), so every stored lifecycle still carries
+  them too, written from the phase (`Legacy`), and `Lifecycle::read` fills
+  a phase stored by that release from them. Each step asserts the two
+  agree.
+- **Risk:** none while they agree. A rollback reads the same computer;
+  only `Starting`'s `destroying` is new to it, so a rolled-back release
+  counts a failing start's own destroy as a crash again (one more strike,
+  as before #1004's note in memory, which it still has).
+- **Delete when:** writing them, once no deployment can roll back to a
+  release before this one (production runs a release after it): step two
+  stops writing them (`Legacy::of`, the per-step assertion). Reading them
+  (`Legacy::fill`) goes too once every stored lifecycle has been written
+  by this release or a later one: a computer that has not woken since
+  keeps the old fields until its next event, so that last cut waits for
+  a sweep that touches every computer, or for no computer being older.
+
 ## A chat wiped while its seed runs can keep its template's repo
 
 - **Shortcut:** a chat's create answers before its repo is made
@@ -298,8 +321,35 @@ unfinished design, not debt.
 ## An operator key is metered per call, not per what its vendor counts
 
 - **Shortcut:** the swap charges one `key` unit a call at an estimate
-  (`fragment_core::price::DEFAULT_KEYS`, sources beside it).
-- **Risk:** calls charged above or below what they cost.
+  (`fragment_core::price::DEFAULT_KEYS`, sources beside it), except a
+  part of a key's calls priced by what its request says
+  (`price::KEY_PARTS`: ElevenLabs' speech by its text's characters, at
+  the multilingual models' $0.08 per 1,000 whatever the model, so Flash
+  and Turbo's $0.04 calls are charged twice their list; fal's
+  synchronous Klein runs by the pixels they ask for; xAI's X searches as
+  20 posts and a call's tokens, its synchronous images as one
+  grok-imagine-image ($0.02) a call; Google Places' photos at their own
+  list; Firecrawl's scrapes and maps by their credits; a Browser Use
+  session's start as five minutes; X's searches as ten posts).
+- **Risk:** calls charged above or below what they cost: every other
+  ElevenLabs call (sound effects, dialogue, a music plan, a voice list)
+  is charged a minute of music; a queued fal generation (Hermes'
+  `image_generate`), an edit and every other fal model are charged
+  nothing until a queued job is settled from its result's answer, once
+  per request id; a Grok chat (its tokens not read), a deferred image, a
+  video and server-side tools other than X Search are charged nothing, a
+  grok-imagine-image-2.0 image or several images a call under their
+  cost, and an X search that fetches fewer than 20 posts over it; Google
+  Places' searches and details (their tier their field mask's, which the
+  meter does not read) and autocompletes (free in a session that ends in
+  a Details call) are charged nothing; a Firecrawl search (its returned
+  results not counted), crawl, batch scrape, extract, agent or browser
+  session is charged nothing, as are a scrape's PDF pages and other
+  add-ons; a Browser Use session is charged five minutes at its start,
+  whatever it ran, and a task its session alone, not its model's tokens;
+  X's lookups (their returned resources not counted) are charged
+  nothing, and a search that returns fewer than ten posts is charged
+  ten.
 - **Delete when:** the swap reads each answer's usage and settles the
   vendor's own units against a hold of its worst case, each catalog row
   naming how, proven by a lane whose upstream fake answers usage.

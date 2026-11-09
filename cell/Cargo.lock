@@ -401,6 +401,7 @@ dependencies = [
  "fragment-nip98",
  "fragment-proto",
  "fragment-templates",
+ "futures-channel",
  "futures-util",
  "hex",
  "serde",

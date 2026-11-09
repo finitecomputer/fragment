@@ -12,22 +12,27 @@ struct ChatView: View {
     /// stops a fling's momentum. Momentum ran on past a jump made while it
     /// lasted, so the tap only hid the button.
     @State private var jumping = false
-    /// The row the chat keeps in place as pages come in above it.
+    /// The row the chat keeps in place as pages come in above it, while it
+    /// is read back from its newest (`heldRow`).
     @State private var anchor: String?
     /// Messages heard (`ChatSession.heard`) when it last left the newest.
     @State private var heardAtLeave = 0
     let library: Library
     /// Opens a fragment of the person's (a chat, or an app at a page).
     let open: (FragmentSummary) -> Void
-    @State private var importer = false
-    @State private var photos = false
-    @State private var picked: [PhotosPickerItem] = []
-    @State private var voice = VoiceMemo()
 
     init(session: ChatSession, library: Library, open: @escaping (FragmentSummary) -> Void) {
         _session = State(initialValue: session)
         self.library = library
         self.open = open
+    }
+
+    /// The timeline's scroll position, by row: `anchor` while the chat is
+    /// read back from its newest; following it, none, and what SwiftUI says
+    /// is on top then is let go, so nothing it writes as the follow scrolls
+    /// redraws the chat.
+    private var heldRow: Binding<String?> {
+        Binding(get: { followsBottom ? nil : anchor }, set: { row in if !followsBottom { anchor = row } })
     }
 
     var body: some View {
@@ -44,7 +49,6 @@ struct ChatView: View {
                         .task(id: "\(session.oldestMessage ?? "")|\(session.paging)") { if session.read && !session.paging { session.page(.older) } }
                     ChatRows(session: session, library: library, open: open)
                     PendingRows(session: session)
-                    DraftRows(session: session, library: library)
                     WorkingLine(session: session, library: library)
                     // the end of a window paged back reached: the page after it
                     Color.clear.frame(height: 1).id("bottom")
@@ -56,8 +60,15 @@ struct ChatView: View {
                 // its backlog is laid out unseen, and shown once read, at its end
                 .opacity(session.read ? 1 : 0)
             }
-            // rows read in above keep the one shown in place
-            .scrollPosition(id: $anchor, anchor: .top)
+            // Rows read in above keep the one shown in place, while the chat
+            // is read back from its newest. Following the newest, no row is
+            // held (`heldRow`): the follow below keeps the end in view, and a
+            // row held as well fought it. In a short chat the lazy stack then
+            // guessed its height two ways in turn and each rise was followed
+            // again, all in one render, until iOS's watchdog ended the app
+            // (FIN-419); and the row, held by its top center, moved the
+            // timeline 20 points sideways.
+            .scrollPosition(id: heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("timeline")
             .defaultScrollAnchor(.bottom, for: .initialOffset)
@@ -98,7 +109,8 @@ struct ChatView: View {
             .scrollDisabled(jumping)
             // once scrolling is held off (the fling stopped), the jump lands
             .onChange(of: followsBottom) { _, following in
-                if !following { heardAtLeave = session.heard }
+                // a row held before is never scrolled back to once let go again
+                if following { anchor = nil } else { heardAtLeave = session.heard }
             }
             .onChange(of: session.detached) { _, detached in
                 if detached { followsBottom = false }
@@ -142,32 +154,34 @@ struct ChatView: View {
                 if let error = session.error {
                     Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 20).padding(.top, 8)
                 }
-                composerAccessories
-                ComposerView(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
-                    // sends go over HTTP: a reconnect never holds the composer
-                    enabled: session.read, busy: session.attaching, recording: voice.recording,
-                    attachPhotos: { photos = true }, attachFiles: { importer = true },
-                    pasteImages: { pasteboard in paste(pasteboard) },
-                    record: { Task { await recordVoice() } },
-                    send: { await session.send() }, stop: { await session.stop() }, hasAttachments: !session.attachments.isEmpty)
+                HelpersBar(helpers: session.helpers, library: library, several: session.agents.count > 1)
+                    .padding(.horizontal, 20)
+                ComposerBar(text: Binding(get: { session.composer }, set: { session.edit($0) }), working: !session.activeTurns.isEmpty,
+                    // sends go over HTTP: a reconnect never holds the composer;
+                    // a first message from Home being sent here does, so it goes first
+                    enabled: session.read && session.sendingFirst == nil, busy: session.attaching,
+                    placeholder: session.placeholder(name: { library.agent(for: $0)?.displayTitle ?? "The agent" }),
+                    attached: session.attachments.map { ($0.id, $0.name) },
+                    remove: { id in session.attachments.removeAll { $0.id == id } },
+                    // each file from its bytes here, an upload with its progress and Retry
+                    files: AnyView(ComposerAttachments(session: session)),
+                    // uploaded at once, one attaching at a time (`beginAttaching`)
+                    attach: { count, read in
+                        guard session.beginAttaching(count) else { return false }
+                        Task { await session.attach(read) }
+                        return true
+                    },
+                    room: session.fileRoom,
+                    // a memo sends itself once recorded and put (`sendMemo`)
+                    memo: { read in
+                        guard session.beginAttaching(1) else { return false }
+                        Task { await session.sendMemo(read) }
+                        return true
+                    },
+                    send: { await session.send() }, stop: { await session.stop() },
+                    steer: { recording in session.steers(recording: recording) ? { await session.steer(recording: recording) } : nil },
+                    quote: session.replyTo.map { quoted in (quoted.text, { session.replyTo = nil }) })
             }.background(FragmentStyle.background)
-        }
-        .fileImporter(isPresented: $importer, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            switch result {
-            case .success(let urls): uploadFiles(urls)
-            case .failure(let error): session.error = error.localizedDescription
-            }
-        }
-        // Photos as the system's picker gives them, its most compatible
-        // encoding: a picture the web shows goes as it is, any other as JPEG
-        .photosPicker(isPresented: $photos, selection: $picked, maxSelectionCount: max(1, ChatAttachment.countMax - session.attachments.count),
-                      matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
-        .onChange(of: picked) { _, items in
-            guard !items.isEmpty else { return }
-            picked = []
-            // busy from the choosing on, before any photo is read (an iCloud one takes a while)
-            guard session.beginAttaching(items.count) else { return }
-            Task { await session.attach { try await Self.read(items) } }
         }
         // Seen only once its newest messages are on screen: read, the window
         // the chat's own (not paged back), following its end; and again on
@@ -178,81 +192,18 @@ struct ChatView: View {
             catch { /* A later live cursor or foreground visit retries the read marker. */ }
         }
         .onDisappear { session.flushDraft() }
+        // the person's own agents: whose menus they may use, whose routines are theirs
+        .onChange(of: library.ownedIdentities, initial: true) { _, owned in session.owned = owned }
+        // and the words that @mention the agents they know, for whom a message is
+        .onChange(of: library.handles, initial: true) { _, handles in session.handles = handles }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.flushDraft() } }
         .task(id: scenePhase) {
-            guard scenePhase == .active else { voice.cancel(); return }
+            guard scenePhase == .active else { AudioPlayback.shared.pause(); return }
             await session.run()
         }
-        .onDisappear { voice.cancel() }
-    }
-
-    private var composerAccessories: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let quoted = session.replyTo {
-                HStack { Label(quoted.text, systemImage: "arrowshape.turn.up.left").font(.caption).lineLimit(2); Spacer(); Button("Cancel reply", systemImage: "xmark") { session.replyTo = nil }.labelStyle(.iconOnly) }
-            }
-            if !session.attachments.isEmpty {
-                ScrollView(.horizontal) { HStack {
-                    ForEach(session.attachments) { file in
-                        Button { session.attachments.removeAll { $0.id == file.id } } label: { Label(file.name, systemImage: "xmark.circle").font(.caption) }.buttonStyle(.bordered)
-                    }
-                } }
-            }
-            if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-            if voice.recording { Label("Recording voice memo…", systemImage: "waveform").foregroundStyle(.red).font(.caption) }
-        }.padding(.horizontal, 20)
-    }
-
-    /// Files picked, read and put as the message's attachments (the
-    /// session's one attaching at a time); its task, to wait on.
-    @discardableResult
-    private func uploadFiles(_ urls: [URL]) -> Task<Void, Never>? {
-        guard session.beginAttaching(urls.count) else { return nil }
-        return Task {
-            await session.attach {
-                try await Task.detached(priority: .userInitiated) {
-                    try urls.map { url in
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                        let limits = ChatAttachment.limits
-                        guard size > 0, size <= limits.uploadMaxBytes else { throw APIError.server(limits.sizeRefusal) }
-                        return try AttachmentInput.file(Data(contentsOf: url), name: url.lastPathComponent, type: UTType(filenameExtension: url.pathExtension))
-                    }
-                }.value
-            }
-        }
-    }
-    /// Photos picked: each read in the picker's most compatible encoding,
-    /// a picture made one the web shows (`AttachmentInput.image`), off the
-    /// main actor.
-    private nonisolated static func read(_ items: [PhotosPickerItem]) async throws -> [OutgoingFile] {
-        var files: [OutgoingFile] = []
-        for (index, item) in items.enumerated() {
-            guard let data = try await item.loadTransferable(type: Data.self) else { throw APIError.server("This item could not be read.") }
-            let type = item.supportedContentTypes.first { $0.conforms(to: .image) || $0.conforms(to: .movie) } ?? .data
-            files.append(try await Task.detached(priority: .userInitiated) {
-                type.conforms(to: .image)
-                    ? try AttachmentInput.image(data, type: type, name: "photo-\(index + 1)")
-                    : try AttachmentInput.file(data, name: "video-\(index + 1).\(type.preferredFilenameExtension ?? "mov")", type: type)
-            }.value)
-        }
-        return files
-    }
-    /// Pictures pasted: read from the pasteboard here, made off the main actor.
-    private func paste(_ pasteboard: UIPasteboard) {
-        let pictures = AttachmentInput.snapshot(pasteboard)
-        guard !pictures.isEmpty else { session.error = "This picture could not be attached."; return }
-        guard session.beginAttaching(pictures.count) else { return }
-        Task { await session.attach { await Task.detached(priority: .userInitiated) { AttachmentInput.pasted(pictures) }.value } }
-    }
-    private func recordVoice() async {
-        if voice.recording {
-            if let url = voice.stop() { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) }
-        } else {
-            guard session.attachments.count < ChatAttachment.countMax else { session.error = ChatAttachment.limits.countRefusal; return }
-            await voice.start { url in Task { await uploadFiles([url])?.value; try? FileManager.default.removeItem(at: url) } }
-        }
+        // a sound playing stops with its chat (a voice memo being recorded
+        // stops with its ComposerBar)
+        .onDisappear { AudioPlayback.shared.stop() }
     }
 }
 
@@ -272,12 +223,20 @@ private struct ChatRows: View {
     var body: some View {
         let faces = library.agentsByIdentity
         let you = session.principal
-        ForEach(session.rows) { record in
-            let links = record.isMessage ? MessageLinks.find(in: record.text, markdown: record.principal != you) : []
-            ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal], card: session.activity.cards[record.id],
-                    links: links, opens: links.compactMap(library.fragment(linkedBy:)).reduce(into: []) { kept, app in if !kept.contains(where: { $0.name == app.name }) { kept.append(app) } },
-                    api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 }, open: open)
-                .equatable()
+        ForEach(session.rows) { item in
+            switch item {
+            case .record(let record):
+                let links = record.isMessage ? MessageLinks.find(in: record.text, markdown: record.principal != you) : []
+                ChatRow(record: record, isYou: record.principal == you, agent: faces[record.principal], card: session.activity.cards[record.id],
+                        queued: session.activity.queued.contains(record.id),
+                        links: links, opens: links.compactMap(library.fragment(linkedBy:)).reduce(into: []) { kept, app in if !kept.contains(where: { $0.name == app.name }) { kept.append(app) } },
+                        api: session.api, fragment: session.fragment.name, reply: { session.replyTo = $0 }, open: open)
+                    .equatable()
+            case .draft(let key):
+                DraftRow(session: session, library: library, key: key)
+            case .hint(let hint):
+                HintRow(session: session, library: library, hint: hint)
+            }
         }
     }
 }
@@ -289,6 +248,8 @@ struct ChatRow: View, Equatable {
     let isYou: Bool
     let agent: FragmentSummary?
     var card: ToolCard? = nil
+    /// A person's message waiting for its agent's running turn (chat.js `queued`).
+    var queued = false
     /// The web addresses in its words, and the fragments of theirs among
     /// them, each with an Open of its own, as the web's chat gives one.
     var links: [URL] = []
@@ -300,31 +261,42 @@ struct ChatRow: View, Equatable {
 
     nonisolated static func == (a: ChatRow, b: ChatRow) -> Bool {
         a.record == b.record && a.isYou == b.isYou && a.agent == b.agent && a.fragment == b.fragment && a.card == b.card
-            && a.links == b.links && a.opens == b.opens
+            && a.queued == b.queued && a.links == b.links && a.opens == b.opens
     }
 
     var body: some View {
         if record.isMessage {
+            let files = attachments
             VStack(alignment: .leading, spacing: 8) {
-                MessageView(text: record.text, isYou: isYou, agent: agent)
-                    .contextMenu {
-                        Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
-                        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
-                        ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
-                        if links.count == 1, let link = links.first {
-                            Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
-                            ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
-                        } else if !links.isEmpty {
-                            Menu("Links", systemImage: "link") {
-                                ForEach(links, id: \.self) { link in
-                                    Menu(link.host() ?? link.absoluteString) {
-                                        Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
-                                        ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                // a message of files alone is its files, without an empty bubble
+                if !(isYou && files.count > 0 && record.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                    MessageView(text: record.text, isYou: isYou, agent: agent)
+                        // an agent's words have no bubble: held, they lift on
+                        // a card of the chat's own color (unseen in place),
+                        // as a person's lift on theirs (FIN-442)
+                        .padding(isYou ? 0 : 14)
+                        .background(isYou ? .clear : FragmentStyle.background, in: RoundedRectangle(cornerRadius: 20))
+                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20))
+                        .contextMenu {
+                            Button("Reply", systemImage: "arrowshape.turn.up.left") { reply(record) }
+                            Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = record.text }
+                            ShareLink(item: record.text) { Label("Share", systemImage: "square.and.arrow.up") }
+                            if links.count == 1, let link = links.first {
+                                Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
+                                ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                            } else if !links.isEmpty {
+                                Menu("Links", systemImage: "link") {
+                                    ForEach(links, id: \.self) { link in
+                                        Menu(link.host() ?? link.absoluteString) {
+                                            Button("Copy link", systemImage: "link") { UIPasteboard.general.url = link }
+                                            ShareLink(item: link) { Label("Share link", systemImage: "square.and.arrow.up.on.square") }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
+                        .padding(isYou ? 0 : -14)
+                }
                 if !opens.isEmpty {
                     HStack(spacing: 8) {
                         ForEach(opens) { app in
@@ -336,9 +308,18 @@ struct ChatRow: View, Equatable {
                         }
                     }
                 }
-                ForEach(attachments) { attachment in
-                    AttachmentView(attachment: attachment, api: api, fragment: fragment)
+                if !files.isEmpty { MessageAttachments(attachments: files, isYou: isYou, api: api, fragment: fragment) }
+                HStack(spacing: 8) {
+                    // its agent answers it after the turn it is in now
+                    if queued { Label("Queued", systemImage: "clock").font(.caption2).foregroundStyle(.secondary).accessibilityIdentifier("queued") }
+                    Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
                 }
+            }
+        } else if let command = record.command {
+            // a command, as it was typed: its name, then its words (chat.js `userMessage`)
+            VStack(alignment: .leading, spacing: 8) {
+                CommandView(command: command, args: record.body["args"].string ?? "", isYou: isYou)
+                    .frame(maxWidth: .infinity, alignment: isYou ? .trailing : .leading)
                 Text(Date(timeIntervalSince1970: Double(record.at) / 1000), style: .time).font(.caption2).foregroundStyle(.tertiary)
             }
         } else if let card {
@@ -361,9 +342,20 @@ struct ChatRow: View, Equatable {
 private struct PendingRows: View {
     let session: ChatSession
     var body: some View {
+        if let first = session.sendingFirst, session.pending.isEmpty {
+            VStack(alignment: .trailing, spacing: 6) {
+                MessageView(text: first, isYou: true)
+                Text("Sending…").font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .trailing)
+        }
         ForEach(session.pending) { pending in
             VStack(alignment: .trailing, spacing: 6) {
-                MessageView(text: pending.text, isYou: true)
+                if let command = pending.command { CommandView(command: command, args: pending.text, isYou: true) }
+                else if !pending.text.isEmpty || pending.attachments.isEmpty { MessageView(text: pending.text, isYou: true) }
+                // its files from their bytes on this iPhone, as they will show once sent
+                if !pending.attachments.isEmpty {
+                    MessageAttachments(attachments: pending.attachments, isYou: true, api: session.api, fragment: session.fragment.name)
+                }
                 if let refused = pending.refused {
                     Button("Not sent: \(refused) Tap to edit", systemImage: "pencil") {
                         session.reopen(pending)
@@ -378,26 +370,55 @@ private struct PendingRows: View {
     }
 }
 
-private struct DraftRows: View {
+/// A reply being written, in its place (after its turn's latest record):
+/// only it observes the draft's words, so they redraw it alone.
+private struct DraftRow: View {
     let session: ChatSession
     let library: Library
+    let key: TurnKey
     var body: some View {
-        // a reply being written is at the chat's end, which a window paged back does not show
-        if !session.detached {
-            ForEach(session.drafts) { draft in
-                MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
-            }
+        if let draft = session.drafts.first(where: { $0.turn == key.id && $0.principal == key.agent }) {
+            MessageView(text: draft.text, isYou: false, agent: library.agent(for: draft.principal), streaming: true)
+                // A tap as words arrive, paced by the bridge's draft interval;
+                // a draft read already written, or cut back, stays quiet.
+                .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.4), trigger: draft.text.utf8.count) { old, new in new > old }
         }
     }
 }
 
-/// What a running turn shows before its reply's words come.
+/// A running turn's working line (or its question's), in its place.
+private struct HintRow: View {
+    let session: ChatSession
+    let library: Library
+    let hint: WorkingHint
+    var body: some View {
+        WorkingIndicator(hints: [hint], library: library, principal: session.principal,
+                         phase: library.computerPhase, present: Set(session.presence.values))
+    }
+}
+
+/// A post awaiting its agent's claim, at the chat's end.
 private struct WorkingLine: View {
     let session: ChatSession
     let library: Library
     var body: some View {
         WorkingIndicator(hints: session.workingHints, library: library, principal: session.principal,
                          phase: library.computerPhase, present: Set(session.presence.values))
+    }
+}
+
+/// A person's command for an agent's runtime, as typed: `/name words`.
+struct CommandView: View {
+    let command: String
+    let args: String
+    let isYou: Bool
+    var body: some View {
+        Text("\(Text("/\(command)").font(.body.monospaced()).foregroundStyle(.secondary))\(args.isEmpty ? "" : " " + args)")
+            .lineSpacing(5).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            .padding(14)
+            .background(FragmentStyle.bubble, in: RoundedRectangle(cornerRadius: 20))
+            .padding(.leading, isYou ? 44 : 0)
+            .accessibilityIdentifier("command")
     }
 }
 
@@ -408,6 +429,7 @@ private struct ChatEmptyState: View {
     let session: ChatSession
     var body: some View {
         let empty = session.rows.isEmpty && session.pending.isEmpty && session.drafts.isEmpty && session.activeTurns.isEmpty
+            && session.sendingFirst == nil && !session.attaching
         Group {
             if !session.read { ChatLoadingView() }
             else if empty {

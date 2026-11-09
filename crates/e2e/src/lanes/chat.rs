@@ -569,7 +569,8 @@ pub fn chat_history(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("Chrome is installed for the chat-history section (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    polish::history_overlaps(s, api, &owner, &session, &mut chrome)
+    polish::history_overlaps(s, api, &owner, &session, &mut chrome)?;
+    polish::history_cursor(s, api, &owner, &session, &mut chrome)
 }
 
 pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
@@ -719,6 +720,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         &page,
         "(() => { window.__drafts = []; new MutationObserver(() => { for (const d of document.querySelectorAll('.msg.agent.streaming .md')) { const t = d.textContent; if (t && window.__drafts[window.__drafts.length - 1] !== t) window.__drafts.push(t); } }).observe(document.getElementById('messages'), { childList: true, subtree: true, characterData: true }); return true; })()",
     )?;
+    // and, for each draft frame that changed a shown draft's text, what it
+    // wrote anywhere else on the page (Untangle M4, FIN-453: a draft's next
+    // text is drawn in its own node alone)
+    chrome.eval(
+        &page,
+        "(() => { window.__draftWrites = []; new MutationObserver((records) => { const d = document.querySelector('.msg.agent.streaming'); if (!d) return; const inside = records.filter((r) => d.contains(r.target)).length; if (inside) window.__draftWrites.push(records.length - inside); }).observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true }); return true; })()",
+    )?;
     let say = |chrome: &mut Browser, text: &str| -> Result<()> {
         chrome.click(&page, "#text")?;
         chrome.type_text(&page, text)?;
@@ -757,6 +765,11 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let reply = reply.as_str().unwrap_or("").to_string();
     let drafts = chrome.eval(&page, "window.__drafts")?;
     s.ok("the agent's draft shows live, as it writes", streamed(&drafts, &reply), json!({ "drafts": drafts, "reply": reply }));
+    // the stub's slow reply: twenty drafts, 40 ms apart, sent at most every 250 ms
+    let partials = drafts.as_array().into_iter().flatten().filter_map(Value::as_str).filter(|t| t.len() < reply.len()).count();
+    let writes = chrome.eval(&page, "window.__draftWrites")?;
+    s.ok("each draft frame shows its text, growing", partials >= 2, json!({ "drafts": drafts, "reply": reply }));
+    s.ok("and writes nothing outside the draft's own node", writes.as_array().is_some_and(|w| !w.is_empty() && w.iter().all(|n| n == 0)), &writes);
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
@@ -811,7 +824,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "[document.getElementById('messages').innerText.slice(-300), document.getElementById('text').placeholder]")?,
     );
     let _ = chrome.screenshot(&page, &shots.join("desktop-asked.png"));
-    say(&mut chrome, "Sprout")?;
+    // what they type is the answer, so no Steer is offered beside Send
+    // while it waits (its menu has `steer`: `commands_queued_and_quotes`)
+    chrome.click(&page, "#text")?;
+    chrome.type_text(&page, "Sprout")?;
+    let unsteered = chrome.eval(&page, &format!("[document.getElementById('steer').hidden, {answer_here}]"))?;
+    s.ok("words typed while it waits for their answer offer no Steer", unsteered == json!([true, true]), &unsteered);
+    chrome.press(&page, "Enter", false)?;
     let answered = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.msg.asked') && !({answer_here})", replied("(told: Sprout)")));
     s.ok("their next message is the answer: the turn goes on with it, and nothing waits", answered, chrome.eval(&page, "document.getElementById('messages').innerText.slice(-300)")?);
 
@@ -1242,6 +1261,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
     polish::work_backfill(s, api, &owner, &owner_session, &mut chrome)?;
     polish::history_recovers(s, api, &owner, &owner_session, &mut chrome)?;
+    polish::window(s, api, &owner, &owner_session, &mut chrome)?;
     polish::finished_card_times(s, api, &owner, &mut chrome)?;
     alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
     card_to_computer(s, api, &mut chrome, &owner, &chat_name, &shots)?;
@@ -1515,6 +1535,8 @@ fn claude_install(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, 
     claude_offers(s, chrome, &shell, &name, shots)?;
     claude_settings(s, api, chrome, owner, &shell, &name, shots)?;
     chrome.close(shell)?;
+    // its Telegram row and Set up (telegram_settings.rs `set_up_offered`)
+    super::telegram_settings::set_up_offered(s, api, owner, &name)?;
     Ok(())
 }
 

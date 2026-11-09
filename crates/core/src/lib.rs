@@ -37,6 +37,7 @@ pub mod glance;
 pub mod glob;
 pub mod governance;
 pub mod icon;
+pub mod key_hour;
 pub mod ledger;
 pub mod levers;
 pub mod listed;

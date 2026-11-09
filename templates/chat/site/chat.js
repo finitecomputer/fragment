@@ -59,6 +59,7 @@ import "./tooltips.js";
 import { KIND } from "./frame-messages.js";
 import { moreOf } from "./pages.js";
 import { over, refusal } from "./limits.js";
+import { noteSaid, relayedOwner as relayedOwnerOf, saidSince, speakerOf } from "./speakers.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
@@ -71,8 +72,14 @@ const DRAFT_SAVE_MS = 300;
 // messages come a page of CHAT_LAST at a time as the reader scrolls up.
 const CHAT_LAST = 100;
 const WORK_LAST = 1000;
-// How far above the reader's view an older page starts loading.
+// How far above (or below) the reader's view the next page starts loading.
 const EARLIER_MARGIN_PX = 800;
+// The messages a page holds at most, a window over the chat: past it, the
+// side away from the reader goes, read again as the reader comes back.
+const WINDOW_MAX = 600;
+// Messages come while the reader is up the chat, kept aside for when the
+// window reaches the end (each counted when it comes); the newest kept.
+const ASIDE_MAX = 1000;
 // After a message of one's own, wait for the agent's turn. Past this long
 // the line says plainly that no reply has started; a wake can be slow.
 const PENDING_MS = 90000;
@@ -406,7 +413,8 @@ export function mount(root) {
   const state = {
     me: null, // { id, principal, role } once the socket said hello
     members: [], // the fragment's members (`__members`), the first added first
-    chat: [], // messages, commands and replies, in seq order: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    chat: [], // the window's messages, commands and replies (`windowed`), in the order read: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
+    spoke: new Map(), // `principal relayed.by relayed.for` -> { m: {principal, relayed}, at }: when each said something not of a turn (`waitsOnWords`), its speaker found as members say now
     history: null, // the chat's first `history` record, as its poster wrote it: { seq, principal, body } (shown only its owner's)
     seen: new Set(), // the chat's seqs taken
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
@@ -472,7 +480,10 @@ export function mount(root) {
   // Each channel's seq keeps history ordered even when a page arrives
   // backwards and several records have the same timestamp. `done`: the
   // chat's first record is read (no older page to ask for).
-  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, workFailed: false, loading: false, done: false, failed: false, watch: false, anchor: null };
+  // `live`: the window reaches the chat's newest message (else `last` is
+  // the newest it holds, and `aside` what came past it); `gen` changes as
+  // Jump to latest starts the window again, so a page read before is let go.
+  const history = { first: { chat: null, work: null }, workAt: Infinity, workDone: false, workReady: false, workFailed: false, loading: false, done: false, failed: false, watch: false, anchor: null, live: true, last: null, aside: [], gen: 0, laterFailed: false };
   const workSeen = new Set();
   const workLatest = new Map(); // each progress field's newest seq
   function remember(channel, record) {
@@ -568,6 +579,7 @@ export function mount(root) {
   }
   async function earlier() {
     if (history.loading || history.done || history.failed || !caughtUp) return;
+    const gen = history.gen;
     history.anchor = visibleAnchor();
     history.loading = true;
     historyStatus();
@@ -575,12 +587,18 @@ export function mount(root) {
     try {
       if (history.first.chat !== null) {
         const page = await fragment.read("chat", { before: history.first.chat, limit: CHAT_LAST });
+        if (gen !== history.gen) return;
         for (const record of page.records) onChat(record, true);
+        // (the cursor goes by the page, whatever of it was seen before: a
+        // reply's card answer, a Stop, shown or not, never holds it)
+        if (page.records.length) history.first.chat = Math.min(history.first.chat, page.records[0].seq);
         history.done = !moreOf(page, CHAT_LAST);
+        windowed("older");
       } else history.done = true;
       history.loading = false;
       await readWork();
     } catch (err) {
+      if (gen !== history.gen) return;
       history.loading = false;
       history.failed = true;
       console.error("chat: earlier messages", err);
@@ -590,15 +608,114 @@ export function mount(root) {
       schedule();
     }
   }
+  // The window kept to WINDOW_MAX messages: reading `older`, its newest go
+  // (the reader is up the chat); reading newer, its oldest.
+  function windowed(reading) {
+    if (state.chat.length <= WINDOW_MAX) return;
+    state.chat.sort((a, b) => a.seq - b.seq);
+    const gone = reading === "older" ? state.chat.splice(WINDOW_MAX) : state.chat.splice(0, state.chat.length - WINDOW_MAX);
+    for (const m of gone) state.seen.delete(m.seq);
+    if (reading === "older") {
+      history.live = false;
+      history.last = state.chat.at(-1).seq;
+    } else {
+      history.done = false;
+      history.first.chat = state.chat[0].seq;
+    }
+    windowStatus();
+  }
+  function windowStatus() {
+    $("scroll").dataset.window = history.live ? "live" : "up";
+    $("later").hidden = history.live;
+  }
+  // The window reaches the chat's end: what came meanwhile joins it.
+  function reachedEnd() {
+    history.live = true;
+    history.last = null;
+    const aside = history.aside;
+    history.aside = [];
+    // (counted as each came)
+    for (const record of aside) onChat(record, true);
+    windowStatus();
+  }
+  // The page below the window, as the reader nears its bottom.
+  async function later() {
+    if (history.live || history.loading || history.laterFailed || !caughtUp) return;
+    const gen = history.gen;
+    history.loading = true;
+    schedule();
+    try {
+      const page = await fragment.read("chat", { after: history.last, limit: CHAT_LAST });
+      if (gen !== history.gen) return;
+      for (const record of page.records) onChat(record, true);
+      history.last = Math.max(history.last, page.next);
+      if (!moreOf(page, CHAT_LAST)) reachedEnd();
+      windowed("newer");
+      history.loading = false;
+    } catch (err) {
+      if (gen !== history.gen) return;
+      history.loading = false;
+      // (said where the reader is; Jump to latest reads again)
+      history.laterFailed = true;
+      console.error("chat: later messages", err);
+      problem("Couldn't load later messages. Jump to latest to try again.");
+    } finally {
+      history.watch = true;
+      schedule();
+    }
+  }
+  // Jump to latest, the window up the chat: it starts again at the newest page.
+  // Answers whether the window is at the end now (a failed read leaves it
+  // where it was, said in the banner, Jump to latest there to try again).
+  async function toLatest() {
+    const gen = ++history.gen;
+    history.loading = true;
+    history.failed = false;
+    history.laterFailed = false;
+    historyStatus();
+    try {
+      const page = await fragment.read("chat", { before: Number.MAX_SAFE_INTEGER, limit: CHAT_LAST });
+      if (gen !== history.gen) return false;
+      for (const m of state.chat) state.seen.delete(m.seq);
+      state.chat = [];
+      history.first.chat = null;
+      for (const record of page.records) onChat(record, true);
+      // (by the page, not what of it is shown: a page of answers alone, seen
+      // before, still says where older messages are)
+      history.first.chat = page.records[0]?.seq ?? null;
+      history.done = !moreOf(page, CHAT_LAST);
+      reachedEnd();
+      // (what came meanwhile joins it: the window at its bound again)
+      windowed("newer");
+      return true;
+    } catch (err) {
+      if (gen !== history.gen) return false;
+      console.error("chat: latest messages", err);
+      problem("Couldn't show the latest messages.");
+      return false;
+    } finally {
+      if (gen === history.gen) {
+        history.loading = false;
+        history.watch = true;
+        historyStatus();
+      }
+      schedule();
+    }
+  }
   const earlierSeen = new IntersectionObserver((entries) => {
     if (entries.at(-1).isIntersecting) earlier();
     $("scroll").dataset.watching = "1";
   }, { root: $("scroll"), rootMargin: `${EARLIER_MARGIN_PX}px 0px 0px 0px` });
   // (again after a draw: an observer says only what changes, and a page
   // drawn while the sentinel stays in view changes nothing)
+  const laterSeen = new IntersectionObserver((entries) => {
+    if (entries.at(-1).isIntersecting) later();
+  }, { root: $("scroll"), rootMargin: `0px 0px ${EARLIER_MARGIN_PX}px 0px` });
   function watchEarlier() {
     earlierSeen.unobserve($("earlier"));
     earlierSeen.observe($("earlier"));
+    laterSeen.unobserve($("later"));
+    laterSeen.observe($("later"));
   }
   // a keyboard's or a screen reader's way to the page above: the
   // sentinel's loader (nothing while a page is in flight)
@@ -651,8 +768,8 @@ export function mount(root) {
       }
       // unanswered, one known already stays as it was
       for (const id of batch) profiles.set(id, found ? (found[id] ?? {}) : (profiles.get(id) ?? {}));
+      schedule();
     }
-    schedule();
   }
   const inRoster = (principal) => state.roster.find((r) => r.identity === principal) ?? null;
   function isAgent(principal) {
@@ -821,13 +938,9 @@ export function mount(root) {
   const doorId = (v) => typeof v === "string" && /^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$/.test(v);
   const DOOR_NAMES = { simplex: "SimpleX", telegram: "Telegram" };
   const doorName = (v) => DOOR_NAMES[v] ?? v;
-  const relayedOwner = (m) => {
-    if (!m.relayed || !state.members.length) return null;
-    const by = state.members.find((x) => x.principal === m.relayed.by);
-    return !by || (by.kind === "agent" && by.owner === m.relayed.for) ? m.relayed.for : null;
-  };
-  const speaker = (m) => relayedOwner(m) ?? m.principal;
-  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => speaker(m) === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  const relayedOwner = (m) => relayedOwnerOf(m, state.members);
+  const speaker = (m) => speakerOf(m, state.members);
+  const waitsOnWords = (t) => running(t) && !!t.asked && !saidSince(state.spoke, state.members, t.asked.asks, t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
@@ -835,6 +948,9 @@ export function mount(root) {
   // are the computer's alone (a sign-in's code), which no message carries
   const takesWords = (p) => p.options.some((o) => o.words === true && o.computer !== true);
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
+  // an agent waiting on this person's words, or on their card that takes
+  // words: what they type is the answer
+  const answeringMe = () => [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
   // a card this page's person may answer now: theirs, neither closed nor
   // gone (expired, or its turn stopped); open past its turn's end, as a
   // card outlives its turn (docs/bridge.md)
@@ -842,6 +958,23 @@ export function mount(root) {
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
   const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+
+  // A message the window holds; one past its newest end while the reader is
+  // up the chat is kept aside (and read again as the window reaches it).
+  // At the end, the window lets its oldest go as new ones come.
+  function keep(record, historical, m) {
+    noteSaid(state.spoke, m);
+    if (!historical && !history.live && record.seq > history.last) {
+      state.seen.delete(record.seq);
+      history.aside.push(record);
+      if (history.aside.length > ASIDE_MAX) history.aside.shift();
+      return;
+    }
+    state.chat.push(m);
+    // at the end, the oldest go; the reader up the window, the newest (the
+    // window goes up: what comes is counted and read again as it reaches it)
+    if (!historical) windowed(stuck ? "newer" : "older");
+  }
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -880,7 +1013,7 @@ export function mount(root) {
     if (body.kind === "command") {
       // a person's command for an agent's runtime: shown as they typed it
       if (typeof body.command !== "string" || !COMMAND.test(body.command)) return;
-      state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
+      keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.args === "string" ? body.args : "", command: body.command, turn: null, to, attachments: [], replyTo: null, post: sentIds.get(record.seq) ?? null });
       if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
       latestSeq = Math.max(latestSeq, record.seq);
       want(record.principal);
@@ -899,7 +1032,7 @@ export function mount(root) {
     // a message an agent relays from its owner through a door (shown as theirs: `speaker`)
     const r = body.relayed;
     const relayed = !turn && r && typeof r === "object" && doorId(r.via) && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal, via: r.via } : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
+    keep(record, historical, { seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -1019,13 +1152,19 @@ export function mount(root) {
     schedule();
   }
 
+  // A draft's next text is drawn in its own node alone (`redrawDrafts`); a
+  // draft come or gone changes the timeline, drawn whole.
   function onDraft(d) {
     if (typeof d.turn !== "string" || typeof d.principal !== "string") return;
     const key = turnKey(d.principal, d.turn);
+    const had = state.drafts.has(key);
     if (typeof d.text !== "string") state.drafts.delete(key);
     else state.drafts.set(key, { principal: d.principal, turn: d.turn, text: d.text, at: Date.now() });
     want(d.principal);
-    schedule();
+    if (had && typeof d.text === "string") {
+      drafted.add(key);
+      drawNext();
+    } else schedule();
   }
 
   // A card's expiry shows without a record: the page looks again then.
@@ -1049,7 +1188,17 @@ export function mount(root) {
     const items = [];
     // the history its owner continued it from, before everything
     const h = state.history;
-    if (h && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
+    if (h && history.done && state.members.some((m) => m.principal === h.principal && m.role === "owner")) items.push({ at: -Infinity, n: 0, type: "history", h });
+    // the window's span: a turn shows when it runs (outside the window, so
+    // Stop and its working line stay), or when it meets the span
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const m of state.chat) {
+      lo = Math.min(lo, m.at);
+      hi = Math.max(hi, m.at);
+    }
+    if (history.done) lo = -Infinity;
+    if (history.live) hi = Infinity;
     // each turn's replies, by its agent: the words an older bridge kept on a
     // step that its turn also replied with show once, as the reply
     const replies = new Map();
@@ -1068,6 +1217,7 @@ export function mount(root) {
     for (const t of state.turns.values()) {
       // a turn its agent never began here (no turn.start of its own) shows nothing
       if (!started(t)) continue;
+      if (!running(t) && (t.lastAt < lo || t.startAt > hi)) continue;
       for (const s of t.steps.values()) {
         // what an older bridge recorded as a step's `text`, the agent's words
         // before the call: they are its reply, shown whole just before the
@@ -1144,14 +1294,26 @@ export function mount(root) {
     return node;
   }
 
+  // What the next frame draws: the whole timeline (`schedule`), or only the
+  // drafts whose text alone changed (`drafted`).
   let scheduled = false;
-  function schedule() {
-    if (scheduled) return;
-    scheduled = true;
+  let drawAsked = false;
+  const drafted = new Set();
+  function drawNext() {
+    if (drawAsked) return;
+    drawAsked = true;
     requestAnimationFrame(() => {
+      drawAsked = false;
+      const whole = scheduled;
+      const drafts = [...drafted];
       scheduled = false;
-      render();
+      drafted.clear();
+      if (whole || !redrawDrafts(drafts)) render();
     });
+  }
+  function schedule() {
+    scheduled = true;
+    drawNext();
   }
 
   function itemNode(it) {
@@ -1247,6 +1409,29 @@ export function mount(root) {
     }
     showLatest();
     animateSentMessages();
+  }
+
+  // Drafts whose text alone changed, each drawn in its node: a draft's place
+  // is its turn's, which its text does not move. One not shown, or made
+  // anew (its poster's name changed), another gone stale (`timeline` drops
+  // it), or earlier messages loading (their place is `render`'s): false,
+  // and the whole timeline is drawn.
+  function redrawDrafts(keys) {
+    const now = Date.now();
+    if (history.anchor || history.watch || [...state.drafts.values()].some((d) => now - d.at > DRAFT_STALE_MS)) return false;
+    const { node: anchor, top } = !stuck ? visibleAnchor() : {};
+    for (const key of keys) {
+      const d = state.drafts.get(key);
+      const shown = nodes.get(`d:${key}`)?.node;
+      if (!d || !shown?.isConnected || draftNode(key, d)[1] !== shown) return false;
+    }
+    if (stuck) toEnd();
+    else if (anchor?.isConnected) {
+      $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+      held = { node: anchor, top };
+    }
+    showLatest();
+    return true;
   }
 
   // A message sent from this page rises from the composer into the thread
@@ -1369,9 +1554,7 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      // an agent waiting on this person's words, or on their card that takes
-      // words: what they type is the answer
-      const askedMe = [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
+      const askedMe = answeringMe();
       // one waiting on a card of theirs no message answers (its buttons, or
       // a code only their computer reads): it waits for them, not works
       const waitsOnMe = [...state.turns.values()].find((t) => [...t.prompts.values()].some((p) => mayAnswer(t, p)));
@@ -2244,9 +2427,11 @@ export function mount(root) {
   // A reader who moves while an older page is in flight chooses a new
   // position. Automatic scroll events from restoring the anchor do not.
   for (const event of ["wheel", "touchmove", "keydown"]) $("scroll").addEventListener(event, () => { history.anchor = null; }, { passive: true });
+  // (written only when it changed: a draft's frame writes nothing else)
   function showLatest() {
-    $("latest").hidden = stuck;
-    $("latest").textContent = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+    const said = newMessages ? `Jump to latest · ${plural(newMessages, "new message")}` : "Jump to latest";
+    if ($("latest").hidden !== stuck) $("latest").hidden = stuck;
+    if ($("latest").textContent !== said) $("latest").textContent = said;
   }
   const toEnd = () => {
     const s = $("scroll");
@@ -2255,13 +2440,15 @@ export function mount(root) {
     newMessages = 0;
     showLatest();
   };
-  $("latest").onclick = () => {
+  $("latest").onclick = async () => {
+    if (!history.live && !(await toLatest())) return;
     stuck = true;
     toEnd();
   };
   $("scroll").addEventListener("scroll", () => {
     const s = $("scroll");
-    if (s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
+    // (the window's bottom is the chat's end only once it reaches it)
+    if (history.live && s.scrollHeight - s.scrollTop - s.clientHeight < 160) stuck = true;
     else if (s.scrollTop < lastTop) stuck = false;
     held = stuck ? null : visibleAnchor();
     lastTop = s.scrollTop;
@@ -2321,10 +2508,11 @@ export function mount(root) {
     $("stop").hidden = !stops;
     $("send").hidden = stops;
     // words typed while its agent works: Send queues them, Steer tells the
-    // running turn at once (its owner's `/steer`)
+    // running turn at once (its owner's `/steer`); while an agent waits for
+    // their answer, what they type is that answer, so no Steer
     const words = input.value.trim();
     const target = commandTarget();
-    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer");
+    const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer") && !answeringMe();
     $("steer").hidden = !steers;
     $("steer").disabled = sending;
     tellBusy();
@@ -2938,6 +3126,26 @@ export function mount(root) {
   let unsent = null; // { id, body }
   async function send(text) {
     if (sending || !canPost() || setupHolds()) return;
+    if (!text.trim() && !attachments.length) return;
+    // said away from the end (the window up the chat, or the reader up within
+    // it): the window goes to the end first, where the message shows. Its
+    // words stay in the composer until it is there, so a read that fails
+    // keeps them (and whatever was typed meanwhile, sent with them after).
+    if (!history.live || !stuck) {
+      const fromComposer = text === input.value;
+      sending = true;
+      let there = true;
+      try {
+        if (!history.live) there = await toLatest();
+      } finally {
+        sending = false;
+      }
+      if (!there) return problem("Your message was not sent: the latest messages could not be shown.");
+      stuck = true;
+      toEnd();
+      if (fromComposer) text = input.value;
+      if (!text.trim() && !attachments.length) return;
+    }
     text = cutBytes(text.trim(), TEXT_MAX_BYTES);
     const files = attachments.slice();
     if (!text && !files.length) return;
@@ -3238,8 +3446,10 @@ export function mount(root) {
     // are read again as the sentinel is next seen, or from the button; work
     // that failed is read again now (its Try again said until it is in)
     history.failed = false;
+    history.laterFailed = false;
     if (history.workFailed && history.workReady) readWork();
     historyStatus();
+    windowStatus();
     history.watch = true;
     arrive();
     schedule();

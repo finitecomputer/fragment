@@ -86,8 +86,18 @@ pub const MEDIA_TYPE: &str = "image/png";
 /// is checked after (`examine`, `check`): the prompt only makes it rarer.
 const STYLE: &str = "A clean 3D CG render of one object, like a product shot for a desktop icon: smooth satin plastic and metal, soft diffuse studio lighting, gentle ambient occlusion, crisp clean edges, slight 3/4 view, clear friendly colours. Centered, filling about 70% of the frame, isolated on a plain flat light grey background. No text, letters or numbers on it. No rounded square, no tile, no app frame, no border.";
 
-/// What the subject's question tells GLM, before the app it is asked of.
+/// What the subject's question tells GLM, before the app it is asked of,
+/// when its asker gave no hint: GLM chooses.
 pub const SUBJECT_SYSTEM: &str = "You name the one physical object that a desktop icon for an app should show. Answer with a short noun phrase only (at most 12 words): one concrete, colourful, everyday object, optionally with one small accessory touching it. Never an abstract shape, a logo, a screen, a person, or anything with writing or numbers on it. Examples: \"a red apple with a green leaf\", \"a blue mail tray holding letters\".";
+
+/// What it tells GLM when its asker gave a hint: the object they name is
+/// the subject, with what they say of it, cleaned into a noun phrase; GLM
+/// chooses one only when they name none ("make it purple"). Their words
+/// are not drawn as they are: a negation ("no bear") drawn names what it
+/// refuses, and writing is refused by `check` (`STYLE` says "No text").
+/// Asked under `SUBJECT_SYSTEM`'s rules instead, GLM swapped a computer
+/// with writing on its screen for a cassette tape (2026-11-08).
+pub const HINTED_SYSTEM: &str = "You name the one physical object that a desktop icon for an app should show, from what its maker asks for. Answer in English with a short noun phrase only (at most 15 words). When they name an object, that object is your answer: keep its kind and every detail they give of it (colour, era, material, shape, what it holds), and never swap it for another object. Leave out only what cannot be drawn: writing, letters or numbers (keep what they are on, blank), anything they say not to show, and instructions. When they name no object, only a colour or a look, choose one concrete, everyday object that suits the app and give it what they ask. Examples: \"an old green typewriter with HELLO on its page, no hands\" is \"a green vintage typewriter with a blank page\"; \"something orange\" for a weather app is \"an orange umbrella\".";
 
 /// Where the subject's question names its asker's hint, and a drawing's
 /// prompt its subject, after the style: what each is told by (the e2e's
@@ -155,7 +165,7 @@ pub fn subject_input(title: &str, description: Option<&str>, hint: Option<&str>)
         asked.push_str(h);
     }
     json!({
-        "messages": [{ "role": "system", "content": SUBJECT_SYSTEM }, { "role": "user", "content": asked }],
+        "messages": [{ "role": "system", "content": if hint.is_some() { HINTED_SYSTEM } else { SUBJECT_SYSTEM } }, { "role": "user", "content": asked }],
         "max_tokens": SUBJECT_MAX_TOKENS,
         "reasoning_effort": "low",
     })

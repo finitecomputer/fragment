@@ -47,7 +47,7 @@ struct SidebarDrawer: View {
             let width = min(350, max(1, geometry.size.width - 36))
             ZStack(alignment: .leading) {
                 if isPresented {
-                    Color.black.opacity(0.25 * max(0, 1 + dragOffset / width))
+                    Color.black.opacity(0.25 * max(0, 1 + Double(dragOffset / width)))
                         .ignoresSafeArea()
                         .onTapGesture { close() }
                         .accessibilityHidden(true)
@@ -135,12 +135,15 @@ struct SidebarView: View {
             }.padding(20)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(library.agents) { agent in
+                    ForEach(library.sidebarAgents) { agent in
                         Menu {
                             Button("New chat with \(agent.displayTitle)", systemImage: "square.and.pencil") {
                                 library.selectedAgent = agent.name; navigate(.launcher)
                             }
                             Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
+                            Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
+                                Task { await library.pin(agent, api: api) }
+                            }
                             if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
                                 Section(chat.displayTitle) { chatActions(chat) }
                             }
@@ -148,6 +151,9 @@ struct SidebarView: View {
                             HStack(spacing: 12) {
                                 AgentAvatar(agent: agent)
                                 Text(agent.displayTitle).font(.headline)
+                                if agent.pinned == true {
+                                    Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
+                                }
                                 Spacer()
                                 Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
                             }.padding(12).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
@@ -170,7 +176,7 @@ struct SidebarView: View {
             }.refreshable { await library.load(api) }
             VStack(spacing: 4) {
                 footer("History", icon: "clock", page: .history)
-                footer("Your Apps", icon: "list.bullet.rectangle", page: .apps)
+                footer("Your Apps", icon: "square.grid.2x2", page: .apps)
                 footer("Settings", icon: "gearshape", page: .settings)
             }.padding(12)
         }

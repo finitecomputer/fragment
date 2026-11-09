@@ -1,6 +1,6 @@
 //! Master's `prune` (.github/workflows/ci.yml) deletes every cache entry a
-//! pull request's or a merge group's ref holds: such a ref's cache is its
-//! own, which no other run reads, and every save is master's. These run
+//! pull request's ref holds: such a ref's cache is its own, which no other
+//! run reads, and every save is master's. These run
 //! that very step, read from ci.yml, against a fake `gh` whose listing
 //! holds every kind of ref, and hold it to deleting those refs' entries
 //! alone: never master's, production's, a tag's or another branch's.
@@ -13,15 +13,17 @@ use std::process::{Command, Output};
 use fragment_devstack as devstack;
 use serde_json::json;
 
-const STEP: &str = "- name: delete pull requests' and merge groups' caches";
+const STEP: &str = "delete pull requests' caches";
 
-/// The step's `run` script as ci.yml has it, its indentation removed.
-fn step_script() -> String {
-    let text = fs::read_to_string(devstack::repo_root().join(".github/workflows/ci.yml")).unwrap();
+/// The `run` script of the step named `step` in `job` of the workflow
+/// `workflow` (under .github/workflows), its indentation removed.
+pub(crate) fn step_script(workflow: &str, job: &str, step: &str) -> String {
+    let text = fs::read_to_string(devstack::repo_root().join(".github/workflows").join(workflow)).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    let prune = lines.iter().position(|l| *l == "  prune:").expect("ci.yml has `prune`");
-    let at = lines.iter().position(|l| l.trim() == STEP).expect("ci.yml has the step");
-    assert!(at > prune && !lines[prune + 1..at].iter().any(|l| l.starts_with("  ") && !l.starts_with("   ") && l.trim_end().ends_with(':')), "the step is prune's");
+    let header = format!("  {job}:");
+    let start = lines.iter().position(|l| *l == header).unwrap_or_else(|| panic!("{workflow} has `{job}`"));
+    let at = lines.iter().position(|l| l.trim() == format!("- name: {step}")).unwrap_or_else(|| panic!("{workflow} has the step {step}"));
+    assert!(at > start && !lines[start + 1..at].iter().any(|l| l.starts_with("  ") && !l.starts_with("   ") && l.trim_end().ends_with(':')), "the step is {job}'s");
     let run = (at..lines.len()).find(|&i| lines[i].trim() == "run: |").expect("the step runs a script");
     let indent = |l: &str| l.len() - l.trim_start().len();
     let body: Vec<&str> = lines[run + 1..].iter().copied().take_while(|l| l.trim().is_empty() || indent(l) > indent(lines[run])).collect();
@@ -55,7 +57,7 @@ esac
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(Command::new("jq").arg("--version").output().is_ok_and(|o| o.status.success()), "the step runs jq, which is not installed");
     let out = Command::new("bash")
-        .args(["-c", &step_script()])
+        .args(["-c", &step_script("ci.yml", "prune", STEP)])
         .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
         .env("GITHUB_REPOSITORY", "owner/repo")
         .env("LISTING", &listing)
@@ -72,12 +74,12 @@ fn page(refs: &[(u32, &str)]) -> serde_json::Value {
     json!({ "total_count": refs.len(), "actions_caches": refs.iter().map(|(id, r)| json!({ "id": id, "ref": r, "key": format!("key-{id}"), "size_in_bytes": 1 })).collect::<Vec<_>>() })
 }
 
-/// Valid: a pull request's merge ref and a merge group's queue ref, on
-/// either page, deleted by id. Kept, whatever else the listing holds:
-/// master, production, another branch, a tag, a pull request's head, and
+/// Valid: a pull request's merge ref, on either page, deleted by id.
+/// Kept, whatever else the listing holds: master, production, another
+/// branch (a retired merge queue's too), a tag, a pull request's head, and
 /// refs that only look like the deleted ones.
 #[test]
-fn prune_deletes_pull_requests_and_merge_groups_caches_alone() {
+fn prune_deletes_pull_requests_caches_alone() {
     let pages = [
         page(&[(1, "refs/heads/master"), (2, "refs/pull/823/merge"), (3, "refs/heads/production"), (4, "refs/heads/gh-readonly-queue/master/pr-830-d0b6c3aa")]),
         page(&[
@@ -93,9 +95,9 @@ fn prune_deletes_pull_requests_and_merge_groups_caches_alone() {
     ];
     let (out, asked) = run_step(&pages);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(asked, ["repos/owner/repo/actions/caches/2", "repos/owner/repo/actions/caches/4", "repos/owner/repo/actions/caches/12"]);
+    assert_eq!(asked, ["repos/owner/repo/actions/caches/2", "repos/owner/repo/actions/caches/12"]);
     let said = String::from_utf8_lossy(&out.stdout);
-    assert!(said.contains("deleted: 2 refs/pull/823/merge key-2") && said.contains("deleted: 4 refs/heads/gh-readonly-queue/master/pr-830-d0b6c3aa key-4"), "{said}");
+    assert!(said.contains("deleted: 2 refs/pull/823/merge key-2") && said.contains("deleted: 12 refs/pull/9/merge key-12"), "{said}");
 }
 
 /// Invalid: nothing deletable is no deletion and a green step; a listing
