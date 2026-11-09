@@ -65,13 +65,17 @@ final class AccountConnection {
         do {
             let person: JSONValue = try await api.request("api/identities/me")
             try Task.checkCancellation()
-            guard var next = account, next.origin == api.baseURL,
-                  try next.signingKey.publicKey == api.identity.publicKey else { throw CancellationError() }
             guard person["kind"].string == "person", let identity = person["id"].string else { throw APIError.invalidResponse }
             // this app's Safari data is the person's it was kept for: another
             // person (a new key, or this one approved by someone else) starts
             // with none of it, before they can open an app
-            if next.identity != identity { await SFSafariViewController.DataStore.default.clearWebsiteData() }
+            if account?.identity != identity {
+                await SFSafariViewController.DataStore.default.clearWebsiteData()
+                try Task.checkCancellation()
+            }
+            // the account as it is now: one removed meanwhile stays removed
+            guard var next = account, next.origin == api.baseURL,
+                  try next.signingKey.publicKey == api.identity.publicKey else { throw CancellationError() }
             next.identity = identity; next.email = person["email"].string; next.approved = true
             try DeviceKeychain.save(next, service: scope.keychainService); account = next; error = nil
             return true
