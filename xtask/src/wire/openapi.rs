@@ -170,6 +170,12 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
             let sends = sends.map(|s| (s.schema)(inn).to_value()).unwrap_or(Value::Null);
             op["x-fragment-socket"] = json!({ "sends": sends, "receives": (receives.schema)(out).to_value() });
         }
+        Answer::Bytes { media } => {
+            let content = json!({ media: { "schema": { "type": "string", "contentMediaType": media } } });
+            responses.insert("200".into(), json!({ "description": "OK: the bytes, whole.", "content": content }));
+            responses.insert("206".into(), json!({ "description": "Partial Content: the range a `Range` header asked for.", "content": content }));
+            op["x-fragment-bytes"] = json!(media);
+        }
     }
     let mut codes: Vec<ErrorCode> = route.errors.iter().chain(ANY_ROUTE.iter()).copied().collect();
     codes.sort_by_key(|c| (c.status(), code_name(*c)));

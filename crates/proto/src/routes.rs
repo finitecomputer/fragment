@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
+use crate::migrations::{Mailbox, MoveAt, Report, Reported, Roster, RosterTaken, StageDone, StageOpened};
 use crate::notice::NoticeList;
 use crate::{
     Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
 };
-use ErrorCode::{BudgetUsedUp, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
+use ErrorCode::{BudgetUsedUp, Conflict, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -125,6 +126,9 @@ pub enum Answer {
     /// A WebSocket (101): the frames a client sends on it, if any, and the
     /// frames it receives.
     Socket { sends: Option<Ty>, receives: Ty },
+    /// 200, bytes of this media type; a request with a `Range` of them is
+    /// answered 206, that range alone (`x-fragment-bytes`).
+    Bytes { media: &'static str },
 }
 
 #[derive(Clone, Copy)]
@@ -149,13 +153,14 @@ pub struct Route {
 pub const ANY_ROUTE: [ErrorCode; 2] = [ErrorCode::Deploying, ErrorCode::SchemaRefused];
 
 /// Each group's tag: its name and what its routes are about.
-pub const TAGS: [(&str, &str); 6] = [
+pub const TAGS: [(&str, &str); 7] = [
     ("fragments", "A signer's list of the fragments they hold a role on, and their own view of each."),
     ("notices", "What the platform tells a person, each in its own words, with what they may do about it."),
     ("search", "A signer's search over their own list."),
     ("members", "Who is in a fragment."),
     ("channels", "A fragment's channels: its records, read, posted and drafted."),
     ("live", "A fragment's live socket: records as they are appended, presence, drafts and queries."),
+    ("migrations", "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move."),
 ];
 
 // Each route's credentials are what its dispatch takes (cell/src/lib.rs):
@@ -165,9 +170,14 @@ pub const TAGS: [(&str, &str); 6] = [
 // signature, its origin's session or frame cookie) beside its share link
 // and the anonymous visitor its visibility lets in (`serve`).
 const SIGNED: &[Auth] = &[Auth::Nip98, Auth::Session];
+// The move's (`/api/migrations/…`): a key's signature alone, the mover's
+// (its npub the deployment's `migrations.mover`) or a new agent's.
+const SIGNATURE: &[Auth] = &[Auth::Nip98];
 const VISITOR: &[Auth] = &[Auth::Nip98, Auth::Site, Auth::Frame, Auth::Link, Auth::Anyone];
 
 const NAME: Param = Param { name: "name", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The fragment's name, in full." };
+const OLD: Param = Param { name: "old", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The old agent's id (Core's project id)." };
+const STAGE: Param = Param { name: "stage", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The stage's id, `<old>.<phase>.<attempt>`, as its routine names it." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
 
 pub const ROUTES: &[Route] = &[
@@ -354,6 +364,72 @@ pub const ROUTES: &[Route] = &[
         answer: Answer::Socket { sends: Some(ty::<LiveIn>()), receives: ty::<LiveOut>() },
         errors: &[Unauthenticated, Forbidden, NotFound],
     },
+    Route {
+        operation: "migrations.roster",
+        method: Method::Put,
+        path: "/api/migrations/mover/roster",
+        summary: "The mover's roster, whole: every live old agent and its owner. Rows not yet asked that it leaves out are withdrawn.",
+        auth: SIGNATURE,
+        params: &[],
+        request: Some(ty::<Roster>()),
+        answer: Answer::Json(ty::<RosterTaken>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, TooLarge, RegistryUnavailable],
+    },
+    Route {
+        operation: "migrations.mailbox",
+        method: Method::Get,
+        path: "/api/migrations/mover/mailbox",
+        summary: "What the mover is told to do, oldest first: each command stays until a report on it is taken.",
+        auth: SIGNATURE,
+        params: &[],
+        request: None,
+        answer: Answer::Json(ty::<Mailbox>()),
+        errors: &[Unauthenticated, Forbidden],
+    },
+    Route {
+        operation: "migrations.report",
+        method: Method::Post,
+        path: "/api/migrations/mover/agents/{old}/report",
+        summary: "What happened on an old agent's current command: a stale command's report is 409 and changes nothing.",
+        auth: SIGNATURE,
+        params: &[OLD],
+        request: Some(ty::<Report>()),
+        answer: Answer::Json(ty::<Reported>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.open",
+        method: Method::Post,
+        path: "/api/migrations/stages/{stage}/open",
+        summary: "The new agent bound to the move opens its stage: its manifest.",
+        auth: SIGNATURE,
+        params: &[STAGE],
+        request: None,
+        answer: Answer::Json(ty::<StageOpened>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.zip",
+        method: Method::Get,
+        path: "/api/migrations/stages/{stage}/zip",
+        summary: "The stage's zip, for the new agent bound to the move while it imports, by ranges (`Range: bytes=…`).",
+        auth: SIGNATURE,
+        params: &[STAGE],
+        request: None,
+        answer: Answer::Bytes { media: "application/zip" },
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.done",
+        method: Method::Post,
+        path: "/api/migrations/stages/{stage}/done",
+        summary: "The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.",
+        auth: SIGNATURE,
+        params: &[STAGE],
+        request: Some(ty::<StageDone>()),
+        answer: Answer::Json(ty::<MoveAt>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
 ];
 
 // Shapes the cell writes as text rather than through a type (a frame
@@ -394,12 +470,14 @@ mod tests {
     use super::*;
 
     /// Goal: each route's credentials are what its dispatch takes. Method:
-    /// an `/api/…` route is a signer's alone (`signer`, `signer_for`), and a
-    /// fragment's page's (`/f/{name}/…`) a visitor's (`site_credential`).
+    /// an `/api/…` route is a signer's alone (`signer`, `signer_for`), the
+    /// move's a signature alone (cell/src/migrations.rs), and a fragment's
+    /// page's (`/f/{name}/…`) a visitor's (`site_credential`).
     #[test]
     fn credentials_are_the_dispatchs() {
         for r in ROUTES {
             match r.path {
+                p if p.starts_with("/api/migrations/") => assert_eq!(r.auth, SIGNATURE, "{}", r.operation),
                 p if p.starts_with("/api/") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
                 p if p.starts_with("/f/{name}/") => assert_eq!(r.auth, VISITOR, "{}", r.operation),
                 p => panic!("{} at {p}: say whose dispatch it is", r.operation),
