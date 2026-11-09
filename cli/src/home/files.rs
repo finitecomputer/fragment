@@ -23,6 +23,7 @@ use super::source::Source;
 use super::survey::size;
 use crate::api::{Client, Code, CodedError};
 use crate::blobs::{could_point, Blobs};
+use fragment_core::blob;
 use crate::codestorage::{Author, Change, CsError, Held, Wants, MAIN};
 
 /// The files one commit carries, and the bytes of theirs it carries in
@@ -84,18 +85,18 @@ pub fn left_behind(plan: &Plan, counted: &Counted) -> String {
         let said = why.said();
         out.push_str(&format!("\n## {}{} ({} files, {})\n\n", said[..1].to_uppercase(), &said[1..], r.files, size(r.bytes)));
         let all: Vec<_> = plan.left.iter().filter(|l| l.why == *why).collect();
+        let mut shown = 0;
         for l in &all {
             if listed >= LEFT_LISTED_MAX {
                 break;
             }
-            listed += 1;
+            (listed, shown) = (listed + 1, shown + 1);
             if l.path.ends_with('/') {
                 out.push_str(&format!("- {} ({} files, {})\n", code_span(&l.path), l.files, size(l.bytes)));
             } else {
                 out.push_str(&format!("- {} ({})\n", code_span(&l.path), size(l.bytes)));
             }
         }
-        let shown = all.len().min(listed);
         if shown < all.len() {
             out.push_str(&format!("- and {} more\n", all.len() - shown));
         }
@@ -127,6 +128,46 @@ fn commit(c: &Client, held: &mut Held, author: &Author, mut head: Option<String>
     unreachable!("the last try returns")
 }
 
+/// Whether main holds `p` already: a file of its size in git, or a blob's
+/// pointer naming its size (read, not guessed from the pointer's own size:
+/// another file's pointer, or a placeholder, is not it).
+fn held_already(c: &Client, held: &mut Held, there: &HashMap<String, u64>, head: Option<&str>, p: &plan::Picked) -> Result<bool> {
+    Ok(match there.get(&p.to) {
+        Some(&n) if n == p.bytes => true,
+        Some(&n) if could_point(n, p.bytes) => {
+            let pointer = held.get(c)?.read_file(&p.to, head.unwrap_or(MAIN))?;
+            blob::parse(&pointer).is_some_and(|ptr| ptr.size == p.bytes)
+        }
+        _ => false,
+    })
+}
+
+/// The manifest of a fragment of files, in a commit of its own, where
+/// main has none: on the head it was read missing from, and on one that
+/// moved meanwhile only if that one has none either, so another writer's
+/// own manifest is kept. Its new head.
+fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: Option<String>) -> Result<Option<String>> {
+    let change = [Change::Upsert { path: RepoPath::parse(MANIFEST).expect("a repo path"), bytes: MANIFEST_BYTES.to_vec() }];
+    for attempt in 1..=COMMIT_TRIES {
+        let storage = held.get(c)?;
+        if let Some(rev) = &head {
+            match storage.read_file(MANIFEST, rev) {
+                Ok(_) => return Ok(head),
+                Err(CsError::NotFound(_)) => {}
+                Err(e) => return Err(anyhow::Error::new(e).context("reading the fragment's manifest")),
+            }
+        }
+        match storage.commit(head.as_deref(), "home files: a page of its files", author, &change) {
+            Ok(tip) => return Ok(Some(tip)),
+            Err(CsError::Precondition(_)) => return Ok(storage.branch_head(MAIN)?),
+            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => head = storage.branch_head(MAIN)?,
+            Err(CsError::Auth(_)) if attempt < COMMIT_TRIES => held.refused(),
+            Err(e) => return Err(anyhow::Error::new(e).context("writing the fragment's manifest")),
+        }
+    }
+    unreachable!("the last try returns")
+}
+
 /// The files the plan brings, into the fragment `into`, and
 /// `left-behind.md`.
 pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Brought> {
@@ -144,15 +185,15 @@ pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Br
         None => HashMap::new(),
     };
 
+    if !there.contains_key(MANIFEST) {
+        head = manifest(c, &mut held, &author, head)?;
+    }
     let mut batch: Vec<Change> = Vec::new();
     let mut batch_bytes = 0;
-    if !there.contains_key(MANIFEST) {
-        batch.push(Change::Upsert { path: RepoPath::parse(MANIFEST).expect("a repo path"), bytes: MANIFEST_BYTES.to_vec() });
-    }
     let (total, total_bytes) = (plan.picked.len(), plan.picked.iter().map(|p| p.bytes).sum::<u64>());
     let (mut files, mut bytes, mut already) = (0, 0u64, 0);
     for p in &plan.picked {
-        if there.get(&p.to).is_some_and(|&held| held == p.bytes || could_point(held, p.bytes)) {
+        if held_already(c, &mut held, &there, head.as_deref(), p)? {
             already += 1;
             continue;
         }
@@ -233,6 +274,49 @@ mod tests {
         let cut = bring(&c, &src, &layout(), other).unwrap();
         assert_eq!((cut.files, cut.already), (1, 1), "what is there already is not sent again");
         assert_eq!(mock.file_at(other, "main", MANIFEST).as_deref(), Some(&br#"{"meta":{"title":"Mine"}}"#[..]), "a manifest of its own is kept");
+    }
+
+    /// Goal: a file of 1 MiB or more counts as there already only when a
+    /// pointer at its path names its size. Invalid: another file's pointer,
+    /// a placeholder the size of one.
+    #[test]
+    fn a_pointer_must_name_the_file() {
+        let mock = crate::mockcs::start();
+        let mib = 1024 * 1024u64;
+        let pointer = |size: u64| fragment_core::blob::pointer(&"a".repeat(64), size).into_bytes();
+        let (two, three) = (pointer(2 * mib), pointer(3 * mib));
+        mock.seed_repo(NAME, &[("files/two.jpg", &two), ("files/three.jpg", &three), ("files/stub.jpg", b"x"), ("files/small.md", b"abc")]);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let mut held = Held::new(NAME, Wants::Write);
+        let head = held.get(&c).unwrap().branch_head(MAIN).unwrap();
+        let listed = held.get(&c).unwrap().list_files(head.as_deref().unwrap()).unwrap();
+        let there: HashMap<String, u64> = listed.entries.into_iter().map(|e| (e.path.as_str().to_string(), e.size)).collect();
+        let picked = |to: &str, bytes: u64| plan::Picked { from: String::new(), to: to.into(), bytes, kind: crate::home::rules::Kind::Photo };
+        let is = |p: plan::Picked, held: &mut Held| held_already(&c, held, &there, head.as_deref(), &p).unwrap();
+        assert!(is(picked("files/three.jpg", 3 * mib), &mut held), "its pointer names its size");
+        assert!(!is(picked("files/two.jpg", 3 * mib), &mut held), "a pointer to a 2 MiB file is not a 3 MiB one's");
+        assert!(!is(picked("files/stub.jpg", 3 * mib), &mut held), "a placeholder is no pointer");
+        assert!(is(picked("files/small.md", 3), &mut held) && !is(picked("files/new.md", 3), &mut held));
+    }
+
+    /// Goal: a manifest another writer made while an import ran is kept.
+    /// Method: the import's first commit loses its head to a writer of
+    /// `fragment.json` (the fake's competitor).
+    #[test]
+    fn another_writers_manifest_is_kept() {
+        let t = Temp::new();
+        let zip = t.0.join("home.zip");
+        zip_of(&zip, &[("work/notes/a.md", b"# a")]);
+        let src = super::super::open(&zip, &layout()).unwrap();
+        let mock = crate::mockcs::start();
+        mock.seed_repo(NAME, &[("notes.md", b"theirs")]);
+        let theirs = br#"{"meta":{"title":"Theirs"}}"#.to_vec();
+        mock.sabotage_commit_packs_with(1, vec![(MANIFEST.to_string(), Some(theirs.clone()))]);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!(b.files, 1);
+        assert_eq!(mock.file_at(NAME, "main", MANIFEST), Some(theirs), "the other writer's manifest, not the files page's");
+        assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
     }
 
     /// A fragment its caller only views is refused before anything is sent.
