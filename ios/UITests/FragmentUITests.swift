@@ -178,6 +178,13 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Notices, dark")
         XCUIDevice.shared.appearance = .light
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "light, drawn")], timeout: 2)
+        // over a page pushed on Home too (Codex on #1151): Your Apps
+        app.buttons["yourApps"].tap()
+        XCTAssertTrue(app.navigationBars["Your Apps"].waitForExistence(timeout: 5))
+        XCTAssertTrue(unsaved.waitForExistence(timeout: 5), "the notices stay over a pushed page")
+        screenshot(app, "Over Your Apps")
+        app.navigationBars["Your Apps"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(update.waitForExistence(timeout: 5), "and back on Home")
         update.buttons["Later"].tap()
         XCTAssertTrue(update.waitForNonExistence(timeout: 20), "Later: the update is told no more")
         XCTAssertTrue(unsaved.exists, "the other stays")
