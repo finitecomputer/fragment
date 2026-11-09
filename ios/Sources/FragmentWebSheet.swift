@@ -252,6 +252,32 @@ private struct WebContent: UIViewRepresentable {
             else { leave(url) }
             return nil
         }
+        // A page's alert, confirm and prompt are the app's own alerts: a page
+        // that asks before it acts (a document's Delete) acts once its person says.
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo) async {
+            _ = await ask(webView, message, from: frame, cancel: false)
+        }
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo) async -> Bool {
+            await ask(webView, message, from: frame, cancel: true).ok
+        }
+        func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                     initiatedByFrame frame: WKFrameInfo) async -> String? {
+            let answer = await ask(webView, prompt, from: frame, cancel: true, field: defaultText ?? "")
+            return answer.ok ? answer.text : nil
+        }
+        /// An alert over the sheet, titled by the page's host; it always
+        /// answers (a page waits on it): with no window to show in, as dismissed.
+        private func ask(_ web: WKWebView, _ message: String, from frame: WKFrameInfo, cancel: Bool, field: String? = nil) async -> (ok: Bool, text: String?) {
+            guard var top = web.window?.rootViewController else { return (false, nil) }
+            while let shown = top.presentedViewController, !shown.isBeingDismissed { top = shown }
+            return await withCheckedContinuation { reply in
+                let alert = UIAlertController(title: frame.securityOrigin.host, message: message, preferredStyle: .alert)
+                if let field { alert.addTextField { $0.text = field } }
+                if cancel { alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in reply.resume(returning: (false, nil)) }) }
+                alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in reply.resume(returning: (true, alert?.textFields?.first?.text)) })
+                top.present(alert, animated: true)
+            }
+        }
         /// Out of the sheet: a fragment of the person's opens in the app, any
         /// other address in the system's own browser (or app, for `mailto:`).
         private func leave(_ url: URL) {

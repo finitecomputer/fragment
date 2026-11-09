@@ -230,7 +230,7 @@ final class DevStackUITests: XCTestCase {
         close(app, "Sheet todo", todo)
         open(app, todo)
         XCTAssertTrue(app.webViews.staticTexts[task].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.webViews.staticTexts["finished \u{201C}\(task)\u{201D}"].exists, "reopened, the tick is there")
+        XCTAssertTrue(app.webViews.staticTexts["finished \u{201C}\(task)\u{201D}"].waitForExistence(timeout: 10), "reopened, the tick is there")
         screenshot(app, "Todo reopened")
         close(app, "Sheet todo", todo)
 
@@ -255,6 +255,19 @@ final class DevStackUITests: XCTestCase {
         XCTAssertTrue(app.webViews.staticTexts["0 saved"].waitForExistence(timeout: 20), "a new key's pages start with nothing kept")
         XCTAssertFalse(app.webViews.staticTexts[note].exists)
         let again = app.webViews.textFields["note"]
+        again.tap(); again.typeText("bread")
+        app.webViews.buttons["Save"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 5))
+        // a page that asks first (confirm) acts on the person's answer
+        app.webViews.buttons["Clear all"].tap()
+        let asked = app.alerts.firstMatch
+        XCTAssertTrue(asked.waitForExistence(timeout: 5), "the page's confirm, as the app's alert")
+        asked.buttons["Cancel"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 5), "Cancel keeps the note")
+        app.webViews.buttons["Clear all"].tap()
+        XCTAssertTrue(asked.waitForExistence(timeout: 5))
+        asked.buttons["OK"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["0 saved"].waitForExistence(timeout: 5), "OK clears them")
         again.tap(); again.typeText("bread")
         app.webViews.buttons["Save"].tap()
         XCTAssertTrue(app.webViews.staticTexts["1 saved"].waitForExistence(timeout: 5))
@@ -317,6 +330,7 @@ final class DevStackUITests: XCTestCase {
     <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Notes kept here</title>
     <style>body{font:17px -apple-system,system-ui,sans-serif;margin:24px}input,button{font:inherit;padding:8px}</style></head><body>
     <form id="f"><input id="t" aria-label="note" placeholder="A note"><button>Save</button></form>
+    <button id="clear" type="button">Clear all</button>
     <p id="count">0 saved</p><ul id="list"></ul>
     <script>
     const load = () => JSON.parse(localStorage.getItem("notes") || "[]");
@@ -329,6 +343,7 @@ final class DevStackUITests: XCTestCase {
       const t = document.getElementById("t").value.trim();
       if (t) { localStorage.setItem("notes", JSON.stringify([...load(), t])); document.getElementById("t").value = ""; draw(); }
     };
+    document.getElementById("clear").onclick = () => { if (confirm("Clear all notes?")) { localStorage.removeItem("notes"); draw(); } };
     draw();
     </script></body></html>
     """
