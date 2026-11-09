@@ -43,11 +43,11 @@ final class Library {
     var computerPhase: String?
     /// What they are told (`GET /api/notices`, `NoticesBand`), as last read;
     /// whether that read failed (what it said before stays); the notices
-    /// whose last action failed, by id, until one goes through or the
-    /// notice is gone; and those with an action under way.
+    /// whose last action failed, by id, and why (`Library.said`), until one
+    /// goes through or the notice is gone; and those with an action under way.
     var notices: [Notice] = []
     var noticesFailed = false
-    var failedNotices: Set<String> = []
+    var failedNotices: [String: String] = [:]
     var acting: Set<String> = []
     @ObservationIgnored private var loadID = UUID()
     @ObservationIgnored private var settle: Task<Void, Never>?
@@ -253,23 +253,36 @@ final class Library {
         guard let read else { return }
         let told = read?.notices ?? []
         if notices != told { notices = told }
-        failedNotices.formIntersection(told.map(\.id))
+        failedNotices = failedNotices.filter { id, _ in told.contains { $0.id == id } }
+    }
+    /// Why an action failed, as its notice says it (Paul, 2026-11-09): the
+    /// server's own words for its refusal, else this page's for a call that
+    /// never reached it (the network).
+    static func said(_ error: Error) -> String {
+        switch error {
+        case APIError.refused(let words), APIError.server(let words), APIError.absent(let words): words
+        default: "Couldn't do that. Try again."
+        }
     }
     /// A notice's action: its route posted with its body, then everything
     /// read again (`load`, whose newest read wins), which decides what
-    /// shows whatever the post answered. Failed, the notice says so, as
-    /// that read finds it, to tap again.
-    func act(_ notice: Notice, _ action: Notice.Action, api: FragmentAPI) async {
-        guard let post = action.post, !acting.contains(notice.id) else { return }
+    /// shows whatever the post answered. Failed, the notice says why, as
+    /// that read finds it, to tap again. Its answer may name a page to open
+    /// (an invite's app, a checkout), which this answers once that read has
+    /// it (an app accepted is in the list): its caller opens it.
+    func act(_ notice: Notice, _ action: Notice.Action, api: FragmentAPI) async -> URL? {
+        guard let post = action.post, !acting.contains(notice.id) else { return nil }
         acting.insert(notice.id)
         defer { acting.remove(notice.id) }
+        var answer: JSONValue = .null
         do {
-            let _: JSONValue = try await api.request(String(post.drop { $0 == "/" }), method: "POST", body: action.body ?? .object([:]))
-            failedNotices.remove(notice.id)
+            answer = try await api.request(String(post.drop { $0 == "/" }), method: "POST", body: action.body ?? .object([:]))
+            failedNotices[notice.id] = nil
         } catch {
-            failedNotices.insert(notice.id)
+            failedNotices[notice.id] = Self.said(error)
         }
         await load(api)
+        return answer["open"].string.flatMap { URL(string: $0) }
     }
     private func loadPages(_ api: FragmentAPI) async {
         guard pages == nil, let mine = fragments.first(where: { $0.role == "owner" }) else { return }
@@ -423,6 +436,7 @@ enum ShellPage: Equatable { case launcher, startingChat, chat(String), history, 
 
 struct FragmentRoot: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var library = Library()
     @State private var connection = AccountConnection()
@@ -465,7 +479,7 @@ struct FragmentRoot: View {
             // as the web's band is over every chat and Settings: one band,
             // never one per page.
             VStack(spacing: 0) {
-                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4, open: openPage)
                     .background(FragmentStyle.background.ignoresSafeArea(edges: .top))
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
@@ -556,6 +570,11 @@ struct FragmentRoot: View {
     private func toggleSidebar() {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
+    }
+    /// A page an action's answer names: one of theirs opens here, as its
+    /// row would; any other address, in Safari.
+    private func openPage(_ url: URL) {
+        if let fragment = library.fragment(linkedBy: url) { open(fragment) } else { openURL(url) }
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }

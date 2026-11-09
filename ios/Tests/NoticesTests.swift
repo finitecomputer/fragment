@@ -48,4 +48,12 @@ struct NoticesTests {
         #expect(Notice.untilSaid(until, now: -3_660_000) == "Calls resume in 1 h 1 min.")
         #expect(Notice.untilSaid(until, now: -7_200_000) == "Calls resume in 2 h.")
     }
+
+    /// A failed action says why (Paul, 2026-11-09): the server's own words
+    /// for its refusal; a call that never reached it, the app's.
+    @MainActor @Test func aFailedActionSaysWhy() {
+        #expect(Library.said(APIError.refused("You already have a seat in Acme: decline this offer.")) == "You already have a seat in Acme: decline this offer.")
+        #expect(Library.said(APIError.absent("No invite to garden--k3x9 waits on you.")) == "No invite to garden--k3x9 waits on you.")
+        #expect(Library.said(URLError(.notConnectedToInternet)) == "Couldn't do that. Try again.")
+    }
 }
