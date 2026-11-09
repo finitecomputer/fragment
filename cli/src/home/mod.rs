@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(f.root.as_deref(), Some("workspace"));
         let left: Vec<(plan::Why, usize)> = f.left_by_why.iter().map(|(w, r)| (*w, r.files)).collect();
         assert_eq!(left, [(plan::Why::Dependencies, 1), (plan::Why::BuildOutput, 1), (plan::Why::Never, 1)]);
-        assert_eq!(f.brought.files, 6);
+        assert_eq!(f.brought.files, 7);
         assert!(f.brought.by_kind.contains_key(&rules::Kind::Photo) && f.brought.by_kind.contains_key(&rules::Kind::Document));
     }
 
