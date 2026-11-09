@@ -48,8 +48,8 @@ async fn settle(v: JsValue) -> Result<JsValue, JsValue> {
     JsFuture::from(Promise::resolve(&v)).await
 }
 
-pub(crate) fn to_js(v: &serde_json::Value) -> JsValue {
-    js_sys::JSON::parse(&v.to_string()).expect("serde_json output is valid JSON")
+pub(crate) fn to_js(v: &impl serde::Serialize) -> JsValue {
+    js_sys::JSON::parse(&serde_json::to_string(v).expect("a value serializes")).expect("serde_json output is valid JSON")
 }
 
 pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
