@@ -116,12 +116,19 @@ fn extract(src: &Source, paths: &[String], to: &Path) -> Result<Extracted> {
     let (mut files, mut bytes) = (0, 0);
     for e in picked {
         let target = target_under(&to, &e.path)?;
+        // written beside it, then renamed over it: a file there already (a
+        // link to one of the home's own, even) is replaced, never written into
+        let beside = target.with_file_name(format!(".{}.fragment-{:016x}", target.file_name().and_then(|n| n.to_str()).unwrap_or("file"), rand::random::<u64>()));
         let copied = src.with_reader(&e.path, |r| {
-            let mut out = std::fs::File::create(&target).with_context(|| format!("writing {}", target.display()))?;
+            let mut out = std::fs::File::options().write(true).create_new(true).open(&beside).with_context(|| format!("writing {}", beside.display()))?;
             std::io::copy(r, &mut out).with_context(|| format!("copying {}", e.path))
-        })?;
+        });
+        let copied = copied.and_then(|n| std::fs::rename(&beside, &target).map(|_| n).with_context(|| format!("writing {}", target.display())));
+        if copied.is_err() {
+            let _ = std::fs::remove_file(&beside);
+        }
         files += 1;
-        bytes += copied;
+        bytes += copied?;
     }
     Ok(Extracted { to: to.display().to_string(), files, bytes })
 }
@@ -324,11 +331,20 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(outside.join("victim")).unwrap(), "keep");
         assert!(!outside.join("note.md").exists(), "nothing written through the folder's link");
+        // a hard link to the home's own file, left in the folder copied into:
+        // replaced, and the home's file kept
+        let linked = t.0.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::hard_link(home.join("SOUL.md"), linked.join("SOUL.md")).unwrap();
+        assert_eq!(extract(&src, &["SOUL.md".into()], &linked).unwrap().bytes, 2);
+        assert_eq!(std::fs::read_to_string(home.join("SOUL.md")).unwrap(), "me", "the home's file, linked, is kept");
+        assert_eq!(std::fs::read_to_string(linked.join("SOUL.md")).unwrap(), "me");
         // into a folder of its own, again: the same files, written over
         let fresh = t.0.join("fresh");
         for _ in 0..2 {
             assert_eq!(extract(&src, &["SOUL.md".into(), "sub".into()], &fresh).unwrap().files, 2);
         }
         assert_eq!(std::fs::read_to_string(fresh.join("sub/note.md")).unwrap(), "note");
+        assert_eq!(std::fs::read_dir(fresh.join("sub")).unwrap().count(), 1, "nothing left beside it");
     }
 }
