@@ -142,25 +142,25 @@ fn held_already(c: &Client, held: &mut Held, there: &HashMap<String, u64>, head:
     })
 }
 
-/// The manifest of a fragment of files, in a commit of its own, where
-/// main has none: on the head it was read missing from, and on one that
+/// The manifest of a fragment of files, last, in a commit of its own,
+/// where main has none: on a head it was read missing from (never with no
+/// head: a commit naming none lands on whatever main is), and on one that
 /// moved meanwhile only if that one has none either, so another writer's
-/// own manifest is kept. Its new head.
-fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: Option<String>) -> Result<Option<String>> {
+/// own manifest is kept.
+fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: String) -> Result<()> {
     let change = [Change::Upsert { path: RepoPath::parse(MANIFEST).expect("a repo path"), bytes: MANIFEST_BYTES.to_vec() }];
     for attempt in 1..=COMMIT_TRIES {
         let storage = held.get(c)?;
-        if let Some(rev) = &head {
-            match storage.read_file(MANIFEST, rev) {
-                Ok(_) => return Ok(head),
-                Err(CsError::NotFound(_)) => {}
-                Err(e) => return Err(anyhow::Error::new(e).context("reading the fragment's manifest")),
-            }
+        match storage.read_file(MANIFEST, &head) {
+            Ok(_) => return Ok(()),
+            Err(CsError::NotFound(_)) => {}
+            Err(e) => return Err(anyhow::Error::new(e).context("reading the fragment's manifest")),
         }
-        match storage.commit(head.as_deref(), "home files: a page of its files", author, &change) {
-            Ok(tip) => return Ok(Some(tip)),
-            Err(CsError::Precondition(_)) => return Ok(storage.branch_head(MAIN)?),
-            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => head = storage.branch_head(MAIN)?,
+        match storage.commit(Some(&head), "home files: a page of its files", author, &change) {
+            Ok(_) | Err(CsError::Precondition(_)) => return Ok(()),
+            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < COMMIT_TRIES => {
+                head = storage.branch_head(MAIN)?.ok_or_else(|| anyhow!("main has no head"))?;
+            }
             Err(CsError::Auth(_)) if attempt < COMMIT_TRIES => held.refused(),
             Err(e) => return Err(anyhow::Error::new(e).context("writing the fragment's manifest")),
         }
@@ -185,9 +185,6 @@ pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Br
         None => HashMap::new(),
     };
 
-    if !there.contains_key(MANIFEST) {
-        head = manifest(c, &mut held, &author, head)?;
-    }
     let mut batch: Vec<Change> = Vec::new();
     let mut batch_bytes = 0;
     let (total, total_bytes) = (plan.picked.len(), plan.picked.iter().map(|p| p.bytes).sum::<u64>());
@@ -209,7 +206,11 @@ pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Br
         }
     }
     batch.push(Change::Upsert { path: RepoPath::parse(LEFT_BEHIND).expect("a repo path"), bytes: blobs.store(left_behind(&plan, &counted).into_bytes())? });
-    commit(c, &mut held, &author, head, &format!("home files: {total} files, and what stayed behind"), &batch)?;
+    let head = commit(c, &mut held, &author, head, &format!("home files: {total} files, and what stayed behind"), &batch)?;
+    if !there.contains_key(MANIFEST) {
+        let head = head.ok_or_else(|| anyhow!("{into}'s main has no head after its files' commit"))?;
+        manifest(c, &mut held, &author, head)?;
+    }
     crate::sync::refresh_pins(c, into, MAIN);
     Ok(Brought { fragment: into.to_string(), files, bytes, already, left: counted.left.files, left_bytes: counted.left.bytes, left_behind: LEFT_BEHIND })
 }
@@ -316,6 +317,25 @@ mod tests {
         let b = bring(&c, &src, &layout(), NAME).unwrap();
         assert_eq!(b.files, 1);
         assert_eq!(mock.file_at(NAME, "main", MANIFEST), Some(theirs), "the other writer's manifest, not the files page's");
+        assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
+    }
+
+    /// Goal: a fragment with no main yet, which another writer gives one
+    /// (their own manifest in it) while the import runs, keeps theirs.
+    #[test]
+    fn a_manifest_made_on_a_new_main_is_kept() {
+        let t = Temp::new();
+        let zip = t.0.join("home.zip");
+        zip_of(&zip, &[("work/notes/a.md", b"# a")]);
+        let src = super::super::open(&zip, &layout()).unwrap();
+        let mock = crate::mockcs::start();
+        mock.seed_repo(NAME, &[]);
+        mock.delete_branch(NAME, "main");
+        let theirs = br#"{"meta":{"title":"Theirs"}}"#.to_vec();
+        mock.land_before_next_commit(vec![(MANIFEST.to_string(), Some(theirs.clone()))]);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        assert_eq!(bring(&c, &src, &layout(), NAME).unwrap().files, 1);
+        assert_eq!(mock.file_at(NAME, "main", MANIFEST), Some(theirs), "theirs, not the files page's");
         assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
     }
 
