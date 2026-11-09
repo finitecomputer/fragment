@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::ReadJson;
 use crate::registry::invites::NoticesOf;
 use fragment_proto::{ErrorCode, IdentityKind};
 
@@ -26,7 +27,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url) -> CellResult<Res
     if computer.status_code() != 200 {
         return Ok(computer);
     }
-    let computer: Value = computer.json().await?;
+    let computer: Value = computer.read_json().await?;
     let notices: Vec<Value> = [computer, registry?].iter().flat_map(|owner| owner["notices"].as_array().cloned().unwrap_or_default()).collect();
     crate::json_answer(&json!({ "notices": notices }))
 }
