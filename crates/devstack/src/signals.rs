@@ -231,6 +231,9 @@ mod tests {
             on_termination(|_| {}).expect("handled");
             println!("ready; {} {}", tree.id(), line.trim());
             std::thread::sleep(WAIT);
+            // no signal came: the tree is this child's to end
+            let _ = tree.kill();
+            let _ = tree.wait();
             return;
         }
         let (c, out, ready) = spawn(TEST, "tree", false);
