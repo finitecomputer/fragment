@@ -1108,7 +1108,7 @@ impl FragmentCell {
                 self.claim_address(&caller, body).await
             }
             (Method::Get, ["api", "manifest"]) => self.manifest(&caller),
-            (Method::Get, ["api", "members"]) => self.members(&caller),
+            (Method::Get, ["api", "members"]) => self.members(&caller).await,
             (Method::Put, ["api", "members", who]) => {
                 let body = body_json(&mut req).await?;
                 self.set_member(&caller, who, body).await

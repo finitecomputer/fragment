@@ -447,9 +447,32 @@ export function closed(handler) {
 /// Who this page is to the fragment: { id, principal, role, platform,
 /// limits } (`platform` the platform's origin, the one page that frames it
 /// with its person's session; `limits` as `limits()` reads them).
-export function me() {
+export async function me() {
   connect();
-  return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));
+  const h = hello ?? (await new Promise((resolve) => helloWaiters.push(resolve)));
+  const email = await emailOf(h.principal);
+  return email ? { ...h, email } : h;
+}
+
+// The signed-in caller's own email, as `__people` gives it (a member's,
+// to a member: decision 48), asked once per principal: none for an
+// anonymous visitor, a link holder or an agent. An ask that fails is
+// asked again by the next `me()`.
+const emails = new Map(); // principal -> Promise<string | null>
+function emailOf(principal) {
+  if (principal.startsWith("anon:")) return Promise.resolve(null);
+  if (!emails.has(principal)) {
+    const asked = fetch(new URL(`__people?id=${encodeURIComponent(principal)}`, base), { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`__people answered ${r.status}`))))
+      .then((r) => r.profiles?.[principal]?.email ?? null)
+      .catch((e) => {
+        emails.delete(principal);
+        console.warn("fragment.me(): no email", e);
+        return null;
+      });
+    emails.set(principal, asked);
+  }
+  return emails.get(principal);
 }
 
 /// What one message of a person's may carry, as the platform said it last

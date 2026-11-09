@@ -122,6 +122,9 @@ shadows.
   query that re-runs after every change), `fragment.subscribe` (a
   channel's records, live, and with `onDraft` its drafts as they
   stream), presence, web push.
+- **Who did it**: store `call.principal`, and show people by email from
+  `./__people?id=…` when the page draws (a member's, to a member);
+  `fragment.me()` has the viewer's own. Never keep a table of names.
 - **Channels**: records a mutation publishes and pages follow live;
   `inbox` takes webhooks, `events` is the log.
 - **Triggers**: a cron, a record on a channel, a change to files.

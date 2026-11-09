@@ -29,18 +29,19 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::isolation::{as_browser, cookie_of, frame, frame_says, made};
-use super::templates::person;
+use super::templates::{email_of, person};
 use crate::api::{Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
-/// A page that shows who it is to its fragment (`me()`) and whom an
-/// operation it calls acts as, once each answers.
+/// A page that shows who it is to its fragment (`me()`, with its email,
+/// or `email:none`) and whom an operation it calls acts as, once each
+/// answers.
 const WHO_PAGE: &str = r#"<p>inside TEXT</p><p id="me">me?</p><p id="op">op?</p>
 <script type="module">
 import * as fragment from "./__fragment.js";
 const show = (id, text) => { document.getElementById(id).textContent = text; };
-fragment.me().then((m) => show("me", "me:" + m.principal));
+fragment.me().then((m) => show("me", "me:" + m.principal + " email:" + (m.email ?? "none")));
 fragment.call("whoami", {}).then((r) => show("op", "op:" + r.principal), (e) => show("op", "op refused " + e.status));
 </script>"#;
 const WHO_APP: &str = r#"import { DurableObject } from "cloudflare:workers";
@@ -109,7 +110,8 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
         anyhow::ensure!(r.status == 200, "{flipped} made public: {r}");
         Ok(())
     };
-    in_chrome(s, api, &names, (&owner_id, &owner_session), (&guest_id, &guest_session), &flip)
+    let (owner_email, guest_email) = (email_of(&owner), email_of(&guest));
+    in_chrome(s, api, &names, (&owner_id, &owner_session, &owner_email), (&guest_id, &guest_session, &guest_email), &flip)
 }
 
 struct Names<'a> {
@@ -488,7 +490,10 @@ fn dropped_cookie(s: &mut Suite, api: &Api, own: &str, session: &str, landing: &
     Ok(())
 }
 
-fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session): (&str, &str), (guest_id, guest_session): (&str, &str), flip: &dyn Fn() -> Result<()>) -> Result<()> {
+type Who<'a> = (&'a str, &'a str, &'a str);
+
+/// `owner` and `guest`: each one's identity, platform session and email.
+fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session, owner_email): Who<'_>, (guest_id, guest_session, guest_email): Who<'_>, flip: &dyn Fn() -> Result<()>) -> Result<()> {
     let wait = Duration::from_secs(20);
     let platform = api.base.clone();
     let Some(mut chrome) = safari_like(s)? else {
@@ -511,6 +516,8 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
     let op = me && frame_says(s, &mut chrome, &shell, &host(n.own), &format!("op:{owner_id}"), wait);
     let text = chrome.eval_in_frame(&shell, &host(n.own), "document.body.innerText").unwrap_or_default();
     s.ok("the platform's page frames the owner's members-only fragment signed in through its mint: its page's me() is the owner, and so is whom its operation call acts as", me && op, &text);
+    let email = frame_says(s, &mut chrome, &shell, &host(n.own), &format!("me:{owner_id} email:{owner_email}"), wait);
+    s.ok("and its me() carries the owner's email, as `__people` gives it to a member (decision 48)", email, &text);
     let top_site = reqwest::Url::parse(&platform).ok().and_then(|u| u.host_str().map(|h| format!("http://{h}"))).unwrap_or_default();
     let partitioned = |chrome: &mut Browser, name: &str| {
         let own_host = api.site_url(name, "").split("//").nth(1).and_then(|h| h.split(':').next()).unwrap_or("").to_string();
@@ -586,14 +593,20 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
         me && op,
         chrome.eval_in_frame(&theirs_page, &host(n.shared), "document.body.innerText").unwrap_or_default(),
     );
+    s.ok(
+        "a member shared in (a viewer) gets their own email from me()",
+        frame_says(s, &mut chrome, &theirs_page, &host(n.shared), &format!("me:{guest_id} email:{guest_email}"), wait),
+        chrome.eval_in_frame(&theirs_page, &host(n.shared), "document.body.innerText").unwrap_or_default(),
+    );
 
     // ---- signed out: a public fragment frames as a stranger sees it
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", "signed-out")?;
     let home = platform_page(&mut chrome, api, SIGNED_OUT)?;
     frame(&mut chrome, &home, &api.site_url(n.open, ""))?;
     let shown = frame_says(s, &mut chrome, &home, &host(n.open), "inside open", wait) && frame_says(s, &mut chrome, &home, &host(n.open), "me:anon:", wait);
+    let shown = shown && frame_says(s, &mut chrome, &home, &host(n.open), "email:none", wait);
     s.ok(
-        "a public fragment frames for someone signed out, as a stranger sees it, with no mint",
+        "a public fragment frames for someone signed out, as a stranger sees it, with no mint (and me() no email)",
         shown,
         chrome.eval_in_frame(&home, &host(n.open), "document.body.innerText").unwrap_or_default(),
     );
