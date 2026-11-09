@@ -536,17 +536,17 @@ fn a_chats_helpers_are_one_set_said_whole() {
     let (h1, h2) = (records::child_id("s-1"), records::child_id("s-2"));
     let s = ev(&mut e, start(&turn, "s-1"), T0 + 1);
     let one = json!({ "child": h1, "parent": turn, "goal": "Find three venues near Lisbon", "since": T0 + 1 });
-    assert_eq!(sets(&s), vec![(format!("hs:{}", T0 + 1), json!({ "kind": "turn.helpers", "helpers": [one], "until": T0 + 1 + limits::HELPERS_LEASE_MS }))]);
+    assert_eq!(sets(&s), vec![(records::helpers_id(LIFE, 1), json!({ "kind": "turn.helpers", "helpers": [one], "until": T0 + 1 + limits::HELPERS_LEASE_MS }))]);
     assert!(s.dirty, "held in the state before its set is posted");
     assert!(posts(&ev(&mut e, start(&turn, "s-1"), T0 + 1)).is_empty(), "said again");
     let s = ev(&mut e, start(&turn, "s-2"), T0 + 1);
-    assert_eq!(sets(&s).iter().map(|(id, b)| (id.clone(), children(b))).collect::<Vec<_>>(), vec![(format!("hs:{}", T0 + 2), vec![h1.clone(), h2.clone()])], "the whole set; a second set in the same ms takes the next number");
+    assert_eq!(sets(&s).iter().map(|(id, b)| (id.clone(), children(b))).collect::<Vec<_>>(), vec![(records::helpers_id(LIFE, 2), vec![h1.clone(), h2.clone()])], "the whole set, each set its own id");
     assert!(posts(&ev(&mut e, end("s-9"), T0 + 1)).is_empty(), "never started");
     // the turn ends; its helpers go on, and end after it
     ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 2);
     assert_eq!(e.state().children.len(), 2);
     let s = ev(&mut e, end("s-1"), T0 + 3);
-    assert_eq!(sets(&s).iter().map(|(id, b)| (id.clone(), children(b))).collect::<Vec<_>>(), vec![(format!("hs:{}", T0 + 3), vec![h2.clone()])]);
+    assert_eq!(sets(&s).iter().map(|(id, b)| (id.clone(), children(b))).collect::<Vec<_>>(), vec![(records::helpers_id(LIFE, 3), vec![h2.clone()])]);
     assert!(s.dirty && e.state().children.len() == 1);
     assert!(posts(&ev(&mut e, end("s-1"), T0 + 3)).is_empty(), "ended once");
     let s = ev(&mut e, end("s-2"), T0 + 4);
@@ -605,7 +605,7 @@ fn a_chats_set_is_renewed_while_any_run_and_a_restart_says_none() {
     let until = since + lease;
     assert!(sets(&e.step(Input::Tick, until - before - 1)).is_empty(), "none before its renewal is due");
     let renewed = e.step(Input::Tick, until - before);
-    assert_eq!(sets(&renewed).iter().map(|(id, b)| (id.clone(), b["until"].clone(), b["helpers"][0]["since"].clone())).collect::<Vec<_>>(), vec![(format!("hs:{}", until - before), json!(until - before + lease), json!(since))]);
+    assert_eq!(sets(&renewed).iter().map(|(id, b)| (id.clone(), b["until"].clone(), b["helpers"][0]["since"].clone())).collect::<Vec<_>>(), vec![(records::helpers_id(LIFE, 2), json!(until - before + lease), json!(since))]);
     assert!(!renewed.dirty, "a renewal is this life's alone: nothing saved");
     assert!(sets(&e.step(Input::Tick, until - before + 1000)).is_empty(), "once a period");
     let missed = until - before + lease * 3;
@@ -618,14 +618,19 @@ fn a_chats_set_is_renewed_while_any_run_and_a_restart_says_none() {
     assert!(sets(&e.step(Input::Tick, later)).is_empty(), "none working: no renewal");
     // restart with a helper running: the next life says none run there
     let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), later + 1)).expect("started").turn;
-    ev(&mut e, Event::Child { child: "s-2".into(), change: ChildChange::Started { turn: t2, goal: "Draft".into() } }, later + 2);
+    let last = ev(&mut e, Event::Child { child: "s-2".into(), change: ChildChange::Started { turn: t2, goal: "Draft".into() } }, later + 2);
+    let last_id = sets(&last)[0].0.clone();
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
     assert_eq!(saved.children.iter().map(|c| (c.goal.as_str(), c.since)).collect::<Vec<_>>(), vec![("Draft", later + 2)], "the owner's set is saved");
-    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
-    let restarted = later + 10;
+    let next_life = "fedcba9876543210fedcba9876543210";
+    let mut e2 = Engine::new(saved, Settings::default(), next_life).expect("whole").with_runtime(crate::runtime::DEFAULT, &[]);
+    // (its clock back where the earlier life's was: a restart within a ms,
+    // or a clock set back, takes no id of that life's — Codex on #1086)
+    let restarted = later + 2;
     e2.step(Input::Agents(vec![a.clone()]), restarted);
     let r = e2.recover(restarted);
-    assert_eq!(sets(&r), vec![(format!("hs:{restarted}"), json!({ "kind": "turn.helpers", "helpers": [], "until": restarted + lease }))], "{:?}", posts(&r));
+    assert_eq!(sets(&r), vec![(records::helpers_id(next_life, 1), json!({ "kind": "turn.helpers", "helpers": [], "until": restarted + lease }))], "{:?}", posts(&r));
+    assert_ne!(sets(&r)[0].0, last_id, "the next life's set is no set of the earlier life's, at the same clock");
     assert!(r.dirty && e2.state().children.is_empty());
     e2.step(heard(Event::Connected(true)), restarted);
     assert!(posts(&e2.step(heard(Event::Child { child: "s-2".into(), change: ChildChange::Ended }), restarted + 1)).is_empty(), "an earlier life's helper ends nothing here");

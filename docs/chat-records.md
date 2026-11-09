@@ -371,7 +371,7 @@ notice the runtime sends after the turn's end still belongs to that turn,
 and is posted after its `turn.end`. If the agent has run no turn in that
 chat in this life, the notice is not posted. A notice is never pushed.
 
-**`turn.helpers`**, id `hs:<n>`: the helpers (children the agent's
+**`turn.helpers`**, id `hs:<life>:<n>`: the helpers (children the agent's
 runtime delegated work to) the agent has working in this chat, all of
 them, as its computer's bridge holds them now.
 
@@ -384,7 +384,8 @@ them, as its computer's bridge holds them now.
 The bridge posts the whole set each time a helper starts or ends, and
 again 5 minutes before `until` while it names any. A restart of the
 computer's bridge posts an empty set to each chat its helpers ran in,
-since they died with the process. `n` rises with each set. A helper
+since they died with the process. `<life>` is the bridge process's
+(`turn.start`'s), and `n` numbers its sets from 1. A helper
 outlives the turn that started it. Helpers the agent grouped (Hermes'
 task `group`) end together, when their group reports.
 

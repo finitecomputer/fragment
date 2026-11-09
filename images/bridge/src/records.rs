@@ -734,10 +734,12 @@ pub fn child_goal(goal: &str) -> String {
     cut(&goal.split_whitespace().collect::<Vec<_>>().join(" "), limits::CHILD_GOAL_MAX_CHARS)
 }
 
-/// A chat's helpers set's post id: `hs:<n>`, `n` rising with each set the
-/// agent posts there, across lives (`Engine::post_helpers`).
-pub fn helpers_id(n: u64) -> String {
-    format!("hs:{n}")
+/// A helpers set's post id: `hs:<life>:<n>`, this bridge life's (never
+/// saved, so never another life's) and the `n`th set it posted, from 1:
+/// no two sets share one, whatever the clock does (`Engine::post_helpers`).
+pub fn helpers_id(life: &str, n: u64) -> String {
+    assert!(valid_life(life) && n >= 1, "a life is 32 lowercase hex, and sets number from 1: {life}");
+    format!("hs:{life}:{n}")
 }
 
 /// One helper in a chat's set: the turn that started it, its id, its task,
@@ -1236,7 +1238,8 @@ mod tests {
         assert_eq!(turn_helpers(&[], 5), json!({ "kind": "turn.helpers", "helpers": [], "until": 5 }), "none working");
         // no reader from before helpers takes one for its turn's: it names no `turn`
         assert!(body.get("turn").is_none());
-        assert!(valid_post_id(&helpers_id(u64::MAX)) && helpers_id(7) == "hs:7");
+        let life = "0123456789abcdef0123456789abcdef";
+        assert!(valid_post_id(&helpers_id(life, u64::MAX)) && helpers_id(life, 7) == format!("hs:{life}:7"));
         // the bound's whole set fits a record, each goal at its worst
         let worst: Vec<String> = (0..limits::HELPERS_PER_CHAT_MAX).map(|i| format!("{i:024}")).collect();
         let goal = "\u{1}".repeat(limits::CHILD_GOAL_MAX_CHARS);
