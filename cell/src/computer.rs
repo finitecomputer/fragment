@@ -2877,12 +2877,9 @@ impl ComputerCell {
                 json_response(&crate::fragment::ask(&self.env, fragment, "computer/door-ticket", &asked).await?)
             }
             (Method::Put, ["agents", fragment, "connections"]) => {
-                let v: Value = body_json(&mut req).await?;
                 // a body that forgot the field is not a reset to every provider
-                if v.get("connections").is_none() {
-                    return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
-                }
-                let AgentConnections { mut connections } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let named = body_json::<AgentConnections>(&mut req).await;
+                let AgentConnections { mut connections } = named.map_err(|e| CellError::invalid(format!("name connections: a list of providers, or null for every provider its owner has ({})", e.message)))?;
                 if let Some(list) = connections.as_mut() {
                     if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
                         return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
@@ -2904,12 +2901,9 @@ impl ComputerCell {
                 json_response(&self.view()?)
             }
             (Method::Put, ["agents", fragment, "accounts", provider]) => {
-                let v: Value = body_json(&mut req).await?;
                 // a body that forgot the field is not a reset to the default
-                if v.get("account").is_none() {
-                    return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
-                }
-                let AgentAccount { account } = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let named = body_json::<AgentAccount>(&mut req).await;
+                let AgentAccount { account } = named.map_err(|e| CellError::invalid(format!("name an account: its id, as GET /api/connections lists it, or null for the default ({})", e.message)))?;
                 if self.cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
                     return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
                 }

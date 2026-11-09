@@ -654,8 +654,7 @@ pub(crate) fn decide(visibility: Visibility, standing: Standing, purpose: Purpos
 }
 
 pub(crate) async fn body_json<T: DeserializeOwned>(req: &mut Request) -> CellResult<T> {
-    let bytes = req.bytes().await?;
-    serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
+    crate::json_body(&req.bytes().await?)
 }
 
 /// The internal call `path` with `body` on fragment `name` (`computer/…`
@@ -985,7 +984,7 @@ impl FragmentCell {
                 return self.picture().await;
             }
             let route = route.to_string();
-            let body: Value = body_json(&mut req).await?;
+            let body = req.bytes().await?;
             return json_response(&self.runs_on(&route, &body).await?);
         }
         if let Some(route) = path.strip_prefix("/meter/") {
@@ -993,13 +992,18 @@ impl FragmentCell {
             if req.headers().get(crate::meter::METER_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
-            let body: Value = body_json(&mut req).await?;
+            let body = req.bytes().await?;
             return match route {
-                "acked" => {
-                    let acked: crate::meter::Acked = serde_json::from_value(body).map_err(|e| CellError::invalid(format!("meter/acked: {e}")))?;
-                    json_response(&self.meter_acked(&acked).await?)
+                "acked" => json_response(&self.meter_acked(&crate::json_body(&body)?).await?),
+                "whose" => {
+                    /// `meter/whose`: whose `principal` is.
+                    #[derive(serde::Deserialize)]
+                    struct Whose {
+                        principal: String,
+                    }
+                    let Whose { principal } = crate::json_body(&body)?;
+                    json_response(&self.whose(&principal)?)
                 }
-                "whose" => json_response(&self.whose(body["principal"].as_str().unwrap_or_default())?),
                 _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
             };
         }
@@ -1020,8 +1024,8 @@ impl FragmentCell {
             }
             self.facet_calls_lever()?;
             let op = op.to_string();
-            let body: Value = body_json(&mut req).await?;
-            return self.cap_search(&op, body).await;
+            let body = req.bytes().await?;
+            return self.cap_search(&op, &body).await;
         }
         if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
             // Only the platform sets the header (a person's yes or no; an

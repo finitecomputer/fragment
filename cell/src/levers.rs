@@ -146,7 +146,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the list levers reach e2e people's lists (and their agents') alone"));
                 }
             }
-            json_answer(&routed::ask_object(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
+            json_answer(&routed::ask_object::<serde_json::Value>(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
         }
         (Method::Post, ["export"]) => {
             /// `{identity, op, steps?}`: a lever on that person's export (export.rs `export_lever`).
