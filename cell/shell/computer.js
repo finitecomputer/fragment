@@ -21,7 +21,7 @@ export function untilSaid(u, now) {
   return `${u.said} in ${h} h${minutes % 60 ? ` ${minutes % 60} min` : ""}.`;
 }
 
-export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, timers = globalThis, now = () => Date.now() }) {
+export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
   // asking for a wake as the person arrives or focuses a chat hides the
@@ -97,9 +97,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     b.append(icon(name), typeof words === "string" ? el("span", null, words) : words);
     return b;
   };
-  // the notices whose last action failed, by id: said so under their words,
-  // until one goes through or the notice is gone
-  const failed = new Set();
+  // the notices whose last action failed, by id, and why: the server's own
+  // words for its refusal (Paul, 2026-11-09), else the page's for a call
+  // that never reached it; said under their words until one goes through
+  // or the notice is gone
+  const failed = new Map();
   // the countdowns as last drawn, each its line and its time (`countdown`)
   let counting = [];
   let tick = null;
@@ -118,7 +120,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       counting.push({ u: n.until, line });
       copy.append(line);
     }
-    if (failed.has(n.id)) copy.append(el("p", null, "Couldn't do that. Try again."));
+    if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id)));
     if (n.detail) copy.append(el("p", "notice-detail", n.detail));
     (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
     row.append(copy, actions);
@@ -140,19 +142,23 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // An action: its route posted with its body, then the notices read again,
   // one more read in the page's sequence (`load`: the newest wins), which
   // decides what shows whatever the post answered. Failed, the notice says
-  // so, as that read finds it, its button back to tap again.
+  // why, as that read finds it, its button back to tap again. Its answer
+  // may name a page to open (Paul, 2026-11-09: an invite's app, a
+  // checkout), opened once that read has it (an app accepted is in the list).
   async function act(n, a, button) {
     // the start the server named, so a stale row's press restarts nothing newer
     if (restarts(a)) return restartComputer(a.body?.generation);
     button.disabled = true;
+    let answer = null;
     try {
-      await api("POST", a.post, a.body ?? {});
+      answer = await api("POST", a.post, a.body ?? {});
       failed.delete(n.id);
-    } catch {
-      failed.add(n.id);
+    } catch (e) {
+      failed.set(n.id, e?.status ? e.message : "Couldn't do that. Try again.");
     }
     // as a change told this page: only the cards whose rows it touched read again
     await load(true).catch(() => {});
+    if (typeof answer?.open === "string") openPage(answer.open);
   }
   // The countdowns, live: each line said again as its minute changes (in
   // place: a button under the person's finger stays), and the band drawn
@@ -225,7 +231,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const box = document.getElementById("computer-notices");
     const t = now();
     const all = notices() ?? [];
-    for (const id of failed) if (!all.some((n) => n.id === id)) failed.delete(id);
+    for (const id of failed.keys()) if (!all.some((n) => n.id === id)) failed.delete(id);
     // a notice a restart answers waits while it runs; one whose time passed is gone
     const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
     counting = [];

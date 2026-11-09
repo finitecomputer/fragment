@@ -66,6 +66,7 @@ function page(t, first, c = clock(Date.now())) {
   const calls = [];
   const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok: (v) => ok(v), fail: (e) => fail(e) }));
   const reads = { asked: 0, shown: 0, updating: false, listFailed: false, noticesFailed: false };
+  const opened = [];
   const shell = { notices: first, reads, computer: { computer: COMPUTER, phase: "awake", generation: 3, notices: [] } };
   let ui = null;
   // shell.js `load`, as far as the notices: an older read's answer that
@@ -82,7 +83,7 @@ function page(t, first, c = clock(Date.now())) {
   ui = createComputer({
     api, el: (tag, cls, text) => new Node(tag, cls, text), seg: (s) => s, named: (n) => n, section: stub, line: stub, actionLine: stub,
     computer: () => shell.computer, notices: () => shell.notices, agents: () => new Map(), computerFailed: () => false, setupPending: () => true,
-    made: () => {}, computerIs: () => {}, openScreen: () => {}, markOffer: () => {}, reads: () => reads, load, timers: c, now: c.now,
+    made: () => {}, computerIs: () => {}, openScreen: () => {}, markOffer: () => {}, reads: () => reads, load, timers: c, now: c.now, openPage: (url) => opened.push(url),
   });
   ui.renderComputer();
   t.after(() => {
@@ -92,7 +93,7 @@ function page(t, first, c = clock(Date.now())) {
   });
   const rows = () => box.children.filter((r) => !r.hidden);
   return {
-    box, calls, load, clock: c, shell, ui,
+    box, calls, load, clock: c, shell, ui, opened,
     // each row: its id, its words, and its actions as drawn
     shown: () => rows().map((r) => ({
       id: r.dataset.id,
@@ -139,12 +140,12 @@ test("a tap posts its body to its route, then reads again; the newest read decid
 test("a tap refused: the notice stays as read, its button back with a short line, and tapped again it goes through", async (t) => {
   const p = page(t, [paused()]);
   p.tap("key_paused:elevenlabs", "Allow up to $20 an hour");
-  p.calls[0].fail(Object.assign(new Error("refused"), { status: 503 }));
+  p.calls[0].fail(Object.assign(new Error("That key isn't paused any more."), { status: 409 }));
   await settle();
   assert.equal(p.calls[1].path, "/api/notices", "read again: the read decides");
   p.calls[1].ok({ notices: [paused()] });
   await settle();
-  assert.deepEqual(p.shown(), [{ id: "key_paused:elevenlabs", words: ["ElevenLabs calls paused: $5.03 this hour", "Couldn't do that. Try again."], actions: [{ label: "Allow up to $20 an hour", enabled: true }] }]);
+  assert.deepEqual(p.shown(), [{ id: "key_paused:elevenlabs", words: ["ElevenLabs calls paused: $5.03 this hour", "That key isn't paused any more."], actions: [{ label: "Allow up to $20 an hour", enabled: true }] }], "the server's own words for its refusal");
   p.tap("key_paused:elevenlabs", "Allow up to $20 an hour");
   p.calls[2].ok({ computer: COMPUTER });
   await settle();
@@ -229,4 +230,33 @@ test("a notice's Restart restarts the start it named, never a newer one: a stale
   p.ui.renderComputer();
   p.tap("update:abc", "Restart");
   assert.deepEqual([p.calls[0].method, p.calls[0].path, p.calls[0].body], ["POST", RESTART, { generation: 3 }], "the action's own precondition, as the server wrote it");
+});
+
+test("a tap that never reached the server (the network): its notice says so in the page's words, to tap again", async (t) => {
+  const p = page(t, [paused()]);
+  p.tap("key_paused:elevenlabs", "Allow up to $20 an hour");
+  p.calls[0].fail(new TypeError("Failed to fetch"));
+  await settle();
+  p.calls[1].ok({ notices: [paused()] });
+  await settle();
+  assert.deepEqual(p.shown()[0].words, ["ElevenLabs calls paused: $5.03 this hour", "Couldn't do that. Try again."]);
+});
+
+test("an action's answer that names a page opens it, once the read after it has it (an invite's app); one that names none opens nothing", async (t) => {
+  const invite = { id: "invite:garden--k3x9", kind: "invite", level: "info", title: "Garden plans", text: "ada@example.com invited you to edit it.", actions: [{ label: "Accept", post: "/api/invites/garden--k3x9/accept", body: {} }, { label: "Decline", post: "/api/invites/garden--k3x9/decline", body: {} }] };
+  const p = page(t, [invite]);
+  p.tap("invite:garden--k3x9", "Accept");
+  p.calls[0].ok({ fragment: "garden--k3x9", role: "editor", open: "https://garden--k3x9.fragment.test/" });
+  await settle();
+  assert.deepEqual(p.opened, [], "not before the read: the list may not have it yet");
+  p.calls[1].ok({ notices: [] });
+  await settle();
+  assert.deepEqual(p.opened, ["https://garden--k3x9.fragment.test/"]);
+  const q = page(t, [invite]);
+  q.tap("invite:garden--k3x9", "Decline");
+  q.calls[0].ok({ ok: true, declined: "garden--k3x9" });
+  await settle();
+  q.calls[1].ok({ notices: [] });
+  await settle();
+  assert.deepEqual(q.opened, []);
 });

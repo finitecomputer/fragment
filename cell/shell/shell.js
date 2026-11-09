@@ -81,12 +81,12 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // first, and its newest message); computer: theirs, with its agents;
 // agents: by identity; computerFailed: whether the last read of their computer
 // failed (what an earlier one said stays: a failure is not "none");
-// invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
-// notices: what they are told, in the server's words (`GET /api/notices`);
+// notices: what they are told, in the server's words (`GET /api/notices`):
+// their computer's, and the invites waiting on their emails;
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
 // What a late answer may still do: one latest ask a kind (asks.js)
 const asks = createAsks();
-const state = { me: null, guest: false, fragments: [], limits: null, invites: [], notices: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
+const state = { me: null, guest: false, fragments: [], limits: null, notices: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, desktopEmpty: false, making: null };
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
@@ -899,7 +899,7 @@ addEventListener("resize", () => closeMenu(true));
 
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain } = createChatList({
+const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain } = createChatList({
   api, ui: { $, el, patch, agentFace, mark, notice },
   data: { byName, own, chats, shown, titleOf, chatTitle: (name) => (byName(name)?.kind === "sessions" ? sessionArchive.title() : chatTitle(name)), homeMark: (f) => homeMark(f), isGroup, agentOfChat: (name) => agentOfChat(name), agentsOf,
     agents: () => state.agents, allFragments: () => state.fragments, computer: () => state.computer, isGuest: () => state.guest, personId: () => state.me?.id,
@@ -910,7 +910,7 @@ const { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, ask
     reading: () => making.readChat(state.making, state.current, state.page) },
   menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem },
   navigation: { newChat, rename: (name) => rename(name), openChat, openApp, openScreen, leaveSidebar, seg },
-  listLive, load, invites: () => state.invites, setInvites: (v) => { state.invites = v; },
+  listLive, load,
 });
 // Continue: a conversation (an import, an archived chat) as a new chat with
 // an agent of the person's choosing (continue.js)
@@ -1281,6 +1281,21 @@ addEventListener("message", async (e) => {
   if (isChat(name)) openChat(name);
   else openApp(name, `${url.pathname}${url.search}${url.hash}`);
 });
+// A page an action's answer names (FIN-458: an invite's app, a checkout):
+// one of theirs (its host this deployment's for a fragment, `ORIGIN`)
+// opens here as its row would; any other address, this page goes to.
+function openPage(href) {
+  let url;
+  try {
+    url = new URL(href, location.href);
+  } catch {
+    return;
+  }
+  const [before, after] = ORIGIN.split("{name}");
+  const name = url.origin.startsWith(before) && url.origin.endsWith(after) ? url.origin.slice(before.length, url.origin.length - after.length) : null;
+  if (name && FRAGMENT_NAME.test(name) && byName(name)) return isChat(name) ? openChat(name) : openApp(name, `${url.pathname}${url.search}${url.hash}`);
+  location.assign(url.href);
+}
 // A fragment's name, when `url` is a page of one on this deployment: its
 // host is the asking fragment's (`sender`, at `origin`, its status's
 // canonical URL) with another fragment's name in its place (a branch's mark
@@ -1739,7 +1754,7 @@ const { computerOf, prewake, renderComputer, restartComputer, computerSection } 
   notices: () => state.notices, agents: () => state.agents, computerFailed: () => state.computerFailed,
   setupPending: () => onboarding.setupPending(),
   made: (c) => { asks.ask("computer"); state.computer = c; }, computerIs, reopenSettings, openScreen, markOffer,
-  reads: () => reads, load,
+  reads: () => reads, load, openPage: (url) => openPage(url),
 });
 // The computer as the platform last answered: shown at once.
 function computerIs(v) {
@@ -1884,7 +1899,7 @@ const { connectionsSection } = createConnections({
 
 const onboarding = createOnboarding({
   api, ui: { $, el, notice },
-  account: { person: () => state.me, isGuest: () => state.guest, setGuest, hasInvites: () => state.invites.length },
+  account: { person: () => state.me, isGuest: () => state.guest, setGuest, told: () => state.notices.length },
   fragments: { allFragments: () => state.fragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg },
   computer: { computerView: () => state.computer, computerFailed: () => state.computerFailed, agents: () => state.agents, computerOf, computerIs },
   navigation: { start, openChat, atHome: () => location.pathname === "/" && !state.page, hasFrame: (name) => state.frames.has(name), page: () => state.page, welcomePath: WELCOME },
@@ -2014,14 +2029,13 @@ function watchList() {
     clearTimeout(opening);
     watching.wait = 1000;
     listChanged();
-    loadInvites().catch(() => {});
   };
   ws.onmessage = (e) => {
     try {
       const type = JSON.parse(e.data).type;
-      if (type === "changed") listChanged();
-      // the invites waiting on their emails (the registry's), and only those
-      else if (type === "invited") loadInvites().catch(() => {});
+      // what changed is named nothing: the list and what they are told, read
+      // again (`invited`, which no release sends since FIN-458, the same)
+      if (type === "changed" || type === "invited") listChanged();
     } catch {}
   };
   ws.onclose = () => {
@@ -2084,7 +2098,7 @@ async function start(open) {
     throw e;
   }
   state.me = me;
-  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null), loadInvites()]);
+  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
   // a deploy refused their list (`load` throws any other failure): what
   // they have is unknown, not nothing, so the page waits as it starts
   if (reads.listFailed) throw new ApiError(503, "deploying", UPDATING);
@@ -2100,7 +2114,7 @@ async function start(open) {
   // settings or the Apps page, as the address asks
   const settings = !open && [SETTINGS, APPS, HISTORY].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
-  if (!state.fragments.length && !state.invites.length && !open && !settings && state.guest) return welcome();
+  if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
@@ -2113,7 +2127,6 @@ async function start(open) {
   if (!settings) resumeFirstRun().catch(() => {});
   // an invite waits, and nothing it shares is open yet: a phone's sidebar,
   // where it is answered, shows over the page
-  if (!settings && !pick && state.invites.length && layout.narrow) layout.show("left");
   // after a reload for a new release, its windows where they were
   reopenWindows(settings);
   prewake();
@@ -2142,7 +2155,7 @@ function guestHome(offer) {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", [`You see and edit what people share with you, once you accept their invite in the sidebar. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
+  notice("You're a guest", [`You see and edit what people share with you, once you accept their invite. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
 // a chat's alert clicked with no shell open (alerts-sw.js): that chat

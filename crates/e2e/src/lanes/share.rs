@@ -340,8 +340,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let listed_theirs = api.signed(&guest, "GET", "/api/fragments", None)?;
     let in_list = listed_theirs.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str() && f["role"] == "editor"));
     s.ok(
-        "their yes makes them a member, at the role it said: the invite is spent, and it is in their list as it answers",
-        r.status == 200 && r.body == json!({ "fragment": chat, "role": "editor" }) && role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty() && in_list,
+        "their yes makes them a member, at the role it said, and names its page to open (FIN-458): the invite is spent, and it is in their list as it answers",
+        r.status == 200 && r.body["fragment"] == chat.as_str() && r.body["role"] == "editor" && r.body["open"].as_str().is_some_and(|o| o.contains(chat.as_str())) && role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty() && in_list,
         format!("{r} {listed_theirs}"),
     );
     let members_before = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
