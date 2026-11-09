@@ -58,6 +58,9 @@ pub struct Source {
     /// What was not read as a file, each in a few words (a name that is
     /// not text, a folder that could not be read).
     pub unread: Vec<String>,
+    /// What was left out unread for what its path says (`skip`): a file
+    /// that may hold a secret. No reader finds it.
+    pub skipped: Vec<Entry>,
 }
 
 enum Backing {
@@ -279,12 +282,29 @@ impl Source {
             true
         });
         let at = entries.iter().enumerate().map(|(n, (e, i))| (e.path.clone(), (n, *i))).collect();
-        Source { origin: origin.map(Path::to_path_buf), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread }
+        Source { origin: origin.map(Path::to_path_buf), backing, entries: entries.into_iter().map(|(e, _)| e).collect(), at, unread, skipped: Vec::new() }
     }
 
     /// The folder or the zip it was opened from, as named (none: a stage).
     pub fn origin(&self) -> Option<&Path> {
         self.origin.as_deref()
+    }
+
+    /// Leaves out every file `skip` names: listed in `skipped`, never read,
+    /// since no reader finds a file the source no longer lists.
+    pub fn skip(&mut self, skip: impl Fn(&str) -> bool) {
+        let mut at = HashMap::with_capacity(self.at.len());
+        let mut kept = Vec::with_capacity(self.entries.len());
+        for e in std::mem::take(&mut self.entries) {
+            if skip(&e.path) {
+                self.skipped.push(e);
+                continue;
+            }
+            let (_, index) = self.at[&e.path];
+            at.insert(e.path.clone(), (kept.len(), index));
+            kept.push(e);
+        }
+        (self.entries, self.at) = (kept, at);
     }
 
     /// Every file, by path.
@@ -437,29 +457,26 @@ impl Source {
     }
 
     /// One file as a file on this computer, for what opens a file by its
-    /// path (SQLite): a folder's own, or a zip's copied into `scratch`.
+    /// path (SQLite): a copy in `scratch`, a folder's as a zip's. Never
+    /// its own place: SQLite reads a WAL beside a database by itself, so
+    /// what it opens has beside it only what the source still lists (the
+    /// caller copies those), never a sidecar it skipped.
     pub fn local(&self, path: &str, scratch: &Scratch) -> Result<PathBuf> {
-        match &self.backing {
-            Backing::Dir(root) => {
-                self.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?;
-                Ok(root.join(path))
-            }
-            Backing::Zip(_) => {
-                let to = scratch.dir.join(path);
-                if let Some(parent) = to.parent() {
-                    std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
-                }
-                let size = self.get(path).map(|e| e.size).unwrap_or(0);
-                let copied = self.with_reader(path, |r| {
-                    let mut out = File::create(&to).with_context(|| format!("writing {}", to.display()))?;
-                    io::copy(r, &mut out).with_context(|| format!("copying {path} out of the zip"))
-                })?;
-                if copied != size {
-                    bail!("{path} came out of the zip as {copied} bytes, not the {size} listed");
-                }
-                Ok(to)
-            }
+        let listed = self.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?.size;
+        let to = scratch.dir.join(path);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
         }
+        let copied = self.with_reader(path, |r| {
+            let mut out = File::create(&to).with_context(|| format!("writing {}", to.display()))?;
+            io::copy(r, &mut out).with_context(|| format!("copying {path}"))
+        })?;
+        // a zip's file is the size its directory lists; a folder's may have
+        // grown since it was listed (a Hermes writing to it)
+        if matches!(self.backing, Backing::Zip(_)) && copied != listed {
+            bail!("{path} came out of the zip as {copied} bytes, not the {listed} listed");
+        }
+        Ok(to)
     }
 }
 
@@ -595,7 +612,8 @@ pub mod tests {
         let out = z.local("big.dat", &scratch).unwrap();
         assert!(out.starts_with(&scratch.dir));
         assert_eq!(std::fs::read(&out).unwrap(), vec![7u8; 70_000]);
-        assert_eq!(d.local("big.dat", &scratch).unwrap(), dir.join("big.dat"), "a folder's file is its own");
+        let copy = d.local("big.dat", &scratch).unwrap();
+        assert!(copy.starts_with(&scratch.dir) && std::fs::read(&copy).unwrap() == vec![7u8; 70_000], "a folder's file is copied too");
         let held = scratch.dir.clone();
         drop(scratch);
         assert!(!held.exists(), "the scratch goes with the import");

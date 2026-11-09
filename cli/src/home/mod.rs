@@ -6,9 +6,8 @@
 //! `import-agent-home`'s; these commands do what needs none.
 //!
 //! **An import is data.** Nothing here runs or follows anything a home
-//! holds. A source holding a path that may hold a secret is refused
-//! whole (`open`): the import never reads a secret, and whatever staged the
-//! home should have left it out.
+//! holds. A file whose path says it may hold a secret is left out of the
+//! source unread, and named (`open`): the import never reads a secret.
 
 pub mod files;
 pub mod layout;
@@ -85,8 +84,11 @@ fn usage(msg: String) -> anyhow::Error {
     anyhow::Error::new(CodedError { code: Code::InvalidUsage, msg })
 }
 
-/// A home, read through `layout`: refused whole if any path in it is one
-/// that may hold a secret (by its name, or the layout's own globs).
+/// A home, read through `layout`, less every file that may hold a secret
+/// (by its name, or the layout's globs): those are left out unread, and
+/// named (`Source::skipped`). A person's own zip may hold one by mistake
+/// (an `.npmrc`, a test key), and skipping it keeps it out of everything
+/// an import makes as well as refusing would, while the rest moves.
 #[cfg(test)]
 pub fn open(path: &Path, layout: &Layout) -> Result<Source> {
     open_with(path, layout, None)
@@ -95,16 +97,9 @@ pub fn open(path: &Path, layout: &Layout) -> Result<Source> {
 /// `open`, of any source a person names: a stage (`stage:<id>`) too,
 /// through the platform (`c`).
 pub fn open_with(path: &Path, layout: &Layout, c: Option<&crate::api::Client>) -> Result<Source> {
-    let src = Source::named(path, c)?;
+    let mut src = Source::named(path, c)?;
     let globs = layout.secret_globs().map_err(|e| usage(format!("the layout {}: {e}", layout.name)))?;
-    let secrets: Vec<String> = src.entries().iter().filter(|e| rules::secret_name(e.path.rsplit('/').next().unwrap_or(&e.path)) || globs.is_match(&e.path)).map(|e| e.path.clone()).collect();
-    if !secrets.is_empty() {
-        bail!(refused(format!(
-            "{} holds files that may hold passwords or keys ({}): an import never reads them, so it reads none of this. Leave them out of it and try again",
-            path.display(),
-            source::said(&secrets)
-        )));
-    }
+    src.skip(|path| rules::secret_name(path.rsplit('/').next().unwrap_or(path)) || globs.is_match(path));
     Ok(src)
 }
 
@@ -265,21 +260,45 @@ mod tests {
         Layout::named(fragment_fakes::old_home::layout().to_str().unwrap()).unwrap()
     }
 
+    /// Goal: a file that may hold a secret (by its name, or the layout's
+    /// globs) is left out of the home: listed, never read, never copied
+    /// out; the rest reads. Before, the whole home was refused.
     #[test]
-    fn a_secret_refuses_the_whole_home() {
+    fn a_secret_is_skipped_never_read_and_named() {
         let t = Temp::new();
-        std::fs::create_dir_all(t.0.join("home/agent/keys")).unwrap();
-        std::fs::write(t.0.join("home/SOUL.md"), "me").unwrap();
-        let hermes = Layout::hermes();
-        assert!(open(&t.0.join("home"), &hermes).is_ok());
-        std::fs::write(t.0.join("home/agent/keys/signing.txt"), "k").unwrap();
+        let home = t.0.join("home");
+        std::fs::create_dir_all(home.join("agent/keys")).unwrap();
+        std::fs::write(home.join("SOUL.md"), "me").unwrap();
+        std::fs::write(home.join("agent/keys/signing.txt"), "k").unwrap();
+        std::fs::write(home.join("agent/notes.md"), "n").unwrap();
+        std::fs::write(home.join(".env"), "OPENROUTER_API_KEY=x").unwrap();
         let layout = Layout { secret: vec!["agent/keys/**".into()], ..Layout::hermes() };
-        let e = open(&t.0.join("home"), &layout).err().expect("refused by the layout's glob");
-        assert!(format!("{e:#}").contains("\"agent/keys/signing.txt\""), "{e:#}");
-        std::fs::write(t.0.join("home/.env"), "OPENROUTER_API_KEY=x").unwrap();
-        let e = open(&t.0.join("home"), &hermes).err().expect("refused by its name");
-        assert!(format!("{e:#}").contains("may hold passwords or keys (\".env\")"), "{e:#}");
-        assert_eq!(e.downcast_ref::<CodedError>().map(|c| c.code), Some(Code::InvalidRequest));
+        let src = open(&home, &layout).unwrap();
+        assert_eq!(src.skipped.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), [".env", "agent/keys/signing.txt"]);
+        assert_eq!(src.entries().iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["SOUL.md", "agent/notes.md"]);
+        assert!(src.read(".env").is_err() && src.read("agent/keys/signing.txt").is_err(), "never read");
+        let out = t.0.join("out");
+        assert_eq!(extract(&src, &["agent".into()], &out).unwrap().files, 1);
+        assert!(!out.join("agent/keys").exists(), "never copied out");
+    }
+
+    /// Goal: a zip a person made holding one file shaped like a secret
+    /// (an `.npmrc` in a project) surveys whole, less that file: its plan
+    /// brings the rest, and names the file left behind, and why.
+    #[test]
+    fn a_zip_with_one_secret_surveys_the_rest() {
+        let layout = fixture_layout();
+        let dir = open(&fixture(), &layout).unwrap();
+        let t = Temp::new();
+        let zip = t.0.join("home.zip");
+        let mut files: Vec<(String, Vec<u8>)> = dir.entries().iter().map(|e| (e.path.clone(), dir.read(&e.path).unwrap())).collect();
+        files.push(("workspace/projects/app/.npmrc".into(), b"//registry.npmjs.org/:_authToken=x".to_vec()));
+        source::tests::zip_of(&zip, &files.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect::<Vec<_>>());
+        let s = survey::survey(&open(&zip, &layout).unwrap(), &layout, 1_794_225_600).unwrap();
+        assert_eq!(s.source.skipped, ["workspace/projects/app/.npmrc"]);
+        assert_eq!(s.files.brought.files, 7, "the fixture's own");
+        let secret = &s.files.left_by_why[&plan::Why::Secret];
+        assert_eq!(secret.largest.iter().map(|l| l.path.as_str()).collect::<Vec<_>>(), ["projects/app/.npmrc"]);
     }
 
     /// The fixture's survey, from its folder and from a zip of it: the

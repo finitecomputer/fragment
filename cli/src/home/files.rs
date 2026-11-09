@@ -348,6 +348,27 @@ mod tests {
         assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
     }
 
+    /// Goal: a zip a person made holding one file that may hold a secret
+    /// (an `.npmrc` in a project) imports everything else, and its
+    /// `left-behind.md` names that file, and why; the file goes nowhere.
+    #[test]
+    fn a_zip_with_one_secret_imports_the_rest() {
+        let t = Temp::new();
+        let zip = t.0.join("home.zip");
+        zip_of(&zip, &[("work/notes/a.md", b"# a"), ("work/proj/.npmrc", b"//registry.npmjs.org/:_authToken=x"), ("work/proj/main.py", b"print(1)")]);
+        let src = super::super::open(&zip, &layout()).unwrap();
+        let mock = crate::mockcs::start();
+        mock.seed_repo(NAME, &[]);
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!((b.files, b.left), (2, 1));
+        assert_eq!(mock.file_at(NAME, "main", "files/notes/a.md").as_deref(), Some(&b"# a"[..]));
+        assert_eq!(mock.file_at(NAME, "main", "files/proj/main.py").as_deref(), Some(&b"print(1)"[..]));
+        assert!(mock.paths(NAME, "main").iter().all(|p| !p.contains(".npmrc")), "the secret went nowhere");
+        let left = String::from_utf8(mock.file_at(NAME, "main", LEFT_BEHIND).unwrap()).unwrap();
+        assert!(left.contains("may hold a password or key") && left.contains("`proj/.npmrc`"), "{left}");
+    }
+
     /// A fragment its caller only views is refused before anything is sent.
     #[test]
     fn a_fragment_only_viewed_is_refused() {

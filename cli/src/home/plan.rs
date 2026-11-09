@@ -118,7 +118,9 @@ pub struct Plan {
 /// The plan for `src`'s work folder (the layout's), within `cap_bytes`
 /// and `cap_files`.
 pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize) -> Result<Plan> {
-    let Some(work) = layout.work.as_deref().filter(|w| *w == "." || src.has_folder(w)) else { return Ok(Plan::default()) };
+    // a work folder the source still lists a file of, or one it skipped
+    let had = |w: &str| src.has_folder(w) || src.skipped.iter().any(|e| e.path.starts_with(&format!("{w}/")));
+    let Some(work) = layout.work.as_deref().filter(|w| *w == "." || had(w)) else { return Ok(Plan::default()) };
     let skip = if work == "." { 0 } else { work.len() + 1 };
     let files: Vec<(&Entry, &str)> = src.under(work).map(|e| (e, &e.path[skip..])).collect();
     // the layout's parts are brought their own way: not these files
@@ -128,7 +130,13 @@ pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize) -> 
     let ignores = gitignores(src, &files);
 
     let mut folders: BTreeMap<String, Left> = BTreeMap::new();
-    let mut left: Vec<Left> = Vec::new();
+    // what the source left out unread for its name (`home::open`), named
+    let mut left: Vec<Left> = src
+        .skipped
+        .iter()
+        .filter_map(|e| Some((if skip == 0 { e.path.as_str() } else { e.path.strip_prefix(&format!("{work}/"))? }, e.size)))
+        .map(|(rel, bytes)| Left { path: rel.to_string(), files: 1, bytes, why: Why::Secret, kind: None })
+        .collect();
     let mut candidates: Vec<(&Entry, &str, Kind)> = Vec::new();
     for (e, rel) in &files {
         if parts.iter().any(|p| rel.starts_with(p.as_str())) {
@@ -350,6 +358,17 @@ mod tests {
         assert_eq!(p.picked.len(), 2);
         assert!(p.left.iter().all(|l| l.why == Why::OverCount));
         assert!(plan(&src, &Layout::hermes(), 1_000, 100).unwrap().picked.is_empty(), "no work, no files");
+    }
+
+    /// A work folder holding nothing but a file skipped for its name still
+    /// lists it left behind.
+    #[test]
+    fn a_work_folder_of_only_a_secret_lists_it() {
+        let t = Temp::new();
+        put(&t.0, &[("work/.npmrc", 9, 1), ("SOUL.md", 2, 1)]);
+        let src = crate::home::open(&t.0, &layout()).unwrap();
+        let p = plan(&src, &layout(), GIB, 100).unwrap();
+        assert_eq!(p.left.iter().map(|l| (l.path.as_str(), l.why, l.bytes)).collect::<Vec<_>>(), [(".npmrc", Why::Secret, 9)]);
     }
 
     #[test]
