@@ -1504,6 +1504,13 @@ pub(crate) fn json_text<'a, T: serde::Deserialize<'a>>(text: &'a str) -> serde_j
     serde_json::from_slice(text.as_bytes())
 }
 
+/// A call's body, read from its bytes once as `T`: one that does not fit is
+/// the caller's (400). A dispatcher hands each route the bytes, and the
+/// route reads its own type, never a `Value` read again as one.
+pub(crate) fn json_body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
+    serde_json::from_slice(bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
+}
+
 /// `worker::Response::json`, its text read through `json_text`: the same
 /// answer, without the `StrRead` decoders `json` would add for each type.
 pub(crate) trait ReadJson {

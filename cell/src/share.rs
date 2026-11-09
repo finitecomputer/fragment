@@ -51,13 +51,14 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, ErrorBody, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
+use serde::de::{DeserializeOwned, IgnoredAny};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::ReadJson;
 use crate::ask_registry;
 use crate::auth::{self, enc, esc};
 use crate::config::Config;
@@ -269,8 +270,16 @@ pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &
 }
 
 /// A fragment's handler at `inner`, asked as the signed-in person: its
-/// answer, or its refusal as it made it.
-pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<Value> {
+/// answer, read from its bytes once as `T` (`IgnoredAny`: only whether it
+/// answered), or its refusal as it made it.
+pub(crate) async fn ask<T: DeserializeOwned>(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<T> {
+    let bytes = answered(env, url, name, who, method, inner, body).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{inner}'s answer: {e}")))
+}
+
+/// `ask`'s round trip, one copy for every answer's type: its 200's bytes,
+/// or its refusal.
+async fn answered(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<Vec<u8>> {
     // the page's own query string is nothing the fragment reads
     let mut at = url.clone();
     at.set_query(None);
@@ -287,24 +296,22 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
     let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
     let mut resp = crate::routed::send(env, "FRAGMENT", name, req).await?;
     let status = resp.status_code();
-    let v: Value = resp.read_json().await.map_err(|e| CellError::host(format!("{inner} answered {status}, not JSON: {e}")))?;
+    let bytes = resp.bytes().await?;
     if status == 200 {
-        return Ok(v);
+        return Ok(bytes);
     }
-    match serde_json::from_value::<ErrorBody>(v) {
-        Ok(e) => {
-            let refused = CellError::new(e.error, e.message);
-            Err(match e.reason {
-                Some(reason) => refused.because(reason),
-                None => refused,
-            })
-        }
-        Err(_) => Err(CellError::host(format!("{inner} answered {status}"))),
-    }
+    Err(crate::routed::refusal(&bytes, || format!("{inner} answered {status}")))
 }
 
-fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T> {
-    serde_json::from_value(v).map_err(|e| CellError::host(format!("{what}: {e}")))
+/// What the sheet reads of a fragment's `GET /api/status`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SheetStatus {
+    visibility: Visibility,
+    kind: FragmentKind,
+    title: Option<String>,
+    view_token: Option<String>,
+    reach: Option<bool>,
 }
 
 /// Emails and pictures for identities, asked of the registry
@@ -472,19 +479,17 @@ enum Flash {
 
 async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, session: &str) -> CellResult<Sheet> {
     let (members, status) =
-        join(ask(env, url, name, who, Method::Get, "/api/members", None), ask(env, url, name, who, Method::Get, "/api/status", None)).await;
-    let members: MemberList = decoded(members?, "the members")?;
-    let status = status?;
+        join(ask::<MemberList>(env, url, name, who, Method::Get, "/api/members", None), ask::<SheetStatus>(env, url, name, who, Method::Get, "/api/status", None)).await;
+    let (members, status) = (members?, status?);
     let role = members.members.iter().find(|m| m.principal == who.id).map(|m| m.role);
-    let visibility: Visibility = decoded(status["visibility"].clone(), "the status's visibility")?;
-    let kind: FragmentKind = decoded(status["kind"].clone(), "the status's kind")?;
-    let title = status["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(label(name)).to_string();
+    let (visibility, kind) = (status.visibility, status.kind);
+    let title = status.title.filter(|t| !t.is_empty()).unwrap_or_else(|| label(name).to_string());
     let chat_agent = match kind {
         FragmentKind::Chat => members.members.iter().find(|m| m.kind == Some(IdentityKind::Agent)).map(|m| m.principal.clone()),
         _ => None,
     };
     let canonical = cfg.canonical(url, name);
-    let link = match (role, status["viewToken"].as_str()) {
+    let link = match (role, status.view_token.as_deref()) {
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
@@ -497,7 +502,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     // beside the owner's invites (the sheet waits on both, not one by one)
     let invites = async {
         match role {
-            Some(Role::Owner) => decoded::<InviteList>(ask(env, url, name, who, Method::Get, "/api/invites", None).await?, "the invites").map(|l| l.invites),
+            Some(Role::Owner) => ask::<InviteList>(env, url, name, who, Method::Get, "/api/invites", None).await.map(|l| l.invites),
             _ => Ok(vec![]),
         }
     };
@@ -515,7 +520,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         chat_agent,
         link,
         canonical,
-        reach: status["reach"].as_bool() == Some(true),
+        reach: status.reach == Some(true),
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -801,7 +806,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         Some(r @ (Role::Viewer | Role::Editor)) => Ok(r),
         _ => Err(CellError::invalid("a role is viewer or editor")),
     };
-    let done = match field("action") {
+    let done: CellResult<IgnoredAny> = match field("action") {
         "invite" => match invite(env, cfg, url, name, &who, &session, field("email"), role()).await {
             Ok(page) => return Ok(page),
             Err(e) => Err(e),
@@ -824,15 +829,20 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         },
         // the share link only: the inbox's token is an integration's,
         // rotated with the CLI
-        "rotate" => match ask(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await {
+        "rotate" => match ask::<IgnoredAny>(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await {
             Ok(_) => return shown(env, cfg, url, name, &who, &session, Some(Flash::Done("A new share link: the old one no longer opens it.")), 200).await,
             Err(e) => Err(e),
         },
         // a member's own, as `fragment members leave`: then the sheet is
         // not theirs to see
         "leave" => {
-            let title = ask(env, url, name, &who, Method::Get, "/api/status", None).await.ok().and_then(|s| s["title"].as_str().map(str::to_string));
-            match ask(env, url, name, &who, Method::Delete, "/api/members/me", None).await {
+            /// What leaving reads of `GET /api/status`.
+            #[derive(Deserialize)]
+            struct Titled {
+                title: Option<String>,
+            }
+            let title = ask::<Titled>(env, url, name, &who, Method::Get, "/api/status", None).await.ok().and_then(|s| s.title);
+            match ask::<IgnoredAny>(env, url, name, &who, Method::Delete, "/api/members/me", None).await {
                 Ok(_) => return left(title.as_deref().unwrap_or(label(name))),
                 Err(e) => Err(e),
             }
@@ -883,8 +893,7 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
         return drawn(&before, Some(Flash::Already { who: email, role: m.role }), 200);
     }
     let again = before.invites.iter().any(|i| i.email == email);
-    let shared = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await?;
-    let flash = match decoded::<Shared>(shared, "the invite")? {
+    let flash = match ask::<Shared>(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await? {
         Shared::Invited(i) => Flash::Invited { who: email, role: i.role, again },
         Shared::Member(_) => return Err(CellError::host("an invite made a member at once: invites wait for a yes (decision 63)")),
     };
@@ -935,9 +944,9 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
     let mut unnamed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for round in asked.chunks(limits::ACCESS_ASKED_AT_ONCE) {
         let answers = join_all(round.iter().map(|name| async move {
-            let (members, invites) = join(ask(env, url, name, who, Method::Get, "/api/members", None), ask(env, url, name, who, Method::Get, "/api/invites", None)).await;
+            let (members, invites) = join(ask::<MemberList>(env, url, name, who, Method::Get, "/api/members", None), ask::<InviteList>(env, url, name, who, Method::Get, "/api/invites", None)).await;
             let read = match (members, invites) {
-                (Ok(m), Ok(i)) => decoded::<MemberList>(m, "the members").and_then(|m| Ok((m.members, decoded::<InviteList>(i, "the invites")?.invites))),
+                (Ok(m), Ok(i)) => Ok((m.members, i.invites)),
                 (Err(e), _) | (_, Err(e)) => Err(e),
             };
             (name.clone(), read)
