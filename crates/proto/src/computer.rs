@@ -338,19 +338,23 @@ pub struct ComputerUses {
 /// `PUT /api/computers/{id}/agents/{fragment}/connections`: the providers
 /// an agent may use, all of them named at once, or `null` for every one
 /// its owner has (the default again). The field is named even when it is
-/// `null`: the route refuses a body without it.
+/// `null`: the route refuses a body without it (`Option::deserialize`, not
+/// an `Option`'s implied default).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnections {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub connections: Option<Vec<String>>,
 }
 
 /// `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}`: which
 /// of its owner's accounts there the agent uses, by its id (one of theirs,
-/// as `GET /api/connections` lists it), or `null` for the default.
+/// as `GET /api/connections` lists it), or `null` for the default. The
+/// field is named even when it is `null`, as `AgentConnections`' is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAccount {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub account: Option<String>,
 }
 
@@ -697,6 +701,20 @@ pub fn valid_port_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent's connections and account are named even when `null`: a
+    /// body without the field is refused, never read as the default.
+    #[test]
+    fn a_null_is_named_and_a_missing_field_refused() {
+        let connections = |text: &str| serde_json::from_slice::<AgentConnections>(text.as_bytes()).map(|c| c.connections).map_err(|e| e.to_string());
+        assert_eq!(connections(r#"{"connections":null}"#), Ok(None));
+        assert_eq!(connections(r#"{"connections":["github"]}"#), Ok(Some(vec!["github".to_string()])));
+        assert!(connections("{}").unwrap_err().contains("missing field `connections`"));
+        let account = |text: &str| serde_json::from_slice::<AgentAccount>(text.as_bytes()).map(|a| a.account).map_err(|e| e.to_string());
+        assert_eq!(account(r#"{"account":null}"#), Ok(None));
+        assert_eq!(account(r#"{"account":"acct_1"}"#), Ok(Some("acct_1".to_string())));
+        assert!(account("{}").unwrap_err().contains("missing field `account`"));
+    }
 
     /// Valid: the port's root, or a path and query an image reads. Invalid:
     /// anything that is not a path on the port.

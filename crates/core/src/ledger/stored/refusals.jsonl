@@ -1,0 +1,23 @@
+{"error":"invalid_request","message":"the request breaks a rule (Id)","refused":{"refused":"invalid","what":"id"}}
+{"error":"invalid_request","message":"the request breaks a rule (Usage(Name))","refused":{"refused":"invalid","what":{"usage":"name"}}}
+{"error":"invalid_request","message":"the request breaks a rule (Usage(Quantity))","refused":{"refused":"invalid","what":{"usage":"quantity"}}}
+{"error":"invalid_request","message":"the request breaks a rule (Amount)","refused":{"refused":"invalid","what":"amount"}}
+{"error":"invalid_request","message":"the request breaks a rule (Note)","refused":{"refused":"invalid","what":"note"}}
+{"error":"invalid_request","message":"the request breaks a rule (Rows)","refused":{"refused":"invalid","what":"rows"}}
+{"error":"invalid_request","message":"the request breaks a rule (Time)","refused":{"refused":"invalid","what":"time"}}
+{"error":"invalid_request","message":"the request breaks a rule (Order)","refused":{"refused":"invalid","what":"order"}}
+{"error":"conflicting_body","message":"this id was used with a different body","refused":{"refused":"conflicting_body"}}
+{"error":"invalid_request","message":"the ledger charges with price book 7; a new book has a higher version","refused":{"current":7,"refused":"stale_book"}}
+{"error":"invalid_request","message":"the ledger's seat is at order 12; a change to it has a higher one","refused":{"current":12,"refused":"stale_seat"}}
+{"error":"invalid_request","message":"the price book has no price for that","refused":{"refused":"no_price"}}
+{"error":"too_large","message":"that is more than one row may cost","refused":{"refused":"too_large"}}
+{"error":"invalid_request","message":"that row is older than the ledger remembers","refused":{"refused":"stale"}}
+{"error":"forbidden","message":"a guest pays for nothing: no agents, no AI, nothing billed","refused":{"refused":"guest_payer"}}
+{"error":"forbidden","message":"guests can't create fragments: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits the fragments shared with them, and a seat makes fragments of its own","refused":{"refused":"guest_creates"}}
+{"error":"budget_used_up","message":"agents are stopped: the credit is used up; adding credit starts them again","refused":{"refused":"agents_stopped","why":"no_credit"}}
+{"error":"budget_used_up","message":"fragments are read-only: the balance reached the overdraft; credit that brings it above zero ends it","refused":{"refused":"read_only","why":"overdrawn"}}
+{"error":"budget_used_up","message":"this fragment spent $5.000123 of its $5.00 cap this month: only its owner spends in it until next month","refused":{"cap":5000000,"refused":"cap_reached","spent":5000123}}
+{"error":"forbidden","message":"an org's credit pays for its fragments, never a person's plan, seat, agents or computer","refused":{"refused":"persons_only"}}
+{"error":"forbidden","message":"only an org's ledger has a budget","refused":{"refused":"orgs_only"}}
+{"error":"budget_used_up","message":"this org's fragments spent $20.000001 of its $20.00 budget this month: AI steps wait until its billing admins raise it, or next month","refused":{"budget":20000000,"refused":"budget_reached","spent":20000001}}
+{"error":"not_found","message":"this person was wiped: their ledger takes nothing more","refused":{"refused":"wiped"}}

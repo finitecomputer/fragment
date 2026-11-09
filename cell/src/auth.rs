@@ -725,7 +725,7 @@ async fn mint_for(env: &Env, url: &Url, by: Minter<'_>, name: &str, back: &str, 
     // them already (docs/api.md, Asking first): the fragment is asked that
     // alone
     let who = Signed::new(minted.identity, key.clone());
-    match share::ask(env, url, name, &who, Method::Get, "/signin/known", None).await {
+    match share::ask::<serde::de::IgnoredAny>(env, url, name, &who, Method::Get, "/signin/known", None).await {
         Ok(_) => {
             let minted = ask_registry(env, &mint(Consent::Member)).await?;
             Ok(Minting::Redeem(minted.redeem.ok_or_else(|| CellError::host("a member's mint answered no redemption"))?))

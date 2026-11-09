@@ -100,31 +100,27 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             json_answer(&ask_registry(env, &calls::TestHook::E2ePeople(hook)).await?)
         }
         (Method::Post, ["ledger"]) => {
-            /// `{identity, …}`: a lever on that person's ledger (ledger.rs `TestHook`).
-            #[derive(Deserialize)]
-            struct TestLedger {
-                identity: String,
-                #[serde(flatten)]
-                hook: ledger::TestHook,
-            }
-            let t: TestLedger = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // `{identity, op, …}`: a lever on that person's ledger (ledger.rs `TestHook`)
+            let mut fields: ledger::TestHookFields = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let identity = fields.identity.take().ok_or_else(|| CellError::invalid("body: missing field `identity`"))?;
+            let hook = ledger::TestHook::try_from(fields).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             // a person's, or an org's (`org:<id>`) where levers reach everyone
-            let org = fragment_core::ledger::org::Payer::parse(&t.identity).is_some_and(|p| matches!(p, fragment_core::ledger::org::Payer::Org(_)));
-            if !npub::is_identity(&t.identity) && !(org && !cfg.levers_scoped) {
+            let org = fragment_core::ledger::org::Payer::parse(&identity).is_some_and(|p| matches!(p, fragment_core::ledger::org::Payer::Org(_)));
+            if !npub::is_identity(&identity) && !(org && !cfg.levers_scoped) {
                 return Err(CellError::invalid("name an identity (or, unscoped, an org's ledger: org:<id>)"));
             }
-            if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
+            if cfg.levers_scoped && !is_e2e(env, &identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the ledger levers reach e2e people alone"));
             }
-            if matches!(t.hook, ledger::TestHook::GateHeard) {
+            if matches!(hook, ledger::TestHook::GateHeard) {
                 // the router's gate, where model calls ask
-                return json_answer(&ledger::gate_heard(&t.identity));
+                return json_answer(&ledger::gate_heard(&identity));
             }
-            if matches!(t.hook, ledger::TestHook::ForgetGate) {
+            if matches!(hook, ledger::TestHook::ForgetGate) {
                 // the router's isolate's gate; the ledger forgets its own
                 ledger::forget_gate();
             }
-            json_answer(&ledger::ask(env, &t.identity, &t.hook).await?)
+            json_answer(&ledger::ask(env, &identity, &hook).await?)
         }
         (Method::Post, ["list"]) => {
             /// `{identity, op}`: a lever on that identity's list (principal.rs `test_lever`).
@@ -146,7 +142,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the list levers reach e2e people's lists (and their agents') alone"));
                 }
             }
-            json_answer(&routed::ask_object(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
+            json_answer(&routed::ask_object::<serde_json::Value>(env, "PRINCIPAL", &t.identity, &format!("test/{}", t.op), &serde_json::json!({})).await?)
         }
         (Method::Post, ["export"]) => {
             /// `{identity, op, steps?}`: a lever on that person's export (export.rs `export_lever`).
@@ -274,8 +270,7 @@ async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
     if lent > levers::E2E_PAID_CALLS_MAX {
         return Err(CellError::invalid(format!("an e2e person makes at most {} paid calls", levers::E2E_PAID_CALLS_MAX)));
     }
-    let answer = ask_registry(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
-    let signed: calls::E2eSignedIn = serde_json::from_value(answer).map_err(|e| CellError::host(format!("the registry's e2e sign-in: {e}")))?;
+    let signed: calls::E2eSignedIn = crate::ask_registry_as(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
     assert!(npub::is_identity(&signed.identity), "the registry answers an identity");
     ledger::ask(env, &signed.identity, &SetPlan { id: E2E_SEAT_ID.into(), plan: Plan::Seat }).await?;
     let cap = ledger::ask(env, &signed.identity, &ledger::TestHook::PaidCalls { max: asked.paid_calls }).await?;
