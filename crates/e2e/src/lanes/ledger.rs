@@ -104,6 +104,42 @@ fn hello() -> Value {
 }
 
 /// What the default book charges for `usage`.
+/// A stream's text with the fake's ids masked (`fake` and 8 hex digits,
+/// `call_` and digits): they count the fake's answers, so they move with
+/// the lanes' order.
+pub(super) fn ids_masked(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // bounded by the text: each pass takes at least one byte of it
+    while let Some(c) = rest.chars().next() {
+        let (prefix, digits): (&str, fn(&u8) -> bool) = match () {
+            () if rest.starts_with("\"fake") => ("\"fake", u8::is_ascii_hexdigit),
+            () if rest.starts_with("\"call_") => ("\"call_", u8::is_ascii_digit),
+            () => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+        };
+        let n = rest.as_bytes()[prefix.len()..].iter().take_while(|b| digits(b)).count();
+        out.push_str(prefix);
+        out.push('#');
+        rest = &rest[prefix.len() + n..];
+    }
+    out
+}
+
+/// The client's bytes of the Workers AI fake's streamed answer to "hello"
+/// (prompt 40, cached 10, completion 30), ids masked: usage dropped from
+/// each chunk with choices, its last line OpenAI's last chunk.
+const STREAMED_WORKERS_AI: &str = "\
+    data: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{\"content\":\"echo: hello\"},\"finish_reason\":null,\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0,\"logprobs\":null}],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\"}\n\n\
+    data: {\"choices\":[],\"created\":0,\"id\":\"fake#\",\"model\":\"@cf/zai-org/glm-5.3-flash\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":0,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":0}}\n\n\
+    data: {\"choices\":[],\"id\":\"fake#\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":30,\"neurons\":1.8,\"prompt_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":10},\"total_tokens\":70}}\n\n\
+    data: [DONE]\n\n";
+
 pub(super) fn charge(usage: &Usage) -> i64 {
     PriceBook::defaults().price(usage).expect("the book prices the tiers' models").charge
 }
@@ -750,7 +786,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let streamed = charge(&tokens(CHEAP, 30, 10, 30));
     let landed = s.eventually(wait, || aig().iter().any(|e| charged(e) == Some(streamed)));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
+    s.ok("its bytes are the ones pinned", ids_masked(&r.text) == STREAMED_WORKERS_AI, ids_masked(&r.text));
     s.ok("and is charged from its last, cumulative usage only", landed, json!(aig()));
+    // a client that goes away mid-answer: the call is read on, and charged
+    s.ai.set_usage(&[Used { prompt: 41, cached: 0, completion: 7 }]);
+    s.ai.pace_next(&[Pace { every_ms: 0, thinking: 0, hold_ms: 0 }]);
+    s.ai.hold_streams();
+    let before = aig().len();
+    let hung = api.signed_hung_up(&hand, route, &chat(true));
+    s.ai.release_streams();
+    let (status, read) = hung?;
+    let gone = charge(&tokens(CHEAP, 41, 0, 7));
+    let landed = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(gone)));
+    s.ok(
+        "a client that hangs up after the answer's first event leaves the call read on to its usage, and charged from it",
+        status == 200 && read.starts_with("data: ") && !read.contains("[DONE]") && landed,
+        json!({ "status": status, "read": read, "entries": aig() }),
+    );
     quote(s, api, &hand, &owner, &owner_id, wait)?;
     let (before, said) = (aig().len(), logged(s, "ledger.unknown-usage"));
     s.ai.break_next();
