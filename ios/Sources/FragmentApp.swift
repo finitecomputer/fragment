@@ -460,7 +460,13 @@ struct FragmentRoot: View {
     }
     private func shell(_ api: FragmentAPI) -> some View {
         ZStack(alignment: .leading) {
-            Group {
+            // What they are told sits above the whole stack, so every page
+            // and every page pushed on it (Your Apps, Settings' own) has it,
+            // as the web's band is over every chat and Settings: one band,
+            // never one per page.
+            VStack(spacing: 0) {
+                NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4)
+                    .background(FragmentStyle.background.ignoresSafeArea(edges: .top))
                     // Your Apps is pushed onto the page it was opened from, so
                     // Back (and swiping back) returns to that chat or page.
                     NavigationStack {
@@ -486,9 +492,6 @@ struct FragmentRoot: View {
                                     .navigationTitle("Your Apps").navigationBarTitleDisplayMode(.inline)
                             }
                     }
-                    // what they are told, over every page and every page pushed
-                    // on it (Your Apps, Settings' own), as the web's band
-                    .safeAreaInset(edge: .top, spacing: 0) { NoticesBand(library: library, api: api, maxHeight: pageHeight * 0.4) }
             }
             .accessibilityHidden(sidebar)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
