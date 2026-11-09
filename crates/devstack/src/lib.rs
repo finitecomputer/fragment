@@ -24,6 +24,7 @@ pub mod node;
 mod node_release;
 pub mod signals;
 pub mod store;
+mod tree;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -749,7 +750,7 @@ pub fn signed_in_subjects(project: &Path, issuer: &str) -> Result<Vec<(String, S
 
 /// The nodes this process started in process groups of their own and has
 /// not dropped, which a terminal's Ctrl-C does not reach (it signals the
-/// terminal's group), and whether the process is ending (`kill_nodes`).
+/// terminal's group), and whether the process is ending (`kill_started`).
 struct Live {
     ending: bool,
     groups: Vec<u32>,
@@ -761,16 +762,22 @@ const LIVE_NODES_MAX: usize = 8;
 
 static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new() });
 
-/// SIGKILLs every node this process started in a group of its own and
-/// still runs, and refuses to start another: the process is ending (a
-/// signal; `signals::on_termination`), and a node started now would make
+/// SIGKILLs every process this process started and every one those
+/// started (tree.rs): its nodes, the Chromes they started detached, a
+/// lane's own Chrome, which no `Drop` closes on the way out; and refuses
+/// to start another node: the process is ending (a signal;
+/// `signals::on_termination`), and a node started now would make
 /// containers after they were removed. The killed nodes' `Node`s are
 /// dropped with the process.
-pub fn kill_nodes() {
+pub fn kill_started() {
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.ending = true;
+    if let Err(e) = tree::kill(std::process::id()) {
+        eprintln!("could not kill the processes this run started: {e}");
+    }
     // each still unreaped: a node strikes its group under this lock before
-    // it reaps its leader (`Node::reap`)
+    // it reaps its leader (`Node::reap`); its group's process that outlived
+    // a leader already exited (workerd may) is no longer below this one
     for group in live.groups.drain(..) {
         let _ = kill_group(group);
     }
@@ -842,7 +849,7 @@ impl Node {
         }
         let t0 = Instant::now();
         let child = {
-            // held across the spawn: `kill_nodes` either finds this node's
+            // held across the spawn: `kill_started` either finds this node's
             // group or has already refused it
             let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
             anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
@@ -924,7 +931,7 @@ impl Node {
     /// Reaps wrangler, which has exited and is not yet reaped (a zombie,
     /// whose process group id stays this node's while it is one): first
     /// its group's other processes SIGKILLed (workerd may outlive it), and
-    /// the group struck from `LIVE`, under its lock, so `kill_nodes` never
+    /// the group struck from `LIVE`, under its lock, so `kill_started` never
     /// signals a group id the kernel is free to give another (#768).
     fn reap(&mut self) -> Result<std::process::ExitStatus> {
         assert!(!self.reaped, "a node is reaped once");
@@ -939,11 +946,15 @@ impl Node {
         Ok(status)
     }
 
-    /// SIGKILL to wrangler and its group, a crash's, then reaped as `reap`.
+    /// SIGKILL to wrangler, all it started (tree.rs: Chrome among them,
+    /// in no group of wrangler's) and its group, a crash's, then reaped as
+    /// `reap`.
     fn kill(&mut self) {
         if !self.reaped {
             if self.own_group {
                 let _ = kill_group(self.child.id());
+            } else if exited_unreaped(self.child.id(), false).is_ok() {
+                let _ = tree::kill(self.child.id());
             }
             let _ = self.child.kill();
             if exited_unreaped(self.child.id(), true).is_ok() {
@@ -953,14 +964,18 @@ impl Node {
     }
 }
 
-/// SIGKILL to the process group `leader` leads, only while `leader` is a
-/// child of this process not yet reaped (alive, or a zombie), so the group
-/// id is still its own: a reaped one's may be another's by now, and is
-/// refused, unsignalled (`ECHILD`).
+/// SIGKILL to `leader`, every process below it (tree.rs: a Chrome
+/// miniflare started detached is in no group of its) and the process group
+/// it leads, only while `leader` is a child of this process not yet reaped
+/// (alive, or a zombie), so its pid and group id are still its own: a
+/// reaped one's may be another's by now, and is refused, unsignalled
+/// (`ECHILD`).
 fn kill_group(leader: u32) -> std::io::Result<()> {
     exited_unreaped(leader, false)?;
+    // below it first: the group's SIGKILL would hand what it started to init
+    let below = tree::kill(leader);
     let _ = Command::new("kill").args(["-KILL", "--", &format!("-{leader}")]).stderr(Stdio::null()).status();
-    Ok(())
+    below.map(|_| ())
 }
 
 /// Whether the child `pid` has exited, leaving it unreaped (`WNOWAIT`: a
@@ -1074,6 +1089,23 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "{pid} still runs");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Goal (FIN-457): what a node started in a session of its own, as
+    /// miniflare starts Chrome, and that one's children die with the node
+    /// when it is killed (crashed, or dropped on an error): its group's
+    /// SIGKILL alone left them running, handed to init. Linux's setsid(1)
+    /// does the detaching here, as @puppeteer/browsers does it there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nodes_detached_descendants_die_with_it() {
+        let detaching = "setsid sh -c 'sleep 60 & echo $!; wait' & wait";
+        let (node, chrome) = scripted_node(detaching);
+        node.crash().unwrap();
+        gone(chrome);
+        let (node, chrome) = scripted_node(detaching);
+        drop(node);
+        gone(chrome);
     }
 
     /// Goal (#768): a node's process group is signalled only while its
