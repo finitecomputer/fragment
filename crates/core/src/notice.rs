@@ -27,11 +27,13 @@ pub fn usd(micros: i64) -> String {
 /// Bytes as a person reads them: GB to a tenth, under one in whole MB (at
 /// least 1).
 pub fn size(bytes: u64) -> String {
-    if bytes >= 1_000_000_000 {
-        let tenths = (bytes + 50_000_000) / 100_000_000;
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+    if bytes >= GB {
+        let tenths = (bytes.saturating_mul(10) + GB / 2) / GB;
         format!("{}.{} GB", tenths / 10, tenths % 10)
     } else {
-        format!("{} MB", ((bytes + 500_000) / 1_000_000).max(1))
+        format!("{} MB", ((bytes + MB / 2) / MB).max(1))
     }
 }
 
