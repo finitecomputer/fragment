@@ -1,7 +1,6 @@
 import { KIND } from "./frame-messages.js";
 import { icon } from "./icons.js";
 
-
 // Provider/account UI keeps failed removals for the current settings visit.
 export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, asks, isOpen, reopenSettings }) {
   // ---- connections (decisions 22, 37 and 44): every provider the platform
