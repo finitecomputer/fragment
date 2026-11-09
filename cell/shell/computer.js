@@ -237,11 +237,35 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     counting = [];
     // a read that failed, its notices' too: what the last said stays, under its line
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
-    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.map(noticeRow)];
+    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow)];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
+    drawAsked(told.find((n) => n.mustAnswer));
     countdown();
     paintSettings();
+  }
+  // One that must be answered (`mustAnswer`) shows alone, over everything,
+  // a guest's welcome too (`#must-answer`, a modal dialog: the page behind
+  // takes nothing), drawn as its row is, until the read after an answer of
+  // it has it no more: the first in the list first (its owner's oldest).
+  // Escape, or a browser that shuts it anyway, leaves it as it was.
+  function drawAsked(n) {
+    const cover = document.getElementById("must-answer");
+    if (!cover) return;
+    if (!n) {
+      delete cover.dataset.id;
+      cover.replaceChildren();
+      if (cover.open) cover.close();
+      return;
+    }
+    const fresh = cover.dataset.id !== n.id;
+    cover.dataset.id = n.id;
+    cover.oncancel = (e) => e.preventDefault();
+    cover.onclose = () => cover.dataset.id && cover.showModal();
+    cover.setAttribute("aria-label", n.title);
+    cover.replaceChildren(noticeRow(n));
+    if (!cover.open) cover.showModal();
+    else if (fresh || !cover.contains(document.activeElement)) cover.querySelector("button")?.focus();
   }
   // The restart, done: awake on a newer start, or a newer start that won't
   // (its notice then says so, with Try again). Settings' Computer, shown,

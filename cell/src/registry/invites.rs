@@ -28,7 +28,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use super::calls::{By, Call, ClaimInvite, InviteEmail};
+use super::calls::{AnswerAsked, By, Call, ClaimInvite, InviteEmail};
 use super::{body, reply, RegistryCell};
 use crate::error::{CellError, CellResult};
 use crate::js;
@@ -219,7 +219,7 @@ impl RegistryCell {
         }
     }
 
-    async fn tell_person(&self, person: &str) {
+    pub(super) async fn tell_person(&self, person: &str) {
         // their notices changed (the one frame: `GET /api/notices` again)
         if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
             console_error!("{}", serde_json::json!({ "invites-told": person, "failed": e.message, "code": e.code }));
@@ -272,9 +272,9 @@ impl RegistryCell {
     }
 
     /// What the registry tells `b.person` (`NoticesOf`): their invites, in
-    /// words.
+    /// words; and on a test fleet, what a test asked them (`TestHook::Ask`).
     fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
-        let notices: Vec<fragment_proto::notice::Notice> = self
+        let mut notices: Vec<fragment_proto::notice::Notice> = self
             .waiting_on(&b.person)?
             .iter()
             .map(|i| {
@@ -282,7 +282,24 @@ impl RegistryCell {
                 fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
             })
             .collect();
+        notices.extend(self.asked.borrow().iter().filter(|(p, ..)| *p == b.person).map(|(_, n, _)| n.clone()));
         Ok(serde_json::json!({ "notices": notices }))
+    }
+
+    /// `a.person`'s answer to what a test asked them (`AnswerAsked`): the
+    /// one it refuses says its words; any other ends it, and they are told.
+    async fn answer_asked(&self, a: AnswerAsked) -> CellResult<serde_json::Value> {
+        let id = format!("asked:{}", a.id);
+        let at = self.asked.borrow().iter().position(|(p, n, _)| *p == a.person && n.id == id && n.actions.iter().any(|x| x.label == a.answer));
+        let Some(at) = at else {
+            return Err(CellError::new(ErrorCode::NotFound, "That question isn't waiting for an answer any more.").because(Reason::Gone));
+        };
+        if let Some(refused) = self.asked.borrow()[at].2.as_ref().filter(|r| r.answer == a.answer) {
+            return Err(CellError::new(ErrorCode::Conflict, refused.said.clone()));
+        }
+        self.asked.borrow_mut().remove(at);
+        self.tell_person(&a.person).await;
+        Ok(serde_json::json!({ "answered": a.id }))
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their
@@ -358,6 +375,7 @@ impl RegistryCell {
             InviteEmail::PATH => reply::<InviteEmail>(async { self.invite(body(bytes)?).await }.await),
             InvitesFor::PATH => reply::<InvitesFor>(body(bytes).and_then(|b| self.waiting_for(b))),
             NoticesOf::PATH => reply::<NoticesOf>(body(bytes).and_then(|b| self.notices_of(b))),
+            AnswerAsked::PATH if self.cfg.test_hooks => reply::<AnswerAsked>(async { self.answer_asked(body(bytes)?).await }.await),
             AnswerInvite::PATH => reply::<AnswerInvite>(async { self.answer_invite(body(bytes)?).await }.await),
             ForgetInvite::PATH => reply::<ForgetInvite>(async { self.forget_invite(body(bytes)?).await }.await),
             _ => return None,

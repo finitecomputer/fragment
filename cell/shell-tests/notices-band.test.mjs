@@ -24,6 +24,15 @@ class Node {
   setAttribute(k, v) {
     this.attrs[k] = v;
   }
+  contains(n) {
+    return walk(this).includes(n);
+  }
+  querySelector(tag) {
+    return walk(this).find((n) => n.tag === tag) ?? null;
+  }
+  focus() {
+    globalThis.document.activeElement = this;
+  }
 }
 const walk = (n) => [n, ...n.children.flatMap(walk)];
 const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -62,7 +71,9 @@ const paused = (o = {}) => ({ id: "key_paused:elevenlabs", kind: "key_paused", l
 
 function page(t, first, c = clock(Date.now())) {
   const box = new Node("div", "computer-notices");
-  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => (id === "computer-notices" ? box : null) };
+  // the page's one cover (index.html `#must-answer`), a modal dialog
+  const cover = Object.assign(new Node("dialog", "must-answer"), { open: false, showModal() { this.open = true; }, close() { this.open = false; } });
+  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => ({ "computer-notices": box, "must-answer": cover })[id] ?? null };
   const calls = [];
   const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok: (v) => ok(v), fail: (e) => fail(e) }));
   const reads = { asked: 0, shown: 0, updating: false, listFailed: false, noticesFailed: false };
@@ -92,18 +103,22 @@ function page(t, first, c = clock(Date.now())) {
     ui.dispose();
   });
   const rows = () => box.children.filter((r) => !r.hidden);
+  // a row: its id, its words, and its actions as drawn
+  const drawn = (r) => ({
+    id: r.dataset.id,
+    words: walk(r).filter((n) => n.tag === "strong" || n.tag === "p").map((n) => n.textContent),
+    actions: walk(r).filter((n) => n.tag === "button" || n.tag === "a").map((n) => (n.tag === "a" ? { open: n.href } : { label: n.textContent, enabled: !n.disabled })),
+  });
+  const press = (row, label) => walk(row).find((n) => n.tag === "button" && n.textContent === label).onclick();
   return {
-    box, calls, load, clock: c, shell, ui, opened,
-    // each row: its id, its words, and its actions as drawn
-    shown: () => rows().map((r) => ({
-      id: r.dataset.id,
-      words: walk(r).filter((n) => n.tag === "strong" || n.tag === "p").map((n) => n.textContent),
-      actions: walk(r).filter((n) => n.tag === "button" || n.tag === "a").map((n) => (n.tag === "a" ? { open: n.href } : { label: n.textContent, enabled: !n.disabled })),
-    })),
+    box, cover, calls, load, clock: c, shell, ui, opened,
+    shown: () => rows().map(drawn),
     tap(id, label) {
-      const row = rows().find((r) => r.dataset.id === id);
-      walk(row).find((n) => n.tag === "button" && n.textContent === label).onclick();
+      press(rows().find((r) => r.dataset.id === id), label);
     },
+    // what the cover shows, open; else null
+    asked: () => (cover.open ? drawn(cover.children[0]) : null),
+    answer: (label) => press(cover.children[0], label),
   };
 }
 
@@ -259,4 +274,39 @@ test("an action's answer that names a page opens it, once the read after it has 
   q.calls[1].ok({ notices: [] });
   await settle();
   assert.deepEqual(q.opened, []);
+});
+
+test("a notice that must be answered shows alone, over the page and never in the band, the first of them first, until the read after an answer of it has it no more", async (t) => {
+  const ask = (id, title) => ({
+    id: `asked:${id}`, kind: "asked", level: "info", title, text: "Said by the server.", mustAnswer: true,
+    actions: ["Yes", "Not now"].map((answer) => ({ label: answer, post: `/api/notices/asked/${id}`, body: { answer } })),
+  });
+  const first = ask("move", "Move to finite.chat?"), second = ask("terms", "New terms");
+  const p = page(t, [paused(), first, second]);
+  assert.deepEqual(p.shown().map((r) => r.id), ["key_paused:elevenlabs"], "the band: none that must be answered");
+  assert.deepEqual(p.asked(), { id: "asked:move", words: ["Move to finite.chat?", "Said by the server."], actions: [{ label: "Yes", enabled: true }, { label: "Not now", enabled: true }] }, "the first, alone, over the page");
+  // refused: it stays, saying why in the server's words
+  p.answer("Not now");
+  p.calls[0].fail(Object.assign(new Error("Not yet: answer Yes, or Never."), { status: 409 }));
+  await settle();
+  p.calls[1].ok({ notices: [paused(), first, second] });
+  await settle();
+  assert.deepEqual(p.asked().words, ["Move to finite.chat?", "Said by the server.", "Not yet: answer Yes, or Never."]);
+  assert.equal(globalThis.document.activeElement?.textContent, "Yes", "drawn again, its first answer has the focus");
+  // answered, and the read after it has it no more: the next
+  p.answer("Yes");
+  assert.deepEqual([p.calls[2].path, p.calls[2].body], ["/api/notices/asked/move", { answer: "Yes" }]);
+  p.calls[2].ok({ answered: "move" });
+  await settle();
+  assert.equal(p.asked().id, "asked:move", "until the read after it: nothing taken away before");
+  p.calls[3].ok({ notices: [paused(), second] });
+  await settle();
+  assert.equal(p.asked().id, "asked:terms");
+  p.answer("Yes");
+  p.calls[4].ok({ answered: "terms" });
+  await settle();
+  p.calls[5].ok({ notices: [paused()] });
+  await settle();
+  assert.equal(p.asked(), null, "none left: the page, as it was");
+  assert.deepEqual(p.shown().map((r) => r.id), ["key_paused:elevenlabs"]);
 });

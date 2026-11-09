@@ -497,6 +497,52 @@ pub(crate) enum TestHook {
     /// waited for a yes (decision 63: no role, title or sharer kept), which
     /// a sign-in as it still meets (`{before}`: how many).
     InvitesBefore(String),
+    /// Asks a person a must-answer notice (FIN-458): no owner asks one
+    /// yet, so a test does, its words and answers given (`Ask`), each
+    /// answer posting `/api/notices/asked/{id}` (`AnswerAsked`). Kept in
+    /// memory alone, each person's oldest first.
+    Ask(Ask),
+}
+
+/// `TestHook::Ask`: whom, the notice's id among theirs, its words, its
+/// answers' labels, and one answer refused with these words, if any (a
+/// must-answer notice stays until one goes through).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Ask {
+    pub person: String,
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    pub answers: Vec<String>,
+    #[serde(default)]
+    pub refused: Option<Refused>,
+}
+
+/// An answer `Ask` refuses, and the words it says why.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Refused {
+    pub answer: String,
+    pub said: String,
+}
+
+/// The most must-answer notices `TestHook::Ask` holds, everyone's.
+pub(crate) const TEST_ASKED_MAX: usize = 16;
+
+/// `POST /notices/asked`: `person`'s `answer` to their asked notice `id`
+/// (`TestHook::Ask`): it goes, and they are told; or 404 (none such), or
+/// 409 with its words (the answer it refuses).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AnswerAsked {
+    pub person: String,
+    pub id: String,
+    pub answer: String,
+}
+
+impl Call for AnswerAsked {
+    const PATH: &'static str = "/notices/asked";
+    type Answer = serde_json::Value;
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the

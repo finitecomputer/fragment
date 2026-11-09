@@ -12,8 +12,10 @@ use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::ReadJson;
+use crate::config::Config;
+use crate::registry::calls::AnswerAsked;
 use crate::registry::invites::NoticesOf;
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::{limits, ErrorCode, IdentityKind};
 
 pub(crate) async fn route(req: &Request, env: &Env, url: &Url) -> CellResult<Response> {
     let who = crate::signer(env, req, url, &[]).await?;
@@ -30,4 +32,19 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url) -> CellResult<Res
     let computer: Value = computer.read_json().await?;
     let notices: Vec<Value> = [computer, registry?].iter().flat_map(|owner| owner["notices"].as_array().cloned().unwrap_or_default()).collect();
     crate::json_answer(&json!({ "notices": notices }))
+}
+
+/// `POST /api/notices/asked/{id} {answer}`, a test fleet's alone: the
+/// signer's answer to the must-answer notice a test asked them
+/// (`TestHook::Ask`, as no owner asks one yet), as the registry takes it:
+/// none such 404, the answer it refuses 409 in its words.
+pub(crate) async fn answer_asked(mut req: Request, env: &Env, cfg: &Config, url: &Url, id: &str) -> CellResult<Response> {
+    if !cfg.test_hooks {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no route POST {}", url.path())));
+    }
+    let body = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let who = crate::signer(env, &req, url, &body).await?;
+    let answer: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("an answer is {{answer}}: {e}")))?;
+    let answer = answer["answer"].as_str().ok_or_else(|| CellError::invalid("an answer is {answer}"))?.to_string();
+    crate::json_answer(&crate::ask_registry(env, &AnswerAsked { person: who.identity.id, id: id.to_string(), answer }).await?)
 }

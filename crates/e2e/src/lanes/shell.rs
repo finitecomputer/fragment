@@ -1705,6 +1705,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
+    must_answer_ui(s, api, &mut b, &session, &shots)?;
     // a guest, in this browser, who then signs in to this seat
     guest_ui(s, api, &mut b, &email, &shots)?;
     println!("      (screenshots: {})", shots.display());
@@ -2216,6 +2217,77 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     Ok(())
 }
 
+/// Asks `person` a notice that must be answered (FIN-458), as no owner
+/// asks one yet: the registry's lever (`TestHook::Ask`), its answers Yes,
+/// Not now and Never, one of them refused in its own words if `refused`.
+fn ask_must(api: &Api, person: &str, id: &str, title: &str, refused: Option<(&str, &str)>) -> Result<()> {
+    let refused = refused.map(|(answer, said)| json!({ "answer": answer, "said": said }));
+    let text = "Your chats, agents and apps move with you. Nothing is lost.";
+    let body = json!({ "ask": { "person": person, "id": id, "title": title, "text": text, "answers": ["Yes", "Not now", "Never"], "refused": refused } });
+    let r = api.unsigned("POST", "/api/test/registry", Some(&body))?;
+    anyhow::ensure!(r.status == 200, "asking {person} {id}: {r}");
+    Ok(())
+}
+
+/// What the page shows of a notice that must be answered: whether it is
+/// open, its id and words, whether it covers the whole page (what is at
+/// its middle is in it), and the band's rows.
+const MUST_ANSWER_SEEN: &str = "(() => { const d = document.getElementById('must-answer'); const r = d.getBoundingClientRect(); const at = document.elementFromPoint(innerWidth / 2, innerHeight / 2); \
+    return { open: d.open, id: d.dataset.id ?? null, words: d.innerText, covers: d.open && r.width >= innerWidth - 1 && r.height >= innerHeight - 1 && d.contains(at), \
+    band: [...document.querySelectorAll('#computer-notices .computer-notice')].map((n) => n.dataset.id ?? n.dataset.kind) }; })()";
+
+/// Presses `label` among the shown must-answer notice's answers.
+fn answer_must(b: &mut Browser, page: &Page, label: &str) -> Result<()> {
+    b.eval(page, &format!("([...document.querySelectorAll('#must-answer button')].find((x) => x.textContent === {}).click(), true)", js(label)))?;
+    Ok(())
+}
+
+/// A notice that must be answered (FIN-458, Paul 2026-11-09), which no
+/// owner asks yet: the registry's lever asks two (`ask_must`). Each shows
+/// alone over the whole page, never in the band, the oldest first; Escape
+/// leaves it; an answer refused stays, in the server's words; answered,
+/// the read after it has it no more and the next shows; the last
+/// answered, the page is as it was. A guest's welcome: `guest_ui`.
+fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let id = super::signin::who(api, session)?["id"].as_str().context("who is signed in")?.to_string();
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open(&format!("{}/", api.base))?;
+    b.viewport(&page, 1280, 800, false)?;
+    anyhow::ensure!(b.until(&page, "!!document.querySelector('#sidebar .row')", wait), "their shell, drawn");
+    ask_must(api, &id, "move", "Move to finite.chat?", Some(("Not now", "Not now isn't open to you yet: answer Yes or Never.")))?;
+    ask_must(api, &id, "terms", "New terms", None)?;
+    let shown = b.until(&page, "document.getElementById('must-answer').dataset.id === 'asked:move'", wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    let in_band = |seen: &Value| seen["band"].as_array().is_some_and(|b| b.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("asked:"))));
+    s.ok(
+        "a notice that must be answered shows alone, over the whole page, the oldest asked first, its words and its answers, told live; the band has none of it",
+        shown && seen["covers"] == json!(true) && seen["words"].as_str().is_some_and(|w| w.contains("Move to finite.chat?") && w.contains("Nothing is lost.") && w.contains("Never")) && !in_band(&seen),
+        &seen,
+    );
+    let _ = b.screenshot(&page, &shots.join("must-answer.png"));
+    b.press(&page, "Escape", false)?;
+    b.press(&page, "Escape", false)?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let kept = b.eval(&page, MUST_ANSWER_SEEN)?;
+    s.ok("Escape, pressed twice, leaves it over the page", kept["covers"] == json!(true) && kept["id"] == json!("asked:move"), &kept);
+    answer_must(b, &page, "Not now")?;
+    let refused = b.until(&page, "/answer Yes or Never/.test(document.getElementById('must-answer').innerText)", wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    s.ok("an answer it refuses: it stays, saying why in the server's words", refused && seen["id"] == json!("asked:move") && seen["covers"] == json!(true), &seen);
+    answer_must(b, &page, "Yes")?;
+    let next = b.until(&page, "document.getElementById('must-answer').dataset.id === 'asked:terms'", wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    s.ok("answered, and read again without it: the next shows, as alone", next && seen["covers"] == json!(true) && seen["words"].as_str().is_some_and(|w| w.contains("New terms")), &seen);
+    answer_must(b, &page, "Never")?;
+    let gone = b.until(&page, "!document.getElementById('must-answer').open", wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    let usable = b.eval(&page, "document.getElementById('sidebar').contains(document.elementFromPoint(40, 120))")?;
+    s.ok("the last answered: no cover, the page as it was, theirs to use", gone && !in_band(&seen) && usable == json!(true), json!({ "seen": seen, "usable": usable }));
+    b.close(page)?;
+    Ok(())
+}
+
 /// What a guest is told of who is signed in (shell.js `noSeatSaid`), for `email`.
 pub(super) fn no_seat_said(email: &str) -> String {
     format!("You're signed in as {email}. This account has no seat. If your team gave you a seat under another email, use another account.")
@@ -2321,6 +2393,15 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("guest-welcome.png"));
+    // a notice that must be answered reaches a guest too, over the welcome
+    // (FIN-458: someone moving to this platform may come as a guest)
+    ask_must(api, &id, "guest", "Move to finite.chat?", None)?;
+    let shown = b.until(&page, "document.getElementById('must-answer').dataset.id === 'asked:guest'", wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    let _ = b.screenshot(&page, &shots.join("guest-must-answer.png"));
+    answer_must(b, &page, "Yes")?;
+    let gone = b.until(&page, &format!("!document.getElementById('must-answer').open && {welcome}"), wait);
+    s.ok("a guest is asked too: the notice that must be answered over their welcome, which is there once it is answered", shown && seen["covers"] == json!(true) && gone, &seen);
     // settings: Billing's guest state, then Account
     let still = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
     let settled = go(b, "/settings", &format!("{settings} && {still}"))?;

@@ -99,6 +99,9 @@ pub struct RegistryCell {
     /// Test fleets: how many more wipes fail just after their orgs' content
     /// (`TestHook::FailWipeRows`).
     fail_wipe_rows: Cell<u32>,
+    /// Test fleets: the must-answer notices a test asked (`TestHook::Ask`),
+    /// whose they are, oldest first; in memory alone.
+    asked: RefCell<Vec<(String, fragment_proto::notice::Notice, Option<calls::Refused>)>>,
     /// CLI codes asked for this minute, by each address and in all
     /// (`POST /cli/begin`: `limits::CLI_BEGINS_PER_MINUTE_MAX`, and the
     /// fleet's `cli_begins_per_ip_minute`). In memory: a restart forgets
@@ -142,6 +145,7 @@ impl DurableObject for RegistryCell {
             skewed: Cell::new(0),
             hold_ms: Cell::new(0),
             fail_wipe_rows: Cell::new(0),
+            asked: RefCell::default(),
             cli_begins,
             finishing: RefCell::default(),
             deciding: RefCell::default(),
@@ -784,6 +788,27 @@ impl RegistryCell {
             TestHook::InvitesBefore(email) => {
                 let made = self.rows::<Value>("UPDATE invites_waiting SET role = NULL, title = NULL, sharer = NULL WHERE email = ? RETURNING fragment", vec![email.into()])?;
                 Ok(json!({ "before": made.len() }))
+            }
+            TestHook::Ask(ask) => {
+                let valid = |id: &str| !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+                if !valid(&ask.id) || ask.title.is_empty() || ask.answers.is_empty() || self.asked.borrow().len() >= calls::TEST_ASKED_MAX {
+                    return Err(CellError::invalid(format!("ask with an id of [a-z0-9-], a title and answers, at most {} asked", calls::TEST_ASKED_MAX)));
+                }
+                let route = format!("/api/notices/asked/{}", ask.id);
+                let notice = fragment_proto::notice::Notice {
+                    id: format!("asked:{}", ask.id),
+                    kind: "asked".into(),
+                    level: fragment_proto::notice::NoticeLevel::Info,
+                    title: ask.title,
+                    text: ask.text,
+                    detail: None,
+                    until: None,
+                    actions: ask.answers.iter().map(|a| fragment_proto::notice::NoticeAction::post(a.as_str(), route.as_str(), json!({ "answer": a }))).collect(),
+                    must_answer: true,
+                };
+                self.asked.borrow_mut().push((ask.person.clone(), notice, ask.refused));
+                self.tell_person(&ask.person).await;
+                Ok(json!({ "asked": ask.id }))
             }
         }
     }

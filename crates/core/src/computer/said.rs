@@ -33,7 +33,7 @@ fn body(key: &str, value: impl Into<Value>) -> Value {
 }
 
 fn notice(id: String, kind: &str, level: NoticeLevel, title: String) -> Notice {
-    Notice { id, kind: kind.into(), level, title, text: None, detail: None, until: None, actions: vec![] }
+    Notice { id, kind: kind.into(), level, title, text: None, detail: None, until: None, actions: vec![], must_answer: false }
 }
 
 fn one(n: &ComputerNotice, f: &Facts) -> Notice {
