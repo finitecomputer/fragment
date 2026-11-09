@@ -714,6 +714,9 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     let opened = format!("(() => {{ const l = {lines}; const one = (n) => n.getBoundingClientRect().height <= parseFloat(getComputedStyle(n).lineHeight) + 1; return {head}.getAttribute('aria-expanded') === 'true' && l.length === 4 && l.map((n) => n.querySelector('.helper-goal').title).join('|') === {} && l.every((n) => one(n.querySelector('.helper-goal')) && n.querySelector('.helper-since').textContent === '<1 min') && l[0].querySelector('.helper-goal').scrollWidth > l[0].querySelector('.helper-goal').clientWidth && {bar}.querySelector('.helpers-more')?.textContent === 'and 1 more' && !{bar}.querySelector('.helper .face, .helper .agent-avatar'); }})()", super::js(&goals[..4].join("|")));
     s.ok("tapped, it lists each task on one line, cut short, oldest first, with how long it has run: four, then how many more", super::shows(chrome, &page, &opened), chrome.eval(&page, &format!("{lines}.map((n) => n.textContent)"))?);
     chrome.screenshot(&page, &shots.join("desktop-open.png"))?;
+    chrome.color_scheme(&page, "dark")?;
+    chrome.screenshot(&page, &shots.join("desktop-open-dark.png"))?;
+    chrome.color_scheme(&page, "light")?;
     // opened mid-work: the newest set says so
     chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
     s.ok("a page opened mid-work shows them, closed", super::shows(chrome, &page, &collapsed), chrome.eval(&page, &format!("{bar}.outerHTML"))?);
@@ -726,6 +729,9 @@ pub(super) fn helpers_bar(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut B
     let phone = format!("(() => {{ const b = {bar}.getBoundingClientRect(); const c = document.getElementById('say').getBoundingClientRect(); return {lines}.length === 3 && !{bar}.querySelector('.helpers-more') && {head}.getBoundingClientRect().height <= 34 && b.bottom <= c.top && c.bottom <= innerHeight && document.documentElement.scrollWidth <= innerWidth && {lines}.every((n) => n.getBoundingClientRect().right <= b.right); }})()");
     s.ok("on a phone, its row stays one line, opened it fits the width, and the composer stays on screen", super::shows(chrome, &page, &phone), chrome.eval(&page, &format!("[{bar}.getBoundingClientRect().toJSON(), document.getElementById('say').getBoundingClientRect().toJSON(), innerHeight]"))?);
     chrome.screenshot(&page, &shots.join("phone-open.png"))?;
+    chrome.color_scheme(&page, "dark")?;
+    chrome.screenshot(&page, &shots.join("phone-open-dark.png"))?;
+    chrome.color_scheme(&page, "light")?;
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
     chrome.screenshot(&page, &shots.join("phone-closed.png"))?;
     // a second agent in the chat: whose helpers, by face; each agent's set
@@ -793,8 +799,8 @@ pub(super) fn helpers_newest_past_the_window(s: &mut Suite, api: &Api, owner: &K
     let lines = format!("[...{bar}.querySelectorAll('.helper')]");
     let listed = format!("{lines}.map((n) => [n.querySelector('.helper-goal').title, n.querySelector('.helper-since').textContent])");
     s.ok(
-        "a set far out of the window shows as the page opens, its newest alone; a lapsed set shows nothing",
-        super::shows(chrome, &page, &format!("{said} === '1 helper working'")),
+        "a set far out of the window shows as the page opens, its newest alone; a lapsed set shows nothing (its agent no face on the bar)",
+        super::shows(chrome, &page, &format!("({said} ?? '').endsWith(': 1 helper working') && {head}.querySelectorAll('.faces > *').length === 1")),
         chrome.eval(&page, &format!("{bar}.outerHTML"))?,
     );
     let asked = chrome.eval(&page, "window.__newest")?;
@@ -810,11 +816,11 @@ pub(super) fn helpers_newest_past_the_window(s: &mut Suite, api: &Api, owner: &K
     // replay: the newest posted again is the same record; a newer one lands live
     let again = post(&ada, "hs:2", helpers_set(&[("h1", "long", goal, since)], until))?;
     post(&ada, "hs:3", helpers_set(&[("h1", "long", goal, since), ("h3", "long", "Book the train", crate::api::now_ms())], until))?;
-    let two = format!("(() => {{ const l = {listed}; return {said} === '2 helpers working' && l.length === 2 && l[0][0] === {} && {since_shown} && l[1][0] === 'Book the train'; }})()", super::js(goal));
+    let two = format!("(() => {{ const l = {listed}; return ({said} ?? '').endsWith(': 2 helpers working') && l.length === 2 && l[0][0] === {} && {since_shown} && l[1][0] === 'Book the train'; }})()", super::js(goal));
     s.ok("a set posted again is the same record, and a newer one lands live", again["replayed"] == true && super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
     chrome.eval(&page, "(() => { location.reload(); return true; })()")?;
     // (the page before the reload had it open: a closed bar is the new page's)
-    let reloaded = format!("{said} === '2 helpers working' && {head}.getAttribute('aria-expanded') === 'false'");
+    let reloaded = format!("({said} ?? '').endsWith(': 2 helpers working') && {head}.getAttribute('aria-expanded') === 'false'");
     anyhow::ensure!(super::shows(chrome, &page, &reloaded), "the reloaded page's bar: {}", chrome.eval(&page, &format!("{bar}.outerHTML"))?);
     chrome.eval(&page, &format!("(() => {{ {head}.click(); return true; }})()"))?;
     s.ok("a reload finds the newest", super::shows(chrome, &page, &two), chrome.eval(&page, &listed)?);
