@@ -60,7 +60,7 @@ use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -939,7 +939,44 @@ impl ComputerCell {
 
     /// What its owner is told of it now (`fragment_core::computer::notices`).
     fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
-        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+        self.with_keys(notices(&self.lifecycle()?, &self.saves()?, &self.images()?, &self.rules()))
+    }
+
+    /// `told`, and a notice of each shared key its owner's cap pauses now,
+    /// worked out from its hour (`fragment_core::key_hour`).
+    fn with_keys(&self, mut told: Vec<ComputerNotice>) -> CellResult<Vec<ComputerNotice>> {
+        let (now, real) = (js::now_ms() + self.offset_ms()?, js::now_ms());
+        for row in self.rows("SELECT DISTINCT provider FROM key_hour", vec![])? {
+            let provider = row["provider"].as_str().unwrap_or_default();
+            let cap = key_hour::KEY_HOUR_CAP;
+            if let Some((spent, resumes_in)) = key_hour::paused(&self.key_slots(provider)?, cap, now) {
+                told.push(ComputerNotice::KeyPaused { provider: provider.to_string(), spent_micros: spent, cap_micros: cap, resumes_at: real + resumes_in });
+            }
+        }
+        Ok(told)
+    }
+
+    /// A shared key's slots this last hour, oldest first.
+    fn key_slots(&self, provider: &str) -> CellResult<Vec<(i64, i64)>> {
+        let rows = self.rows("SELECT slot, micros FROM key_hour WHERE provider = ? ORDER BY slot", vec![provider.into()])?;
+        Ok(rows.iter().map(|r| (r["slot"].as_i64().unwrap_or(0), r["micros"].as_i64().unwrap_or(0))).collect())
+    }
+
+    /// Refuses a shared key its owner's cap pauses (FIN-448): 429, with when
+    /// it resumes. A read that fails lets the call go (a preference never
+    /// breaks an agent).
+    fn key_open(&self, provider: &str) -> CellResult<()> {
+        let now = js::now_ms() + self.offset_ms().unwrap_or(0);
+        let slots = self.key_slots(provider).unwrap_or_else(|e| {
+            console_error!("{}", json!({ "computer": "key-hour-unread", "provider": provider, "message": e.message }));
+            vec![]
+        });
+        let cap = key_hour::KEY_HOUR_CAP;
+        let Some((spent, resumes_in)) = key_hour::paused(&slots, cap, now) else { return Ok(()) };
+        let minutes = resumes_in.div_euclid(60_000) + i64::from(resumes_in.rem_euclid(60_000) > 0);
+        let (spent, cap) = (fragment_core::price::dollars(spent), fragment_core::price::dollars(cap));
+        let said = format!("{provider}'s calls are paused: {spent} spent on it in the last hour, its limit {cap} an hour; they resume in about {minutes} minutes as the hour passes");
+        Err(CellError::new(ErrorCode::RateLimited, said).because(Reason::KeyPaused).retry_after(resumes_in.unsigned_abs()))
     }
 
     /// The image its next start runs, as the deployment has it now: the
@@ -2139,20 +2176,24 @@ impl ComputerCell {
 
     /// Counts an agent's calls a provider answered, in `at`'s month, and
     /// forgets months past `USES_MONTHS_KEPT`. A month already holding
-    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged).
-    fn count_uses(&self, b: &UsedAsk) -> CellResult<()> {
+    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged). A
+    /// shared key's charge counts in its hour too: whether one reached its cap.
+    fn count_uses(&self, b: &UsedAsk) -> CellResult<bool> {
         if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
             return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
         }
         let offset = self.offset_ms()?;
         let (at, now) = (b.at.saturating_add(offset), js::now_ms() + offset);
         let month = Month::of(at);
+        let mut capped = false;
         for u in &b.uses {
             let Some(provider) = self.cfg.providers.get(&u.provider).filter(|_| u.micros >= 0) else {
                 return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
             };
             // a shared key's charge counts in its hour (fragment_core::key_hour)
             if provider.kind == Kind::Operator && u.micros > 0 {
+                let before = key_hour::spent(&self.key_slots(&u.provider)?, now);
+                capped |= before < key_hour::KEY_HOUR_CAP && before + u.micros >= key_hour::KEY_HOUR_CAP;
                 self.exec(
                     "INSERT INTO key_hour (provider, slot, micros) VALUES (?, ?, ?) ON CONFLICT (provider, slot) DO UPDATE SET micros = micros + excluded.micros",
                     vec![u.provider.as_str().into(), key_hour::slot_of(at.min(now)).into(), u.micros.into()],
@@ -2172,7 +2213,8 @@ impl ComputerCell {
         }
         let oldest = i64::from(month.0.saturating_sub(USES_MONTHS_KEPT - 1));
         self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])?;
-        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])
+        self.exec("DELETE FROM key_hour WHERE slot < ?", vec![key_hour::oldest(now).into()])?;
+        Ok(capped)
     }
 
     fn view(&self) -> CellResult<ComputerView> {
@@ -2208,7 +2250,7 @@ impl ComputerCell {
             phase,
             generation: life.generation(),
             why,
-            notices: notices(&life, &saves, &images, &self.rules()),
+            notices: self.with_keys(notices(&life, &saves, &images, &self.rules()))?,
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -2708,7 +2750,10 @@ impl ComputerCell {
             "computer/used" => {
                 let b: UsedAsk = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
-                self.count_uses(&b)?;
+                // a key's charge that reaches its cap: its owner's pages read again
+                if self.count_uses(&b)? {
+                    self.tell_owner().await;
+                }
                 json_response(&json!({ "ok": true }))
             }
             "computer/uses" => {
@@ -2929,8 +2974,12 @@ impl ComputerCell {
             }
             let secret = match provider.kind {
                 Kind::Connection => self.connection_token(&owner, &provider.name, agent).await?,
-                // its call is gated on its owner's standing, and charged after (`egress_swap`)
-                Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
+                // its call is held to its owner's cap on the key here, gated on
+                // their standing and charged after (`egress_swap`)
+                Kind::Operator => {
+                    self.key_open(&provider.name)?;
+                    crate::keys::operator_key(&self.env, &provider.name).await?
+                }
                 Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
             };
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {

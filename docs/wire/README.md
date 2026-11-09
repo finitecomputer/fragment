@@ -575,7 +575,7 @@ in. `PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post there: a r
 
 out, open. A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.
 
-Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`.
+Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `key_paused`.
 
 ### `Role`
 

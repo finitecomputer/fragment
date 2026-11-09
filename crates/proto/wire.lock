@@ -611,6 +611,7 @@ value Reason admins_full
 value Reason already_offered
 value Reason gone
 value Reason holds_seat
+value Reason key_paused
 value Reason last_admin
 value Reason last_paid_seat
 value Reason no_seat

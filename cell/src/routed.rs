@@ -345,7 +345,11 @@ pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str,
     let message = v["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("{binding} {name} answered {status}"));
     // its reason too, for whoever reads the refusal (FIN-352's, through a
     // computer's door ticket)
-    let refused = CellError::new(code, message);
+    let mut refused = CellError::new(code, message);
+    // and how long to wait (a paused shared key's: FIN-448)
+    if let Some(ms) = v["retry_after_ms"].as_u64() {
+        refused = refused.retry_after(ms);
+    }
     Err(match v["reason"].as_str().and_then(fragment_proto::Reason::parse) {
         Some(reason) => refused.because(reason),
         None => refused,

@@ -607,6 +607,11 @@ pub enum ComputerNotice {
     /// that fills stops its agents from saving their work, so its owner is
     /// told well before.
     DiskFilling { total: u64, free: u64 },
+    /// A shared key its agents call is paused (FIN-448): its owner's calls
+    /// on `provider` were charged `spent_micros` this last hour, its cap
+    /// `cap_micros`, until `resumes_at` as the hour passes.
+    #[serde(rename_all = "camelCase")]
+    KeyPaused { provider: String, spent_micros: i64, cap_micros: i64, resumes_at: i64 },
 }
 
 /// `POST /api/computers/{id}/restart`: the start its owner restarts, as

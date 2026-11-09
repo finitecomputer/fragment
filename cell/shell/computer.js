@@ -1,3 +1,4 @@
+import { providerName } from "./connections.js";
 import { icon } from "./icons.js";
 import { active, createRestartFollow, FAILED, READ_FAILED } from "./restart-follow.js";
 export const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
@@ -10,6 +11,28 @@ export function stateSaid(c, restarting) {
 }
 
 const size = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`);
+
+// dollars as a notice says them: $20, $5.03
+const usd = (micros) => (micros / 1e6).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: micros % 1e6 ? 2 : 0 });
+
+// A paused shared key's notice (`key_paused`, FIN-448) in words at `now`;
+// null once past its end: no pause, though no one told this page yet.
+export function keyPausedSaid(n, now) {
+  if (n.resumesAt <= now) return null;
+  return { title: `${providerName(n.provider)} calls paused: ${usd(n.spentMicros)} this hour` };
+}
+
+// One redraw at the earliest time `notices` change by the clock alone (a
+// key pause's end), cleared as the next drawing schedules its own: an idle
+// page drops a pause as it ends. `timers` is the page's (a test's clock).
+export function createExpiry(timers) {
+  let pending = null;
+  return (notices, now, redraw) => {
+    if (pending !== null) timers.clearTimeout(pending);
+    const ends = notices.filter((n) => n.kind === "key_paused" && n.resumesAt > now).map((n) => n.resumesAt);
+    pending = ends.length ? timers.setTimeout(redraw, Math.min(...ends) - now) : null;
+  };
+}
 
 // What the person is told of a disk filling (the `disk_filling` notice),
 // here too, in one line (Paul's words): the room left, and what to do.
@@ -81,6 +104,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     changed: () => renderComputer(),
     hidden: () => document.hidden,
   });
+  const expiry = createExpiry(globalThis);
   const followVisibility = () => follow.visibility();
   document.addEventListener("visibilitychange", followVisibility);
   // whether the last drawing showed a restart: one gone since is done
@@ -197,6 +221,11 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     } else if (n.kind === "disk_filling") {
       row.classList.add("warn");
       copy.append(el("strong", null, diskSaid(n)));
+    } else if (n.kind === "key_paused") {
+      const said = keyPausedSaid(n, Date.now());
+      if (!said) return null;
+      row.classList.add("warn");
+      copy.append(el("strong", null, said.title));
     } else if (n.kind === "deploying") {
       copy.append(el("strong", null, "Updating — back in a moment"));
     } else if (n.kind === "refresh") {
@@ -223,6 +252,8 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const rows = [...(reads().updating ? [{ kind: "deploying" }] : computerFailed() || reads().listFailed ? [{ kind: "refresh" }] : []), ...(restart ? [{ kind: "restart" }] : []), ...told].map(noticeRow).filter(Boolean);
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
+    // a key's pause ends by the clock alone: drawn again then, idle or not
+    expiry(told, Date.now(), renderComputer);
     paintSettings();
   }
   // The restart, done: awake on a newer start, or a newer start that won't
