@@ -1222,11 +1222,7 @@ impl PrincipalCell {
         if status == 200 {
             return Ok(Ok(bytes));
         }
-        let refusal: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let e = match (refusal["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(json!(c)).ok()), refusal["message"].as_str()) {
-            (Some(code), Some(message)) => CellError::new(code, message),
-            _ => CellError::host(format!("{name}'s {path} answered {status}")),
-        };
+        let e = crate::routed::refusal(&bytes, || format!("{name}'s {path} answered {status}"));
         if status >= 500 || status == 429 {
             return Err(Stop::Retry(e.message));
         }
@@ -1304,7 +1300,7 @@ impl PrincipalCell {
                 Some(fragment_proto::ListedFragment {
                     name: r["fragment"].as_str()?.to_string(),
                     role: Role::parse(r["role"].as_str()?)?,
-                    kind: serde_json::from_value(face["kind"].clone()).unwrap_or_default(),
+                    kind: crate::members::face_kind(&face),
                     title: face["title"].as_str().map(str::to_string),
                     picture: face["picture"].as_str().map(str::to_string),
                     agent_role: face["role"].as_str().map(str::to_string),

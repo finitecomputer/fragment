@@ -1,0 +1,8 @@
+{"charged":64,"rows_new":1,"rows_before":0,"refused":[{"index":1,"why":{"refused":"conflicting_body"}}]}
+{"charged":315,"rows_new":1,"rows_before":0,"refused":[]}
+{"charged":736,"rows_new":2,"rows_before":0,"refused":[]}
+{"charged":18,"rows_new":3,"rows_before":0,"refused":[]}
+{"charged":3,"rows_new":1,"rows_before":0,"refused":[]}
+{"charged":3,"refused":[],"rows_before":0,"rows_new":1}
+{"charged":6,"rows_new":1,"rows_before":0,"refused":[{"index":1,"why":{"refused":"no_price"}},{"index":2,"why":{"refused":"invalid","what":"id"}},{"index":3,"why":{"refused":"invalid","what":{"usage":"name"}}},{"index":4,"why":{"refused":"invalid","what":{"usage":"quantity"}}},{"index":5,"why":{"refused":"invalid","what":"time"}},{"index":6,"why":{"refused":"stale"}},{"index":7,"why":{"refused":"conflicting_body"}}]}
+{"charged":6,"refused":[{"index":1,"why":{"refused":"no_price"}},{"index":2,"why":{"refused":"invalid","what":"id"}},{"index":3,"why":{"refused":"invalid","what":{"usage":"name"}}},{"index":4,"why":{"refused":"invalid","what":{"usage":"quantity"}}},{"index":5,"why":{"refused":"invalid","what":"time"}},{"index":6,"why":{"refused":"stale"}},{"index":7,"why":{"refused":"conflicting_body"}}],"rows_before":0,"rows_new":1}
