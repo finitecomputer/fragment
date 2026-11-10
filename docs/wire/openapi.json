@@ -450,42 +450,6 @@
         "x-fragment-direction": "out",
         "x-fragment-open": true
       },
-      "EventKind": {
-        "description": "What a report says happened.",
-        "oneOf": [
-          {
-            "const": "stopped",
-            "description": "The old agent is stopped: it is a folder now.",
-            "type": "string"
-          },
-          {
-            "const": "progress",
-            "description": "Staging goes on.",
-            "type": "string"
-          },
-          {
-            "const": "staged",
-            "description": "The stage is complete (`POST …/complete`).",
-            "type": "string"
-          },
-          {
-            "const": "failed",
-            "description": "A step failed; the platform decides whether to try again.",
-            "type": "string"
-          },
-          {
-            "const": "retired",
-            "description": "Retired and marked moved.",
-            "type": "string"
-          },
-          {
-            "const": "restarted",
-            "description": "Started again.",
-            "type": "string"
-          }
-        ],
-        "x-fragment-direction": "in"
-      },
       "FragmentKind": {
         "description": "What a fragment is to the people who use it (`fragment.json`'s `kind`,\ndecision 6): the shell lists each kind in its own place. An app unless\nit says otherwise.\n\nOpen (`x-fragment-open`, docs/wire): a kind this build does not know\nreads as `Other`.",
         "oneOf": [
@@ -2283,7 +2247,7 @@
         "x-fragment-open": true
       },
       "Report": {
-        "description": "`POST /api/migrations/mover/agents/{old}/report`: what happened on the\ncommand it names. Taken only for that old agent's current command;\nanother (a stale attempt's) is 409, changing nothing. `seq` only grows\nper command: one taken already is a 200 that changes nothing.\n\nFlat: its `event`, and the fields that event has (`progress`: `bytes`,\n`files`; `staged`: `manifest_sha256`, `bytes`, `files`; `failed`:\n`step`, `why`; `retired`: `receipt`). One an event needs and lacks is\n400.",
+        "description": "`POST /api/migrations/mover/agents/{old}/report`: what happened on the\ncommand it names. Taken only for that old agent's current command;\nanother (a stale attempt's) is 409, changing nothing. `seq` only grows\nper command: one taken already is a 200 that changes nothing.\n\nFlat, one shape for every kind, read as plain fields: its `kind`, and\nthe fields that kind has. `stopped` (the old agent is a folder now);\n`progress`, `bytes` and `files` so far; `staged` (`POST …/complete`\ndone), `manifest_sha256`, `bytes` and `files` in all; `failed` (the\nplatform decides whether to try again), `step` and `why`; `retired`\n(and marked moved), `receipt`; `restarted`. Another kind, or a field a\nkind needs and lacks, is 400.",
         "properties": {
           "bytes": {
             "default": null,
@@ -2298,9 +2262,6 @@
           "command": {
             "type": "string"
           },
-          "event": {
-            "$ref": "#/components/schemas/EventKind"
-          },
           "files": {
             "default": null,
             "format": "uint64",
@@ -2309,6 +2270,9 @@
               "integer",
               "null"
             ]
+          },
+          "kind": {
+            "type": "string"
           },
           "manifest_sha256": {
             "default": null,
@@ -2350,7 +2314,7 @@
         "required": [
           "command",
           "seq",
-          "event"
+          "kind"
         ],
         "type": "object",
         "x-fragment-direction": "in"
@@ -2502,7 +2466,7 @@
         "x-fragment-direction": "in"
       },
       "RosterTaken": {
-        "description": "The roster's answer: the rows bound to a person here by this\nsnapshot, the rows it withdrew, and whether it was the last snapshot\nagain (then nothing changed).",
+        "description": "The roster's answer: the rows it offered at once (new rows of a person\nbound here already: a person is bound when they open the move), the\nrows it withdrew, and whether it was the last snapshot again (then\nnothing changed).",
         "properties": {
           "bound": {
             "format": "uint32",

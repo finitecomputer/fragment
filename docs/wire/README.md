@@ -369,12 +369,6 @@ out, open. Every refusal the platform answers with, as `{"error": code, "message
 
 Values: `invalid_request`, `unauthenticated`, `forbidden`, `not_found`, `unknown_operation`, `no_code`, `already_exists`, `conflicting_body`, `conflict`, `too_large`, `app_failed`, `rate_limited`, `host_failed`, `upstream_failed`, `registry_unavailable`, `budget_used_up`, `storage_full`, `node_full`, `wont_wake`, `not_connected`, `schema_refused`, `deploying`.
 
-### `EventKind`
-
-in. What a report says happened.
-
-Values: `stopped`, `progress`, `staged`, `failed`, `retired`, `restarted`.
-
 ### `FragmentKind`
 
 out, open. What a fragment is to the people who use it (`fragment.json`'s `kind`, decision 6): the shell lists each kind in its own place. An app unless it says otherwise. Open (`x-fragment-open`, docs/wire): a kind this build does not know reads as `Other`.
@@ -848,14 +842,14 @@ Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_
 
 ### `Report`
 
-in. `POST /api/migrations/mover/agents/{old}/report`: what happened on the command it names. Taken only for that old agent's current command; another (a stale attempt's) is 409, changing nothing. `seq` only grows per command: one taken already is a 200 that changes nothing. Flat: its `event`, and the fields that event has (`progress`: `bytes`, `files`; `staged`: `manifest_sha256`, `bytes`, `files`; `failed`: `step`, `why`; `retired`: `receipt`). One an event needs and lacks is 400.
+in. `POST /api/migrations/mover/agents/{old}/report`: what happened on the command it names. Taken only for that old agent's current command; another (a stale attempt's) is 409, changing nothing. `seq` only grows per command: one taken already is a 200 that changes nothing. Flat, one shape for every kind, read as plain fields: its `kind`, and the fields that kind has. `stopped` (the old agent is a folder now); `progress`, `bytes` and `files` so far; `staged` (`POST …/complete` done), `manifest_sha256`, `bytes` and `files` in all; `failed` (the platform decides whether to try again), `step` and `why`; `retired` (and marked moved), `receipt`; `restarted`. Another kind, or a field a kind needs and lacks, is 400.
 
 | field | type | | |
 | --- | --- | --- | --- |
 | `bytes` | `integer` or `null` | optional | Bytes and files staged so far (`progress`), or in all (`staged`). |
 | `command` | `string` | required |  |
-| `event` | [`EventKind`](#eventkind) | required |  |
 | `files` | `integer` or `null` | optional |  |
+| `kind` | `string` | required |  |
 | `manifest_sha256` | `string` or `null` | optional | `staged`: the manifest's SHA-256 (hex), as `POST …/complete` answered it. |
 | `receipt` | `string` or `null` | optional | `retired`: Core's retirement snapshot's id. |
 | `seq` | `integer` | required |  |
@@ -915,7 +909,7 @@ in. A person on the roster: their WorkOS user (the one both platforms sign them 
 
 ### `RosterTaken`
 
-out. The roster's answer: the rows bound to a person here by this snapshot, the rows it withdrew, and whether it was the last snapshot again (then nothing changed).
+out. The roster's answer: the rows it offered at once (new rows of a person bound here already: a person is bound when they open the move), the rows it withdrew, and whether it was the last snapshot again (then nothing changed).
 
 | field | type | | |
 | --- | --- | --- | --- |

@@ -341,9 +341,10 @@ pub struct Has {
     pub nostr: bool,
 }
 
-/// The roster's answer: the rows bound to a person here by this
-/// snapshot, the rows it withdrew, and whether it was the last snapshot
-/// again (then nothing changed).
+/// The roster's answer: the rows it offered at once (new rows of a person
+/// bound here already: a person is bound when they open the move), the
+/// rows it withdrew, and whether it was the last snapshot again (then
+/// nothing changed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RosterTaken {
@@ -435,16 +436,19 @@ pub enum Mark {
 /// another (a stale attempt's) is 409, changing nothing. `seq` only grows
 /// per command: one taken already is a 200 that changes nothing.
 ///
-/// Flat: its `event`, and the fields that event has (`progress`: `bytes`,
-/// `files`; `staged`: `manifest_sha256`, `bytes`, `files`; `failed`:
-/// `step`, `why`; `retired`: `receipt`). One an event needs and lacks is
-/// 400.
+/// Flat, one shape for every kind, read as plain fields: its `kind`, and
+/// the fields that kind has. `stopped` (the old agent is a folder now);
+/// `progress`, `bytes` and `files` so far; `staged` (`POST …/complete`
+/// done), `manifest_sha256`, `bytes` and `files` in all; `failed` (the
+/// platform decides whether to try again), `step` and `why`; `retired`
+/// (and marked moved), `receipt`; `restarted`. Another kind, or a field a
+/// kind needs and lacks, is 400.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Report {
     pub command: String,
     pub seq: u64,
-    pub event: EventKind,
+    pub kind: String,
     /// Bytes and files staged so far (`progress`), or in all (`staged`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
@@ -469,29 +473,10 @@ pub struct Report {
     pub receipt: Option<String>,
 }
 
-/// What a report says happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum EventKind {
-    /// The old agent is stopped: it is a folder now.
-    Stopped,
-    /// Staging goes on.
-    Progress,
-    /// The stage is complete (`POST …/complete`).
-    Staged,
-    /// A step failed; the platform decides whether to try again.
-    Failed,
-    /// Retired and marked moved.
-    Retired,
-    /// Started again.
-    Restarted,
-}
-
 impl Report {
-    /// A report of `event` alone, its fields to fill.
-    pub fn of(command: &str, seq: u64, event: EventKind) -> Report {
-        Report { command: command.into(), seq, event, bytes: None, files: None, manifest_sha256: None, step: None, why: None, receipt: None }
+    /// A report of `kind` alone, its fields to fill.
+    pub fn of(command: &str, seq: u64, kind: &str) -> Report {
+        Report { command: command.into(), seq, kind: kind.into(), bytes: None, files: None, manifest_sha256: None, step: None, why: None, receipt: None }
     }
 }
 
@@ -668,6 +653,13 @@ pub struct MoveAt {
 
 // ---- The operators' routes (`/api/admin/migrations`; not on the wire)
 
+/// `POST /api/admin/migrations/{old}`: staff's act on one move: `op`
+/// `retry`, `restart-old`, `retire` or `withdraw` (another is 400).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminAct {
+    pub op: String,
+}
+
 /// `GET /api/admin/migrations[?after=<old>]`: every move, by old id, a
 /// page at a time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -740,11 +732,13 @@ mod tests {
     /// A report's events, as the mover sends them.
     #[test]
     fn a_report_on_the_wire() {
-        let r: Report = serde_json::from_value(json!({ "command": "o:1:stop_and_stage", "seq": 3, "event": "staged", "manifest_sha256": "ab", "bytes": 10, "files": 2 })).unwrap();
-        assert_eq!((r.event, r.manifest_sha256.as_deref(), r.bytes, r.files), (EventKind::Staged, Some("ab"), Some(10), Some(2)));
-        let stopped: Report = serde_json::from_value(json!({ "command": "c", "seq": 1, "event": "stopped" })).unwrap();
-        assert_eq!(stopped, Report::of("c", 1, EventKind::Stopped));
-        assert!(serde_json::from_value::<Report>(json!({ "command": "c", "seq": 1, "event": "exploded" })).is_err());
+        let r: Report = serde_json::from_value(json!({ "command": "o:1:stop_and_stage", "seq": 3, "kind": "staged", "manifest_sha256": "ab", "bytes": 10, "files": 2 })).unwrap();
+        assert_eq!((r.kind.as_str(), r.manifest_sha256.as_deref(), r.bytes, r.files), ("staged", Some("ab"), Some(10), Some(2)));
+        let stopped: Report = serde_json::from_value(json!({ "command": "c", "seq": 1, "kind": "stopped" })).unwrap();
+        assert_eq!(stopped, Report::of("c", 1, "stopped"));
+        assert_eq!(serde_json::to_value(&stopped).unwrap(), json!({ "command": "c", "seq": 1, "kind": "stopped" }));
+        // a kind is read as text: one there is not is the platform's to refuse
+        assert!(serde_json::from_value::<Report>(json!({ "command": "c", "seq": 1 })).is_err());
     }
 
     /// A roster row with what it may leave out, and `move` its staged bytes.

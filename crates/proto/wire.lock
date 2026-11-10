@@ -375,8 +375,8 @@ field PutDraft.text optional string|null
 field PutDraft.turn required string
 field Report.bytes optional integer|null
 field Report.command required string
-field Report.event required EventKind
 field Report.files optional integer|null
+field Report.kind required string
 field Report.manifest_sha256 optional string|null
 field Report.receipt optional string|null
 field Report.seq required integer
@@ -629,7 +629,6 @@ type Docked out object
 type Done out object
 type ErrorBody out object
 type ErrorCode out enum open
-type EventKind in enum
 type FragmentKind out enum open
 type FragmentList out object
 type FragmentStatus out object
@@ -813,12 +812,6 @@ value ErrorCode unauthenticated
 value ErrorCode unknown_operation
 value ErrorCode upstream_failed
 value ErrorCode wont_wake
-value EventKind failed
-value EventKind progress
-value EventKind restarted
-value EventKind retired
-value EventKind staged
-value EventKind stopped
 value FragmentKind agent
 value FragmentKind app
 value FragmentKind brain

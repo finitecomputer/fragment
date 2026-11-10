@@ -40,12 +40,12 @@ admin route is.
 
 | Route | Body → answer | Rules |
 |---|---|---|
-| `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is. A person already known here (their WorkOS id among the registry's subjects) is bound at once. Pushed every 10 minutes. |
+| `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is. A person is bound when they open the move (the WorkOS user they signed in as, asked of the registry then); a new row of a person bound already is offered at once (`bound`). Pushed every 10 minutes. |
 | `GET /api/migrations/mover/mailbox` | → `Mailbox` | Each command stays until a report on it is taken, so reading again is the retry. Polled every 10 seconds. |
 | `POST /api/migrations/mover/agents/{old}/report` | `Report` → `Reported` | Taken only for the old agent's current command. Any other command id is 409 `conflict`, changing nothing. `seq` grows per command: a `seq` taken already is a 200 with `taken: false`. |
 | `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>` | the part's bytes → `StagePart {n, bytes, sha256, etag}` | One part of the zip (1 to `PARTS_MAX`, at most `PART_MAX_BYTES`, each but the last at least `PART_MIN_BYTES`), streamed unread straight into the stage's multipart upload in `STAGE`. Its SHA-256, which the signed URL names, is kept with it for the mover's resume; the zip's own SHA-256 in the manifest is what the importer checks. The same part again replaces it. |
 | `GET /api/migrations/mover/stages/{stage}/parts` | → `StageParts {parts}` | The parts taken so far: their numbers, sizes, hashes and etags, never their bytes. What a resumed upload sends next. |
-| `POST /api/migrations/mover/stages/{stage}/complete` | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` | The zip made whole from parts 1 to n (none missing, `zip_bytes` theirs in all), then `manifest.json` written, last. Then the mover reports `staged` with that SHA-256. The same complete again answers the same. |
+| `POST /api/migrations/mover/stages/{stage}/complete` | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` | The zip made whole from the parts taken (their bytes in all the manifest's `zip_bytes`; R2 refuses a part too small), then `manifest.json` written, last. Then the mover reports `staged` with that SHA-256. The same complete again answers the same. One cut off between the zip and its manifest is not made again: its attempt stalls, and the next stages afresh. |
 
 The three stage routes take only the stage its old agent's current
 `stop_and_stage` names (any other stage is 403), and only while it stages:
@@ -60,9 +60,9 @@ side: a stop of a stopped runtime does nothing, and a stage writes the
 same keys again.
 
 A command is flat: its `kind`, and that kind's fields. So is a report:
-its `event`, and that event's fields.
+its `kind` (text, one shape for all), and that kind's fields.
 
-| Command (`kind`) | The mover | Reports (`event`) |
+| Command (`kind`) | The mover | Reports (`kind`) |
 |---|---|---|
 | `stop_and_stage`, `phase`, `stage`, `secrets` | Stops the old agent, then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. `secrets` is empty until the vault (FIN-466). | `stopped`; `progress` with `bytes`, `files`; then `staged` with `manifest_sha256`, `bytes`, `files`; or `failed` with `step`, `why` |
 | `retire`, `as` (`migrated` or `archived`) | Retires it (a verified backup first) and marks it moved | `retired` with `receipt` |
@@ -155,7 +155,7 @@ earliest deadline of any row.
 
 | From → to | Moved by | Deadline | When it passes |
 |---|---|---|---|
-| listed → open | the bind: a roster push that finds the person (and, with F5, their sign-in) | none | none |
+| listed → open | the bind: the person opens the move, signed in as the WorkOS user the roster names (or a roster names a new row of a person bound already) | none | none |
 | open → later, never, asked | the person (F4, F6) | none | none |
 | later → open | the alarm | 24 hours | offered again |
 | asked → staging | the mover's `stopped` | 1 hour | held, `mover_down` |
@@ -194,10 +194,7 @@ staff read a move's state and act on it here.
 | Route | Answer |
 |---|---|
 | `GET /api/admin/migrations[?after=<old>]` | `AdminMoves`: each move by old id, a page at a time |
-| `POST /api/admin/migrations/{old}/retry` | `AdminMove`: a held move asked again, as a new attempt |
-| `POST /api/admin/migrations/{old}/restart-old` | the old agent started again, the move offered again |
-| `POST /api/admin/migrations/{old}/retire` | the old agent retired as migrated |
-| `POST /api/admin/migrations/{old}/withdraw` | the move out of the roster's hands: offered no more |
+| `POST /api/admin/migrations/{old}` `AdminAct {op}` | `AdminMove`, after `op`: `retry` (a held move asked again, as a new attempt), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated), or `withdraw` (the move out of the roster's hands: offered no more) |
 
 ## Configuration
 
