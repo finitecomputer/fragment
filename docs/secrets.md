@@ -12,6 +12,7 @@ its home; everything that uses it reads it from there.
 | The deployment's own: the host secret, the code.storage org key, WorkOS's client id and API key, Stripe's restricted key and webhook secret, a read-only Workers Observability key (the operators' glance reads the account's Workers Logs with it: an account API token with Workers Observability Read and nothing else), each model slot's key on an OpenAI-compatible API, each operator key, each connection's OAuth client secret | the account's Cloudflare Secrets Store, bound to the platform Worker by name (below) | Paul, or the coordinating session, with `cargo xtask secret`; deleting one is Paul's alone |
 | A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`), and removed when it installs other code (a fork: Paul, 2026-10-31) |
 | A person's own key for an `own` provider | their computer's Durable Object, sealed | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
+| A person's secret for their agents (a token, a bot's, a Nostr key) | their Vault, a Durable Object of theirs, sealed (below) | the person alone, never an agent: `PUT /api/vault/{secret}` (docs/api.md, "A person's Vault"); or the platform's own code for them (`vault::put`: FIN-463's hand-off) |
 | A sign-in under way (its PKCE verifier) | sealed in the computer (an own key's) or the registry (a connection's), until used or ten minutes pass | no one |
 | A fragment's nostr key (an agent's too) and its push key | made and sealed in the fragment's Durable Object, opened only to sign | no one |
 | A person's connections (Google, …) | WorkOS Pipes, which holds and refreshes them; a computer's swap asks it for a short-lived token on each call (decision 22) | the person (docs/pipes-browser-binding.md) |
@@ -63,6 +64,25 @@ only from that computer's egress, toward that provider.
 - **Agents hold no key.** Model calls go through the platform's model
   route, which adds a deployment key toward that API alone; operator keys
   and connections are swapped in at the computer's egress.
+
+## A person's Vault
+
+FIN-466: a person keeps secrets on the platform, and their agents use
+them without holding them. One `Vault` Durable Object a person, named by
+their identity (cell/src/vault.rs), holds each by its name: its value
+sealed for that object, the hosts it may go to, where it goes on a
+request, and the agents that may use it (Paul, 2026-11-09: per agent).
+
+- **A value goes in and never comes out.** No answer, list, log, event or
+  wipe report names one; the person who set it cannot read it back.
+- **Hosts, place and agents are set only with the value**
+  (`fragment_core::vault::check`), so no one sends a value anywhere its
+  setter did not mean. No hosts: parked, it fills nothing.
+- **Only its person writes it**, from their session or their own key;
+  their agents are refused every route. The CLI's `fragment vault
+  set|list|rm` reads a value from a hidden prompt, or stdin, never argv or
+  the environment, and never prints one.
+- **A wipe empties it** with their ledger, and keeps the row that says so.
 
 ## The Secrets Store
 

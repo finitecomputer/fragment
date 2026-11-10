@@ -84,7 +84,7 @@ move in the routine that starts the import.
 |---|---|---|
 | `POST /api/migrations/stages/{stage}/open` | `StageOpened {stage, manifest}` | The manifest as the mover wrote it. |
 | `GET /api/migrations/stages/{stage}/zip` | the zip's bytes | `Range: bytes=…` is answered 206 with that range alone. |
-| `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | `ok` moves it to `retiring`; not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once, and its objects are deleted. |
+| `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | `ok` moves it to `retiring`; not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once. A phase 1 stage's objects are deleted; a phase 2 stage's are kept until 90 days after the cutoff (Deletion). |
 
 Each is the bound agent's alone (403 for anyone else), for its current
 stage alone (404 for another attempt's), and only while the move is
@@ -170,6 +170,7 @@ waits for it and fewer than 8 archive.
 | retiring → moved | the mover's `retired` | 24 hours | held, `retire_timed_out` |
 | a staged attempt's objects | the alarm | 14 days after `staged` | deleted (the old host's backup remains) |
 | archived → expired | the alarm | cutoff + 90 days | deleted |
+| a phase 2 stage, its move ended any other way | the alarm | cutoff + 90 days | deleted |
 
 A stage's `failed` report counts as an attempt, as a stall does. A
 retirement's `failed` keeps its command for the mover to try again: the
@@ -184,11 +185,11 @@ by hand), and `withdraw` (out of the move).
 
 | When | What |
 |---|---|
-| `done`, either way in phase 1; done well in phase 2 | that attempt's prefix: its routes refuse at once, its objects go from the alarm, at most 1,000 a pass |
+| `done`, either way, in phase 1 | that attempt's prefix: its routes refuse at once, its objects go from the alarm, at most 1,000 a pass |
 | 14 days after `staged` (phase 1, done or not) | the same |
 | a superseded attempt | its prefix, and its unfinished upload aborted |
 | Never | nothing: Never only stops the asking |
-| 90 days after the cutoff (phase 2), whatever its import did | the same: a phase 2 stage is the only copy left (its old agent was retired as archived), so a failed import keeps it for staff's retry until then |
+| 90 days after the cutoff (phase 2), whatever its import did | the same. A phase 2 stage is the only copy left (its old agent was retired as archived), so it is kept until then: after a good import as after a failed one (for staff's retry). Its `done` ends only its reads |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |
 
 `/data` saves never hold a stage: the importer reads it by ranges into

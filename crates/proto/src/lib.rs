@@ -2536,6 +2536,7 @@ pub mod org;
 #[cfg(feature = "schema")]
 pub mod routes;
 pub mod search;
+pub mod vault;
 pub mod wipe;
 
 #[cfg(test)]

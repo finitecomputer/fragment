@@ -98,6 +98,8 @@
       { "name": "LEDGER", "class_name": "Ledger" },
       // A fragment life's search index: one object per life (search_index.rs).
       { "name": "SEARCH_INDEX", "class_name": "SearchIndex" },
+      // A person's Vault: one object per person (vault.rs).
+      { "name": "VAULT", "class_name": "Vault" },
       // The finite.computer move: one object, removable with it (migrations.rs).
       { "name": "MIGRATIONS", "class_name": "Migrations" }
     ]
@@ -110,6 +112,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] },
     { "tag": "v2", "new_sqlite_classes": ["SearchIndex"] },
-    { "tag": "v3", "new_sqlite_classes": ["Migrations"] }
+    { "tag": "v3", "new_sqlite_classes": ["Vault"] },
+    { "tag": "v4", "new_sqlite_classes": ["Migrations"] }
   ]
 }

@@ -555,9 +555,26 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{failed} | {gone}"),
     );
     api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": erin_id, "op": "cap", "steps": null })))?;
+    // within its limits, the next is made: scaled down by 2^16 (a
+    // fragment's part 256 KiB, the archive 1 MiB), its 200 KiB stands for
+    // 12.5 GiB, an imported agent's files (FIN-463), past the 2 GiB of
+    // before (32 KiB here)
+    let scale = |k: Option<u32>| api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": erin_id, "op": "scale", "steps": k })));
+    anyhow::ensure!(scale(Some(1 << 16))?.status == 200, "the scale lever");
     let again = press(api, &erin)?;
     let made = built(s, api, &erin);
-    s.ok("within its limit, the next is made", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
+    s.ok("within its limits, the next is made: a fragment past the 2 GiB of before, as an imported agent's files are", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
+    // past a fragment's part, within the archive (scaled by 2^18: 64 KiB
+    // and 256 KiB), it fails saying whose
+    scale(Some(1 << 18))?;
+    let third = press(api, &erin)?;
+    let past = built(s, api, &erin);
+    s.ok(
+        "past one fragment's part it fails as it builds, naming the fragment (too_large)",
+        third.body["id"] != again.body["id"] && past["state"] == "failed" && past["error"]["code"] == "too_large" && past["error"]["message"].as_str().is_some_and(|m| m.starts_with(&format!("{fat} would pass")) && m.contains("the most one fragment's part")),
+        &past,
+    );
+    scale(None)?;
 
     // ---- the CLI: `fragment export` starts one, waits, and downloads it
     let home = s.dir("export-cli");

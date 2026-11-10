@@ -61,6 +61,7 @@ mod sync;
 mod telegram_settings;
 mod templates;
 mod trials;
+mod vault;
 mod wipe;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -86,6 +87,7 @@ const LANES: &[Lane] = &[
     signin::signin,
     native::native,
     connections::connections,
+    vault::vault,
     levers::levers,
     members::secrets,
     members::reach,
@@ -202,7 +204,7 @@ pub const SHARDS: [&[&str]; 5] = [
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "identities", "signin", "native", "connections", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
+        "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
         "members", "billing", "governance", "billing-page", "move",
     ],
 ];
