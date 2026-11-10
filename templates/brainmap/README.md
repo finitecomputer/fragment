@@ -94,8 +94,9 @@ wiki (or its source and no wiki), else straight to its wiki.
 A map discloses the brain's wiki names, source titles, its agents' names
 and routines. Keep its audience inside the brain's: create it with
 `--visibility members` and share it with no one the brain is not shared
-with. The snapshot writes no token, email or person's identity (people are
-one count), and no source's text.
+with. The snapshot copies no token, no member's email or npub (people are
+one count) and no source's body; it does copy titles, log headings and
+routines' words as written, so whatever those say, the map says.
 
 ## Why a CDN
 

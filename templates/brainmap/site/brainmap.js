@@ -2,7 +2,7 @@
 // snapshot redraws every open page) drawn with React Flow. Selecting a node
 // lights everything its data passes through, upstream and downstream
 // (graph.js `lineage`), and opens its panel (panel.js).
-import { useEffect, useMemo, useState } from "react";
+import { Component, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ReactFlow, ReactFlowProvider, Background, Controls, MiniMap } from "@xyflow/react";
 import * as fragment from "./__fragment.js";
@@ -29,7 +29,7 @@ function ago(t) {
 function useMap() {
   const [state, setState] = useState({ loading: true });
   useEffect(() => {
-    const stop = fragment.live("map", {}, (r) => setState({ map: r.map, problem: r.problem ?? null }), (e) => setState({ problem: `The map didn't load: ${e.message}` }));
+    const stop = fragment.live("map", {}, (r) => setState({ map: r.map, rev: r.rev, problem: r.problem ?? null }), (e) => setState({ problem: `The map didn't load: ${e.message}` }));
     const unclosed = fragment.closed(({ code }) => setState({ problem: code === 4004 ? "This map was deleted." : "Your access changed: reload to see it." }));
     return () => {
       stop();
@@ -96,19 +96,34 @@ function Canvas({ raw }) {
   </div>`;
 }
 
-function Missing({ problem }) {
+function Missing({ problem, title = "No map yet" }) {
   return html`<main class="bm-missing">
-    <h1>No map yet</h1>
+    <h1>${title}</h1>
     <p>${problem}</p>
     <p>Sync a brain, then write its map here: <code>node scripts/snapshot.mjs &lt;brain&gt; --dir &lt;its folder&gt; --out map.json</code> and <code>fragment write &lt;this map&gt; map.json --from map.json</code>.</p>
   </main>`;
+}
+
+// A map the page could not draw says why, in place of a blank page; the next
+// snapshot (a new `rev`, the boundary's key) tries again.
+class Boundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  render() {
+    return this.state.error ? html`<${Missing} title="This map could not be drawn" problem=${this.state.error instanceof Error ? this.state.error.message : "an unknown error"} />` : this.props.children;
+  }
 }
 
 function App() {
   const state = useMap();
   if (state.loading) return html`<p class="bm-loading">Loading the map…</p>`;
   if (!state.map) return html`<${Missing} problem=${state.problem ?? "map.json is empty."} />`;
-  return html`<${ReactFlowProvider}><${Canvas} raw=${state.map} /><//>`;
+  return html`<${Boundary} key=${state.rev}><${ReactFlowProvider}><${Canvas} raw=${state.map} /><//><//>`;
 }
 
 createRoot(document.getElementById("root")).render(html`<${App} />`);

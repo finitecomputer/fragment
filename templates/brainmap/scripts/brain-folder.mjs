@@ -188,6 +188,15 @@ function childrenOf(dir, id) {
   });
 }
 
+/** Each child brain once, however many wikis (or entries) name it: per wiki, its paths, each once. */
+function childSources(entries) {
+  return [...Map.groupBy(entries, (c) => c.id)].map(([id, cs]) => {
+    const flows = [...Map.groupBy(cs, (c) => c.wiki)].map(([wiki, ws]) => ({ wiki, count: new Set(ws.flatMap((w) => w.paths)).size, last: null }));
+    const paths = [...new Set(cs.flatMap((c) => c.paths))].slice(0, ITEMS_MAX);
+    return { id, label: cs[0].label, kind: "brain", provider: cs[0].provider, flows, items: paths.map((p) => ({ path: p, title: p, captured: null })) };
+  });
+}
+
 /** Sources grouped by connector: how many each brought into each wiki, the newest, and the newest items. */
 function grouped(notes) {
   const by = Map.groupBy(notes, (n) => n.connector);
@@ -208,10 +217,7 @@ export function readFolder(dir) {
     .filter((e) => e.isDirectory() && !e.name.startsWith(".") && !["site", "applib"].includes(e.name))
     .map((e) => e.name).sort();
   const read = ids.map((id) => readWiki(dir, id));
-  const children = ids.flatMap((id) => childrenOf(dir, id)).map(({ wiki, paths, ...c }) => ({
-    ...c, flows: [{ wiki, count: paths.length, last: null }], items: paths.slice(0, ITEMS_MAX).map((p) => ({ path: p, title: p, captured: null })),
-  }));
-  return { wikis: read.map((r) => r.wiki), sources: [...grouped(read.flatMap((r) => r.notes)), ...children] };
+  return { wikis: read.map((r) => r.wiki), sources: [...grouped(read.flatMap((r) => r.notes)), ...childSources(ids.flatMap((id) => childrenOf(dir, id)))] };
 }
 
 /** An agent's routines that name the brain, as workflows: what each reads and where it writes, from its words. */

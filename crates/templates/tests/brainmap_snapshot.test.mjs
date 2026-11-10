@@ -78,9 +78,11 @@ test("a brain folder reads as its wikis and its sources by connector, child brai
     "garden/wiki/frost-dates.md": note({ title: "Frost dates", updated: "2026-11-04" }),
     "garden/output/brief.md": "# Weekly brief\n",
     "exec/datasets/sources.json": JSON.stringify([{ fragment: "research--a1b2", paths: ["team/wiki/launch.md"] }, { nope: 1 }]),
+    "board/index.md": "# Board",
+    "board/datasets/sources.json": JSON.stringify([{ fragment: "research--a1b2", paths: ["team/wiki/launch.md", "team/wiki/risks.md"] }, { fragment: "research--a1b2", paths: ["team/wiki/risks.md"] }]),
   });
   const { wikis, sources } = readFolder(dir);
-  assert.deepEqual(wikis.map((w) => w.id), ["exec", "garden"], "each top-level folder, never a hidden one");
+  assert.deepEqual(wikis.map((w) => w.id), ["board", "exec", "garden"], "each top-level folder, never a hidden one");
   const garden = wikis.find((w) => w.id === "garden");
   assert.equal(garden.pages, 1);
   assert.equal(garden.updated, "2026-11-04");
@@ -91,7 +93,9 @@ test("a brain folder reads as its wikis and its sources by connector, child brai
   assert.deepEqual(Object.keys(by).sort(), ["brain:research--a1b2", "gmail", "telegram", "upload", "web"], "no conflict copy, no asset's bytes");
   assert.deepEqual(by.gmail.flows, [{ wiki: "garden", count: 1, last: "2026-11-01" }], "a date from the file's name");
   assert.equal(by.gmail.items[0].title, "Tariff thread", "a title from the first heading");
-  assert.deepEqual(by["brain:research--a1b2"].flows, [{ wiki: "exec", count: 1, last: null }]);
+  assert.equal(sources.filter((s) => s.id === "brain:research--a1b2").length, 1, "a child two wikis draw on is one source (Codex review)");
+  assert.deepEqual(by["brain:research--a1b2"].flows, [{ wiki: "board", count: 2, last: null }, { wiki: "exec", count: 1, last: null }], "each wiki's paths, each once");
+  assert.deepEqual(by["brain:research--a1b2"].items.map((i) => i.path), ["team/wiki/launch.md", "team/wiki/risks.md"]);
   assert.equal(by["brain:research--a1b2"].kind, "brain");
 });
 

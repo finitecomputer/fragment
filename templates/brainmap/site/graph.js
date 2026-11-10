@@ -26,9 +26,13 @@ const H = HEIGHTS;
 const BRAIN = { pad: 16, head: 56, wikiW: 210, indexW: 168, gap: 56 };
 const BRAIN_W = BRAIN.pad + BRAIN.wikiW + BRAIN.gap + BRAIN.indexW + BRAIN.pad;
 
-const text = (v, max = 400) => (typeof v === "string" ? v.slice(0, max) : v == null ? "" : String(v).slice(0, max));
+// text is a string, a number or a boolean; anything else (an object, which may
+// not even convert to a string) is no text
+const text = (v, max = 400) => (typeof v === "string" ? v.slice(0, max) : typeof v === "number" || typeof v === "boolean" ? String(v).slice(0, max) : "");
 const count = (v) => (Number.isInteger(v) && v > 0 ? v : 0);
 const list = (v) => (Array.isArray(v) ? v.slice(0, LIST_MAX) : []);
+// each id once, as first named: React Flow's ids are the map's
+const unique = (xs) => xs.filter((x, i) => xs.findIndex((y) => y.id === x.id) === i);
 const time = (v) => {
   const t = typeof v === "number" ? v : Date.parse(text(v, 40));
   return Number.isFinite(t) ? t : null;
@@ -62,22 +66,22 @@ export function normalize(map) {
       visibility: text(brain.visibility, 16),
       index: { line: text(index.line, 200), pages: count(index.pages), sections: count(index.sections), pending: count(index.pending) },
     },
-    wikis: list(m.wikis).map((w) => ({
+    wikis: unique(list(m.wikis).map((w) => ({
       id: text(w?.id, 128),
       pages: count(w?.pages),
       updated: text(w?.updated, 40) || null,
       log: list(w?.log).slice(0, 10).map((e) => ({ date: text(e?.date, 40), title: text(e?.title, 200) })),
       outputs: list(w?.outputs).slice(0, 20).map(item),
-    })).filter((w) => w.id),
-    sources: list(m.sources).map((s) => ({
+    })).filter((w) => w.id)),
+    sources: unique(list(m.sources).map((s) => ({
       id: text(s?.id, 128),
       label: text(s?.label, 80) || text(s?.id, 80),
       kind: text(s?.kind, 16) || "connector",
       provider: text(s?.provider, 80),
       flows: list(s?.flows).map(flow).filter((f) => f.wiki),
       items: list(s?.items).slice(0, ITEMS_MAX).map(item),
-    })).filter((s) => s.id),
-    workflows: list(m.workflows).map((w) => ({
+    })).filter((s) => s.id)),
+    workflows: unique(list(m.workflows).map((w) => ({
       id: text(w?.id, 160),
       agent: text(w?.agent_title, 80) || text(w?.agent, 128),
       said: text(w?.said, 160),
@@ -87,14 +91,14 @@ export function normalize(map) {
       paused: w?.paused === true,
       lastAt: time(w?.last_at),
       nextAt: time(w?.next_at),
-    })).filter((w) => w.id),
-    readers: list(m.readers).map((r) => ({
+    })).filter((w) => w.id)),
+    readers: unique(list(m.readers).map((r) => ({
       id: text(r?.id, 128),
       kind: text(r?.kind, 16),
       label: text(r?.label, 80) || text(r?.id, 24),
       role: text(r?.role, 16),
       count: count(r?.count),
-    })).filter((r) => r.id),
+    })).filter((r) => r.id)),
     cut: ["wikis", "sources", "workflows", "readers"].filter((k) => Array.isArray(m[k]) && m[k].length > LIST_MAX),
   };
 }

@@ -74,7 +74,7 @@ test("a hostile map draws within bounds, with only http(s) links and no edge to 
   const m = normalize({ brain: { url: "javascript:alert(1)" } });
   assert.equal(m.brain.url, null);
   assert.equal(g.map.brain.url, null);
-  assert.equal(g.map.brain.title, "[object Object]", "text is text");
+  assert.equal(g.map.brain.title, "Brain", "an object is no title");
   assert.equal(g.map.brain.index.pages, 0);
   assert.ok(g.nodes.filter((n) => n.type === "source").length <= LIST_MAX);
   assert.ok(g.nodes.filter((n) => n.type === "wiki").length <= LIST_MAX);
@@ -107,4 +107,34 @@ test("each column is ordered by where its edges go, so few of them cross", () =>
     for (const b of fromSources.slice(i + 1)) if ((y(a.source) - y(b.source)) * (y(a.target) - y(b.target)) < 0) crossings++;
   }
   assert.ok(crossings <= 16, `the sample's source edges cross ${crossings} times (34 when sources stood by size)`);
+});
+
+test("a map whose values are not text or numbers draws, never throws (Codex review)", () => {
+  const hostile = { toString: null, valueOf: null };
+  const g = graph({
+    version: 1,
+    brain: { name: hostile, title: hostile, url: hostile, visibility: [1], index: { line: hostile } },
+    wikis: [{ id: "w", log: [{ date: hostile, title: hostile }], outputs: [{ path: hostile }] }],
+    sources: [{ id: "s", label: hostile, provider: hostile, flows: [{ wiki: "w", count: 1, last: hostile }], items: [{ title: hostile }] }],
+    workflows: [{ id: "f", agent: hostile, said: hostile, text: hostile, sources: [hostile, "s"], last_at: hostile }],
+    readers: [{ id: "r", label: hostile, role: hostile }],
+  });
+  assert.equal(g.map.brain.title, "Brain", "no title to show, so the default");
+  assert.equal(g.map.brain.url, null);
+  assert.deepEqual(g.map.workflows[0].sources, ["s"], "a name that is not text is no name");
+  assert.ok(g.nodes.some((n) => n.id === "src:s") && g.nodes.some((n) => n.id === "reader:r"));
+});
+
+test("a list naming one id twice draws it once, as first named (Codex review)", () => {
+  const g = graph({
+    version: 1,
+    brain: {},
+    sources: [{ id: "a", label: "First", flows: [{ wiki: "w", count: 2 }] }, { id: "a", label: "Second", flows: [{ wiki: "x", count: 5 }] }],
+    wikis: [{ id: "w" }, { id: "w", pages: 9 }],
+    workflows: [{ id: "f" }, { id: "f" }],
+    readers: [{ id: "r" }, { id: "r" }],
+  });
+  const ids = g.nodes.map((n) => n.id);
+  assert.equal(new Set(ids).size, ids.length, `every node id once: ${ids.join(", ")}`);
+  assert.equal(g.nodes.find((n) => n.id === "src:a").data.label, "First");
 });
