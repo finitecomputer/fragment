@@ -642,6 +642,11 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let session = api.sign_in(&email)?;
     let workos_id = s.workos.user(&email).id;
     let old = format!("{run}-a");
+    // a guest, as someone from finite.computer arrives (this fleet's default
+    // plan is a seat, whose shell would make a first agent of its own)
+    let id = super::signin::who(api, &session)?["id"].as_str().context("their identity")?.to_string();
+    let made_guest = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": format!("{old}-guest"), "plan": "guest" })))?;
+    anyhow::ensure!(made_guest.status == 200, "a guest: {made_guest}");
     let mut a = agent(&old);
     a.name = "Juniper".into();
     a.picture_url = Some(format!("{}/__shell/agent.png", api.base));
@@ -769,11 +774,6 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
 fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover: &Mover, session: &str, old: &str, shots: &std::path::Path) -> Result<()> {
     let wait = Duration::from_secs(30);
     let agent_wait = Duration::from_secs(180);
-    let me = super::signin::who(api, session)?;
-    let id = me["id"].as_str().context("their identity")?.to_string();
-    // a guest, as someone from finite.computer arrives (this fleet's default plan is a seat)
-    let made_guest = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": format!("{old}-guest"), "plan": "guest" })))?;
-    anyhow::ensure!(made_guest.status == 200, "a guest: {made_guest}");
     // answered Not now above: Never, then Ask again, through their own routes, offers it again now
     for verb in ["never", "ask-again"] {
         let r = super::shell::shell(api, session, "POST", &format!("/api/migrations/offers/{old}/{verb}"), Some(&json!({})), &[])?;

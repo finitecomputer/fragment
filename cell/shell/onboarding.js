@@ -515,8 +515,13 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     setupRun = (async () => {
       const made = await defaultAgent();
       lastMade = made;
+      // a quiet making (the move's page) is done once made, its computer
+      // assigned and it in its chat: what it is made for wakes it (its
+      // move's routine), and a wake its computer's view refused a moment
+      // ago (a guest's, comped since) is no answer about it
+      const quiet = !!setup?.quiet;
       const t0 = Date.now();
-      for (;;) {
+      for (; !quiet; ) {
         let ready = false;
         try {
           ready = await agentReady(made);
