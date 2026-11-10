@@ -1387,6 +1387,8 @@ impl Manager {
         let taken: Vec<String> = self.slots.iter().filter(|(_, s)| s.taken).map(|(f, _)| f.clone()).collect();
         for f in taken {
             crate::ev!("simplex.taken", { "agent": f });
+            // its replies meanwhile wait for its next start, not for no core
+            self.apply(&f, Input::Restarting);
             self.stop_core(&f).await;
             if let Some(s) = self.slots.get_mut(&f) {
                 s.taken = false;
@@ -3472,6 +3474,27 @@ mod tests {
     /// A waiting sync polls state at the timer's bound, before and after
     /// acceptance, and stops polling once it is ready. No timer replaces
     /// the keys of an accepted negotiation.
+    /// Goal (FIN-483, Codex's review): a core whose queues another client
+    /// took is stopped to start again, and a reply posted meanwhile waits
+    /// in its link's outbox for that start, never sent to no core.
+    #[tokio::test]
+    async fn a_reply_while_its_core_starts_again_waits_for_it() {
+        let dir = std::env::temp_dir().join(format!("simplex-taken-{}", std::process::id()));
+        let (mut m, _sent, _) = captured(&dir, 16);
+        let f = "juniper--k3x9";
+        // its process gone already (the test runs none): what retake does after
+        m.slots.get_mut(f).expect("its slot").core = None;
+        m.apply(f, Input::Said(&Resp::AnotherClient { contact: 3 }));
+        assert!(m.slots[f].taken);
+        m.retake().await;
+        assert!(!m.slots[f].taken && m.slots[f].retry_at.is_some(), "started again after a while");
+        m.apply(f, Input::Reply("the answer"));
+        assert_eq!(m.slots[f].saved.link.outbox.iter().cloned().collect::<Vec<_>>(), vec!["the answer".to_string()], "held for its next start");
+        let back = load(&m.slots[f].dir, &agent()).expect("its file");
+        assert_eq!(back.link.outbox.len(), 1, "and in its file, across a restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_waiting_sync_polls_state_without_replacing_keys() {
         let dir = std::env::temp_dir().join(format!("simplex-sync-timer-{}", std::process::id()));

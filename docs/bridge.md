@@ -435,8 +435,9 @@ never reaches another agent's core.
   its conversation moved) takes the contact's queues, and the core says so
   (`contactAnotherClient`, `subscriptionEnd`). The bridge stops that core
   and starts it again, which subscribes again (counted as an exit, so one
-  that keeps losing them waits for its owner); its start's state read
-  heals the ratchet, unforced.
+  that keeps losing them waits for its owner); replies meanwhile wait in
+  its outbox, and its start's state read heals the ratchet, unforced, and
+  sends them.
 - **The agent is kept out**: the core and `BRIDGE_SIMPLEX_DIR` are root's,
   0700, and on no agent's PATH. The agent's passwordless sudo still
   reaches root, and a core's bot API listens on loopback (the debt

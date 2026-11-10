@@ -175,6 +175,10 @@ pub enum Input<'a> {
     Delivered(i64),
     /// A sync still waits for `ok`: read the core's state before retrying.
     Resync,
+    /// Its core is stopped to start again (another client took its queues):
+    /// replies wait in the outbox until the next start reads it in step,
+    /// as through a sync, rather than go to no core.
+    Restarting,
 }
 
 /// What the link asks for.
@@ -318,6 +322,11 @@ impl Link {
             Input::Delivered(item) => {
                 if self.contact().is_some() && !self.scan.running {
                     self.delivered = self.delivered.max(item);
+                }
+            }
+            Input::Restarting => {
+                if self.contact().is_some() {
+                    self.syncing = true;
                 }
             }
             Input::Resync => {
@@ -877,6 +886,18 @@ mod tests {
         }
         assert!(Link::default().apply(Input::Said(&Resp::AnotherClient { contact: 3 })).is_empty(), "not linked");
         assert_eq!(link.contact(), Some(3), "still bound");
+        // Codex's review: a reply while its core starts again waits for it,
+        // across a restart of the bridge too, and goes once it is in step
+        link.apply(Input::Restarting);
+        assert!(link.apply(Input::Reply("answered meanwhile")).is_empty(), "held, not sent to no core");
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(link.apply(Input::Started { rollback: false })[0], Action::Ask(Cmd::ContactInfo { contact: 3 }));
+        let ok = link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok }));
+        assert_eq!(sends(&ok), vec!["answered meanwhile"]);
+        assert!(!link.syncing);
+        let mut off = Link::default();
+        off.apply(Input::Restarting);
+        assert!(!off.syncing, "nothing bound, nothing held");
     }
 
     /// Goal: the outbox is bounded: past it the oldest parts go, counted.
