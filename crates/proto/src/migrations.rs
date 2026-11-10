@@ -659,6 +659,17 @@ pub struct MoveAt {
     pub state: MoveState,
 }
 
+// ---- Its person's routes (`/api/migrations/offers/{old}/…`, F4)
+
+/// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a
+/// new agent of their own, which the move's stage is imported into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OfferYes {
+    /// The new agent: its identity's id or npub.
+    pub agent: String,
+}
+
 // ---- The operators' routes (`/api/admin/migrations`; not on the wire)
 
 /// `POST /api/admin/migrations/{old}`: staff's act on one move: `op`

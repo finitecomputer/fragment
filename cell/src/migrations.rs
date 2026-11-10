@@ -24,16 +24,19 @@
 //! export's own multipart shims in js.rs) in boxed steps, one copy each,
 //! and passes the object's answers on unread.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use fragment_core::migrations::{self as machine, Col, Effect, Move, Refused, Step};
 use fragment_nip98::Payload;
 use fragment_proto::migrations::{
-    parse_stage, stage_prefix, valid_old, AdminAct, Mailbox, MoveAt, MoveState, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES, PARTS_MAX,
-    PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
+    parse_stage, stage_prefix, valid_old, AdminAct, Mailbox, MoveAt, MoveState, OfferYes, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
+    PARTS_MAX, PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
 };
-use fragment_proto::{limits, ErrorCode};
+use fragment_proto::notice::NoticeList;
+use fragment_proto::{limits, ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
@@ -73,6 +76,15 @@ const ROUTINE_RETRY_MS: i64 = 30_000;
 /// (routed.rs `marker`): the router never passes it. The routine goes as
 /// `stage/routine/<key>`, its text the body: appended once by its key.
 pub(crate) const ROUTINE_HEADER: &str = "x-fragment-move-routine";
+/// A person's pages told of a change to their moves, at most, by one call
+/// (a roster may change many): the rest read theirs as they reconnect.
+const TELLS_MAX: usize = 32;
+/// An old agent's picture, read for its person (`…/picture`): its bytes at
+/// most, and the kinds a page shows (never SVG, which runs script).
+const PICTURE_MAX_BYTES: usize = 1024 * 1024;
+const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// A person's notices when the move has none for them.
+const NO_NOTICES: &[u8] = br#"{"notices":[]}"#;
 
 /// A move's columns (`fragment_core::migrations::COLUMNS`), as SQL names
 /// and binds them, and the queries built of them: whole at compile time.
@@ -127,6 +139,9 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
     }
     if let ["stages", stage, op] = rest {
         return stage_route(req, env, url, stage, op).await;
+    }
+    if let ["offers", old, op] = rest {
+        return offer_route(req, env, cfg, url, old, op).await;
     }
     let ["mover", tail @ ..] = rest else { return Err(crate::no_route(url.path())) };
     let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
@@ -217,6 +232,80 @@ pub(crate) async fn visit(env: &Env, cfg: &Config, person: &str) -> CellResult<R
         return Err(CellError::host("a WorkOS user's id is not one"));
     }
     pass(env, format!("bind/{subject}"), person.to_string()).await
+}
+
+/// `GET /api/notices`, the move's part (`notices::route`): `person`'s open
+/// moves, each an offer that must be answered. A person it does not know
+/// yet is bound first, by the WorkOS user they sign in as (asked of the
+/// registry once: then they are known, roster or not, and a roster after
+/// offers their rows at once). One with no WorkOS user, or whose user is
+/// another person's here, is told nothing. Its bytes, a `NoticeList`.
+pub(crate) async fn notices(env: &Env, cfg: &Config, person: &str) -> CellResult<Vec<u8>> {
+    if cfg.migrations.is_none() {
+        return Ok(NO_NOTICES.to_vec());
+    }
+    let told = ask(env, "notices".into(), person.to_string()).await?;
+    if !told.is_empty() {
+        return Ok(told);
+    }
+    match crate::connections::workos_user(env, cfg, person).await? {
+        Some(subject) if valid_old(&subject) => ask(env, "notices".into(), format!("{person}\n{subject}")).await,
+        _ => Ok(NO_NOTICES.to_vec()),
+    }
+}
+
+/// `/api/migrations/offers/{old}/…`: the person's own answers to an offer
+/// (`later`, `never`, `ask-again`; `yes {agent}`, an agent of their own,
+/// from `/move`), and its picture, read for them. The object says whether
+/// the move is theirs.
+fn offer_route<'a>(mut req: Request, env: &'a Env, cfg: &'a Config, url: &'a Url, old: &'a str, op: &'a str) -> Waits<'a, Response> {
+    Box::pin(async move {
+        let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+        let who = crate::signer(env, &req, url, &bytes).await?.identity;
+        if who.kind != IdentityKind::Person {
+            return Err(CellError::new(ErrorCode::Forbidden, "an offer is its person's to answer"));
+        }
+        old_ok(old)?;
+        match (req.method(), op) {
+            (Method::Get, "picture") => picture(cfg, text(ask(env, format!("picture/{old}"), who.id).await?)?).await,
+            (Method::Post, "later" | "never" | "ask-again") => pass(env, format!("answer/{old}/{op}"), who.id).await,
+            (Method::Post, "yes") => {
+                let OfferYes { agent } = crate::json_body(&bytes)?;
+                let agent = crate::ask_registry(env, &crate::registry::calls::Lookup { who: agent }).await?;
+                let owner = agent.owner.filter(|_| agent.kind == IdentityKind::Agent).unwrap_or_default();
+                pass(env, format!("answer/{old}/yes"), format!("{}\n{}\n{owner}", who.id, agent.id)).await
+            }
+            _ => Err(crate::no_route(url.path())),
+        }
+    })
+}
+
+/// An old agent's picture, as the roster names it, read for its person:
+/// https alone (http too on a local fleet, whose pictures are its own), an
+/// image a page shows, within `PICTURE_MAX_BYTES`.
+async fn picture(cfg: &Config, at: String) -> CellResult<Response> {
+    let none = || CellError::new(ErrorCode::NotFound, "this old agent has no picture to show");
+    let local = cfg.test_hooks && !cfg.levers_scoped;
+    if !(at.starts_with("https://") || (local && at.starts_with("http://"))) {
+        return Err(none());
+    }
+    let mut resp = Fetch::Url(Url::parse(&at).map_err(|_| none())?).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the picture did not answer: {e}")))?;
+    let kind = resp.headers().get("content-type")?.unwrap_or_default();
+    let kind = kind.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if resp.status_code() != 200 || !PICTURE_TYPES.contains(&kind.as_str()) {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the picture answered {} ({kind})", resp.status_code())));
+    }
+    let (bytes, cut) = crate::cs::read_answer(&mut resp, PICTURE_MAX_BYTES).await?;
+    if cut {
+        return Err(CellError::too_large("a picture", PICTURE_MAX_BYTES + 1, PICTURE_MAX_BYTES));
+    }
+    let h = Headers::new();
+    h.set("content-type", &kind)?;
+    // kept by no cache: its URL is the same for whoever signs in next on
+    // this browser, and the shell reads it with its own header anyway
+    h.set("cache-control", "no-store")?;
+    h.set("x-content-type-options", "nosniff")?;
+    Ok(Response::from_bytes(bytes)?.with_headers(h))
 }
 
 /// One call into the object (`migrations/<op>`, `body` its text), asked
@@ -392,6 +481,15 @@ struct AgentIn {
     old: String,
 }
 
+/// An offer as its notice reads it (`RosterAgent`'s name and picture).
+#[derive(Deserialize)]
+struct OfferIn {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    picture_url: Option<String>,
+}
+
 /// A manifest as the object checks it (the importer reads the rest).
 #[derive(Deserialize)]
 struct ManifestIn {
@@ -450,6 +548,9 @@ pub struct MigrationsCell {
     raw: JsValue,
     cfg: &'static Config,
     schema: crate::schema::Schema,
+    /// The WorkOS users whose moves this call changed: their people's
+    /// pages are told after it (`tell`).
+    changed: Rc<RefCell<Vec<String>>>,
 }
 
 impl DurableObject for MigrationsCell {
@@ -458,7 +559,7 @@ impl DurableObject for MigrationsCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let schema = crate::schema::Schema::start(&raw, state.storage().sql(), &fragment_core::migrate::MIGRATIONS, &state.id().to_string());
         let cfg = Config::from_env(&env);
-        MigrationsCell { state, env, raw, cfg, schema }
+        MigrationsCell { state, env, raw, cfg, schema, changed: Rc::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -487,13 +588,14 @@ impl DurableObject for MigrationsCell {
             // looked at again in a minute
             let _ = js::set_alarm(&self.raw, js::now_ms() + 60_000);
         }
+        self.tell().await;
         Response::ok("")
     }
 }
 
 impl MigrationsCell {
     fn parts(&self) -> Parts {
-        Parts { sql: self.state.storage().sql() }
+        Parts { sql: self.state.storage().sql(), changed: self.changed.clone() }
     }
 
     /// The object's clock: real time, moved by the `clock` lever on a fleet
@@ -521,9 +623,28 @@ impl MigrationsCell {
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         self.schema.ready()?;
         let body = req.text().await?;
-        let answer = self.call(&req.path(), body)?;
+        let answer = self.call(&req.path(), body);
         self.arm()?;
-        Ok(answer)
+        self.tell().await;
+        answer
+    }
+
+    /// The people whose moves changed, told (`principal::tell_changed`), so
+    /// each open page reads its notices again: at most `TELLS_MAX`, best
+    /// effort (a page that missed it reads them as it reconnects).
+    async fn tell(&self) {
+        let mut workos: Vec<String> = self.changed.borrow_mut().drain(..).collect();
+        workos.sort_unstable();
+        workos.dedup();
+        let parts = self.parts();
+        let mut people: Vec<String> = workos.iter().filter_map(|w| parts.person_of(w).ok().flatten()).collect();
+        people.sort_unstable();
+        people.dedup();
+        for person in people.iter().take(TELLS_MAX) {
+            if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
+                console_error!("migrations.tell-failed: {person}: {}", e.message);
+            }
+        }
     }
 
     fn call(&self, path: &str, body: String) -> CellResult<Response> {
@@ -611,6 +732,22 @@ impl MigrationsCell {
                 };
                 crate::json_answer(&MoveAt { state })
             }
+            // a person's: their open moves' offers (none known: empty, for the
+            // router to bind them by their WorkOS user, the body's 2nd line)
+            ("notices", []) => self.notices(&body),
+            // a person's answer (body: who; a Yes's agent and its owner after)
+            ("answer", [old, op]) => {
+                let mut lines = body.lines();
+                let person = lines.next().unwrap_or_default();
+                let agent = lines.next().zip(lines.next());
+                let (state, _) = self.answer(old, Some(person), op, agent)?;
+                crate::json_answer(&MoveAt { state })
+            }
+            // where its picture is, for its person alone
+            ("picture", [old]) => {
+                let (_, offer) = self.offer_of(old, &body)?;
+                Ok(Response::ok(offer.picture_url.unwrap_or_default())?)
+            }
             ("test", []) if self.cfg.test_hooks => self.test(crate::json_body(body.as_bytes())?),
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         }
@@ -688,6 +825,87 @@ impl MigrationsCell {
             }
             Ok(bound)
         })
+    }
+
+    /// A person's open moves, oldest first, each as the offer that must be
+    /// answered; `body` is who (`person`), then the WorkOS user to bind them
+    /// by when the router asked. One not known here answers nothing at all.
+    fn notices(&self, body: &str) -> CellResult<Response> {
+        let (person, subject) = body.split_once('\n').unwrap_or((body, ""));
+        let parts = self.parts();
+        if !subject.is_empty() {
+            match self.bind(subject, person) {
+                Ok(_) => {}
+                // their WorkOS user is another person's here: nothing to tell them
+                Err(e) if e.code == ErrorCode::Conflict => {
+                    console_error!("migrations.notices: {person}: {}", e.message);
+                    return crate::json_passed(NO_NOTICES.to_vec());
+                }
+                Err(e) => return Err(e),
+            }
+            // this read answers what binding them offered
+            self.changed.borrow_mut().clear();
+        }
+        if parts.rows("SELECT 1 AS n FROM people WHERE person = ? LIMIT 1", vec![text_value(person)])?.is_empty() {
+            return Ok(Response::ok("")?);
+        }
+        let rows = parts.rows(
+            "SELECT m.old, m.offer FROM moves m JOIN people p ON p.workos_id = m.workos_id WHERE p.person = ? AND m.state = 'open' ORDER BY m.since_ms, m.old",
+            vec![text_value(person)],
+        )?;
+        let page = format!("{}/move", self.cfg.platform());
+        let notices = rows
+            .iter()
+            .map(|r| {
+                let o: OfferIn = crate::json_body(r["offer"].as_str().unwrap_or_default().as_bytes())?;
+                Ok(machine::offer(r["old"].as_str().unwrap_or_default(), &o.name, o.picture_url.is_some(), &page))
+            })
+            .collect::<CellResult<Vec<_>>>()?;
+        crate::json_answer(&NoticeList { notices })
+    }
+
+    /// `old`'s move and its roster offer, if it is `person`'s (404 otherwise:
+    /// no one learns of another's).
+    fn offer_of(&self, old: &str, person: &str) -> CellResult<(Move, OfferIn)> {
+        let parts = self.parts();
+        let none = || CellError::new(ErrorCode::NotFound, format!("no offer {old} of yours"));
+        let m = parts.get(old)?.ok_or_else(none)?;
+        if parts.person_of(&m.workos_id)?.as_deref() != Some(person) {
+            return Err(none());
+        }
+        let offer = parts.rows("SELECT offer FROM moves WHERE old = ?", vec![text_value(old)])?.pop().and_then(|r| r["offer"].as_str().map(str::to_string)).unwrap_or_default();
+        Ok((m, crate::json_body(offer.as_bytes())?))
+    }
+
+    /// A person's answer to `old`'s offer (`later`, `never`, `ask-again`,
+    /// `yes` with an agent and its owner): `person` names who answers, its
+    /// move theirs (404 otherwise); `None` is a lever's, for its person.
+    /// A Yes binds an agent of the person's own alone (403). The move's
+    /// state and attempt after.
+    fn answer(&self, old: &str, person: Option<&str>, op: &str, agent: Option<(&str, &str)>) -> CellResult<(MoveState, u32)> {
+        let parts = self.parts();
+        let m = match person {
+            Some(p) => self.offer_of(old, p)?.0,
+            None => parts.get(old)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old}")))?,
+        };
+        let theirs = parts.person_of(&m.workos_id)?.ok_or_else(|| CellError::new(ErrorCode::Conflict, "its person is not known here yet"))?;
+        let now = self.now()?;
+        let outcome = match (op, agent) {
+            ("later", _) => machine::later(&m, now),
+            ("never", _) => machine::never(&m, now),
+            ("ask-again" | "ask_again", _) => machine::ask_again(&m, now),
+            ("yes", Some((agent, owner))) if owner == theirs => machine::yes(&m, agent, now),
+            ("yes", _) => return Err(CellError::new(ErrorCode::Forbidden, "yes binds an agent of the person's own")),
+            (other, _) => return Err(CellError::invalid(format!("no answer {other}"))),
+        };
+        match outcome.map_err(refused)? {
+            None => Ok((m.state, m.attempt)),
+            Some(s) => {
+                let at = (s.to.state, s.to.attempt);
+                self.commit(vec![s], now)?;
+                Ok(at)
+            }
+        }
     }
 
     /// The mover's commands, oldest first.
@@ -902,26 +1120,9 @@ impl MigrationsCell {
             self.supervise()?;
             return crate::json_answer(&json!({ "offsetMs": offset, "now": self.now()? }));
         }
-        let old = v["old"].as_str().unwrap_or_default();
-        let m = parts.get(old)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old}")))?;
-        let person = parts.person_of(&m.workos_id)?.ok_or_else(|| CellError::new(ErrorCode::Conflict, "its person is not known here yet"))?;
-        let now = self.now()?;
-        let outcome = match (v["op"].as_str(), v["answer"].as_str()) {
-            (Some("answer"), Some("later")) => machine::later(&m, now),
-            (Some("answer"), Some("never")) => machine::never(&m, now),
-            (Some("answer"), Some("ask_again")) => machine::ask_again(&m, now),
-            (Some("answer"), Some("yes")) if v["owner"].as_str() == Some(person.as_str()) => machine::yes(&m, v["agent"].as_str().unwrap_or_default(), now),
-            (Some("answer"), Some("yes")) => return Err(CellError::new(ErrorCode::Forbidden, "yes binds an agent of the person's own")),
-            other => return Err(CellError::invalid(format!("no migrations lever {other:?}"))),
-        };
-        let (state, attempt) = match outcome.map_err(refused)? {
-            None => (m.state, m.attempt),
-            Some(s) => {
-                let at = (s.to.state, s.to.attempt);
-                self.commit(vec![s], now)?;
-                at
-            }
-        };
+        let (Some("answer"), Some(answer)) = (v["op"].as_str(), v["answer"].as_str()) else { return Err(CellError::invalid(format!("no migrations lever {}", v["op"]))) };
+        let agent = v["agent"].as_str().map(|a| (a, v["owner"].as_str().unwrap_or_default()));
+        let (state, attempt) = self.answer(v["old"].as_str().unwrap_or_default(), None, answer, agent)?;
         crate::json_answer(&json!({ "state": state.as_str(), "attempt": attempt }))
     }
 }
@@ -936,6 +1137,7 @@ fn text_value(s: &str) -> SqlStorageValue {
 #[derive(Clone)]
 struct Parts {
     sql: SqlStorage,
+    changed: Rc<RefCell<Vec<String>>>,
 }
 
 impl Parts {
@@ -989,10 +1191,15 @@ impl Parts {
             .collect()
     }
 
+    /// A new row, its person told when it comes in offered (bound already).
     fn insert(&self, m: &Move, offer: &str) -> CellResult<()> {
         let mut binds = Self::binds(m);
         binds.push(text_value(offer));
-        self.exec(INSERT_MOVE, binds)
+        self.exec(INSERT_MOVE, binds)?;
+        if m.state == MoveState::Open {
+            self.changed.borrow_mut().push(m.workos_id.clone());
+        }
+        Ok(())
     }
 
     /// A change: the move stored, its sweeps and routines queued for after
@@ -1001,6 +1208,7 @@ impl Parts {
         let mut binds = Self::binds(&s.to);
         binds.push(text_value(&s.to.old));
         self.exec(UPDATE_MOVE, binds)?;
+        self.changed.borrow_mut().push(s.to.workos_id.clone());
         for e in &s.effects {
             match e {
                 Effect::Sweep { prefix } => self.exec("INSERT INTO sweeps (prefix, at_ms) VALUES (?, ?) ON CONFLICT (prefix) DO NOTHING", vec![text_value(prefix), SqlStorageValue::Integer(now)])?,

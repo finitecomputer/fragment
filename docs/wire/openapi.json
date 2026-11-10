@@ -1809,6 +1809,14 @@
             "description": "Unique among the person's notices, and the same across reads while it\ntells the same thing: what a client keys its row by.",
             "type": "string"
           },
+          "image": {
+            "default": null,
+            "description": "A picture beside its words (an agent's): a platform path, read with\nthe person's own credential. A client from before it shows none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "kind": {
             "description": "What it is about (`key_paused`), for tests and logs. No client reads\nit to decide what to draw.",
             "type": "string"
@@ -1921,6 +1929,20 @@
         ],
         "type": "object",
         "x-fragment-direction": "out"
+      },
+      "OfferYes": {
+        "description": "`POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a\nnew agent of their own, which the move's stage is imported into.",
+        "properties": {
+          "agent": {
+            "description": "The new agent: its identity's id or npub.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
       },
       "OldBrain": {
         "properties": {
@@ -5253,6 +5275,541 @@
         "x-fragment-takes": "application/octet-stream"
       }
     },
+    "/api/migrations/offers/{old}/ask-again": {
+      "post": {
+        "operationId": "migrations.again",
+        "parameters": [
+          {
+            "description": "The old agent's id (Core's project id).",
+            "in": "path",
+            "name": "old",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveAt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The person's Ask again, after a Never: their old agent's offer is asked again now.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/offers/{old}/later": {
+      "post": {
+        "operationId": "migrations.later",
+        "parameters": [
+          {
+            "description": "The old agent's id (Core's project id).",
+            "in": "path",
+            "name": "old",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveAt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The person's Not now: their old agent's offer is asked again after a day.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/offers/{old}/never": {
+      "post": {
+        "operationId": "migrations.never",
+        "parameters": [
+          {
+            "description": "The old agent's id (Core's project id).",
+            "in": "path",
+            "name": "old",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveAt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The person's Never: their old agent's offer is asked no more, until they ask again.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/offers/{old}/yes": {
+      "post": {
+        "operationId": "migrations.yes",
+        "parameters": [
+          {
+            "description": "The old agent's id (Core's project id).",
+            "in": "path",
+            "name": "old",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfferYes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveAt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`, `registry_unavailable`",
+            "x-fragment-codes": [
+              "deploying",
+              "registry_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
     "/api/migrations/stages/{stage}/done": {
       "post": {
         "operationId": "migrations.done",
@@ -6249,7 +6806,7 @@
       "name": "live"
     },
     {
-      "description": "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move.",
+      "description": "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, a person's answers to the offer to bring an old agent over, and a new agent's stage. Removable, with the move.",
       "name": "migrations"
     },
     {

@@ -36,11 +36,44 @@ admin route is.
   and only while the move is `importing`.
 - **Operators** are the deployment's (`orgs.rs` `operator`).
 
+## The offer (F4)
+
+A person whose old agents' moves are `open` is asked about each, oldest
+first, in `GET /api/notices` (docs/api.md, Notices): a notice that must
+be answered, `move:<old>`, its words the server's
+(`fragment_core::migrations::offer`): "Bring <name> over from
+finite.computer?", "You'll get a month free.", with the roster's picture
+through the platform. Its answers:
+
+| Answer | Does |
+|---|---|
+| Yes | Opens `/move` (F6), which asks what the import needs, makes the new agent, and posts `yes {agent}` |
+| Not now | `POST /api/migrations/offers/{old}/later`: asked again after `LATER_MS` (a day) |
+| Never | `POST …/never`: asked no more until `POST …/ask-again` (from `/move`) |
+
+The routes are the person's own (a session or their key): another
+person's old agent is none (404), an agent is refused (403), and an
+answer its move's state does not take is 409 in the machine's words.
+`GET …/picture` reads the roster's `picture_url` for its person alone
+(https; an image a page shows, at most 1 MiB).
+
+**Binding.** A person is bound by their first notices read: the router
+asks Migrations for their offers, and a person it does not know yet is
+looked up once (the WorkOS user they sign in as, of the registry) and
+bound by it, roster or not. From then on a roster row of theirs is
+offered as it comes. A person with no WorkOS user, or whose user is
+another person's here, is told nothing.
+
+**Told.** Every change to a bound person's move (their answers, a roster,
+the alarm's deadlines, staff's acts) tells their open pages
+(`principal::tell_changed`, at most 32 people a call), which read their
+notices again.
+
 ## The mover's routes
 
 | Route | Body → answer | Rules |
 |---|---|---|
-| `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is. A person is bound when they open the move (the WorkOS user they signed in as, asked of the registry then); a new row of a person bound already is offered at once (`bound`). Pushed every 10 minutes. |
+| `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is. A person is bound by their first notices read (the WorkOS user they signed in as, asked of the registry then: "The offer"); a new row of a person bound already is offered at once (`bound`). Pushed every 10 minutes. |
 | `GET /api/migrations/mover/mailbox` | → `Mailbox` | Each command stays until a report on it is taken, so reading again is the retry. Polled every 10 seconds. |
 | `POST /api/migrations/mover/agents/{old}/report` | `Report` → `Reported` | Taken only for the old agent's current command. Any other command id is 409 `conflict`, changing nothing. `seq` grows per command: a `seq` taken already is a 200 with `taken: false`. |
 | `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>` | the part's bytes → `StagePart {n, bytes, sha256, etag}` | One part of the zip (1 to `PARTS_MAX`, at most `PART_MAX_BYTES`, each but the last at least `PART_MIN_BYTES`), streamed unread straight into the stage's multipart upload in `STAGE`. Its SHA-256, which the signed URL names, is kept with it for the mover's resume; the zip's own SHA-256 in the manifest is what the importer checks. The same part again replaces it. |
@@ -160,8 +193,8 @@ waits for it and fewer than 8 archive.
 
 | From → to | Moved by | Deadline | When it passes |
 |---|---|---|---|
-| listed → open | the bind: the person opens the move, signed in as the WorkOS user the roster names (or a roster names a new row of a person bound already) | none | none |
-| open → later, never, asked | the person (F4, F6) | none | none |
+| listed → open | the bind: the person's first notices read, or their visit to `/move`, signed in as the WorkOS user the roster names (or a roster names a new row of a person bound already) | none | none |
+| open → later, never, asked | the person's routes (F4: `/api/migrations/offers/{old}/…`; Yes from F6's page) | none | none |
 | later → open | the alarm | 24 hours | offered again |
 | asked → staging | the mover's `stopped` | 1 hour | held, `mover_down` |
 | staging → importing | the mover's `staged` | 30 minutes without progress; 12 hours in all | attempt + 1, up to 3, then held `stage_failed` |

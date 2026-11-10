@@ -554,3 +554,27 @@ test("the cover never gives the focus to an answer the person didn't choose: sho
   await settle();
   assert.equal(globalThis.document.activeElement?.tag, "a", "the link, still");
 });
+
+test("an offer to bring an old agent over (the move's): its picture beside its words; Yes opens the platform's page here, the main answer; Not now posts, and a refusal is the server's words", async (t) => {
+  globalThis.location = { origin: "https://chat.test", href: "https://chat.test/" };
+  t.after(() => delete globalThis.location);
+  const offer = {
+    id: "move:prj_1", kind: "move_offer", level: "info", title: "Bring Ada over from finite.computer?", text: "You'll get a month free.", mustAnswer: true, image: "/api/migrations/offers/prj_1/picture",
+    actions: [{ label: "Yes", open: "https://chat.test/move" }, { label: "Not now", post: "/api/migrations/offers/prj_1/later" }, { label: "Never", post: "/api/migrations/offers/prj_1/never" }],
+  };
+  const p = page(t, [offer]);
+  assert.deepEqual(p.asked(), { id: "move:prj_1", words: ["Bring Ada over from finite.computer?", "You'll get a month free."], actions: [{ open: "https://chat.test/move" }, { label: "Not now", enabled: true }, { label: "Never", enabled: true }] });
+  const row = p.cover.children.find((r) => r.dataset.id);
+  const pic = walk(row).find((n) => n.tag === "img");
+  assert.equal(pic?.dataset.src, "/api/migrations/offers/prj_1/picture", "its picture, drawn (read with the shell's credential)");
+  const yes = walk(row).find((n) => n.tag === "a");
+  assert.ok(yes.className.includes("primary"), "Yes, the main answer");
+  assert.equal(yes.target, undefined, "the platform's own page opens here, not apart");
+  p.answer("Not now");
+  assert.deepEqual([p.calls[0].path, p.calls[0].body], ["/api/migrations/offers/prj_1/later", {}]);
+  p.calls[0].fail(Object.assign(new Error("Not now: this move is asked."), { status: 409 }));
+  await settle();
+  p.calls[1].ok({ notices: [offer] });
+  await settle();
+  assert.deepEqual(p.asked().words, ["Bring Ada over from finite.computer?", "You'll get a month free.", "Not now: this move is asked."]);
+});
