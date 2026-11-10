@@ -497,6 +497,20 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
         json!([later.body, told_later, waiting, told_back, back]),
     );
 
+    // a roster after names a new old agent of theirs: offered at once, and told
+    let f3 = format!("{run}-f3");
+    let mut more = roster.clone();
+    more.snapshot = format!("{run}-s9");
+    more.people[0].agents.push(agent(&f3));
+    let pushed = mover.push(&more)?;
+    let told_new = crate::lanes::shell::told(&mut tab);
+    let with_new = ids(&offers(&erin)?);
+    s.ok(
+        "a roster after, naming a new old agent of a person bound already, offers it at once, and their pages are told",
+        pushed.status == 200 && pushed.body["bound"] == 1 && told_new == json!({ "type": "changed" }) && with_new.contains(&format!("move:{f3}")),
+        json!([pushed.body, told_new, with_new]),
+    );
+
     // Never, then Ask again
     let never = api.signed(&erin, "POST", &at(&f2, "never"), None)?;
     let gone = ids(&offers(&erin)?);
@@ -506,7 +520,7 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
     let too_late = api.signed(&erin, "POST", &at(&f1, "ask-again"), None)?;
     s.ok(
         "Never: asked no more, until Ask again, which offers it at once; Ask again of an offer open already changes nothing",
-        never.body["state"] == "never" && gone == [format!("move:{f1}")] && again.body["state"] == "open" && asked_again.contains(&format!("move:{f2}")) && open_again.status == 200 && too_late.status == 200,
+        never.body["state"] == "never" && gone == [format!("move:{f1}"), format!("move:{f3}")] && again.body["state"] == "open" && asked_again.contains(&format!("move:{f2}")) && open_again.status == 200 && too_late.status == 200,
         json!([never.body, gone, again.body, asked_again]),
     );
 
@@ -520,7 +534,7 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
     let later_now = api.signed(&erin, "POST", &at(&f1, "later"), None)?;
     s.ok(
         "Yes with another person's agent is refused (403), a body that is none (400); with their own, the old agent is told to stop and its offer goes; Yes again changes nothing, and Not now after it is refused in the server's words (409)",
-        theirs.status == 403 && bad.status == 400 && yes.body["state"] == "asked" && yes_again.status == 200 && left == [format!("move:{f2}")] && cmd.is_some_and(|c| c.stage.as_deref() == Some(&format!("{f1}.p1.1"))) && later_now.status == 409 && !later_now.message().is_empty(),
+        theirs.status == 403 && bad.status == 400 && yes.body["state"] == "asked" && yes_again.status == 200 && left == [format!("move:{f3}"), format!("move:{f2}")] && cmd.is_some_and(|c| c.stage.as_deref() == Some(&format!("{f1}.p1.1"))) && later_now.status == 409 && !later_now.message().is_empty(),
         json!([theirs.status, bad.status, yes.body, left, later_now.body]),
     );
     if let Ok(w) = tab {
