@@ -994,9 +994,8 @@ label.settings-line { cursor: pointer; }
 .move-copy { flex: 1; min-width: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.45; }
 .move-copy strong { display: block; margin-bottom: 2px; color: var(--text-primary); font-size: 15px; }
 .move-copy p { margin: 0; }
-.move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 14px; }
 .move-pick input[type="checkbox"] { flex: none; width: 18px; height: 18px; margin: 0; }
-.move-name { flex: 1; min-width: 0; max-width: 280px; height: 34px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 14px; }
 .move-row > button { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/28px var(--font-sans); }
 .move-layout .form-error { margin: 0 0 12px; }
 @media (max-width: 640px) { .move-layout { padding: 18px 16px 60px; } }

@@ -787,10 +787,10 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     anyhow::ensure!(b.until(&page, "document.getElementById('must-answer').open && !!document.querySelector('#must-answer a')", wait), "the offer, over the page");
     b.eval(&page, "(document.querySelector('#must-answer a').click(), true)")?;
     let opened = b.until(&page, &format!("location.pathname === '/move' && !!{row} && !document.getElementById('must-answer').open"), wait);
-    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, name: r?.querySelector('.move-name')?.value, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open }}; }})()"))?;
+    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open }}; }})()"))?;
     s.ok(
-        "Yes opens /move here: the old agent, its words, whether to bring it and the name it takes, prefilled; the offer's cover stands aside on the page that answers it",
-        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper is on finite.computer.")) && seen["name"] == "Juniper" && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false,
+        "Yes opens /move here: the old agent, its words, and whether to bring it (chosen); the offer's cover stands aside on the page that answers it",
+        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper is on finite.computer.")) && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false,
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));

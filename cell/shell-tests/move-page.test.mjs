@@ -62,7 +62,7 @@ function page(t, own = { agents: [], ids: new Map() }) {
 
 const offer = (old, state, said, o = {}) => ({ old, name: `Old ${old}`, state, said, ...o });
 
-test("its agents in the server's words: the askable ones each a choice and a name, a Never'd one Ask again, one under way neither", async (t) => {
+test("its agents in the server's words: the askable ones each a choice, a Never'd one Ask again, one under way neither", async (t) => {
   const p = page(t);
   p.ui.open();
   p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer.", { image: "/api/migrations/offers/a/picture" }), offer("b", "never", "You said never."), offer("c", "staging", "Copying Old c…")] });
@@ -86,9 +86,6 @@ test("Bring over: the move opened (the comp), a seat waited for, then each a new
   p.ui.open();
   p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer.")] });
   await settle();
-  const name = walk(p.root).find((n) => n.className === "move-name");
-  name.value = "Juniper";
-  name.oninput();
   p.button("Bring over").onclick();
   await settle();
   p.next("POST", "/api/migrations/offers").ok({ offers: [] });
@@ -96,8 +93,8 @@ test("Bring over: the move opened (the comp), a seat waited for, then each a new
   p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
   assert.equal(p.guest(), false, "a seat, as the platform said");
-  assert.deepEqual(p.made.map((m) => m.spec), [{ name: "Juniper", role: null, quiet: true, from: "a" }], "made for its old agent, which its agent.json keeps");
-  assert.deepEqual(p.rows()[0].words, ["Old a", "Making Juniper…"], "while it is made");
+  assert.deepEqual(p.made.map((m) => m.spec), [{ name: "Old a", role: null, quiet: true, from: "a", agent: null }], "made for its old agent, which its agent.json keeps, under its name");
+  assert.deepEqual(p.rows()[0].words, ["Old a", "Making Old a…"], "while it is made");
   p.made[0].ok({ chat: "juniper-chat--k3x9", id: "npub1juniper", computer: "computer:aa" });
   await settle();
   const yes = p.next("POST", "/api/migrations/offers/a/yes");
@@ -142,8 +139,31 @@ test("Ask again after a Never posts it, then the page as the server says", async
   assert.deepEqual(p.rows()[0].pick, true);
 });
 
-test("one new agent an old one: an agent made for it before whose Yes never arrived (or a reload) is gone on with, never a second made", async (t) => {
-  const p = page(t, { agents: ["mine--a1b2", "juniper--k3x9"], ids: new Map([["mine--a1b2", "npub1mine"], ["juniper--k3x9", "npub1juniper"]]) });
+test("one new agent an old one: the agent made for it before (a Yes that never arrived, a making cut short, a reload) is handed back to Add to go on with, never a second", async (t) => {
+  for (const placed of [true, false]) {
+    const p = page(t, { agents: ["mine--a1b2", "juniper--k3x9"], ids: new Map([["mine--a1b2", "npub1mine"], ...(placed ? [["juniper--k3x9", "npub1juniper"]] : [])]) });
+    p.ui.open();
+    p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer.")] });
+    await settle();
+    p.button("Bring over").onclick();
+    await settle();
+    p.next("POST", "/api/migrations/offers").ok({ offers: [] });
+    await settle();
+    p.next("GET", "/api/ledger").ok({ plan: "seat" });
+    await settle();
+    p.next("GET", "/api/f/mine--a1b2/file?path=agent.json").fail(Object.assign(new Error("not found"), { status: 404 }));
+    await settle();
+    p.next("GET", "/api/f/juniper--k3x9/file?path=agent.json").ok({ tier: "standard", from: "a" });
+    await settle();
+    assert.deepEqual(p.made.map((m) => m.spec), [{ name: "Old a", role: null, quiet: true, from: "a", agent: "juniper--k3x9" }], `the one made for it, handed back (${placed ? "on its computer" : "cut short"})`);
+    p.made[0].ok({ chat: "juniper-chat--k3x9", id: "npub1juniper", computer: "computer:aa" });
+    await settle();
+    assert.deepEqual(p.next("POST", "/api/migrations/offers/a/yes").body, { agent: "npub1juniper" });
+  }
+});
+
+test("a mapping that could not be read is no leave to make one: Bring over stops, saying so, to try again, and makes nothing", async (t) => {
+  const p = page(t, { agents: ["juniper--k3x9"], ids: new Map([["juniper--k3x9", "npub1juniper"]]) });
   p.ui.open();
   p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer.")] });
   await settle();
@@ -153,13 +173,14 @@ test("one new agent an old one: an agent made for it before whose Yes never arri
   await settle();
   p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
-  p.next("GET", "/api/f/mine--a1b2/file?path=agent.json").ok({ tier: "standard" });
+  p.next("GET", "/api/f/juniper--k3x9/file?path=agent.json").fail(Object.assign(new Error("deploying"), { status: 503 }));
   await settle();
-  p.next("GET", "/api/f/juniper--k3x9/file?path=agent.json").ok({ tier: "standard", from: "a" });
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer.")] });
   await settle();
-  assert.equal(p.made.length, 0, "no second agent made");
-  const yes = p.next("POST", "/api/migrations/offers/a/yes");
-  assert.deepEqual(yes.body, { agent: "npub1juniper" }, "the one made for it");
+  assert.equal(p.made.length, 0, "no agent made");
+  assert.equal(p.calls.filter((c) => c.path.endsWith("/yes")).length, 0, "no Yes");
+  assert.deepEqual(p.errors(), ["Couldn't check whether Old a was brought over already, so nothing was made. Try again."]);
+  assert.equal(p.button("Bring over").disabled, false, "to try again");
 });
 
 test("a choice made again after none was: Bring over is offered again", async (t) => {

@@ -397,11 +397,14 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // staying as it is; answered with what was made (`{chat, id, computer}`).
   // `from`: the old finite.computer agent it is made for, kept in its
   // agent.json (`from`), so the page finds it again (move-page.js `madeFor`).
-  async function addAgent({ name, role, runtime = "hermes", quiet = false, from = null }) {
+  // `agent`: the one made for it before, which the page found so: gone on
+  // with by its own label (its chat too, one made whose answer was lost),
+  // under the name it has, never another made.
+  async function addAgent({ name, role, runtime = "hermes", quiet = false, from = null, agent = null }) {
     if (setup) throw new Error("Another agent is being made: finish it in its chat first.");
     const placed = new Set([...agents().values()].map((a) => a.fragment));
-    const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
-    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, quiet, from, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    const left = agent ?? allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name))?.name;
+    setup = { label: left ? labelOf(left) : freeLabel(slug(name)), title: agent ? titleOf(agent) : name, role: role || null, runtime, job: addedJob, added: true, quiet, from, agent: left ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
     lastMade = null;
     const unsaid = await creatingAgent();
     if (unsaid) throw new Error(unsaid);
