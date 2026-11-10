@@ -55,6 +55,19 @@ impl Call for InvitesFor {
     type Answer = serde_json::Value;
 }
 
+/// `POST /invites/notices`: what the registry tells the person `person`
+/// (FIN-458, `GET /api/notices`; the router resolved them): each invite
+/// waiting on an email of theirs, in words (`fragment_core::registry::said`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NoticesOf {
+    pub person: String,
+}
+
+impl Call for NoticesOf {
+    const PATH: &'static str = "/invites/notices";
+    type Answer = serde_json::Value;
+}
+
 /// `POST /invites/answer`: the asker's yes (`yes`) or no to `fragment`'s
 /// invite waiting on an email of theirs. Answers the role they hold there
 /// after a yes, none after a no; 404 when none waits (taken back,
@@ -207,7 +220,8 @@ impl RegistryCell {
     }
 
     async fn tell_person(&self, person: &str) {
-        if let Err(e) = crate::principal::tell_invited(&self.env, person).await {
+        // their notices changed (the one frame: `GET /api/notices` again)
+        if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
             console_error!("{}", serde_json::json!({ "invites-told": person, "failed": e.message, "code": e.code }));
         }
     }
@@ -239,18 +253,36 @@ impl RegistryCell {
     /// the soonest of them).
     fn waiting_for(&self, b: InvitesFor) -> CellResult<serde_json::Value> {
         let who = self.invitee_by(&b.by, b.acting_for.as_deref())?;
-        // read as the wire names them (proto's `WaitingInvite`; a row with a
-        // role has its title: they are written together), and passed on as
-        // read: the cell's Wasm carries no visitor of its own for them
-        let invites = self.rows::<serde_json::Value>(
+        Ok(serde_json::json!({ "invites": self.waiting_on(&who.id)? }))
+    }
+
+    /// The invites waiting on `person`'s emails, as the wire names them
+    /// (proto's `WaitingInvite`; a row with a role has its title: they are
+    /// written together), and passed on as read: the cell's Wasm carries no
+    /// visitor of its own for them.
+    fn waiting_on(&self, person: &str) -> CellResult<Vec<serde_json::Value>> {
+        self.rows::<serde_json::Value>(
             "SELECT w.fragment, w.role, COALESCE(w.title, w.fragment) AS title, w.email, w.expires_at AS \"expiresAt\",
                (SELECT s.email FROM subjects s WHERE s.identity = w.sharer ORDER BY s.signed_in_at DESC LIMIT 1) AS \"from\"
              FROM invites_waiting w
              WHERE w.role IN ('viewer', 'editor') AND w.expires_at > ? AND w.email IN (SELECT email FROM subjects WHERE identity = ?)
              ORDER BY w.expires_at, w.fragment LIMIT ?",
-            vec![SqlStorageValue::Integer(js::now_ms()), who.id.as_str().into(), SqlStorageValue::Integer(limits::INVITES_PER_EMAIL_MAX as i64)],
-        )?;
-        Ok(serde_json::json!({ "invites": invites }))
+            vec![SqlStorageValue::Integer(js::now_ms()), person.into(), SqlStorageValue::Integer(limits::INVITES_PER_EMAIL_MAX as i64)],
+        )
+    }
+
+    /// What the registry tells `b.person` (`NoticesOf`): their invites, in
+    /// words.
+    fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
+        let notices: Vec<fragment_proto::notice::Notice> = self
+            .waiting_on(&b.person)?
+            .iter()
+            .map(|i| {
+                let s = |k: &str| i[k].as_str().unwrap_or_default();
+                fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
+            })
+            .collect();
+        Ok(serde_json::json!({ "notices": notices }))
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their
@@ -325,6 +357,7 @@ impl RegistryCell {
         Some(match path {
             InviteEmail::PATH => reply::<InviteEmail>(async { self.invite(body(bytes)?).await }.await),
             InvitesFor::PATH => reply::<InvitesFor>(body(bytes).and_then(|b| self.waiting_for(b))),
+            NoticesOf::PATH => reply::<NoticesOf>(body(bytes).and_then(|b| self.notices_of(b))),
             AnswerInvite::PATH => reply::<AnswerInvite>(async { self.answer_invite(body(bytes)?).await }.await),
             ForgetInvite::PATH => reply::<ForgetInvite>(async { self.forget_invite(body(bytes)?).await }.await),
             _ => return None,
