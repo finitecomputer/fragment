@@ -906,6 +906,53 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
             && ![&moved, &listed, &held, &again].iter().any(|r| r.text.contains(&bot)),
         format!("{moved} {held} {again}"),
     );
+    // moved at once into three fragments of theirs, each move reading it
+    // before any keeps it: one keeps it, the others are refused (409
+    // while it is claimed, 404 once it is gone), and it leaves the Vault
+    let mut homes = vec![name.clone()];
+    for which in ["move-a", "move-b"] {
+        let home = s.named(api, &owner, which)?;
+        s.create(api, &owner, &home)?;
+        // private, as a key needs (`reach`, above)
+        let private = api.signed(&owner, "PUT", &format!("/api/f/{home}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(private.status == 200, "{home} made private: {private}");
+        homes.push(home);
+    }
+    let (owner_keys, homes) = (&owner, &homes);
+    let raced = (0..3)
+        .map(|trial| -> Result<Value> {
+            let (secret, key, value) = (format!("raced-e2e-{trial}"), format!("RACED_{trial}"), format!("{bot}-raced-{trial}"));
+            let parked = vault(owner_keys, "PUT", &format!("/api/vault/{secret}"), Some(json!({ "value": value, "hosts": [], "agents": [agent_id_name(&name)] })))?;
+            anyhow::ensure!(parked.status == 200, "the owner's vault: {parked}");
+            let body = json!({ "fromVault": secret, "hosts": ["api.telegram.org"] });
+            let answers = std::thread::scope(|scope| {
+                let each: Vec<_> = homes
+                    .iter()
+                    .map(|home| {
+                        let (path, body) = (format!("/api/f/{home}/secrets/{key}"), &body);
+                        scope.spawn(move || api.signed(owner_keys, "PUT", &path, Some(body)))
+                    })
+                    .collect();
+                each.into_iter().map(|h| h.join().expect("a move's thread")).collect::<Result<Vec<_>>>()
+            })?;
+            let kept = homes.iter().map(|home| api.signed(owner_keys, "GET", &format!("/api/f/{home}/secrets"), None)).collect::<Result<Vec<_>>>()?;
+            let held = vault(owner_keys, "GET", "/api/vault", None)?;
+            let refused = answers.iter().filter(|r| r.status != 200).all(|r| (r.status == 409 && r.code() == Some(ErrorCode::Conflict)) || r.status == 404);
+            Ok(json!({
+                "statuses": answers.iter().map(|r| r.status).collect::<Vec<_>>(),
+                "moved": answers.iter().filter(|r| r.status == 200).count(),
+                "refused": refused,
+                "homes": kept.iter().filter(|r| r.text.contains(&key)).count(),
+                "inVault": held.text.contains(&secret),
+                "shown": answers.iter().chain(&kept).chain([&held]).any(|r| r.text.contains(&value)),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    s.ok(
+        "a Vault secret moved into three fragments at once, three times: each time one keeps it, the others are refused (409 claimed, or 404 gone), and the Vault holds it no more",
+        raced.iter().all(|t| t["moved"] == 1 && t["refused"] == true && t["homes"] == 1 && t["inVault"] == false && t["shown"] == false),
+        json!(raced),
+    );
     vault(&owner, "DELETE", "/api/vault/nostr-e2e", None)?;
     Ok(())
 }

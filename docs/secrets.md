@@ -100,9 +100,13 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
 - **A secret moves out once, whole**: its person may move one into a
   fragment they edit as that fragment's secret (`fromVault` on `PUT
   /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as
-  a Telegram bot's token moves into its connector. The fragment keeps it,
-  then the Vault removes it, so it has one home and is never lost between.
-  A Nostr key never moves.
+  a Telegram bot's token moves into its connector. The Vault claims the
+  value for that one destination as the move reads it; the fragment keeps
+  it, then the Vault removes it, for its claimant alone. So it has one
+  home and is never lost between: a move into anywhere else is refused
+  (409) while the claim stands, and the same move again finishes one cut
+  short. A claim has no clock; setting the secret again or removing it
+  ends it (`fragment_core::vault::Claimed`). A Nostr key never moves.
 
 ## The Secrets Store
 
