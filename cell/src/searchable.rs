@@ -175,9 +175,7 @@ impl FragmentCell {
     /// `op` on the index `scope` (search_index.rs), with `body`: its answer.
     async fn search_index<T: DeserializeOwned>(&self, scope: &str, op: &str, body: &impl Serialize) -> CellResult<T> {
         self.test_countdown(MetaKey::TestFailSearchIndex, "the search index is out of reach")?;
-        let body = serde_json::to_value(body).map_err(|e| CellError::host(format!("index/{op}'s call: {e}")))?;
-        let answer = crate::routed::ask_object(&self.env, "SEARCH_INDEX", scope, &format!("index/{op}"), &body).await?;
-        serde_json::from_value(answer).map_err(|e| CellError::host(format!("index/{op}'s answer: {e}")))
+        crate::routed::ask_object(&self.env, "SEARCH_INDEX", scope, &format!("index/{op}"), body).await
     }
 
     /// Waits for, then holds, `source`.
@@ -508,9 +506,9 @@ impl FragmentCell {
     /// app is the fragment itself, so its own index is its to write and
     /// ask, with no role checked, and everything it embeds is paid by the
     /// fragment's owner (its code cannot vouch for whoever called it).
-    pub(crate) async fn cap_search(&self, op: &str, body: serde_json::Value) -> CellResult<Response> {
-        fn read<T: DeserializeOwned>(op: &str, body: serde_json::Value) -> CellResult<T> {
-            serde_json::from_value(body).map_err(|e| CellError::invalid(format!("search.{op}: {e}")))
+    pub(crate) async fn cap_search(&self, op: &str, body: &[u8]) -> CellResult<Response> {
+        fn read<T: DeserializeOwned>(op: &str, body: &[u8]) -> CellResult<T> {
+            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("search.{op}: {e}")))
         }
         match op {
             "upsert" => self.search_write(By::App, read(op, body)?).await,

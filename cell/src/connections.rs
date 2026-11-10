@@ -217,8 +217,13 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
             let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
-            let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &told).await {
-                Ok(v) => serde_json::from_value(v["providers"].clone()).map_err(|e| CellError::host(format!("the computer's own keys: {e}")))?,
+            /// `computer/own-keys`' answer: the providers it holds a key of its own for.
+            #[derive(serde::Deserialize)]
+            struct OwnKeys {
+                providers: Vec<String>,
+            }
+            let own: Vec<String> = match crate::routed::ask_object::<OwnKeys>(env, "COMPUTER", &computer, "computer/own-keys", &told).await {
+                Ok(keys) => keys.providers,
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
             };
