@@ -153,6 +153,11 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let ours = [&agent_name, &chat_name, &app_name];
     let mut repos: Vec<String> = [&agent, &chat, &app].iter().map(|c| c["repo"].as_str().unwrap_or("").to_string()).collect();
 
+    // a secret in their Vault (FIN-466), which the wipe empties
+    let sentinel = format!("wipe-vault-{}", &Keys::generate().pubkey_hex()[..20]);
+    let r = api.signed(&paul, "PUT", "/api/vault/linear", Some(&json!({ "value": sentinel, "hosts": ["api.linear.app"], "agents": [agent_name] })))?;
+    s.ok("a secret in their vault", r.status == 200, &r);
+
     // ---- the dry run: what a wipe deletes, and nothing changes
     let dry = cli_wipe(s, api, &file, &[&email, "--dry-run"]);
     let d = dry.as_ref().map(Value::clone).unwrap_or(Value::Null);
@@ -177,7 +182,9 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
             && f["computer"]["computer"] == computer.as_str()
             && f["computer"]["saves"].as_u64().is_some_and(|n| n >= 1)
             && f["computer"]["backups"].as_u64().is_some_and(|n| n >= 1)
-            && f["ledger"] == true,
+            && f["ledger"] == true
+            && f["vault"] == true
+            && !format!("{dry:?}").contains(&sentinel),
         format!("{dry:?}"),
     );
     let me = api.signed(&paul, "GET", "/api/identities/me", None)?;
@@ -323,6 +330,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
             && f["pictures"] == 0
             && f["lists"] == 0
             && f["ledger"] == false
+            && f["vault"] == false
             && f["agents"] == json!([])
             && f["computer"]["saves"] == 0
             && f["computer"]["backups"] == 0

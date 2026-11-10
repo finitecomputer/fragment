@@ -1862,7 +1862,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- an invited guest: someone with a seat invites the guest's email
     // to an app they titled; the guest lands home, not the welcome, the
-    // invite in their sidebar (decision 63), and their Accept opens it
+    // invite told them as a notice (decision 63; FIN-458), and its Accept
+    // opens it (its answer names its page)
     let owner = api.person()?;
     let owner_email = Api::email_of(&owner);
     let label = format!("garden-{}", &Keys::generate().pubkey_hex()[..6]);
@@ -1874,21 +1875,22 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "sharing it with the guest: {r}");
     let session = api.sign_in(&Api::email_of(&bea))?;
     let page = page_of(&mut b, api, &session, "/")?;
-    let invite = format!("#invites .invite[data-invite={app:?}]");
+    let invite = format!("#computer-notices .computer-notice[data-id=\"invite:{app}\"]");
+    let accept = format!("[...(document.querySelector({invite:?})?.querySelectorAll('.notice-actions button') ?? [])].find((x) => x.textContent === 'Accept')");
     let waits = view(
         &mut b,
         &page,
-        &format!("location.pathname === '/' && !!document.querySelector({:?}) && !document.querySelector('#apps [data-key=\"app:{app}\"]') && /accept their invite in the sidebar/.test(document.getElementById('notice')?.innerText ?? '')", format!("{invite} .invite-accept")),
+        &format!("location.pathname === '/' && !!{accept} && !document.querySelector('#apps [data-key=\"app:{app}\"]') && /accept their invite\\./.test(document.getElementById('notice')?.innerText ?? '')"),
         wait,
     );
     let said = b.eval(&page, &format!("document.querySelector({invite:?})?.innerText ?? ''"))?;
     let _ = b.screenshot(&page, &shots.join("6-invited-guest-invite.png"));
     s.ok(
-        "an invited guest lands home, not the welcome: the invite in their sidebar, titled as its owner titled it, from whom and as what, with Accept and Decline; nothing of it in their dock yet, and their note says where to accept it",
+        "an invited guest lands home, not the welcome: the invite told them as a notice, titled as its owner titled it, from whom and as what, with Accept and Decline; nothing of it in their dock yet, and their note says to accept it",
         waits && said.as_str().is_some_and(|t| t.contains("Garden plans") && t.contains(&format!("{owner_email} invited you to edit it")) && t.contains("Decline")),
         &said,
     );
-    if !act(s, &mut b, &page, "the invite's Accept", &click(&format!("{invite} .invite-accept")))? {
+    if !act(s, &mut b, &page, "the invite's Accept", &click_text(&format!("{invite} .notice-actions button"), "Accept"))? {
         return Ok(());
     }
     let landed = view(

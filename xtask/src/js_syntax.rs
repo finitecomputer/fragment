@@ -80,6 +80,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/chat-speakers.test.mjs",
     "cell/shell-tests/computer-answer.test.mjs",
     "cell/shell-tests/computer-state.test.mjs",
+    "cell/shell-tests/connections-names.test.mjs",
     "cell/shell-tests/frame-messages.test.mjs",
     "cell/shell-tests/frame-standin.test.mjs",
     "cell/shell-tests/history-page.test.mjs",

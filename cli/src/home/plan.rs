@@ -25,9 +25,9 @@ use super::layout::Layout;
 use super::rules::{self, Kind};
 use super::source::{Entry, Source};
 
-const GIB: u64 = 1024 * 1024 * 1024;
-/// The bytes of files one agent's import brings, at most (Paul, FIN-463).
-pub const FILES_MAX_BYTES: u64 = 10 * GIB;
+/// The bytes of files one agent's import brings, at most (Paul, FIN-463):
+/// what a person's export keeps room for in one fragment.
+pub const FILES_MAX_BYTES: u64 = fragment_core::export::limits::HOME_FILES_MAX_BYTES;
 /// The files it brings, at most: what a person's export takes of one
 /// fragment (`export::limits::FILES_MAX`), less room for the fragment's
 /// own (its manifest, `left-behind.md`).
@@ -328,6 +328,7 @@ impl Plan {
 mod tests {
     use super::*;
     use crate::home::source::tests::Temp;
+    use fragment_core::export::limits::GIB;
 
     fn put(root: &Path, files: &[(&str, usize, i64)]) {
         for (p, size, age) in files {
