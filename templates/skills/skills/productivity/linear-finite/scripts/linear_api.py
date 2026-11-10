@@ -40,6 +40,17 @@ MAX_NODES = 100
 ISSUE_FIELDS = "identifier title url priorityLabel updatedAt state { name } team { key } assignee { name email }"
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is never followed: it would carry the Authorization
+    header to wherever it points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
 class LinearError(Exception):
     def __init__(self, status, code, message):
         super().__init__(message)
@@ -59,9 +70,11 @@ def graphql(query, variables=None):
     headers = {"Authorization": f"Bearer {token()}", "Content-Type": "application/json", "Accept": "application/json"}
     request = urllib.request.Request(GRAPHQL, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
+        with OPENER.open(request, timeout=TIMEOUT_S) as response:
             answer = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise LinearError(exc.code, "redirected", f"Linear answered a redirect to {exc.headers.get('Location', '?')}, which the helper never follows with the token") from None
         raise refusal(exc.code, exc.read().decode("utf-8", errors="replace")) from None
     except urllib.error.URLError as exc:
         raise LinearError(0, "unreachable", str(exc.reason)) from None

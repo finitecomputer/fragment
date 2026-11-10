@@ -108,3 +108,4 @@ priorityLabel, updatedAt, state: {name}, team: {key}, assignee}`; `get` adds
 | `authentication_error` | Your owner reconnects Linear in Settings → Connections |
 | `no_such_team` / `no_such_state` | List them: `$LAPI teams`, or the issue's team's states with `graphql` |
 | `invalid_input`, `Entity not found` | The identifier or id is wrong, or not in the connected workspace |
+| `redirected` | Linear answered a redirect, which the helper never follows with the token: say so, and stop |
