@@ -128,10 +128,10 @@ export function createSchedulesPage(page, h) {
   // One fragment's schedules and cron triggers, kept for this visit.
   async function read(name, mine) {
     const at = `/api/f/${h.seg(name)}`;
-    const answer = await Promise.all([h.api("GET", `${at}/schedules`), h.api("GET", `${at}/triggers`)]).then(
-      ([s, t]) => ({ schedules: s.schedules, triggers: t.triggers }),
-      () => ({ failed: true }),
-    );
+    // both settled before the next is asked: a quick failure of one holds
+    // its place until the other answers
+    const [s, t] = await Promise.allSettled([h.api("GET", `${at}/schedules`), h.api("GET", `${at}/triggers`)]);
+    const answer = s.status === "fulfilled" && t.status === "fulfilled" ? { schedules: s.value.schedules, triggers: t.value.triggers } : { failed: true };
     if (mine !== visit) return;
     answers.set(name, answer);
     render();

@@ -153,6 +153,21 @@ test("the page: a few fragments read at once, each drawn as it answers; a failed
   assert.equal(again.empty(), "No schedules");
 });
 
+test("a fragment's one read failing holds its place until the other answers: never more than READS_AT_ONCE out", async () => {
+  const own = (name) => ({ name, kind: "app", role: "owner" });
+  const t = page(["a", "b", "c", "d", "e"].map(own));
+  t.p.open();
+  const schedules = t.calls.find((c) => c.path === "/api/f/a/schedules");
+  schedules.done = true;
+  schedules.fail(new Error("asleep"));
+  await settle();
+  assert.ok(!t.calls.some((c) => c.path.startsWith("/api/f/e/")), "e waits for a's triggers");
+  t.answer("a", [], []);
+  await settle();
+  assert.ok(t.calls.some((c) => c.path === "/api/f/e/schedules"));
+  assert.deepEqual(t.quiet(), ["Title of a was not read"]);
+});
+
 test("no fragment to ask: one line, at once", () => {
   const t = page([{ name: "c", kind: "chat", role: "owner" }]);
   t.p.open();
