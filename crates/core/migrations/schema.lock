@@ -21,6 +21,7 @@ step Registry 6 connection_accounts 05c1285d594517cb
 step Registry 7 public_addresses ab8499c84e7997be
 step Registry 8 org_content 67159e5ef6e0243b
 step Registry 9 key_sessions 68cfc8333a9ff162
+step Registry 10 comp_until 192cf4964b4e7e5c
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
@@ -37,6 +38,8 @@ step Vault 2 claims b4b34835457aa761
 step Migrations 1 baseline dcdbff021844dd7c
 step Migrations 2 opened_manifest 8ba2596d7c018f5c
 step Migrations 3 routine_generation ad1b55b48c743941
+step Migrations 4 people_by_person 87d4690491d35ee6
+step Migrations 5 people_comped edd3cbbee6194f4f
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -138,10 +141,11 @@ Registry table org_content_offers: CREATE TABLE org_content_offers ( id TEXT PRI
 Registry index org_content_offers_email: CREATE INDEX org_content_offers_email ON org_content_offers (email) WHERE answer IS NULL
 Registry index org_content_offers_waiting: CREATE UNIQUE INDEX org_content_offers_waiting ON org_content_offers (org, email) WHERE answer IS NULL
 Registry table org_governance: CREATE TABLE org_governance ( seq INTEGER PRIMARY KEY AUTOINCREMENT, org TEXT NOT NULL, request TEXT NOT NULL, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT, detail TEXT NOT NULL, UNIQUE (org, request) )
-Registry table org_members: CREATE TABLE org_members ( id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL, seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL)
+Registry table org_members: CREATE TABLE org_members ( id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL, seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, until_ms INTEGER)
 Registry index org_members_offer_email: CREATE UNIQUE INDEX org_members_offer_email ON org_members (org, email) WHERE person IS NULL
 Registry index org_members_offers: CREATE INDEX org_members_offers ON org_members (email, added_at) WHERE person IS NULL
 Registry index org_members_org: CREATE INDEX org_members_org ON org_members (org)
+Registry index org_members_until: CREATE INDEX org_members_until ON org_members (until_ms) WHERE until_ms IS NOT NULL
 Registry table org_payers: CREATE TABLE org_payers ( org TEXT PRIMARY KEY, person TEXT NOT NULL, subscription TEXT NOT NULL)
 Registry index org_payers_person: CREATE INDEX org_payers_person ON org_payers (person)
 Registry table orgs: CREATE TABLE orgs ( id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, status TEXT, customer TEXT UNIQUE, subscription TEXT UNIQUE, items TEXT, period_end INTEGER, trial_end INTEGER, cancel_at_end INTEGER NOT NULL DEFAULT 0, event_at INTEGER, synced_at INTEGER)
@@ -232,7 +236,8 @@ Migrations index moves_deadline: CREATE INDEX moves_deadline ON moves (deadline_
 Migrations index moves_state: CREATE INDEX moves_state ON moves (state)
 Migrations index moves_workos: CREATE INDEX moves_workos ON moves (workos_id)
 Migrations table parts: CREATE TABLE parts (stage TEXT NOT NULL, n INTEGER NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (stage, n))
-Migrations table people: CREATE TABLE people (workos_id TEXT PRIMARY KEY, email TEXT NOT NULL, person TEXT)
+Migrations table people: CREATE TABLE people (workos_id TEXT PRIMARY KEY, email TEXT NOT NULL, person TEXT, comp_until_ms INTEGER, comped_ms INTEGER)
+Migrations index people_person: CREATE INDEX people_person ON people (person)
 Migrations table routines: CREATE TABLE routines (stage TEXT PRIMARY KEY, agent TEXT NOT NULL, tries INTEGER NOT NULL, next_ms INTEGER NOT NULL)
 Migrations table sweeps: CREATE TABLE sweeps (prefix TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)
 Migrations table uploads: CREATE TABLE uploads (stage TEXT PRIMARY KEY, upload_id TEXT NOT NULL, created_ms INTEGER NOT NULL, manifest_sha256 TEXT, zip_bytes INTEGER, manifest TEXT)

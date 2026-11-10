@@ -659,6 +659,47 @@ pub struct MoveAt {
     pub state: MoveState,
 }
 
+// ---- Its person's routes (`/api/migrations/offers/{old}/…`, F4)
+
+/// `GET /api/migrations/offers` (`POST`: the person opens the move, and is
+/// given its comp once): the person's old agents, each where its move is,
+/// in the server's words. `/move` draws them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Offers {
+    pub offers: Vec<Offer>,
+}
+
+/// One old agent of the person's, and where its move is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Offer {
+    pub old: String,
+    /// Its name on finite.computer.
+    pub name: String,
+    /// Its picture, a platform path (`…/offers/{old}/picture`), when the
+    /// roster has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub image: Option<String>,
+    pub state: MoveState,
+    /// Where it is, in the server's words.
+    pub said: String,
+    /// The new agent it is brought into, after Yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub agent: Option<String>,
+}
+
+/// `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a
+/// new agent of their own, which the move's stage is imported into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OfferYes {
+    /// The new agent: its identity's id or npub.
+    pub agent: String,
+}
+
 // ---- The operators' routes (`/api/admin/migrations`; not on the wire)
 
 /// `POST /api/admin/migrations/{old}`: staff's act on one move: `op`
