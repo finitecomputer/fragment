@@ -899,6 +899,7 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
     "basic auth: a short password's header echoed back is named as its secret, never its base64",
     "a signed request goes with the query its signature covers, byte for byte, an empty piece and all",
     "a secret named as a connection the deployment offers (named before it offered it) stays its person's: in the view as a key, its placeholder filled toward its host",
+    "one request carrying that connection's placeholder and the secret's, at the connection's host, each where its row takes it: each is filled with its own (Pipes' token in the header, the Vault's value in the query), never the other's",
 ];
 
 /// A Vault's secret, as its person puts it (`PUT /api/vault/{name}`).
@@ -1019,6 +1020,24 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         given.contains(&as_key) && r.starts_with("fetched 200") && seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {value}") && r.contains(&format!("Bearer {{{{{shared}}}}}")),
         json!({ "given": given, "said": r, "seen": seen }),
     );
+    // that connection connected, and the secret toward its host in a query
+    // parameter: one request carries both, one name and one tag between them
+    let email = Api::email_of(w.owner);
+    s.workos.connect(&email, shared, true);
+    vault_put(api, w, shared, json!({ "value": value, "hosts": ["oauth.test"], "place": { "query": "key" }, "agents": [w.agent] }))?;
+    let as_connection = fragment_core::swap::Placeholder::new(fragment_core::catalog::Kind::Connection, shared, &tag).text();
+    let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let before = s.upstream.seen().len();
+    let r = say(s, 616, &format!("fetch http://oauth.test/v1/me?key={as_key} with {as_connection}"), &mut said)?;
+    let seen = last_seen(s, before);
+    let token = s.workos.tokens(shared).last().cloned().unwrap_or_default();
+    s.ok(
+        VAULT_CHECKS[13],
+        listed.status == 200 && r.starts_with("fetched 200") && !token.is_empty() && seen["auth"]["authorization"] == format!("Bearer {token}") && seen["query"] == json!([["key", value]]),
+        json!({ "said": r, "seen": seen }),
+    );
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{shared}"), None)?;
+    anyhow::ensure!(off.status == 200, "the shared name's connection cleared: {off}");
 
     let gone = api.signed(w.owner, "DELETE", "/api/vault/e2e-vault", None)?;
     let before = s.upstream.seen().len();

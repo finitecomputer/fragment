@@ -337,6 +337,14 @@ pub fn found(headers: &[(String, String)], query: Option<&str>, path: &str) -> R
     Ok(distinct)
 }
 
+/// Each wanted placeholder's secret among those resolved for its request
+/// (the Computer's, then the Vault's), matched by the whole placeholder: a
+/// connection's and a Vault secret's may share a name and a tag
+/// (`Catalog::named`), never a secret. One resolved to nothing is left out.
+pub fn resolved(wanted: &[Placeholder], answered: &[(Placeholder, String)]) -> BTreeMap<Placeholder, String> {
+    wanted.iter().filter_map(|w| answered.iter().find(|(p, s)| p == w && !s.is_empty()).map(|(_, s)| (w.clone(), s.clone()))).collect()
+}
+
 impl Plan {
     /// Reads `headers`, `query` and `path` of a request to `host`. A
     /// request with no placeholder plans nothing, and goes on as it came.
@@ -745,6 +753,36 @@ mod tests {
         assert!(matches!(Plan::of(&mine, None, "/", &with, "api.linear.app"), Err(SwapError::WrongHost { .. })), "the Vault's toward the connection's host");
         assert!(matches!(Plan::of(&theirs, None, "/", &with, "linear.example"), Err(SwapError::WrongHost { .. })), "the connection's toward the Vault's host");
         assert!(matches!(Plan::of(&mine, None, "/", &c, "linear.example"), Err(SwapError::WrongKind { .. })), "no Vault row beside it: the wrong kind, as before");
+    }
+
+    /// One request carrying a connection's placeholder and a Vault
+    /// secret's of the same name (one tag: it names computer, agent and
+    /// name, not kind), each where its row takes it: each is filled with its
+    /// own secret, never the other's, whichever answered first.
+    #[test]
+    fn a_connections_and_a_vault_secrets_placeholder_in_one_request_each_get_their_own() {
+        let c = Catalog::parse(&json!([{ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] }]).to_string()).unwrap();
+        let connected = ph(Kind::Connection, "google", "ada--k3x9");
+        let vaulted = ph(Kind::Own, "google", "ada--k3x9");
+        assert_eq!(connected.tag, vaulted.tag, "one tag");
+        let with = c.with(vec![crate::vault::row("google", vec!["www.googleapis.com".into()], Placement::Query { name: "key".into() })]);
+        let headers = h(&[("authorization", &format!("Bearer {}", connected.text()))]);
+        let query = format!("key={}", vaulted.text());
+        let plan = Plan::of(&headers, Some(&query), "/drive/v3/files", &with, "www.googleapis.com").expect("both planned");
+        assert_eq!(plan.wanted.len(), 2);
+        // matched by name and tag alone (#1206's first cut), the Computer's
+        // answer, first, filled the Vault's placeholder with the connection's token
+        let first = [(connected.clone(), "ya29.oauth".to_string()), (vaulted.clone(), "AIza-vault".to_string())];
+        let by_name_and_tag = first.iter().find(|(p, _)| p.provider == vaulted.provider && p.tag == vaulted.tag).map(|(_, s)| s.as_str());
+        assert_eq!(by_name_and_tag, Some("ya29.oauth"), "the bug this resolves");
+        for answered in [vec![(connected.clone(), "ya29.oauth".to_string()), (vaulted.clone(), "AIza-vault".to_string())], vec![(vaulted.clone(), "AIza-vault".to_string()), (connected.clone(), "ya29.oauth".to_string())]] {
+            let secrets = resolved(&plan.wanted, &answered);
+            assert_eq!((secrets[&connected].as_str(), secrets[&vaulted].as_str()), ("ya29.oauth", "AIza-vault"));
+            let out = plan.apply(&headers, Some(&query), &with, &secrets);
+            assert_eq!((out.headers, out.query.as_deref()), (h(&[("authorization", "Bearer ya29.oauth")]), Some("key=AIza-vault")));
+        }
+        assert_eq!(resolved(&plan.wanted, &[(connected.clone(), "ya29.oauth".to_string())]).len(), 1, "the Vault's unanswered is left out, never filled with the connection's");
+        assert!(resolved(&[connected.clone()], &[(connected, String::new())]).is_empty(), "an empty secret is none");
     }
 
     /// Invalid: what the scan refuses, before any secret is asked for.

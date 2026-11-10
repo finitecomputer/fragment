@@ -3197,7 +3197,7 @@ impl ComputerCell {
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
                 return Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}'s credential is not a printable token", provider.name)));
             }
-            secrets.push(json!({ "provider": provider.name, "tag": p.tag, "secret": secret }));
+            secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
         Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets }))
     }
@@ -3916,7 +3916,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     };
     let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
     // each placeholder's secret, by its provider and tag
-    let mut answered: Vec<(String, String, String)> = vec![];
+    let mut answered: Vec<(Placeholder, String)> = vec![];
     let mut vault_rows = vec![];
     // what a Vault filled (never a signature), by name: named so in the answer
     let mut filled: Vec<(String, String)> = vec![];
@@ -3930,7 +3930,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
-            answered.push((provider.to_string(), tag.to_string(), secret.to_string()));
+            // its kind: a connection's and a Vault secret's may share a name and a tag
+            let p = Placeholder { connection: s["connection"] == true, provider: provider.to_string(), tag: tag.to_string() };
+            answered.push((p, secret.to_string()));
         }
         let field = |k: &str| answer[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the computer named no {k}")));
         let (agent, owner, identity) = (field("agent")?, field("owner")?, field("identity")?);
@@ -3957,7 +3959,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
                     true => signed = true,
                     false => filled.push((p.provider.clone(), secret.clone())),
                 }
-                answered.push((p.provider.clone(), p.tag.clone(), secret));
+                answered.push(((*p).clone(), secret));
                 // the Vault checked this host is one of its own
                 vault_rows.push(fragment_core::vault::row(&p.provider, vec![host.clone()], placement));
             }
@@ -3969,12 +3971,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     if signed && plan.wanted.len() > 1 {
         return Err(CellError::invalid("a request a Vault signs carries no other placeholder: its signature covers the request as it is sent"));
     }
-    let mut secrets = BTreeMap::new();
-    for p in &plan.wanted {
-        if let Some((_, _, s)) = answered.iter().find(|(provider, tag, s)| *provider == p.provider && *tag == p.tag && !s.is_empty()) {
-            secrets.insert(p.clone(), s.clone());
-        }
-    }
+    let secrets = swap::resolved(&plan.wanted, &answered);
     if secrets.len() != plan.wanted.len() {
         return Err(CellError::host("the computer resolved fewer credentials than were asked for"));
     }
