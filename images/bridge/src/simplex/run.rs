@@ -772,6 +772,9 @@ struct Slot {
     resync_at: Option<Instant>,
     /// It stopped too often: not started again until its owner asks.
     broken: Option<String>,
+    /// Another client took its contact's queues (`Notice::Taken`): its core
+    /// is stopped at the next tick and started again (FIN-483).
+    taken: bool,
     /// What last went wrong, or what the owner last did, for its page.
     note: Option<String>,
     /// Since when it should not run but has commands under way.
@@ -1069,6 +1072,7 @@ impl Manager {
                 retry_at: None,
                 resync_at: None,
                 broken: None,
+                taken: false,
                 note: None,
                 draining_since: None,
                 cancel_at: None,
@@ -1163,6 +1167,7 @@ impl Manager {
             self.pulse_until = None;
             let _ = self.pulse.send(false);
         }
+        self.retake().await;
         self.reconcile().await;
         self.read_names(Instant::now());
         self.resync();
@@ -1367,6 +1372,26 @@ impl Manager {
             for id in ids {
                 self.act(&f, Action::Ask(Cmd::CancelFile { file: id }));
             }
+        }
+    }
+
+    /// Each core whose contact's queues another client took (FIN-483): a
+    /// core run elsewhere on a copy of its databases (an old agent started
+    /// again) subscribes to them, and this one hears nothing more until it
+    /// subscribes again, which only a start does (v7.0.3; the 2026-11-10
+    /// spike). Stopped, and counted as an exit, so it is started again
+    /// after `RESTART_MS`, within `EXITS_MAX`: one that keeps losing them
+    /// waits for its owner. Its next start's state read heals the ratchet
+    /// unforced, as for any start.
+    async fn retake(&mut self) {
+        let taken: Vec<String> = self.slots.iter().filter(|(_, s)| s.taken).map(|(f, _)| f.clone()).collect();
+        for f in taken {
+            crate::ev!("simplex.taken", { "agent": f });
+            self.stop_core(&f).await;
+            if let Some(s) = self.slots.get_mut(&f) {
+                s.taken = false;
+            }
+            self.count_exit(&f, "another SimpleX client took its chat");
         }
     }
 
@@ -1947,6 +1972,7 @@ impl Manager {
                     Notice::Linked { .. } => s.note = None,
                     Notice::Refused => crate::ev!("simplex.refused_contact", { "agent": f }),
                     Notice::MaybeLost | Notice::Resynced => {}
+                    Notice::Taken => s.taken = true,
                     Notice::Unlinked { by_them } => {
                         s.note = Some(if *by_them { "They removed this agent in their SimpleX app.".into() } else { "Unlinked.".into() });
                     }
@@ -3156,6 +3182,7 @@ mod tests {
             retry_at: None,
             resync_at: None,
             broken: None,
+            taken: false,
             note: None,
             draining_since: None,
             cancel_at: None,
@@ -3375,6 +3402,7 @@ mod tests {
             retry_at: None,
             resync_at: None,
             broken: None,
+            taken: false,
             note: None,
             draining_since: None,
             cancel_at: None,
@@ -3500,6 +3528,7 @@ mod tests {
             retry_at: None,
             resync_at: None,
             broken: None,
+            taken: false,
             note: None,
             draining_since: None,
             cancel_at: None,

@@ -228,6 +228,10 @@ pub enum Notice {
     Unlinked { by_them: bool },
     /// The core refused something the link asked, saying `what`.
     Failed { what: String },
+    /// Another client took the bound contact's queues (FIN-483: a core run
+    /// elsewhere on a copy of these databases): this core is deaf to them
+    /// until it subscribes again, so it is started again.
+    Taken,
 }
 
 impl Link {
@@ -356,6 +360,7 @@ impl Link {
                 Phase::Linked { contact: linked, .. } if linked == contact => {}
                 _ => out.extend([Action::Ask(Cmd::Delete { contact: *contact, notify: false }), Action::Tell(Notice::Refused)]),
             },
+            Resp::AnotherClient { contact } | Resp::SubscriptionEnd { contact: Some(contact) } if self.linked_to(*contact) => out.push(Action::Tell(Notice::Taken)),
             Resp::Items(items) => self.items(items, out),
             Resp::Page(items) => self.page(items, out),
             Resp::Sync { contact, status } if self.linked_to(*contact) => match status {
@@ -404,6 +409,8 @@ impl Link {
             // file a forwarded message carries), never the link's, as is the
             // agent's profile (its name)
             Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::ContactInfo { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            // another contact's queues, or a connection of no contact's (its address)
+            Resp::AnotherClient { .. } | Resp::SubscriptionEnd { .. } => {}
         }
     }
 
@@ -855,6 +862,21 @@ mod tests {
         for status in [SyncStatus::Required, SyncStatus::Allowed] {
             assert_eq!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status })), vec![Action::Ask(Cmd::Sync { contact: 3, force: false })]);
         }
+    }
+
+    /// Goal (FIN-483): another client on the bound contact's queues is told,
+    /// so its core subscribes again; another contact's, or the address's,
+    /// moves nothing.
+    #[test]
+    fn another_client_on_its_queues_is_told() {
+        let mut link = linked();
+        assert_eq!(link.apply(Input::Said(&Resp::AnotherClient { contact: 3 })), vec![Action::Tell(Notice::Taken)]);
+        assert_eq!(link.apply(Input::Said(&Resp::SubscriptionEnd { contact: Some(3) })), vec![Action::Tell(Notice::Taken)]);
+        for r in [Resp::AnotherClient { contact: 9 }, Resp::SubscriptionEnd { contact: Some(9) }, Resp::SubscriptionEnd { contact: None }] {
+            assert!(link.apply(Input::Said(&r)).is_empty(), "{r:?}");
+        }
+        assert!(Link::default().apply(Input::Said(&Resp::AnotherClient { contact: 3 })).is_empty(), "not linked");
+        assert_eq!(link.contact(), Some(3), "still bound");
     }
 
     /// Goal: the outbox is bounded: past it the oldest parts go, counted.
