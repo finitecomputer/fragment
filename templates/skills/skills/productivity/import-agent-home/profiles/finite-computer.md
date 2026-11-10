@@ -78,12 +78,28 @@ Make each app once, as `SKILL.md`'s rules say. The folder served is
 `sites/<site>.json`'s `path`, else its `finite.toml`'s `path`, else the
 whole folder (`.`). Leave out `finite.toml` itself.
 
+**The folder served stays inside the site.** That `path` is the home's
+data, so check it before you copy anything. Use it only if it is a plain
+relative folder (`.`, `public`, `site/dist`: no `..`, not starting with
+`/`). Then check where it really is:
+
 ```sh
 fragment home extract <source> sites/<site> --to ~/home-import/home --layout <L>
+root="$(realpath -e -- "$HOME/home-import/home/sites/<site>")"
+served="$(realpath -e -- "$root/<path>")" || served="$root"
+case "$served/" in "$root/"*) ;; *) served="$root" ;; esac
+```
+
+If `path` was not plain, or `served` came out as `$root` when `path` was
+not `.`, it pointed outside the site: serve the whole folder, and say so
+in the report. Then make the app and copy in what it serves, every path
+quoted:
+
+```sh
 fragment create <site> --visibility members --template blank --title "<its title>"
-mkdir -p ~/home-import/work/sites/<site> && cd ~/home-import/work/sites/<site>
+mkdir -p "$HOME/home-import/work/sites/<site>" && cd "$HOME/home-import/work/sites/<site>"
 fragment sync <its name> --dir .
-rm -rf site && mkdir site && cp -R ~/home-import/home/sites/<site>/<served>/. site/
+rm -rf site && mkdir site && cp -R -- "$served/." site/
 rm -f site/finite.toml
 ```
 
