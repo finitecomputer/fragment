@@ -6,8 +6,9 @@
 //!    project file that builds it, hidden folders, compiled code,
 //!    archives, installers and model weights, and what a project's
 //!    `.gitignore` ignores.
-//! 2. **Left behind, listed:** a file past a blob's most
-//!    (`BLOB_MAX_BYTES`), or whose name can't be a file's here.
+//! 2. **Left behind, listed:** a file past one upload's most (the
+//!    caller's limit as its platform advertises it, at most a blob's
+//!    `BLOB_MAX_BYTES`), or whose name can't be a file's here.
 //! 3. **Brought first:** photos, video, audio and documents, newest first;
 //!    then everything else (source and data), newest first, while the
 //!    cap holds (`FILES_MAX_BYTES`, and `FILES_MAX` files).
@@ -55,7 +56,7 @@ pub enum Why {
     Ignored,
     /// Its name says it may hold a secret.
     Secret,
-    /// Larger than a file here may be (`BLOB_MAX_BYTES`).
+    /// Larger than one upload here may be (`file_max_bytes`).
     TooLarge,
     /// Its path can't be a file's here.
     Name,
@@ -74,7 +75,7 @@ impl Why {
             Why::Never => "compiled code, an archive, an installer or model weights",
             Why::Ignored => "its project's .gitignore leaves it out",
             Why::Secret => "its name says it may hold a password or key",
-            Why::TooLarge => "larger than one file here may be (256 MiB)",
+            Why::TooLarge => "larger than one upload here may be",
             Why::Name => "its name can't be a file's name here",
             Why::OverCap => "past the 10 GiB brought",
             Why::OverCount => "past the number of files brought",
@@ -113,12 +114,24 @@ pub struct Plan {
     pub picked: Vec<Picked>,
     /// Folders first (by path), then files, the largest first.
     pub left: Vec<Left>,
+    /// The caller's upload limit, as its platform advertised it; None when
+    /// planned offline, not knowing it (`file_max_bytes`).
+    pub upload_max_bytes: Option<u64>,
+}
+
+/// The most one file brought may be: the caller's upload limit, never past
+/// a blob's most; offline, a blob's most (the import reads the limit, and
+/// a file past it stays behind then).
+pub fn file_max_bytes(upload_max_bytes: Option<u64>) -> u64 {
+    upload_max_bytes.map_or(BLOB_MAX_BYTES, |n| n.min(BLOB_MAX_BYTES))
 }
 
 /// The plan for `src`'s work folder (the layout's), within `cap_bytes`
-/// and `cap_files`.
-pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize) -> Result<Plan> {
-    let Some(work) = layout.work.as_deref().filter(|w| *w == "." || src.has_folder(w)) else { return Ok(Plan::default()) };
+/// and `cap_files`, each file within the caller's `upload_max_bytes` (None:
+/// not known, offline).
+pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize, upload_max_bytes: Option<u64>) -> Result<Plan> {
+    let file_max = file_max_bytes(upload_max_bytes);
+    let Some(work) = layout.work.as_deref().filter(|w| *w == "." || src.has_folder(w)) else { return Ok(Plan { upload_max_bytes, ..Plan::default() }) };
     let skip = if work == "." { 0 } else { work.len() + 1 };
     let files: Vec<(&Entry, &str)> = src.under(work).map(|e| (e, &e.path[skip..])).collect();
     // the layout's parts are brought their own way: not these files
@@ -152,7 +165,7 @@ pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize) -> 
             Some(Why::Never)
         } else if ignored(&ignores, rel) {
             Some(Why::Ignored)
-        } else if e.size > BLOB_MAX_BYTES {
+        } else if e.size > file_max {
             Some(Why::TooLarge)
         } else if !fragment_proto::valid_repo_path(&format!("{PREFIX}/{rel}")) {
             Some(Why::Name)
@@ -183,7 +196,7 @@ pub fn plan(src: &Source, layout: &Layout, cap_bytes: u64, cap_files: usize) -> 
         }
     }
     left.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
-    Ok(Plan { root: Some(work.to_string()), picked, left: folders.into_values().chain(left).collect() })
+    Ok(Plan { root: Some(work.to_string()), picked, left: folders.into_values().chain(left).collect(), upload_max_bytes })
 }
 
 fn name_of(rel: &str) -> &str {
@@ -264,6 +277,10 @@ pub struct Counted {
     pub root: Option<String>,
     pub cap_bytes: u64,
     pub cap_files: usize,
+    /// The upload limit planned with; null when not known (offline).
+    pub upload_max_bytes: Option<u64>,
+    /// The most one file brought may be (`file_max_bytes`).
+    pub file_max_bytes: u64,
     pub brought: Tally,
     pub left: Tally,
     /// Each reason: its count, and its largest (at most `EXAMPLES`).
@@ -320,7 +337,17 @@ impl Plan {
             r.largest.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.path.cmp(&b.path)));
             r.largest.truncate(EXAMPLES);
         }
-        Counted { root: self.root.clone(), cap_bytes, cap_files, brought, left, left_by_why: by_why }
+        Counted { root: self.root.clone(), cap_bytes, cap_files, upload_max_bytes: self.upload_max_bytes, file_max_bytes: file_max_bytes(self.upload_max_bytes), brought, left, left_by_why: by_why }
+    }
+}
+
+impl Counted {
+    /// Why files stay behind, in words, with the limit a file was past.
+    pub fn said(&self, why: Why) -> String {
+        match why {
+            Why::TooLarge => format!("{} ({})", why.said(), super::survey::size(self.file_max_bytes)),
+            _ => why.said().to_string(),
+        }
     }
 }
 
@@ -359,15 +386,15 @@ mod tests {
         let src = Source::open(&t.0).unwrap();
         // the cap: 70 bytes. Photos and documents go first, newest first (60
         // bytes), then main.py (newest of the rest); data.csv is past it
-        let p = plan(&src, &layout(), 70, 100).unwrap();
+        let p = plan(&src, &layout(), 70, 100, None).unwrap();
         let picked: Vec<&str> = p.picked.iter().map(|p| p.to.as_str()).collect();
         assert_eq!(picked, ["files/notes/new.md", "files/notes/old.md", "files/photos/a.jpg", "files/code/main.py"]);
         let left: Vec<(&str, Why)> = p.left.iter().map(|l| (l.path.as_str(), l.why)).collect();
         assert_eq!(left, [("code/data.csv", Why::OverCap)], "the brains part is brought its own way, and the home is no work");
-        let p = plan(&src, &layout(), 1_000, 2).unwrap();
+        let p = plan(&src, &layout(), 1_000, 2, None).unwrap();
         assert_eq!(p.picked.len(), 2);
         assert!(p.left.iter().all(|l| l.why == Why::OverCount));
-        assert!(plan(&src, &Layout::hermes(), 1_000, 100).unwrap().picked.is_empty(), "no work, no files");
+        assert!(plan(&src, &Layout::hermes(), 1_000, 100, None).unwrap().picked.is_empty(), "no work, no files");
     }
 
     /// As git decides: a file under a folder a `.gitignore` ignores stays
@@ -380,7 +407,7 @@ mod tests {
         std::fs::write(t.0.join("work/p/.gitignore"), "private/\n!private/keep.txt\n*.log\n").unwrap();
         std::fs::write(t.0.join("work/p/sub/.gitignore"), "!b.log\n").unwrap();
         let src = Source::open(&t.0).unwrap();
-        let p = plan(&src, &layout(), GIB, 100).unwrap();
+        let p = plan(&src, &layout(), GIB, 100, None).unwrap();
         let mut picked: Vec<&str> = p.picked.iter().map(|p| p.from.as_str()).collect();
         picked.sort();
         assert_eq!(picked, ["work/p/.gitignore", "work/p/sub/.gitignore", "work/p/sub/b.log"]);
@@ -410,7 +437,7 @@ mod tests {
         ]);
         std::fs::write(t.0.join("work/py/.gitignore"), "*.log\n!keep.log\n").unwrap();
         let src = Source::open(&t.0).unwrap();
-        let p = plan(&src, &layout(), GIB, 100).unwrap();
+        let p = plan(&src, &layout(), GIB, 100, None).unwrap();
         let mut picked: Vec<&str> = p.picked.iter().map(|p| p.from.as_str()).collect();
         picked.sort();
         assert_eq!(picked, ["work/app/package.json", "work/app/src/index.js", "work/notes/build/plan.md", "work/py/.gitignore", "work/py/keep.log", "work/py/main.py"]);
