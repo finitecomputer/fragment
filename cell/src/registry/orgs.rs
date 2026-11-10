@@ -245,7 +245,11 @@ impl RegistryCell {
             "INSERT INTO plan_syncs (person, since, due, tries) VALUES (?, ?, ?, 0)
              ON CONFLICT (person) DO UPDATE SET since = excluded.since, due = excluded.due, tries = 0",
             vec![person.into(), now.clone(), now],
-        )
+        )?;
+        // their seat changed: what the registry tells them of it may have,
+        // though their ledger's standing has not (a lapsed seat removed)
+        self.tell_after(vec![person.to_string()]);
+        Ok(())
     }
 
     /// Arms the alarm for the earliest queued push, unless it is armed
