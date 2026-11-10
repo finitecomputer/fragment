@@ -500,7 +500,7 @@ pub(crate) enum TestHook {
     /// Asks a person a must-answer notice (FIN-458): no owner asks one
     /// yet, so a test does, its words and answers given (`Ask`), each
     /// answer posting `/api/notices/asked/{id}` (`AnswerAsked`). Kept in
-    /// memory alone, each person's oldest first.
+    /// the registry's storage, each person's oldest first.
     Ask(Ask),
 }
 
@@ -520,6 +520,25 @@ pub(crate) struct Ask {
     pub refused: Option<Refused>,
 }
 
+impl Ask {
+    /// The notice it asks, in its own words: one that must be answered, each
+    /// answer posting `/api/notices/asked/{id}` with it.
+    pub fn notice(&self) -> fragment_proto::notice::Notice {
+        let route = format!("/api/notices/asked/{}", self.id);
+        fragment_proto::notice::Notice {
+            id: format!("asked:{}", self.id),
+            kind: "asked".into(),
+            level: fragment_proto::notice::NoticeLevel::Info,
+            title: self.title.clone(),
+            text: self.text.clone(),
+            detail: None,
+            until: None,
+            actions: self.answers.iter().map(|a| fragment_proto::notice::NoticeAction::post(a.as_str(), route.as_str(), serde_json::json!({ "answer": a }))).collect(),
+            must_answer: true,
+        }
+    }
+}
+
 /// An answer `Ask` refuses, and the words it says why.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Refused {
@@ -533,15 +552,6 @@ pub(crate) const TEST_ASKED_MAX: usize = 16;
 /// Where the registry keeps what `TestHook::Ask` asked (its storage's
 /// key-value side: no table, a test fleet's alone).
 pub(crate) const ASKED_KEY: &str = "test-asked";
-
-/// A must-answer notice a test asked (`TestHook::Ask`): whose, as told,
-/// and the answer it refuses.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Asked {
-    pub person: String,
-    pub notice: fragment_proto::notice::Notice,
-    pub refused: Option<Refused>,
-}
 
 /// `POST /notices/asked`: `person`'s `answer` to their asked notice `id`
 /// (`TestHook::Ask`): it goes, and they are told; or 404 (none such), or

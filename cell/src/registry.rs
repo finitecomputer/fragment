@@ -791,22 +791,11 @@ impl RegistryCell {
                 if !valid(&ask.id) || ask.title.is_empty() || ask.answers.is_empty() || asked.len() >= calls::TEST_ASKED_MAX {
                     return Err(CellError::invalid(format!("ask with an id of [a-z0-9-], a title and answers, at most {} asked", calls::TEST_ASKED_MAX)));
                 }
-                let route = format!("/api/notices/asked/{}", ask.id);
-                let notice = fragment_proto::notice::Notice {
-                    id: format!("asked:{}", ask.id),
-                    kind: "asked".into(),
-                    level: fragment_proto::notice::NoticeLevel::Info,
-                    title: ask.title,
-                    text: ask.text,
-                    detail: None,
-                    until: None,
-                    actions: ask.answers.iter().map(|a| fragment_proto::notice::NoticeAction::post(a.as_str(), route.as_str(), json!({ "answer": a }))).collect(),
-                    must_answer: true,
-                };
-                asked.push(calls::Asked { person: ask.person.clone(), notice, refused: ask.refused });
+                let (person, id) = (ask.person.clone(), ask.id.clone());
+                asked.push(ask);
                 self.keep_asked(&asked).await?;
-                self.tell_person(&ask.person).await;
-                Ok(json!({ "asked": ask.id }))
+                self.tell_person(&person).await;
+                Ok(json!({ "asked": id }))
             }
         }
     }
@@ -815,12 +804,12 @@ impl RegistryCell {
     /// oldest first: kept in this object's storage, a test fleet's alone,
     /// as a page reads them long after the test asked (memory is gone once
     /// the object idles).
-    pub(crate) async fn asked(&self) -> CellResult<Vec<calls::Asked>> {
+    pub(crate) async fn asked(&self) -> CellResult<Vec<calls::Ask>> {
         let kept: Option<String> = self.state.storage().get(calls::ASKED_KEY).await?;
         kept.map_or(Ok(vec![]), |k| crate::json_text(&k).map_err(|e| CellError::host(format!("the asked notices kept: {e}"))))
     }
 
-    pub(crate) async fn keep_asked(&self, asked: &[calls::Asked]) -> CellResult<()> {
+    pub(crate) async fn keep_asked(&self, asked: &[calls::Ask]) -> CellResult<()> {
         let kept = serde_json::to_string(asked).expect("asked notices serialize");
         Ok(self.state.storage().put(calls::ASKED_KEY, kept).await?)
     }

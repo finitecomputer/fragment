@@ -28,7 +28,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use super::calls::{AnswerAsked, By, Call, ClaimInvite, InviteEmail};
+use super::calls::{self, AnswerAsked, By, Call, ClaimInvite, InviteEmail};
 use super::{body, reply, RegistryCell};
 use crate::error::{CellError, CellResult};
 use crate::js;
@@ -283,7 +283,7 @@ impl RegistryCell {
             })
             .collect();
         if self.cfg.test_hooks {
-            notices.extend(self.asked().await?.into_iter().filter(|a| a.person == b.person).map(|a| a.notice));
+            notices.extend(self.asked().await?.iter().filter(|a| a.person == b.person).map(calls::Ask::notice));
         }
         Ok(serde_json::json!({ "notices": notices }))
     }
@@ -291,9 +291,8 @@ impl RegistryCell {
     /// `a.person`'s answer to what a test asked them (`AnswerAsked`): the
     /// one it refuses says its words; any other ends it, and they are told.
     async fn answer_asked(&self, a: AnswerAsked) -> CellResult<serde_json::Value> {
-        let id = format!("asked:{}", a.id);
         let mut asked = self.asked().await?;
-        let Some(at) = asked.iter().position(|x| x.person == a.person && x.notice.id == id && x.notice.actions.iter().any(|y| y.label == a.answer)) else {
+        let Some(at) = asked.iter().position(|x| x.person == a.person && x.id == a.id && x.answers.contains(&a.answer)) else {
             return Err(CellError::new(ErrorCode::NotFound, "That question isn't waiting for an answer any more.").because(Reason::Gone));
         };
         if let Some(refused) = asked[at].refused.as_ref().filter(|r| r.answer == a.answer) {
