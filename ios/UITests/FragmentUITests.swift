@@ -285,6 +285,7 @@ final class FragmentUITests: XCTestCase {
         asked(first).buttons["Decline"].tap()
         XCTAssertTrue(asked(first).staticTexts["Couldn't refresh your computer"].waitForExistence(timeout: 20), "the read's failure, in the cover")
         XCTAssertTrue(asked(first).buttons["Decline"].exists, "the notice as last read, under it")
+        screenshot(app, "Must answer, read failed")
         downFor(server, secret: secret, path: "/invites/notices", times: 0)
         asked(first).buttons["Try again"].tap()
         XCTAssertTrue(asked(next).waitForExistence(timeout: 30), "read again, without it: the next")
