@@ -1869,10 +1869,16 @@ pub struct Rotated {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutSecret {
+    /// The value; empty with `fromVault`.
+    #[serde(default)]
     pub value: String,
     /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
     /// (`fragment_core::secrets::secret_host`).
     pub hosts: Vec<String>,
+    /// In place of `value`: a secret of the caller's own Vault (FIN-466),
+    /// moved here: kept here, gone from the Vault. A person's alone.
+    #[serde(default, rename = "fromVault", skip_serializing_if = "Option::is_none")]
+    pub from_vault: Option<String>,
 }
 
 /// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
