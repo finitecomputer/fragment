@@ -2455,7 +2455,9 @@ fn run(cli: Cli) -> Result<()> {
                         (Some(o), None) => format!("\towned by {o}"),
                         (None, _) => String::new(),
                     };
-                    println!("{}\t{}{owned}", m.role.as_str(), m.principal);
+                    // a person by their email too, to the owner and their agent (decision 48)
+                    let email = m.email.as_deref().map(|e| format!("\t{e}")).unwrap_or_default();
+                    println!("{}\t{}{email}{owned}", m.role.as_str(), m.principal);
                 }
             }
             MembersCmd::Add { name, who, role } => {

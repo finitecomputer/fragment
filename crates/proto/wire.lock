@@ -71,6 +71,7 @@ bound Manifest.left_more default null
 bound Manifest.left_more range u64
 bound Manifest.zip_bytes range u64
 bound Member.addedAt range i64
+bound Member.email default null
 bound Member.kind default null
 bound Member.owner default null
 bound MessageHit.at range i64
@@ -327,6 +328,7 @@ field Manifest.zip_bytes required integer
 field Manifest.zip_sha256 required string
 field Member.addedAt required integer
 field Member.addedBy required string
+field Member.email optional string|null
 field Member.kind optional IdentityKind|null
 field Member.owner optional string|null
 field Member.principal required string

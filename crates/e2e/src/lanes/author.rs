@@ -1074,6 +1074,13 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         again == Some(1) && v["error"]["code"] == "invalid_request" && v["error"]["message"].as_str().is_some_and(|m| m.contains("fragment members role")) && changed["role"] == "editor",
         json!([v, changed]),
     );
+    let listed = s.cli(api, &home, &["members", "list", &name]);
+    let text = String::from_utf8_lossy(&listed.stdout).to_string();
+    s.ok(
+        "fragment members list shows its owner each person by email too, as the share sheet does (decision 48)",
+        listed.status.success() && text.lines().any(|l| l.starts_with("editor\t") && l.ends_with(&format!("\t{bea_email}"))),
+        &text,
+    );
     // the invites waiting for the CLI's person's yes: listed, accepted by
     // label, declined by name (decision 63)
     let me_email = s.cli_keys(&home).map(|k| crate::cli_email(&fragment_core::npub::encode(k.pubkey_hex()))).transpose()?.unwrap_or_default();

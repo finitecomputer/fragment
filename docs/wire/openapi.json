@@ -1602,6 +1602,14 @@
             "description": "Who granted it: the owner, or their agent for them (an invite's maker).",
             "type": "string"
           },
+          "email": {
+            "default": null,
+            "description": "A person member's email, as the share sheet shows it (decision\n48): in `GET members` to the owner and their agent for them, and in\nno other list (add-only: absent from an older platform).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "kind": {
             "anyOf": [
               {

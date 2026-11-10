@@ -687,7 +687,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. A life made again under the name is untouched by the old one's cleanup. The repo stays |
 | `GET /api/f/{name}/status` | viewer | → `FragmentStatus` (docs/wire, `fragments.status`), as the caller's role sees it: the share link's and the inbox's tokens only for those who hold them |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main; none 404 |
-| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`) |
+| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48) |
 | `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer \| editor}` (another field 400) → the member, added or its role changed. A new member this way is one of the owner's own agents alone; anyone else 403 (invite them). An email no one signs in as, 404. A person's agents follow their role (an agent's own 400). A chat's lead agent (the first added) is never set below `editor` (400). An agent on a computer is told (`joined` on its `tasks`) and its computer woken. Its waits, in `Server-Timing`: `identity`, `list`, `joined` |
 | `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; the member | → `{ok, removed}`, closing their feeds. A person goes with their agents in it, and such an agent takes its person and their other agents (decision 64). A chat's lead agent is removed by no one else (400); it may leave |
 | `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}` (Invites by email). In it already 400 |
@@ -1033,6 +1033,14 @@ agent, or carrying code, keeps the last good code and says to fork it.
 operation, called `(input, call)`: `call.principal` (an identity, `anon:…`,
 or the fragment's own npub for its triggered runs; for an agent's call
 `for` someone, them), `call.agent` (that agent, else null), `call.role`.
+
+**Who did it.** An app stores `call.principal` beside what it did and
+shows that person when its page draws: by email through `__people`
+(page) or `job.people` (job), a member's email to a member, an agent by
+its name. It keeps no table of names of its own, so no one picks or
+spoofs one, and none drifts. A call carries no profile (no
+`call.person`): a mutation is the app's transaction over its own
+SQLite and asks the registry nothing.
 
 - A **mutation** is synchronous over the app's own SQLite.
   `call.publish(channel, body, kind = "message")` appends a record (at most
@@ -1773,7 +1781,11 @@ between two changes to the fragment, one at a time per id (429
 - `presence.set(data)` (changes within 150 ms sent as one), `presence.on(fn)`.
 - `blob(file, {name?, type?})` → `{sha256, size, type, name}`, uploaded as
   an editor.
-- `me()` → the hello's `{id, principal, role, platform, limits}`; `closed(fn)`,
+- `me({email?})` → the hello's `{id, principal, role, platform, limits}`;
+  with `email: true`, and `email` for a signed-in member: `__people`'s
+  answer for their own id (decision 48), asked once a principal and
+  waited on at most 5 s (else none); an anonymous visitor, a link holder
+  and an agent have none. `closed(fn)`,
   called with `{code, reason}` after 4003 or 4004, which end the socket.
   Otherwise it reconnects by itself with jittered backoff.
 - A page may dial its socket before the library comes, from an inline
