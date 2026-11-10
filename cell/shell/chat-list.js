@@ -46,7 +46,7 @@ export function askedAgentOf({ open, own, agentsOf, mine, main }) {
   return agentsOf(open.name).map((id) => mine.find((a) => a.identity === id)).find(Boolean) ?? main;
 }
 
-export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load, invites, setInvites }) {
+export function createChatList({ api, ui, data, selection, menus, navigation, listLive, load }) {
   const { $, el, patch, agentFace, notice } = ui;
   const { byName, own, chats, shown, titleOf, chatTitle, homeMark, isGroup, agentOfChat, agentsOf, agents, allFragments, computer, isGuest, personId, isThread, waitingOn, renderThreads, offers } = data;
   // `onScreen`: the chat whose row is active (making.js `shownChat`);
@@ -421,61 +421,6 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     renderThreads();
   }
 
-  // ---- invites: shared by email, and theirs only once they accept (decision 63) ----
-  // The invites waiting on the emails the person signs in with, above their
-  // chats: what each shares, who shared it, and as what, with Accept and
-  // Decline. Read as the page starts, as its list's socket opens, and when
-  // the socket says they changed (`invited`: one made, renewed or taken
-  // back). Accepted, it is in their list, and opens; declined, it goes.
-  const invitesRead = { asked: 0, shown: 0 };
-  async function loadInvites() {
-    const mine = ++invitesRead.asked;
-    // failed, what was read before stays: a failure is not "none"
-    const got = await api("GET", "/api/invites").catch(() => null);
-    if (!got || mine < invitesRead.shown) return;
-    invitesRead.shown = mine;
-    setInvites(got.invites ?? []);
-    renderInvites();
-  }
-  function renderInvites() {
-    const rows = invites().map((i) => {
-      const box = el("div", "invite");
-      box.dataset.key = `invite:${i.fragment}`;
-      box.dataset.invite = i.fragment;
-      const may = i.role === "editor" ? "edit" : "view";
-      box.append(el("strong", "invite-title", i.title), el("span", "invite-from", `${i.from ?? "Someone"} invited you to ${may} it`));
-      const actions = el("div", "invite-actions");
-      actions.append(inviteButton(i, "accept", "Accept"), inviteButton(i, "decline", "Decline"));
-      box.append(actions);
-      return box;
-    });
-    patch($("invites"), rows);
-    $("invites").hidden = !rows.length;
-  }
-  // What it shares opens as its kind does: a chat in the middle, else a window.
-  const openShared = (name) => (byName(name)?.kind === "chat" ? openChat(name) : openApp(name));
-  function inviteButton(invite, verb, text) {
-    const b = el("button", `invite-${verb}`, text);
-    b.type = "button";
-    b.onclick = async () => {
-      const both = [...b.parentElement.children];
-      for (const x of both) x.disabled = true;
-      try {
-        await api("POST", `/api/invites/${seg(invite.fragment)}/${verb}`, {});
-        await Promise.all([load(), loadInvites()]);
-        if (verb === "accept") { openShared(invite.fragment); leaveSidebar(); }
-      } catch (e) {
-        // gone (taken back, answered in another tab, run out): read again, and
-        // one theirs already (accepted elsewhere) opens
-        await Promise.all([load(), loadInvites()]).catch(() => {});
-        if (e.status === 404 && verb === "accept" && byName(invite.fragment)) return openShared(invite.fragment);
-        const gone = e.status === 404 ? "It isn't open any more: it was taken back, answered, or ran out." : "Try again in a moment.";
-        notice(verb === "accept" ? "The invite wasn't accepted" : "The invite wasn't declined", gone);
-        for (const x of both) x.disabled = false;
-      }
-    };
-    return b;
-  }
   // Match the chat composer's edge reflection, including its 64px falloff.
   // The pointer's reflection on the launcher's button and each agent's hero,
   // as the chat composer's (its 64px falloff): each frame the pointer moved,
@@ -575,5 +520,5 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     ]);
   }
   const askedAgent = () => askedAgentOf({ open: current() && !page() ? byName(current()) : null, own, agentsOf, mine: ownAgents(), main: primaryAgent() });
-  return { renderHeading, renderChats, loadInvites, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
+  return { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownAgents, markSeen, edgeAgain: updateSidebarEdge };
 }

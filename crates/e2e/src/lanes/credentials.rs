@@ -77,7 +77,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "its owner sees it over the agent's chat: the key, and what it spent this hour",
     "as the hour passes, its oldest charges go: the key's calls go again, and its notice with them",
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
-    "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and a short line; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
+    "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
 ];
 
@@ -508,10 +508,11 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "told": told, "inChat": in_chat }),
     );
     let lifted = say(s, 160, &speak(SPOKEN))?;
-    // its countdown first, then the line (FIN-458's band: every notice's)
+    // its countdown first, then why, in the server's own words for its
+    // refusal (FIN-458's band: every notice's; `KEY_ASKS_FAIL`'s 503)
     let unconfirmed = |f: &Value| {
         let lines: Vec<&str> = f["lines"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        matches!(lines.as_slice(), [until, "Couldn't do that. Try again."] if until.starts_with("Calls resume in ")) && f["button"] == "Allow up to $20 an hour"
+        matches!(lines.as_slice(), [until, "refused (a test)"] if until.starts_with("Calls resume in ")) && f["button"] == "Allow up to $20 an hour"
     };
     s.ok(
         SWAP_CHECKS[44],

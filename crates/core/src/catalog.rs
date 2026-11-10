@@ -368,6 +368,30 @@ pub fn env_name_ok(name: &str) -> bool {
         && !RESERVED_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
+/// Whether one place a credential may go is one: a header a credential
+/// may go in, in a format with `{}` once; a query parameter's name; or a
+/// half of basic auth. A person's Vault holds its secrets to the same
+/// rules (`vault`).
+pub fn placement_ok(placement: &Placement) -> Result<(), String> {
+    match placement {
+        Placement::Header { name, format } => {
+            if !header_name_ok(name) {
+                return Err(format!("{name:?} is not a header a credential may go in (lower case; no hop, framing, cookie or x-fragment- header)"));
+            }
+            if !format_ok(format) {
+                return Err(format!("{format:?} is not a format: printable, at most {FORMAT_MAX_BYTES} bytes, `{{}}` once where the credential goes"));
+            }
+        }
+        Placement::Query { name } => {
+            if !query_name_ok(name) {
+                return Err(format!("{name:?} is not a query parameter's name"));
+            }
+        }
+        Placement::Basic { .. } => {}
+    }
+    Ok(())
+}
+
 fn check_placements(p: &Provider) -> Result<(), String> {
     if p.placements.is_empty() || p.placements.len() > PLACEMENTS_MAX {
         return Err(format!("1 to {PLACEMENTS_MAX}, not {}", p.placements.len()));
@@ -376,22 +400,10 @@ fn check_placements(p: &Provider) -> Result<(), String> {
     let mut queries = vec![];
     let mut basic = false;
     for placement in &p.placements {
+        placement_ok(placement)?;
         match placement {
-            Placement::Header { name, format } => {
-                if !header_name_ok(name) {
-                    return Err(format!("{name:?} is not a header a credential may go in (lower case; no hop, framing, cookie or x-fragment- header)"));
-                }
-                if !format_ok(format) {
-                    return Err(format!("{format:?} is not a format: printable, at most {FORMAT_MAX_BYTES} bytes, `{{}}` once where the credential goes"));
-                }
-                headers.push(name.as_str());
-            }
-            Placement::Query { name } => {
-                if !query_name_ok(name) {
-                    return Err(format!("{name:?} is not a query parameter's name"));
-                }
-                queries.push(name.as_str());
-            }
+            Placement::Header { name, .. } => headers.push(name.as_str()),
+            Placement::Query { name } => queries.push(name.as_str()),
             Placement::Basic { .. } => {
                 if basic {
                     return Err("basic auth is named twice".into());

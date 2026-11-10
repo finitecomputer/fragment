@@ -149,7 +149,7 @@ mod tests {
         let files = cell_sources();
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
-        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell")];
+        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell"), ("vault.rs", "VaultCell")];
         for (file, class) in objects {
             let text = &files[file];
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
