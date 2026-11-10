@@ -901,6 +901,9 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     for which in ["move-a", "move-b"] {
         let home = s.named(api, &owner, which)?;
         s.create(api, &owner, &home)?;
+        // private, as a key needs (`reach`, above)
+        let private = api.signed(&owner, "PUT", &format!("/api/f/{home}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(private.status == 200, "{home} made private: {private}");
         homes.push(home);
     }
     let (owner_keys, homes) = (&owner, &homes);
