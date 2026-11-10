@@ -2119,11 +2119,12 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Export { out } => {
             use fragment_proto::export::{ExportState, ExportView};
             let mut v: ExportView = c.call_as(c.post_json("/api/export", &json!({}))?)?;
-            // bounded: a build fails past its own time (6 hours), and so does this wait
+            // bounded: a build fails past its own time (`BUILD_MAX_MS`), and so does this wait
             let t0 = std::time::Instant::now();
+            let most = std::time::Duration::from_millis(fragment_core::export::limits::BUILD_MAX_MS as u64 + 600_000);
             while v.state == ExportState::Building {
-                if t0.elapsed() > std::time::Duration::from_secs(6 * 3600 + 600) {
-                    return Err(anyhow!("export {} is still building after six hours", v.id));
+                if t0.elapsed() > most {
+                    return Err(anyhow!("export {} is still building after {} hours", v.id, most.as_secs() / 3600));
                 }
                 if !j {
                     eprint!("\rbuilding export {}: {} of {} parts, {} bytes   ", v.id, v.progress.done, v.progress.total, v.progress.bytes);
@@ -2141,7 +2142,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             let day = fragment_core::export::rfc3339(v.started_at)[..10].to_string();
             let out = out.unwrap_or_else(|| PathBuf::from(format!("fragment-export-{day}.tar")));
-            let n = c.download(&download, &out)?;
+            let n = c.download(&download, &out, v.size.unwrap_or(0))?;
             if Some(n) != v.size {
                 return Err(anyhow!("{} holds {n} bytes, not the export's {}: download it again", out.display(), v.size.unwrap_or(0)));
             }
