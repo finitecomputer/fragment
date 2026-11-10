@@ -566,7 +566,7 @@ test("an offer to bring an old agent over (the move's): its picture beside its w
   assert.deepEqual(p.asked(), { id: "move:prj_1", words: ["Bring Ada over from finite.computer?", "You'll get a month free."], actions: [{ open: "https://chat.test/move" }, { label: "Not now", enabled: true }, { label: "Never", enabled: true }] });
   const row = p.cover.children.find((r) => r.dataset.id);
   const pic = walk(row).find((n) => n.tag === "img");
-  assert.equal(pic?.src, "/api/migrations/offers/prj_1/picture", "its picture, drawn");
+  assert.equal(pic?.dataset.src, "/api/migrations/offers/prj_1/picture", "its picture, drawn (read with the shell's credential)");
   const yes = walk(row).find((n) => n.tag === "a");
   assert.ok(yes.className.includes("primary"), "Yes, the main answer");
   assert.equal(yes.target, undefined, "the platform's own page opens here, not apart");

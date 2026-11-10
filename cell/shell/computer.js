@@ -21,6 +21,21 @@ export function untilSaid(u, now) {
   return `${u.said} in ${h} h${minutes % 60 ? ` ${minutes % 60} min` : ""}.`;
 }
 
+// A platform path's image (a notice's `image`) on `img`: read as the shell
+// reads the API, with its header (the session's cookie alone is no caller
+// for `/api/…`), and shown from its bytes; one that won't load goes.
+export function platformImage(img, path) {
+  img.dataset.src = path;
+  if (!globalThis.location || typeof fetch !== "function") return;
+  fetch(path, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" })
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    .then((b) => {
+      img.onload = () => URL.revokeObjectURL(img.src);
+      img.src = URL.createObjectURL(b);
+    })
+    .catch(() => img.remove?.());
+}
+
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
@@ -185,8 +200,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (n.image) {
       const pic = el("img", "notice-image");
       pic.alt = "";
-      pic.src = n.image;
-      pic.onerror = () => pic.remove();
+      platformImage(pic, n.image);
       row.append(pic);
     }
     row.append(copy, actions);

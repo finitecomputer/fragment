@@ -1259,10 +1259,15 @@ impl Parts {
             .collect()
     }
 
+    /// A new row, its person told when it comes in offered (bound already).
     fn insert(&self, m: &Move, offer: &str) -> CellResult<()> {
         let mut binds = Self::binds(m);
         binds.push(text_value(offer));
-        self.exec(INSERT_MOVE, binds)
+        self.exec(INSERT_MOVE, binds)?;
+        if m.state == MoveState::Open {
+            self.changed.borrow_mut().push(m.workos_id.clone());
+        }
+        Ok(())
     }
 
     /// A change: the move stored, its sweeps and routines queued for after
