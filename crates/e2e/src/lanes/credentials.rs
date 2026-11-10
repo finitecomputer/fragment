@@ -80,8 +80,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
     "a connection whose read only the platform keeps (its provider has no read-only scope, as Salesforce's), connected with no access kept: read only, a GET goes with Pipes' token, and a POST is refused (403) before any token is minted, reaching no one",
-    "connected read and write through its callback, its access is kept: its owner's list says so, and a POST goes with Pipes' token",
-    "connected read only again through its callback, its access is kept so: its owner's list says read only, and a POST is refused again, reaching no one",
+    "connected read and write through its callback, its access is kept: a POST at once (no read of the owner's between) goes with Pipes' token, and the owner's list says read and write",
+    "connected read only again through its callback, a POST at once is refused again, reaching no one: no earlier write is believed; the owner's list says read only",
+    "a reconnect as read only whose import's outcome is unknown (Pipes timed out, the import landing later) leaves it read only, never at the write before: a POST is refused before and after it lands",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -275,19 +276,35 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         access_of(&r) == "read" && read.starts_with("fetched 200") && read_swapped && wrote.starts_with("fetched 403") && wrote.contains("connected read only") && unsent(s) == before,
         json!({ "access": access_of(&r), "read": read, "wrote": wrote }),
     );
+    // each change is the registry's at once: a write call asks it, so no
+    // read of the owner's comes between a connect and the call
     let session = api.sign_in(&email)?;
     let back = connected_through_callback(api, &session, KEPT_CONNECTION, "write")?;
-    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
     let wrote = say(s, 173, &fetch(s, true))?;
-    s.ok(SWAP_CHECKS[47], back.status == 200 && access_of(&r) == "write" && wrote.starts_with("fetched 200") && swapped(s), json!({ "back": back.status, "access": access_of(&r), "wrote": wrote }));
-    let back = connected_through_callback(api, &session, KEPT_CONNECTION, "read")?;
+    let wrote_swapped = swapped(s);
     let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    s.ok(SWAP_CHECKS[47], back.status == 200 && wrote.starts_with("fetched 200") && wrote_swapped && access_of(&r) == "write", json!({ "back": back.status, "access": access_of(&r), "wrote": wrote }));
+    let back = connected_through_callback(api, &session, KEPT_CONNECTION, "read")?;
     let before = unsent(s);
     let wrote = say(s, 174, &fetch(s, true))?;
+    let refused = wrote.starts_with("fetched 403") && wrote.contains("connected read only") && unsent(s) == before;
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    s.ok(SWAP_CHECKS[48], back.status == 200 && refused && access_of(&r) == "read", json!({ "back": back.status, "access": access_of(&r), "wrote": wrote }));
+    // read and write again, then a reconnect as read only whose import
+    // Pipes answers 504, landing later: read only from before the import
+    let back = connected_through_callback(api, &session, KEPT_CONNECTION, "write")?;
+    let wrote = say(s, 175, &fetch(s, true))?;
+    anyhow::ensure!(back.status == 200 && wrote.starts_with("fetched 200"), "the kept connection read and write again: {} {wrote}", back.status);
+    s.workos.defer_next_import();
+    let back = connected_through_callback(api, &session, KEPT_CONNECTION, "read")?;
+    let before = unsent(s);
+    let unknown = say(s, 176, &fetch(s, true))?;
+    let landed = s.workos.land_deferred_import();
+    let after = say(s, 177, &fetch(s, true))?;
     s.ok(
-        SWAP_CHECKS[48],
-        back.status == 200 && access_of(&r) == "read" && wrote.starts_with("fetched 403") && wrote.contains("connected read only") && unsent(s) == before,
-        json!({ "back": back.status, "access": access_of(&r), "wrote": wrote }),
+        SWAP_CHECKS[49],
+        back.status == 303 && landed && [&unknown, &after].iter().all(|said| said.starts_with("fetched 403") && said.contains("connected read only")) && unsent(s) == before,
+        json!({ "back": back.status, "landed": landed, "unknown": unknown, "after": after }),
     );
     let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{KEPT_CONNECTION}"), None)?;
     anyhow::ensure!(gone.status == 200, "the kept connection's checks cleared: {gone}");

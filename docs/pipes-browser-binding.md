@@ -62,18 +62,22 @@ scopes may then be read and write's (the catalog refuses identical scopes
 otherwise, and methods on write). The platform enforces it, not the
 provider:
 
-- The registry keeps the access picked (`connection_access`), written in
-  the turn a connect is known to have imported, as its fence is lifted:
-  the newest such connect's, so a reconnect as read only is read only. A
-  connect whose import is not known to have landed keeps nothing, and
-  none kept is read only (`connection_signin::access_held`). A wipe takes
-  it.
-- The person's states carry it to their computer (`computer/own-keys`'
-  `access`, read with the fences in one question), and the egress tells
-  the computer each request's method (`computer/credentials`' `method`).
-  A read-only account's call of another method is refused (403, saying
-  so) before Pipes is asked for a token, so nothing is minted and nothing
-  is sent (`connection_signin::method_allowed`).
+- The registry keeps the access picked (`connection_access`). Read only
+  is kept before the import (in the turn its session is checked), so a
+  reconnect as read only whose import's outcome is unknown, and lands, is
+  read only; read and write is kept only in the turn a connect is known to
+  have imported, as its fence is lifted, and only while the person who
+  began it is still signed in as that WorkOS user (a wipe while Pipes
+  answered keeps nothing). None kept is read only
+  (`connection_signin::access_held`). A wipe takes it.
+- The egress tells the computer each request's method (`computer/
+  credentials`' `method`). A call read only may make (`GET`, `HEAD`) asks
+  nothing more. Any other asks the registry for the access kept, then,
+  never a belief from an earlier read (a downgrade since would leave it
+  writing): read only, it is refused (403, saying so) before Pipes is
+  asked for a token, so nothing is minted and nothing is sent
+  (`connection_signin::method_allowed`). Settings reads it with the
+  fences, in the one question a person's states ask already.
 - Such a row connects one account (`accounts_max` 1): its access is kept a
   provider, not an account.
 

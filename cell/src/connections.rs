@@ -155,22 +155,6 @@ pub fn held_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BT
     listed.iter().filter(|(p, _)| cfg.providers.get(p).is_some_and(|p| p.several())).map(|(p, l)| (p.clone(), accounts::held(l))).gathered()
 }
 
-/// What a person's computer holds of their access at each connection whose
-/// platform keeps it (`ConnectionOAuth::kept`: one account a person), to
-/// hold a read-only account's calls to its methods (computer.rs
-/// `connection_token`): read only where none is kept, or none is listed.
-pub fn kept_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BTreeMap<String, ConnectionAccess> {
-    cfg.providers
-        .providers()
-        .iter()
-        .filter_map(|p| p.connection_oauth.as_ref().filter(|o| o.kept()).map(|o| (p, o)))
-        .filter_map(|(p, o)| {
-            let account = listed.get(&p.name).and_then(|l| l.first());
-            fragment_core::connection_signin::access_held(o, None, account.and_then(|a| a.kept)).map(|a| (p.name.clone(), a))
-        })
-        .collect()
-}
-
 /// `provider`'s accounts of the person signed in as `who`, as their list
 /// names them (`connection_states`), those they disconnected marked.
 async fn accounts_of(env: &Env, cfg: &Config, who: &str, provider: &str) -> CellResult<Vec<PipesAccount>> {
@@ -238,7 +222,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
-            let told = json!({ "connections": states, "accounts": held_of(cfg, &listed), "access": kept_of(cfg, &listed) });
+            let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
             /// `computer/own-keys`' answer: the providers it holds a key of its own for.
             #[derive(serde::Deserialize)]
             struct OwnKeys {
@@ -485,7 +469,7 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
 async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) -> CellResult<BTreeMap<String, ProviderState>> {
     let mut listed = BTreeMap::new();
     let states = connection_states(env, cfg, std::future::ready(Ok(user)), Some(&mut listed)).await?;
-    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states, "accounts": held_of(cfg, &listed), "access": kept_of(cfg, &listed) })).await {
+    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states, "accounts": held_of(cfg, &listed) })).await {
         Ok(_) => Ok(states),
         Err(e) if e.code == ErrorCode::NotFound => Ok(states),
         Err(e) => {

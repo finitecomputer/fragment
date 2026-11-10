@@ -1,7 +1,7 @@
 //! A connection becomes usable at Pipes only after the initiating browser,
 //! live platform session, provider and one-use pending state are verified.
 use fragment_core::{catalog::{ConnectionOAuth, Kind}, connection_accounts::{self as accounts, Import, Imported, Intent, Lasting}, connection_signin::{self, Account}, own_signin, roundtrip};
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::{computer::ConnectionAccess, ErrorCode, IdentityKind};
 use serde::Deserialize;
 use worker::SqlStorageValue;
 
@@ -172,6 +172,14 @@ impl RegistryCell {
         // tokens are dropped, never revoked: `Finishing`), and one from
         // here on is refused until this answers
         if !self.finishing.borrow_mut().may_import(id) { return Ok(NotUnderWay); }
+        let row = || -> Vec<SqlStorageValue> { vec![pending.issuer.as_str().into(), pending.subject.as_str().into(), b.provider.as_str().into()] };
+        let keep = |access: ConnectionAccess| self.exec(connection_signin::KEEP_ACCESS, [row(), vec![access.word().into(), SqlStorageValue::Integer(js::now_ms())]].concat());
+        // read only picked, where the platform keeps the access: kept so
+        // before the import (the session checked in this turn), whose
+        // outcome may be unknown yet land: never left at an earlier write
+        if o.kept() && access == ConnectionAccess::Read {
+            keep(ConnectionAccess::Read)?;
+        }
         // An import that fails, or whose outcome is unknown (a timeout, a
         // 5xx), leaves a disconnect's lasting fence standing: it may yet
         // land at Pipes, and is never taken for a connection. Of several,
@@ -193,13 +201,17 @@ impl RegistryCell {
         // known to have imported, in the turn it answered and before it is
         // no longer under way, so no disconnect comes between: the fence of
         // the provider goes, and of several, that account's
-        let row = || -> Vec<SqlStorageValue> { vec![pending.issuer.as_str().into(), pending.subject.as_str().into(), b.provider.as_str().into()] };
         self.exec(connection_signin::UNFENCE, row())?;
         // where the platform keeps the access (no read-only scope at the
-        // provider), the one picked, in the same turn: a connect whose
-        // import is not known to have landed keeps none, read only
+        // provider), the one picked, in the same turn, for the person who
+        // began it still: a wipe while Pipes answered took their rows, and
+        // nothing is kept for them again. A connect whose import is not
+        // known to have landed keeps nothing more (read only, or what was)
         if o.kept() {
-            self.exec(connection_signin::KEEP_ACCESS, [row(), vec![access.word().into(), SqlStorageValue::Integer(js::now_ms())]].concat())?;
+            let still = self.live_session(&b.session, None, false).ok().and_then(|live| self.subject_of(SubjectOf { identity: live.session.identity.id, issuer: pending.issuer.clone() }).ok()).and_then(|s| s.subject);
+            if still.as_deref() == Some(pending.subject.as_str()) {
+                keep(access)?;
+            }
         }
         if let (Some(_), Some(identifier)) = (&import, &identifier) {
             self.exec(connection_signin::UNFENCE_ACCOUNT, [row(), vec![identifier.as_str().into()]].concat())?;

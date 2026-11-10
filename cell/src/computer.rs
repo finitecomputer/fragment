@@ -435,11 +435,6 @@ pub struct ComputerCell {
     /// takes several (its row's `accounts_max`), in their list's order,
     /// which a swap chooses its agent's from (`connection_accounts::chosen`).
     accounts: RefCell<BTreeMap<String, Vec<Held>>>,
-    /// Believed with them: the access the owner picked at each connection
-    /// whose platform keeps it (`ConnectionOAuth::kept`), which holds a
-    /// read-only account's swaps to its methods (`connection_token`); one
-    /// not named here is read only.
-    access: RefCell<BTreeMap<String, ConnectionAccess>>,
     /// How many times the owner's reads (and disconnects) told it their
     /// states (`computer/own-keys`): a read of its own begun before one
     /// answers older states, and does not draw over them.
@@ -480,7 +475,6 @@ impl DurableObject for ComputerCell {
             taking_over: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
-            access: RefCell::default(),
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
@@ -657,10 +651,6 @@ struct OwnKeysAsk {
     /// With them, the accounts at each connection that takes several.
     #[serde(default)]
     accounts: Option<BTreeMap<String, Vec<Held>>>,
-    /// With them, the access picked at each connection whose platform
-    /// keeps it (`connections::kept_of`).
-    #[serde(default)]
-    access: Option<BTreeMap<String, ConnectionAccess>>,
 }
 
 /// `computer/joined`'s body: the agent `identity` was added to `fragment`,
@@ -2144,7 +2134,6 @@ impl ComputerCell {
         }
         *self.states.borrow_mut() = Some((states.clone(), until));
         *self.accounts.borrow_mut() = crate::connections::held_of(self.cfg, &listed);
-        *self.access.borrow_mut() = crate::connections::kept_of(self.cfg, &listed);
         states
     }
 
@@ -2766,7 +2755,6 @@ impl ComputerCell {
                 if let Some(states) = b.connections {
                     *self.states.borrow_mut() = Some((states, js::now_ms() + STATES_TTL_MS));
                     *self.accounts.borrow_mut() = b.accounts.unwrap_or_default();
-                    *self.access.borrow_mut() = b.access.unwrap_or_default();
                     self.states_told.set(self.states_told.get() + 1);
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
@@ -3252,13 +3240,18 @@ impl ComputerCell {
             _ => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
         }
         // read only, where the platform keeps it (the provider has no
-        // read-only scope): a call of another method is refused before any
-        // token is minted, as its states say (none kept: read only)
+        // read-only scope): a call read only may not make goes only where
+        // the access its owner picked allows it, asked of the registry now
+        // (never believed from an earlier read, which a downgrade since
+        // would leave writing), before any token is minted; none kept is
+        // read only
         if let Some(o) = self.cfg.providers.get(provider).and_then(|p| p.connection_oauth.as_ref()).filter(|o| o.kept()) {
-            let access = self.access.borrow().get(provider).copied().unwrap_or(ConnectionAccess::Read);
-            if !fragment_core::connection_signin::method_allowed(o, access, method) {
-                let methods = o.access.read.methods.as_deref().unwrap_or_default().join(", ");
-                return Err(CellError::new(ErrorCode::Forbidden, format!("{provider} is connected read only: its owner lets agents read with it ({methods}), not {method}. They can allow changes in Settings, under Connections")));
+            if !fragment_core::connection_signin::method_allowed(o, ConnectionAccess::Read, method) {
+                let access = self.kept_access(owner, provider, o).await?;
+                if !fragment_core::connection_signin::method_allowed(o, access, method) {
+                    let methods = o.access.read.methods.as_deref().unwrap_or_default().join(", ");
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{provider} is connected read only: its owner lets agents read with it ({methods}), not {method}. They can allow changes in Settings, under Connections")));
+                }
             }
         }
         let account = match self.cfg.providers.get(provider).is_some_and(|p| p.several()) {
@@ -3296,6 +3289,16 @@ impl ComputerCell {
             None => self.note_state(provider, ProviderState::Connected),
         }
         Ok(token.to_string())
+    }
+
+    /// The access `owner` picked at `provider`, a row whose platform keeps
+    /// it (`ConnectionOAuth::kept`), as the registry keeps it now: read
+    /// only where it keeps none, or they have no WorkOS account.
+    async fn kept_access(&self, owner: &str, provider: &str, o: &catalog::ConnectionOAuth) -> CellResult<ConnectionAccess> {
+        let Some(subject) = self.workos_user(owner).await? else { return Ok(ConnectionAccess::Read) };
+        let issuer = crate::keys::workos(&self.env, self.cfg).await?.issuer();
+        let kept = crate::ask_registry(&self.env, &crate::registry::calls::ConnectionFences { issuer, subject }).await?.access.get(provider).copied();
+        Ok(fragment_core::connection_signin::access_held(o, None, kept).unwrap_or(ConnectionAccess::Read))
     }
 
     /// Keeps the newest `max` rows of `table` (by expiry).
