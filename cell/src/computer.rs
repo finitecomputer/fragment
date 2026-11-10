@@ -600,6 +600,10 @@ struct CredentialsAsk {
 struct Asked {
     provider: String,
     tag: String,
+    /// A connection's placeholder (`fcx_`), not a key's (`fck_`): a Vault's
+    /// secret may share a connection's name (`Catalog::named`).
+    #[serde(default)]
+    connection: bool,
 }
 
 /// `computer/used`'s body: an agent's calls a provider answered, at `at`,
@@ -3142,8 +3146,8 @@ impl ComputerCell {
         let keys = crate::keys::tag_keys(&self.env).await?;
         let mut agent: Option<&str> = None;
         for p in &b.placeholders {
-            // a name no catalog row has is its agent's person's Vault's to answer
-            if let Some(provider) = self.cfg.providers.get(&p.provider) {
+            // a key's name no catalog key has is its agent's person's Vault's to answer
+            if let Some(provider) = self.cfg.providers.named(&p.provider, p.connection) {
                 if !provider.hosts.contains(&b.host) {
                     return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {}", provider.name, provider.hosts.join(", "), b.host)));
                 }
@@ -3165,10 +3169,10 @@ impl ComputerCell {
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
         let narrowed = stored_connections(row["connections"].as_str().unwrap_or_default(), agent)?;
         let mut secrets = vec![];
-        // a Vault's secret (a name no catalog row has) is its egress's to ask
+        // a Vault's secret (a key's name no catalog key has) is its egress's to ask
         // the agent's person's Vault for, this agent's now that its tag says so
-        for p in b.placeholders.iter().filter(|p| self.cfg.providers.get(&p.provider).is_some()) {
-            let provider = self.cfg.providers.get(&p.provider).expect("a catalog's, filtered so");
+        for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
+            let provider = self.cfg.providers.named(&p.provider, p.connection).expect("a catalog's, filtered so");
             if !may_use(&narrowed, &provider.name) {
                 let list = narrowed.as_deref().unwrap_or_default();
                 return Err(CellError::new(
@@ -3868,6 +3872,13 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     egress_api(api, env, ctx, computer, true).await
 }
 
+/// Whether `p` is its agent's person's Vault's: a key's placeholder whose
+/// name no catalog key has (a Vault's secret is a key, and may share a
+/// connection's name: `Catalog::named`).
+fn vault_s(cfg: &Config, p: &Placeholder) -> bool {
+    !p.connection && cfg.providers.named(&p.provider, false).is_none()
+}
+
 /// Headers a hop answers for itself, never sent on.
 const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "host"];
 
@@ -3892,9 +3903,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let headers_in: Vec<(String, String)> = req.headers().entries().filter(|(name, _)| !HOP_HEADERS.contains(&name.as_str()) && !name.starts_with("x-fragment-")).collect();
     let refused = |e: swap::SwapError| CellError::new(e.code(), e.to_string());
     let found = swap::found(&headers_in, url.query(), url.path()).map_err(refused)?;
-    // a name no catalog row has is its agent's person's Vault's (FIN-466):
+    // a key's name no catalog key has is its agent's person's Vault's (FIN-466):
     // its row is known once the Vault answers, and the request is planned then
-    let vaulted = found.iter().any(|p| cfg.providers.get(&p.provider).is_none());
+    let vaulted = found.iter().any(|p| vault_s(cfg, p));
     if !vaulted {
         Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(refused)?;
     }
@@ -3915,7 +3926,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // whose ledger a key's call goes on, and as which agent
     let mut payer: Option<(String, String, String)> = None;
     if !found.is_empty() {
-        let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
+        let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag, "connection": p.connection })).collect();
         let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
@@ -3926,7 +3937,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         // a Vault's secrets, asked of the agent's person's Vault: each bound
         // to this agent, toward this host; a signature over the request as
         // it goes, over https
-        let vaulted: Vec<&Placeholder> = found.iter().filter(|p| cfg.providers.get(&p.provider).is_none()).collect();
+        let vaulted: Vec<&Placeholder> = found.iter().filter(|p| vault_s(cfg, p)).collect();
         if !vaulted.is_empty() {
             let ask = crate::vault::FillAsk {
                 agent: agent.clone(),
@@ -4003,7 +4014,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     }
     let out = Request::new_with_init(&target, &init)?;
     // the operator's keys among them, and the gate asked for them last
-    let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)).collect();
+    let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.named(&p.provider, p.connection).is_some_and(|row| row.kind == Kind::Operator)).collect();
     if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
         let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
         crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
@@ -4024,7 +4035,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let uses: Vec<Value> = plan
             .wanted
             .iter()
-            .filter(|p| cfg.providers.get(&p.provider).is_some())
+            .filter(|p| cfg.providers.named(&p.provider, p.connection).is_some())
             .map(|p| {
                 let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
                 let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));

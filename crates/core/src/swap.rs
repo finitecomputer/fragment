@@ -346,7 +346,8 @@ impl Plan {
         let mut places: Vec<&Location> = vec![];
         for f in &found {
             let text = f.placeholder.named();
-            let p = catalog.get(&f.placeholder.provider).ok_or_else(|| SwapError::NotOffered { placeholder: text.clone() })?;
+            // its kind's row; else another of its name, to say it is the wrong kind
+            let p = catalog.named(&f.placeholder.provider, f.placeholder.connection).or_else(|| catalog.get(&f.placeholder.provider)).ok_or_else(|| SwapError::NotOffered { placeholder: text.clone() })?;
             if (p.kind == Kind::Connection) != f.placeholder.connection {
                 return Err(SwapError::WrongKind { placeholder: text, kind: p.kind });
             }
@@ -389,7 +390,7 @@ impl Plan {
         }
         let at = |loc: &Location| self.found.iter().find(|f| &f.at == loc);
         let format_of = |f: &Found| {
-            let p = catalog.get(&f.placeholder.provider).expect("a planned placeholder's provider is offered");
+            let p = catalog.named(&f.placeholder.provider, f.placeholder.connection).expect("a planned placeholder's provider is offered");
             p.placements.iter().find_map(|pl| match pl {
                 Placement::Header { name, format } if Location::Header(name.clone()) == f.at => Some(format.clone()),
                 _ => None,
@@ -718,6 +719,32 @@ mod tests {
         let plan = Plan::of(&headers, None, "/", &with, "finite.site").expect("planned");
         let out = plan.apply(&headers, None, &with, &secrets(&[(&nostr, "eyJldmVudCI6MX0")]));
         assert_eq!(out.headers, h(&[("authorization", "Nostr eyJldmVudCI6MX0")]));
+    }
+
+    /// A person's Vault secret named `linear` before the deployment offered
+    /// a `linear` connection stays theirs once it does: its placeholder
+    /// (`fck_`) is planned as the Vault's row, toward the Vault's host, and
+    /// the connection's (`fcx_`) as the connection's, each refused at the
+    /// other's host. With no Vault row beside it, a key's placeholder of a
+    /// connection's name is the wrong kind, as before.
+    #[test]
+    fn a_vault_secret_named_as_a_connection_stays_its_persons() {
+        let c = Catalog::parse(
+            &json!([{ "name": "linear", "kind": "connection", "hosts": ["api.linear.app"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["LINEAR_OAUTH_ACCESS_TOKEN"] }]).to_string(),
+        )
+        .unwrap();
+        let vaulted = ph(Kind::Own, "linear", "ada--k3x9");
+        let connected = ph(Kind::Connection, "linear", "ada--k3x9");
+        let with = c.with(vec![crate::vault::row("linear", vec!["linear.example".into()], Placement::Header { name: "x-linear-key".into(), format: "{}".into() })]);
+        let mine = h(&[("x-linear-key", &vaulted.text())]);
+        let plan = Plan::of(&mine, None, "/", &with, "linear.example").expect("the Vault's");
+        assert_eq!(plan.apply(&mine, None, &with, &secrets(&[(&vaulted, "lin_api_x")])).headers, h(&[("x-linear-key", "lin_api_x")]), "in the Vault's place");
+        let theirs = h(&[("authorization", &format!("Bearer {}", connected.text()))]);
+        let plan = Plan::of(&theirs, None, "/", &with, "api.linear.app").expect("the connection's");
+        assert_eq!(plan.apply(&theirs, None, &with, &secrets(&[(&connected, "pipes-token")])).headers, h(&[("authorization", "Bearer pipes-token")]));
+        assert!(matches!(Plan::of(&mine, None, "/", &with, "api.linear.app"), Err(SwapError::WrongHost { .. })), "the Vault's toward the connection's host");
+        assert!(matches!(Plan::of(&theirs, None, "/", &with, "linear.example"), Err(SwapError::WrongHost { .. })), "the connection's toward the Vault's host");
+        assert!(matches!(Plan::of(&mine, None, "/", &c, "linear.example"), Err(SwapError::WrongKind { .. })), "no Vault row beside it: the wrong kind, as before");
     }
 
     /// Invalid: what the scan refuses, before any secret is asked for.
