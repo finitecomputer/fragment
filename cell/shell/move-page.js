@@ -24,6 +24,9 @@ import { platformImage } from "./computer.js";
 
 const IN_FLIGHT = new Set(["asked", "staging", "importing", "retiring", "archiving"]);
 const ASKABLE = new Set(["open", "later", "archived"]);
+// a move far enough along that its SimpleX chat, if it had one, waits in
+// the new agent's Settings (FIN-463: its bridge sets it aside as it imports)
+const CARRIED = new Set(["importing", "retiring", "moved"]);
 // how often a move under way is read again, and how long a seat may take
 // to reach the ledger after the comp (the registry's push)
 const READ_EVERY_MS = 5_000;
@@ -102,6 +105,7 @@ export function createMovePage(root, h) {
     const list = el("ul", "move-list");
     list.append(...offers.map(row));
     wrap.append(list);
+    if (offers.some((o) => CARRIED.has(o.state))) wrap.append(el("p", "muted move-simplex", "If you chatted with it on SimpleX, keep that chat in Settings."));
     if (failed) wrap.append(el("p", "form-error", failed));
     if (offers.some((o) => ASKABLE.has(o.state))) {
       const go = el("button", "primary", "Bring over");
