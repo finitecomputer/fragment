@@ -292,33 +292,56 @@ pub struct Plan {
     pub wanted: Vec<Placeholder>,
 }
 
+/// Every placeholder in a request's `headers`, `query` and `path`, where
+/// it is: a malformed one refused.
+fn scan(headers: &[(String, String)], query: Option<&str>, path: &str) -> Result<Vec<Found>, SwapError> {
+    let mut found = vec![];
+    let mut add = |text: &str, at: Location| -> Result<(), SwapError> {
+        let t = tokens(text, &at)?;
+        let alone = t.len() == 1 && t[0].0 == 0 && t[0].1 == text.len();
+        for (_, _, placeholder) in t {
+            found.push(Found { placeholder, at: at.clone(), alone });
+        }
+        Ok(())
+    };
+    for (name, value) in headers {
+        assert_eq!(name, &name.to_ascii_lowercase(), "header names are read lower case");
+        match (name.as_str(), basic_of(value)) {
+            ("authorization", Some((user, password))) => {
+                add(&user, Location::Basic(Half::User))?;
+                add(&password, Location::Basic(Half::Password))?;
+            }
+            _ => add(value, Location::Header(name.clone()))?,
+        }
+    }
+    for (_, name, value) in query_pieces(query.unwrap_or_default()) {
+        add(&value, Location::Query(name))?;
+    }
+    add(path, Location::Path)?;
+    Ok(found)
+}
+
+/// The distinct placeholders a request carries, in the order they appear,
+/// before any is checked against a catalog: a person's Vault names its
+/// own (`vault`), so the swap asks it before planning (`Plan::of`).
+pub fn found(headers: &[(String, String)], query: Option<&str>, path: &str) -> Result<Vec<Placeholder>, SwapError> {
+    let mut distinct: Vec<Placeholder> = vec![];
+    for f in scan(headers, query, path)? {
+        if !distinct.contains(&f.placeholder) {
+            distinct.push(f.placeholder);
+        }
+    }
+    if distinct.len() > PLACEHOLDERS_MAX {
+        return Err(SwapError::TooMany(distinct.len()));
+    }
+    Ok(distinct)
+}
+
 impl Plan {
     /// Reads `headers`, `query` and `path` of a request to `host`. A
     /// request with no placeholder plans nothing, and goes on as it came.
     pub fn of(headers: &[(String, String)], query: Option<&str>, path: &str, catalog: &Catalog, host: &str) -> Result<Plan, SwapError> {
-        let mut found = vec![];
-        let mut add = |text: &str, at: Location| -> Result<(), SwapError> {
-            let t = tokens(text, &at)?;
-            let alone = t.len() == 1 && t[0].0 == 0 && t[0].1 == text.len();
-            for (_, _, placeholder) in t {
-                found.push(Found { placeholder, at: at.clone(), alone });
-            }
-            Ok(())
-        };
-        for (name, value) in headers {
-            assert_eq!(name, &name.to_ascii_lowercase(), "header names are read lower case");
-            match (name.as_str(), basic_of(value)) {
-                ("authorization", Some((user, password))) => {
-                    add(&user, Location::Basic(Half::User))?;
-                    add(&password, Location::Basic(Half::Password))?;
-                }
-                _ => add(value, Location::Header(name.clone()))?,
-            }
-        }
-        for (_, name, value) in query_pieces(query.unwrap_or_default()) {
-            add(&value, Location::Query(name))?;
-        }
-        add(path, Location::Path)?;
+        let found = scan(headers, query, path)?;
         let mut wanted: Vec<Placeholder> = vec![];
         let mut places: Vec<&Location> = vec![];
         for f in &found {
@@ -663,5 +686,47 @@ mod tests {
         let p = ph(Kind::Operator, "perplexity", "juniper--k3x9");
         let headers = h(&[("authorization", &p.text())]);
         Plan::of(&headers, None, "/", &c, "api.perplexity.ai").unwrap().apply(&headers, None, &c, &secrets(&[(&p, "a\r\nx-evil: 1")]));
+    }
+
+    /// Valid: a request's placeholders are found before any catalog is
+    /// read, a Vault's name among them, each once, in order; and a Vault's
+    /// row beside the catalog plans and swaps as a catalog row does, its
+    /// signature's header (`Nostr {}`) in place of the guest's.
+    #[test]
+    fn a_vault_s_secret_is_found_first_and_planned_beside_the_catalog() {
+        let linear = ph(Kind::Own, "linear", "ada--k3x9");
+        let nostr = ph(Kind::Own, "nostr-ada", "ada--k3x9");
+        let mail = ph(Kind::Own, "mail", "ada--k3x9");
+        let headers = h(&[("authorization", &format!("Bearer {}", linear.text())), ("x-other", &linear.text())]);
+        let found = found(&headers, Some(&format!("k={}", mail.text())), "/v1").expect("found");
+        assert_eq!(found, vec![linear.clone(), mail.clone()]);
+        // not offered by the catalog alone, planned once the Vault's row is beside it
+        assert!(matches!(Plan::of(&h(&[("authorization", &format!("Bearer {}", linear.text()))]), None, "/", &catalog(), "api.linear.app"), Err(SwapError::NotOffered { .. })));
+        let row = crate::vault::row("linear", vec!["api.linear.app".into()], Placement::Header { name: "authorization".into(), format: "Bearer {}".into() });
+        let with = catalog().with(vec![row]);
+        let headers = h(&[("authorization", &format!("Bearer {}", linear.text()))]);
+        let plan = Plan::of(&headers, None, "/", &with, "api.linear.app").expect("planned");
+        assert_eq!(plan.wanted, vec![linear.clone()]);
+        let out = plan.apply(&headers, None, &with, &secrets(&[(&linear, "lin_api_x")]));
+        assert_eq!(out.headers, h(&[("authorization", "Bearer lin_api_x")]));
+        // toward another host it is refused, as a catalog row's is
+        assert!(matches!(Plan::of(&headers, None, "/", &with, "evil.example"), Err(SwapError::WrongHost { .. })));
+        // a signature replaces the guest's header whole
+        let signing = crate::vault::Placing::Nip98.placement();
+        let with = catalog().with(vec![crate::vault::row("nostr-ada", vec!["finite.site".into()], signing)]);
+        let headers = h(&[("authorization", &format!("Bearer {}", nostr.text()))]);
+        let plan = Plan::of(&headers, None, "/", &with, "finite.site").expect("planned");
+        let out = plan.apply(&headers, None, &with, &secrets(&[(&nostr, "eyJldmVudCI6MX0")]));
+        assert_eq!(out.headers, h(&[("authorization", "Nostr eyJldmVudCI6MX0")]));
+    }
+
+    /// Invalid: what the scan refuses, before any secret is asked for.
+    #[test]
+    fn the_scan_refuses_a_malformed_placeholder_and_more_than_four() {
+        assert!(matches!(found(&h(&[("authorization", "Bearer fck_linear_abc")]), None, "/"), Err(SwapError::Malformed { .. })));
+        let many: Vec<String> = (0..5).map(|i| ph(Kind::Own, &format!("k{i}"), "ada--k3x9").text()).collect();
+        let headers: Vec<(String, String)> = many.iter().enumerate().map(|(i, p)| (format!("x-k{i}"), p.clone())).collect();
+        assert_eq!(found(&headers, None, "/"), Err(SwapError::TooMany(5)));
+        assert_eq!(found(&h(&[("accept", "*/*")]), None, "/"), Ok(vec![]));
     }
 }

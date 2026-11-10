@@ -4,6 +4,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod home;
 mod mcp;
 mod notice;
 mod operator;
@@ -438,6 +439,12 @@ enum Cmd {
     Schedule {
         #[command(subcommand)]
         sub: ScheduleCmd,
+    },
+    /// An agent's home brought here from wherever it ran: what an import
+    /// would bring (`survey`), and its files copied out (`extract`)
+    Home {
+        #[command(subcommand)]
+        sub: home::HomeCmd,
     },
     /// An agent's past conversations, in your Session Archive
     Session {
@@ -1732,6 +1739,13 @@ fn run(cli: Cli) -> Result<()> {
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
         }
+        // read here, changing nothing: no platform, no key
+        Cmd::Home { sub } => {
+            let done = home::run(sub)?;
+            json_exit(j, &done);
+            home::print(&done);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -1891,6 +1905,9 @@ fn run(cli: Cli) -> Result<()> {
             if j && watch {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
+            // every pass refuses it too (`read_local`); this one is before
+            // the watcher takes the folder or anything is asked of the host
+            sync::refuse_dir(&dir, dirs::home_dir().as_deref()).map_err(|e| usage(e.to_string()))?;
             let opts = SyncOptions {
                 mode: match mode.as_deref() {
                     _ if live => Mode::Pull,
@@ -2746,7 +2763,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Home { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -2863,6 +2880,7 @@ fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
         crate::sync::SyncError::Cs(CsError::OutcomeUnknown(_)) => anyhow::Error::new(CodedError { code: Code::OutcomeUnknown, msg: e.to_string() }),
         // the host's refusal keeps its code (a viewer's sync is forbidden)
         crate::sync::SyncError::Cs(CsError::Host(refused)) | crate::sync::SyncError::Host(refused) => anyhow::Error::new(refused),
+        crate::sync::SyncError::Refused(folder) => anyhow::Error::new(CodedError::from(folder)),
         other => anyhow!("{other}"),
     }
 }
