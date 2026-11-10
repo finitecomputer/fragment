@@ -308,7 +308,7 @@ fn read(source: Source, spool: &mut Spool, upload_max: u64, own: Option<&Path>) 
 /// deployment's bound; an agent's, acting for its owner, a blob's). An
 /// older platform names none: a person's then passed its zone (the
 /// default), an agent's, from its computer, a blob's.
-fn upload_max(list: &FragmentList, agent: bool) -> u64 {
+pub(crate) fn upload_max(list: &FragmentList, agent: bool) -> u64 {
     match list.limits {
         Some(l) => l.upload_max_bytes,
         None if agent => fragment_proto::limits::BLOB_MAX_BYTES,

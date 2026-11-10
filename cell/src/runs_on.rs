@@ -316,6 +316,18 @@ impl FragmentCell {
         }
     }
 
+    /// The finite.computer move's routine (migrations.rs): appended to this
+    /// agent fragment's own `tasks`, with no chat, once by its key, as a
+    /// join's notice is; nothing when it declares no postable `tasks`.
+    pub(crate) async fn move_routine(&self, key: &str, text: &str) -> CellResult<Value> {
+        if self.declared_channel(TASKS)?.is_none_or(|d| d.post.is_none()) {
+            return Ok(json!({ "posted": false, "why": "its fragment declares no postable tasks channel" }));
+        }
+        let routine = json!({ "kind": "routine", "text": text });
+        let (record, appended) = self.append_own(TASKS, &routine, key).await?;
+        Ok(json!({ "posted": true, "seq": record.seq, "replayed": !appended }))
+    }
+
     /// An agent became a member here (`set_member`, `join`): its computer
     /// is to hear so, in the turn of the membership's write (the row is
     /// sent by `flush_joined`). A deployment without computers tells no one.

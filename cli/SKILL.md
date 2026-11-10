@@ -114,14 +114,16 @@ shadows.
   query reads, a mutation changes the app's SQLite (all or nothing, once
   per id), a job runs durable steps. Each has a `role` (who may call it)
   and an `input` JSON Schema. Give every operation you write a
-  `description`: what it does and what it answers, in plain text
+  `description`: what it does and what it answers
   (`"description": "Add a todo with this text. Answers its {id}."`).
-  People and agents read it in `fragment status` to know what to call,
-  and a described operation is a tool (below).
+  It shows in `fragment status` and makes the operation a tool (below).
 - **Pages** import `./__fragment.js`: `fragment.call`, `fragment.live` (a
   query that re-runs after every change), `fragment.subscribe` (a
   channel's records, live, and with `onDraft` its drafts as they
   stream), presence, web push.
+- **Who did it**: store `call.principal`; a page shows members by email
+  from `./__people?id=…` (to members), the viewer's own by
+  `fragment.me({ email: true })`. Keep no table of names.
 - **Channels**: records a mutation publishes and pages follow live;
   `inbox` takes webhooks, `events` is the log.
 - **Triggers**: a cron, a record on a channel, a change to files.
@@ -131,14 +133,13 @@ shadows.
   which the fragment's owner pays for: `job.ai.text` (text on the
   platform's model tiers, `cheap` or `medium`; with OpenAI's `tools` the
   model asks for calls your job runs, a tool loop with no computer, and
-  with `draft: {channel, turn}` its words stream to the pages following
-  that channel until the record you publish under the turn replaces
-  them), `job.ai.decide` and `job.ai.image` (a JPEG into the fragment's
-  files).
+  with `draft: {channel, turn}` its words stream to that channel's
+  pages until your record under the turn replaces them),
+  `job.ai.decide` and `job.ai.image` (a JPEG into the fragment's files).
   - `job.ai.decide`: typed answers (one of named options, a yes-or-no
     probability, a score on ordered levels) about text, JSON, or a
     photo, voice note or video someone uploaded (`fragment.blob(file)`'s
-    `{sha256, type}`), with no prose to parse: to sort, route and gate.
+    `{sha256, type}`): to sort, route and gate.
     `model`: `clef-flash` (the default), `clef`, or `clef-omni` (audio
     and video). An agent asks the same from its computer, `POST
     $FRAGMENT_MODEL/v1/decide`.
@@ -155,9 +156,8 @@ claude mcp add groceries -- fragment mcp groceries --write    # and change thing
 codex mcp add groceries -- fragment mcp groceries             # Codex
 ```
 
-`fragment list` shows what your person has. An operation without a
-`description` is no tool: describe the ones a model should use. A
-reader has one tool more, `fragment-search`.
+An operation without a `description` is no tool: describe the ones a
+model should use. A reader has one tool more, `fragment-search`.
 
 ## Before you spend
 

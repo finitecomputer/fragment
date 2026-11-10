@@ -29,7 +29,13 @@
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs).
-  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "fragment-blobs" },
+    // The finite.computer move's stages (migrations.rs): a deploy binds it
+    // only when its config names `migrations`, making it with its
+    // lifecycle rules (xtask/src/deploy.rs).
+    { "binding": "STAGE", "bucket_name": "fragment-migrations-stage" }
+  ],
   // Deliveries: channel records and web push, sent outside any request (deliveries.rs).
   // Meters: each fragment's batches of usage rows to its owner's ledger (meter.rs).
   "queues": {
@@ -93,7 +99,9 @@
       // A fragment life's search index: one object per life (search_index.rs).
       { "name": "SEARCH_INDEX", "class_name": "SearchIndex" },
       // A person's Vault: one object per person (vault.rs).
-      { "name": "VAULT", "class_name": "Vault" }
+      { "name": "VAULT", "class_name": "Vault" },
+      // The finite.computer move: one object, removable with it (migrations.rs).
+      { "name": "MIGRATIONS", "class_name": "Migrations" }
     ]
   },
   // Restarted at the move to Cloudflare: nothing on celld migrates
@@ -104,6 +112,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] },
     { "tag": "v2", "new_sqlite_classes": ["SearchIndex"] },
-    { "tag": "v3", "new_sqlite_classes": ["Vault"] }
+    { "tag": "v3", "new_sqlite_classes": ["Vault"] },
+    { "tag": "v4", "new_sqlite_classes": ["Migrations"] }
   ]
 }

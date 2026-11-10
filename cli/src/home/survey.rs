@@ -229,7 +229,8 @@ pub fn survey(src: &Source, layout: &Layout, now_s: i64) -> Result<Survey> {
         let jobs: serde_json::Value = serde_json::from_slice(&src.read(&jobs_path)?).unwrap_or(serde_json::Value::Null);
         Ok(routines::routines(&routines::jobs_of(&jobs), config.as_ref().and_then(|c| c.timezone.as_deref()), now_s, &layout.attention))
     });
-    let plan = plan::plan(src, layout, plan::FILES_MAX_BYTES, plan::FILES_MAX)?;
+    // offline: the caller's upload limit is read when the files are brought
+    let plan = plan::plan(src, layout, plan::FILES_MAX_BYTES, plan::FILES_MAX, None)?;
     Ok(Survey {
         format: FORMAT,
         layout: layout.name.clone(),
@@ -296,7 +297,10 @@ pub fn print(s: &Survey) {
     let f = &s.files;
     println!("Files: {} brought ({}), {} left behind ({})", f.brought.files, size(f.brought.bytes), f.left.files, size(f.left.bytes));
     for (why, r) in &f.left_by_why {
-        println!("  {} file{} ({}): {}", r.files, if r.files == 1 { "" } else { "s" }, size(r.bytes), why.said());
+        println!("  {} file{} ({}): {}", r.files, if r.files == 1 { "" } else { "s" }, size(r.bytes), f.said(*why));
+    }
+    if f.upload_max_bytes.is_none() {
+        println!("  Planned without your upload limit (read when the files are brought): a file past it stays behind then, listed.");
     }
 }
 

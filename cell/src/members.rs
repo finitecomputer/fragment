@@ -124,6 +124,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         added_at: r["added_at"].as_i64().unwrap_or(0),
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
+        email: None,
     })
 }
 
@@ -493,9 +494,22 @@ impl FragmentCell {
         Ok(out)
     }
 
-    pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
+    /// The API's list (`fragment members list`): to the owner, and their
+    /// agent for them, each person by their email too, as the share sheet
+    /// shows them (decision 48). A page's (`__members`) and a job's name no
+    /// one: they ask `__people` (`job.people`), which decides by who asks.
+    pub(crate) async fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        json_response(&self.member_list()?)
+        let mut list = self.member_list()?;
+        if self.shares(caller) {
+            // bounded: at most MEMBERS_MAX, asked PROFILES_MAX at a time
+            let people = list.members.iter().filter(|m| m.kind != Some(IdentityKind::Agent)).map(|m| m.principal.clone()).collect();
+            let profiles = crate::share::profiles(&self.env, people).await;
+            for m in &mut list.members {
+                m.email = profiles.get(&m.principal).and_then(|p| p.email.clone());
+            }
+        }
+        json_response(&list)
     }
 
     /// Every member, the first added first (a chat's lead is its first

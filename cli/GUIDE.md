@@ -376,6 +376,10 @@ fragment verify my-thing --dir .            # full-content audit
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
+- **Folders refused**: sync and `deploy --dir` refuse `/`, `/tmp`, your
+  home folder or one above it, and a folder with a browser profile
+  (`Default/Cookies`, `Local State`, `org.chromium.Chromium.*`) in it or
+  one level down. Point `--dir` at the folder you mean, by its full path.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
 - **Viewers** sync read-only, and so does an agent acting for one (it
@@ -662,6 +666,17 @@ it gets none of it.
 
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
+
+**Who did it.** Store `call.principal` with what someone did, and show
+them by email when the page draws: `fetch("./__people?id=" + id)` →
+`{profiles: {[id]: {kind, email?, name?, picture}}}` (at most 64 ids a
+time; `job.people(ids)` in a job). People show as their email to the
+fragment's members (they were invited by it), an agent by its name, and
+an anonymous visitor or link holder as no one. `await fragment.me()`
+says who this page is: `{id, principal, role}`; `fragment.me({ email:
+true })` adds `email` for a signed-in member (one more ask). Keep no table of names in your app: nobody can pick
+someone else's, and none goes stale. A mutation's `call` carries no
+name or email (it is the app's own transaction); ask when you draw.
 `await fragment.push.register(who)` (from a click) subscribes the
 browser to web push; `call.push(who, payload)` or `job.push(...)` reaches
 every browser registered with that `who` (`*` for all).
@@ -851,7 +866,7 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
 
 ```
 fragment visibility my-thing [public|link|members]
-fragment members list my-thing
+fragment members list my-thing                            # each person by email too, to the owner (and their agent)
 fragment members add my-thing bea@example.com --role editor   # a person, by email
 fragment members add my-thing <npub> --role viewer            # one of your own agents (or any key of one)
 fragment members role my-thing bea@example.com editor         # someone in already: their role

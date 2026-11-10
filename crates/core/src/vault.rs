@@ -45,6 +45,25 @@ impl Placing {
     }
 }
 
+/// A secret as the swap plans it beside the catalog's providers
+/// (`Catalog::with`): an own key's row of its own, its hosts and its one
+/// place, no environment variable.
+pub fn row(name: &str, hosts: Vec<String>, placement: Placement) -> catalog::Provider {
+    catalog::Provider {
+        name: name.to_string(),
+        kind: catalog::Kind::Own,
+        hosts,
+        placements: vec![placement],
+        env: vec![],
+        price: None,
+        oauth: None,
+        connection_oauth: None,
+        accounts_max: None,
+        models: None,
+        note: None,
+    }
+}
+
 /// A secret that passed, in the form the Vault stores: its hosts and
 /// agents sorted and each once, its place as given (its default spelled out).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -82,6 +82,20 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   their agents are refused every route. The CLI's `fragment vault
   set|list|rm` reads a value from a hidden prompt, or stdin, never argv or
   the environment, and never prints one.
+- **An agent uses one through its computer's swap**, as an own key: its
+  view lists each secret bound to it with a host, as `fck_<name>_<tag>`
+  toward its hosts, and the computer's egress catches those hosts (armed
+  again as the view is read). For a request carrying one, the computer
+  asks the Vault (`vault/fill`), which answers only for an agent the
+  secret names, toward one of its hosts; the swap plans the request with
+  that secret's row beside the catalog (`Catalog::with`).
+- **A Nostr key signs, never leaves** (`place: {"sign": "nip98"}`): the
+  Vault answers a fresh NIP-98 event over the request as it goes (its
+  https URL, method and body's SHA-256) in `Authorization: Nostr …`, and
+  such a request carries no other placeholder.
+- **Echoes are hidden**: an answer to a request a Vault filled is read
+  whole (not an event stream, at most 8 MiB) and each value it echoes
+  named `{{name}}`, as a job's fetch names its own.
 - **A wipe empties it** with their ledger, and keeps the row that says so.
 
 ## The Secrets Store
