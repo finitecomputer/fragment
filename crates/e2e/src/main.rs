@@ -337,6 +337,10 @@ pub struct Planned {
     pub skip: Option<String>,
 }
 
+/// Phase 2's cutoff on the local node (2100-01-01): the move lane moves its
+/// object's clock past it.
+pub const MIGRATIONS_CUTOFF_MS: i64 = 4_102_444_800_000;
+
 pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
     only: Option<Vec<String>>,
@@ -419,6 +423,9 @@ pub struct Suite {
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
+    /// The finite.computer mover's key (`FRAGMENT_MIGRATIONS_MOVER`):
+    /// the fake mover signs with it (lanes/moves.rs).
+    pub mover: Keys,
     /// An operator key no person holds (`FRAGMENT_OPERATORS` lists it, and
     /// nothing ever approves it): a wipe's (`Need::Operator`). Local: made
     /// per run; hosted: `--operator-key-file`'s, or none.
@@ -762,6 +769,8 @@ impl Suite {
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
             ),
+            // the move, its cutoff far off: the move lane moves its object's clock past it
+            migrations: Some((fragment_core::npub::encode(self.mover.pubkey_hex()), MIGRATIONS_CUTOFF_MS.to_string())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
@@ -1236,6 +1245,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start_with(vec![(SWAP_ROUTER_HOST.into(), openrouter.handler())])?),
         openrouter: Fake::of(hidden, "OpenRouter", openrouter),
         operator: Keys::generate(),
+        mover: Keys::generate(),
         wiper: Some(Keys::generate()),
         cli,
         scratch,

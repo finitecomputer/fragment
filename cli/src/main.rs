@@ -1740,8 +1740,8 @@ fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
         // read here, changing nothing: no platform, no key
-        Cmd::Home { sub } => {
-            let done = home::run(sub)?;
+        Cmd::Home { sub } if !sub.calls() => {
+            let done = home::run(sub, None)?;
             json_exit(j, &done);
             home::print(&done);
             return Ok(());
@@ -2088,6 +2088,11 @@ fn run(cli: Cli) -> Result<()> {
             let result = apps::rename(&c, &name, &title)?;
             json_exit(j, &result);
             println!("{}: {}", result["name"].as_str().unwrap_or(&name), result["title"].as_str().unwrap_or(&title));
+        }
+        Cmd::Home { sub } => {
+            let done = home::run(sub, Some(&c))?;
+            json_exit(j, &done);
+            home::print(&done);
         }
         Cmd::Session { sub } => {
             let imported = session::run(&c, sub)?;
@@ -2450,7 +2455,9 @@ fn run(cli: Cli) -> Result<()> {
                         (Some(o), None) => format!("\towned by {o}"),
                         (None, _) => String::new(),
                     };
-                    println!("{}\t{}{owned}", m.role.as_str(), m.principal);
+                    // a person by their email too, to the owner and their agent (decision 48)
+                    let email = m.email.as_deref().map(|e| format!("\t{e}")).unwrap_or_default();
+                    println!("{}\t{}{email}{owned}", m.role.as_str(), m.principal);
                 }
             }
             MembersCmd::Add { name, who, role } => {
@@ -2763,7 +2770,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } | Cmd::Home { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }

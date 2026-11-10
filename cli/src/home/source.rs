@@ -296,13 +296,19 @@ impl Source {
 
     /// One file's bytes, whole: at most `READ_MAX_BYTES`.
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
+        self.read_max(path, READ_MAX_BYTES)
+    }
+
+    /// One file's bytes, whole: at most `max` (a blob's most, for a file
+    /// brought whole).
+    pub fn read_max(&self, path: &str, max: u64) -> Result<Vec<u8>> {
         let size = self.get(path).ok_or_else(|| anyhow!("{path}: no such file"))?.size;
-        if size > READ_MAX_BYTES {
-            bail!("{path} is {size} bytes: more than {READ_MAX_BYTES} to read whole");
+        if size > max {
+            bail!("{path} is {size} bytes: more than {max} to read whole");
         }
         self.with_reader(path, |r| {
             let mut out = Vec::with_capacity(size as usize);
-            r.take(READ_MAX_BYTES + 1).read_to_end(&mut out).with_context(|| format!("reading {path}"))?;
+            r.take(max + 1).read_to_end(&mut out).with_context(|| format!("reading {path}"))?;
             if out.len() as u64 != size {
                 bail!("{path} read as {} bytes, not the {size} listed", out.len());
             }

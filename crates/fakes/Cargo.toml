@@ -27,3 +27,6 @@ fragment-nip98 = { path = "../nip98", features = ["sign"] }
 # the icon model's drawings (`workers_ai::icon_drawing`): PNGs with alpha,
 # which the cell reads as Images' cutouts (local Images cuts nothing out)
 png = "0.18"
+# an old agent's home as a stage brings it, one zip (`old_home::stage`);
+# the CLI's own reader's version
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2"] }

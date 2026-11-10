@@ -24,6 +24,24 @@ class Node {
   setAttribute(k, v) {
     this.attrs[k] = v;
   }
+  contains(n) {
+    return walk(this).includes(n);
+  }
+  querySelector(tag) {
+    return walk(this).find((n) => n.tag === tag) ?? null;
+  }
+  querySelectorAll(selector) {
+    const tags = selector.split(",").map((t) => t.trim());
+    return walk(this).filter((n) => tags.includes(n.tag));
+  }
+  focus() {
+    globalThis.document.activeElement = this;
+    // `focusin`, heard by the dialog it is in (the cover's listener)
+    globalThis.document.focused?.(this);
+  }
+  addEventListener(type, heard) {
+    (this.listeners ??= []).push({ type, heard });
+  }
 }
 const walk = (n) => [n, ...n.children.flatMap(walk)];
 const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -60,9 +78,66 @@ const RESTART = `/api/computers/${COMPUTER}/restart`;
 const allow = (cap) => ({ label: "Allow up to $20 an hour", post: `/api/computers/${COMPUTER}/key-caps/elevenlabs`, body: { from: cap } });
 const paused = (o = {}) => ({ id: "key_paused:elevenlabs", kind: "key_paused", level: "warn", title: "ElevenLabs calls paused: $5.03 this hour", actions: [allow(5_000_000)], ...o });
 
+// The page's top layer, as the HTML dialog rules keep it: a modal dialog
+// shown goes on top, one closed leaves it; what is on top takes the keys.
+// Its watchers (`MutationObserver` on `open`) hear each change as a page's
+// would, when the test says (a microtask, in a browser).
+function topLayer() {
+  const layer = [];
+  const watchers = [];
+  const dialog = (cls) =>
+    Object.assign(new Node("dialog", cls), {
+      open: false,
+      showModal() {
+        layer.splice(layer.indexOf(this) >>> 0, layer.includes(this) ? 1 : 0);
+        layer.push(this);
+        this.open = true;
+        changed.push(this);
+        // as a browser does: itself, if it says so (`autofocus`), else its
+        // first button that takes the focus
+        if (this.autofocus) this.focus();
+        else walk(this).find((n) => n.tag === "button" && !n.disabled)?.focus();
+      },
+      close() {
+        if (layer.includes(this)) layer.splice(layer.indexOf(this), 1);
+        this.open = false;
+        changed.push(this);
+      },
+    });
+  const changed = [];
+  globalThis.MutationObserver = class {
+    constructor(heard) {
+      this.heard = heard;
+    }
+    observe() {
+      watchers.push(this);
+    }
+    disconnect() {
+      watchers.splice(watchers.indexOf(this) >>> 0, 1);
+    }
+  };
+  return {
+    dialog,
+    top: () => layer.at(-1) ?? null,
+    // what the page's watchers hear of the dialogs opened and closed since
+    heard() {
+      const now = changed.splice(0).map((target) => ({ type: "attributes", attributeName: "open", target }));
+      if (now.length) for (const w of [...watchers]) w.heard(now);
+    },
+  };
+}
+
 function page(t, first, c = clock(Date.now())) {
   const box = new Node("div", "computer-notices");
-  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => (id === "computer-notices" ? box : null) };
+  const layer = topLayer();
+  // the page's one cover (index.html `#must-answer`), a modal dialog
+  const cover = layer.dialog("must-answer");
+  globalThis.document = {
+    hidden: false, addEventListener() {}, removeEventListener() {}, getElementById: (id) => ({ "computer-notices": box, "must-answer": cover })[id] ?? null,
+    focused: (n) => {
+      if (cover.contains(n)) for (const l of cover.listeners ?? []) if (l.type === "focusin") l.heard({ target: n });
+    },
+  };
   const calls = [];
   const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok: (v) => ok(v), fail: (e) => fail(e) }));
   const reads = { asked: 0, shown: 0, updating: false, listFailed: false, noticesFailed: false };
@@ -92,18 +167,26 @@ function page(t, first, c = clock(Date.now())) {
     ui.dispose();
   });
   const rows = () => box.children.filter((r) => !r.hidden);
+  // a row: its id, its words, and its actions as drawn
+  const drawn = (r) => ({
+    id: r.dataset.id,
+    words: walk(r).filter((n) => n.tag === "strong" || n.tag === "p").map((n) => n.textContent),
+    actions: walk(r).filter((n) => n.tag === "button" || n.tag === "a").map((n) => (n.tag === "a" ? { open: n.href } : { label: n.textContent, enabled: !n.disabled })),
+  });
+  const press = (row, label) => walk(row).find((n) => n.tag === "button" && n.textContent === label).onclick();
+  // the cover's notice (its page's own rows, a read that failed, above it)
+  const askedRow = () => cover.children.find((r) => r.dataset.id);
   return {
-    box, calls, load, clock: c, shell, ui, opened,
-    // each row: its id, its words, and its actions as drawn
-    shown: () => rows().map((r) => ({
-      id: r.dataset.id,
-      words: walk(r).filter((n) => n.tag === "strong" || n.tag === "p").map((n) => n.textContent),
-      actions: walk(r).filter((n) => n.tag === "button" || n.tag === "a").map((n) => (n.tag === "a" ? { open: n.href } : { label: n.textContent, enabled: !n.disabled })),
-    })),
+    box, cover, calls, load, clock: c, shell, ui, opened, layer, reads,
+    shown: () => rows().map(drawn),
     tap(id, label) {
-      const row = rows().find((r) => r.dataset.id === id);
-      walk(row).find((n) => n.tag === "button" && n.textContent === label).onclick();
+      press(rows().find((r) => r.dataset.id === id), label);
     },
+    // what the cover shows, open; else null
+    asked: () => (cover.open ? drawn(askedRow()) : null),
+    answer: (label) => press(askedRow(), label),
+    // the cover's buttons as drawn, by label
+    coverButton: (label) => walk(cover).find((n) => n.tag === "button" && n.textContent === label),
   };
 }
 
@@ -261,6 +344,41 @@ test("an action's answer that names a page opens it, once the read after it has 
   assert.deepEqual(q.opened, []);
 });
 
+test("a notice that must be answered shows alone, over the page and never in the band, the first of them first, until the read after an answer of it has it no more", async (t) => {
+  const ask = (id, title) => ({
+    id: `asked:${id}`, kind: "asked", level: "info", title, text: "Said by the server.", mustAnswer: true,
+    actions: ["Yes", "Not now"].map((answer) => ({ label: answer, post: `/api/notices/asked/${id}`, body: { answer } })),
+  });
+  const first = ask("move", "Move to finite.chat?"), second = ask("terms", "New terms");
+  const p = page(t, [paused(), first, second]);
+  assert.deepEqual(p.shown().map((r) => r.id), ["key_paused:elevenlabs"], "the band: none that must be answered");
+  assert.deepEqual(p.asked(), { id: "asked:move", words: ["Move to finite.chat?", "Said by the server."], actions: [{ label: "Yes", enabled: true }, { label: "Not now", enabled: true }] }, "the first, alone, over the page");
+  // refused: it stays, saying why in the server's words
+  p.answer("Not now");
+  p.calls[0].fail(Object.assign(new Error("Not yet: answer Yes, or Never."), { status: 409 }));
+  await settle();
+  p.calls[1].ok({ notices: [paused(), first, second] });
+  await settle();
+  assert.deepEqual(p.asked().words, ["Move to finite.chat?", "Said by the server.", "Not yet: answer Yes, or Never."]);
+  assert.equal(globalThis.document.activeElement, p.cover, "drawn again, no answer they didn't choose has the focus: the cover's own");
+  // answered, and the read after it has it no more: the next
+  p.answer("Yes");
+  assert.deepEqual([p.calls[2].path, p.calls[2].body], ["/api/notices/asked/move", { answer: "Yes" }]);
+  p.calls[2].ok({ answered: "move" });
+  await settle();
+  assert.equal(p.asked().id, "asked:move", "until the read after it: nothing taken away before");
+  p.calls[3].ok({ notices: [paused(), second] });
+  await settle();
+  assert.equal(p.asked().id, "asked:terms");
+  p.answer("Yes");
+  p.calls[4].ok({ answered: "terms" });
+  await settle();
+  p.calls[5].ok({ notices: [paused()] });
+  await settle();
+  assert.equal(p.asked(), null, "none left: the page, as it was");
+  assert.deepEqual(p.shown().map((r) => r.id), ["key_paused:elevenlabs"]);
+});
+
 // An invite, as the registry tells it, for the tests below.
 const invited = () => ({
   id: "invite:garden--k3x9", kind: "invite", level: "info", title: "Garden plans", text: "ada@example.com invited you to edit it.",
@@ -320,3 +438,119 @@ for (const [first, second] of [["Accept", "Decline"], ["Decline", "Accept"]]) {
   });
 }
 
+
+test("a refusal outlives its notice's time too: Allow refused, the pause's countdown ends before another read, and the words stay, a line of their own", async (t) => {
+  const c = clock(0);
+  const pause = () => paused({ until: { at: 150_000, said: "Calls resume" } });
+  const p = page(t, [pause()], c);
+  p.tap("key_paused:elevenlabs", "Allow up to $20 an hour");
+  p.calls[0].fail(Object.assign(new Error("That key isn't paused any more."), { status: 409 }));
+  await settle();
+  p.calls[1].ok({ notices: [pause()] });
+  await settle();
+  assert.deepEqual(p.shown()[0].words.at(-1), "That key isn't paused any more.", "under its notice while it shows");
+  c.tick(150_000);
+  assert.deepEqual(p.shown(), [{ id: "key_paused:elevenlabs", words: ["ElevenLabs calls paused: $5.03 this hour", "That key isn't paused any more."], actions: [{ label: "OK", enabled: true }] }], "its time passed: a line of its own, with OK");
+  p.tap("key_paused:elevenlabs", "OK");
+  assert.deepEqual(p.shown(), [], "dismissed, it goes");
+});
+
+// A notice that must be answered, as an invite to a `must-answer` fragment
+// is on a local fleet, for the tests below.
+const mustAnswer = (name, title) => ({
+  id: `invite:${name}`, kind: "invite", level: "info", title, text: "ada@example.com invited you to view it.", mustAnswer: true,
+  actions: [{ label: "Accept", post: `/api/invites/${name}/accept`, body: {} }, { label: "Decline", post: `/api/invites/${name}/decline`, body: {} }],
+});
+
+test("the answer that has the cover's focus keeps it through a redraw of the same notice, so Enter is the one the person chose", async (t) => {
+  const asked = mustAnswer("must-answer-1--k3x9", "Garden plans");
+  const p = page(t, [asked]);
+  // they tab to Decline; the page's watch reads meanwhile, the same notice
+  p.coverButton("Decline").focus();
+  p.load();
+  p.calls[0].ok({ notices: [asked] });
+  await settle();
+  assert.equal(globalThis.document.activeElement?.textContent, "Decline", "drawn again, Decline still has the focus");
+  assert.ok(p.cover.contains(globalThis.document.activeElement), "the new Decline: the one drawn now");
+  // their Decline, refused once: under way its buttons are off, and back, the focus is theirs again
+  globalThis.document.activeElement.onclick();
+  p.calls[1].fail(Object.assign(new Error("the identity registry did not answer; try again shortly"), { status: 503 }));
+  await settle();
+  p.calls[2].ok({ notices: [asked] });
+  await settle();
+  assert.equal(globalThis.document.activeElement?.textContent, "Decline", "after the refusal too");
+});
+
+test("a dialog the page opens over the cover (a frame's ask, an answer's continuation) waits under it: the cover is shown again on top, and the other is the page's once it is answered", async (t) => {
+  const asked = mustAnswer("must-answer-1--k3x9", "Garden plans");
+  const p = page(t, [asked]);
+  p.layer.heard();
+  // they move to Decline; the other opens, and the browser moves the focus into it
+  p.coverButton("Decline").focus();
+  const other = p.layer.dialog("add-agent");
+  other.showModal();
+  other.focus();
+  p.layer.heard();
+  assert.equal(p.layer.top(), p.cover, "the cover, on top again");
+  assert.ok(other.open, "the other still open, under it");
+  assert.equal(globalThis.document.activeElement?.textContent, "Decline", "the answer they chose has the focus again");
+  p.answer("Decline");
+  p.calls[0].ok({ ok: true, declined: "must-answer-1--k3x9" });
+  await settle();
+  p.calls[1].ok({ notices: [] });
+  await settle();
+  p.layer.heard();
+  assert.equal(p.cover.open, false);
+  assert.equal(p.layer.top(), other, "answered: the other is the page's");
+});
+
+test("a read that fails while a notice must be answered says so in the cover, with Try again: the notice as last read stays under it", async (t) => {
+  const asked = mustAnswer("must-answer-1--k3x9", "Garden plans");
+  const p = page(t, [asked]);
+  // their answer goes through, and the read after it fails
+  p.answer("Decline");
+  p.calls[0].ok({ ok: true, declined: "must-answer-1--k3x9" });
+  await settle();
+  p.reads.noticesFailed = true;
+  p.calls[1].fail(Object.assign(new Error("the read failed"), { status: 503 }));
+  await settle();
+  p.ui.renderComputer();
+  assert.ok(p.cover.open, "the notice as last read, still over the page");
+  const failed = p.cover.children.find((r) => r.dataset.kind === "refresh");
+  assert.ok(failed, "the read's failure, in the cover");
+  assert.equal(walk(failed).find((n) => n.tag === "strong")?.textContent, "Couldn't refresh your computer");
+  p.coverButton("Try again").onclick();
+  assert.deepEqual(p.calls.at(-1).path, "/api/notices", "Try again reads again");
+  p.reads.noticesFailed = false;
+  p.calls.at(-1).ok({ notices: [] });
+  await settle();
+  assert.equal(p.cover.open, false, "read again without it: the page, as it was");
+});
+
+test("the cover never gives the focus to an answer the person didn't choose: shown, its own; theirs kept by what it does, renamed or a link; gone, its own again", async (t) => {
+  const asked = mustAnswer("must-answer-1--k3x9", "Garden plans");
+  const p = page(t, [asked]);
+  assert.equal(globalThis.document.activeElement, p.cover, "shown: the cover's own focus, where Enter answers nothing");
+  // Decline, renamed by the next read: still theirs
+  p.coverButton("Decline").focus();
+  const renamed = { ...asked, actions: [asked.actions[0], { ...asked.actions[1], label: "No thanks" }] };
+  p.load();
+  p.calls[0].ok({ notices: [renamed] });
+  await settle();
+  assert.equal(globalThis.document.activeElement?.textContent, "No thanks", "the same answer, by what it does");
+  // gone from the next read: the cover's own focus, not Accept
+  p.load();
+  p.calls[1].ok({ notices: [{ ...asked, actions: [asked.actions[0]] }] });
+  await settle();
+  assert.equal(globalThis.document.activeElement, p.cover, "their answer gone: the cover's own focus");
+  // a link they moved to is kept too
+  const help = { label: "Read the terms", open: "https://finite.chat/terms" };
+  p.load();
+  p.calls[2].ok({ notices: [{ ...asked, actions: [...asked.actions, help] }] });
+  await settle();
+  walk(p.cover).find((n) => n.tag === "a").focus();
+  p.load();
+  p.calls[3].ok({ notices: [{ ...asked, actions: [...asked.actions, help] }] });
+  await settle();
+  assert.equal(globalThis.document.activeElement?.tag, "a", "the link, still");
+});

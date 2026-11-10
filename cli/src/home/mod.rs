@@ -9,6 +9,7 @@
 //! holds. A file whose path says it may hold a secret is left out of the
 //! source unread, and named (`open`): the import never reads a secret.
 
+mod files;
 mod layout;
 mod plan;
 mod routines;
@@ -38,6 +39,23 @@ pub enum HomeCmd {
         source: PathBuf,
         /// Where the home keeps things: `hermes` (a bare Hermes home), or
         /// a layout file (a platform's, carried by its import skill)
+        #[arg(long, default_value = "hermes")]
+        layout: String,
+    },
+    /// Bring an agent's own files into a fragment of files you edit (make
+    /// one with `fragment create <label> --visibility members`): each under
+    /// `files/`, large ones as blobs, the cap's pick (photos, video, audio
+    /// and documents first, the newest first, up to 10 GiB), and
+    /// `left-behind.md` listing what stayed and why. Running it again goes
+    /// on where it stopped, and sends nothing twice
+    Files {
+        source: PathBuf,
+        /// The fragment to bring them into
+        #[arg(long)]
+        into: String,
+        /// Only say what it would bring and leave; send nothing
+        #[arg(long)]
+        plan: bool,
         #[arg(long, default_value = "hermes")]
         layout: String,
     },
@@ -156,6 +174,8 @@ fn target_under(to: &Path, rel: &str) -> Result<PathBuf> {
 pub enum Done {
     Survey(Box<survey::Survey>),
     Extracted(Extracted),
+    Planned(Box<plan::Counted>),
+    Brought(files::Brought),
 }
 
 impl Serialize for Done {
@@ -163,12 +183,30 @@ impl Serialize for Done {
         match self {
             Done::Survey(v) => v.serialize(s),
             Done::Extracted(v) => v.serialize(s),
+            Done::Planned(v) => v.serialize(s),
+            Done::Brought(v) => v.serialize(s),
         }
     }
 }
 
-pub fn run(sub: HomeCmd) -> Result<Done> {
+impl HomeCmd {
+    /// Whether it calls the platform (and so needs a key to sign with).
+    pub fn calls(&self) -> bool {
+        matches!(self, HomeCmd::Files { plan: false, .. })
+    }
+}
+
+/// `c`: the platform's client, for a command that `calls` it.
+pub fn run(sub: HomeCmd, c: Option<&crate::api::Client>) -> Result<Done> {
     match sub {
+        HomeCmd::Files { source, into, plan, layout } => {
+            let layout = Layout::named(&layout)?;
+            let src = open(&source, &layout)?;
+            match c {
+                Some(c) if !plan => Ok(Done::Brought(files::bring(c, &src, &layout, &into)?)),
+                _ => Ok(Done::Planned(Box::new(files::planned(&src, &layout)?))),
+            }
+        }
         HomeCmd::Survey { source, layout } => {
             let layout = Layout::named(&layout)?;
             let src = open(&source, &layout)?;
@@ -187,6 +225,8 @@ pub fn print(d: &Done) {
     match d {
         Done::Survey(s) => survey::print(s),
         Done::Extracted(e) => println!("{} files ({}) copied into {}", e.files, survey::size(e.bytes), e.to),
+        Done::Planned(c) => files::print_planned(c),
+        Done::Brought(b) => files::print(b),
     }
 }
 
@@ -198,12 +238,12 @@ mod tests {
     /// The old agent's home every test reads: synthetic, laid out as
     /// finite.computer kept one (`crates/fakes/fixtures/old-home`).
     pub fn fixture() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/fakes/fixtures/old-home")
+        fragment_fakes::old_home::root()
     }
 
     /// The fixture's own layout, as a platform's skill carries one.
     fn fixture_layout() -> Layout {
-        Layout::named(fixture().with_extension("layout.json").to_str().unwrap()).unwrap()
+        Layout::named(fragment_fakes::old_home::layout().to_str().unwrap()).unwrap()
     }
 
     /// Goal: a file that may hold a secret (by its name, or the layout's

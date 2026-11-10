@@ -33,6 +33,9 @@ step Computer 4 key_caps 3a6f4f9976a3efe3
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
+step Migrations 1 baseline dcdbff021844dd7c
+step Migrations 2 opened_manifest 8ba2596d7c018f5c
+step Migrations 3 routine_generation ad1b55b48c743941
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -220,3 +223,15 @@ SearchIndex table vectors: CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, code
 
 Vault table secrets: CREATE TABLE secrets (name TEXT PRIMARY KEY, sealed TEXT NOT NULL, secret TEXT NOT NULL)
 Vault table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
+
+Migrations table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+Migrations table moves: CREATE TABLE moves ( old TEXT PRIMARY KEY, workos_id TEXT NOT NULL, state TEXT NOT NULL, reason TEXT, held_from TEXT, phase TEXT NOT NULL, attempt INTEGER NOT NULL, agent TEXT, command TEXT, seq INTEGER NOT NULL, since_ms INTEGER NOT NULL, progress_ms INTEGER, staged_ms INTEGER, routine_ms INTEGER, routines INTEGER NOT NULL, opened INTEGER NOT NULL, expires_ms INTEGER, by_staff INTEGER NOT NULL, deadline_ms INTEGER, offer TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0)
+Migrations index moves_command: CREATE INDEX moves_command ON moves (command, since_ms)
+Migrations index moves_deadline: CREATE INDEX moves_deadline ON moves (deadline_ms)
+Migrations index moves_state: CREATE INDEX moves_state ON moves (state)
+Migrations index moves_workos: CREATE INDEX moves_workos ON moves (workos_id)
+Migrations table parts: CREATE TABLE parts (stage TEXT NOT NULL, n INTEGER NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (stage, n))
+Migrations table people: CREATE TABLE people (workos_id TEXT PRIMARY KEY, email TEXT NOT NULL, person TEXT)
+Migrations table routines: CREATE TABLE routines (stage TEXT PRIMARY KEY, agent TEXT NOT NULL, tries INTEGER NOT NULL, next_ms INTEGER NOT NULL)
+Migrations table sweeps: CREATE TABLE sweeps (prefix TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)
+Migrations table uploads: CREATE TABLE uploads (stage TEXT PRIMARY KEY, upload_id TEXT NOT NULL, created_ms INTEGER NOT NULL, manifest_sha256 TEXT, zip_bytes INTEGER, manifest TEXT)
