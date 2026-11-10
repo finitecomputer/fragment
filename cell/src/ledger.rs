@@ -39,11 +39,13 @@
 //! and kept nowhere, so nothing makes the ledger again.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::notice::NoticeList;
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -91,6 +93,14 @@ thread_local! {
 pub struct LedgerCell {
     state: State,
     raw: JsValue,
+    env: Env,
+    /// What its person was last told (`told`; `Ledger::told_key`), as kept
+    /// in its meta: read once an activation, so a call compares in memory.
+    told: RefCell<Option<String>>,
+    /// What the last transaction left the ledger saying (`settled`), for
+    /// `told`: kept beside, not in, what `transact` answers, so its
+    /// closures' types (one for each caller) carry none of it.
+    left: Rc<Cell<Option<String>>>,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
     /// When this activation last set the alarm for (the ledger's clock):
@@ -115,7 +125,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
+        LedgerCell { state, raw, env, told: RefCell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -217,6 +227,12 @@ pub struct FragmentOpen {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {}
+
+/// What the ledger tells its person (FIN-458; `GET /api/notices`): their
+/// standing short of `Ok` for want of credit, in words (`Ledger::said`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticesOf {}
 
 /// An org's ledger now.
 #[derive(Debug, Serialize, Deserialize)]
@@ -372,6 +388,12 @@ impl Route for SetOverdraft {
 impl Route for SetFragmentCap {
     const PATH: &'static str = "/cap";
     type Answer = Done;
+}
+
+impl Route for NoticesOf {
+    const PATH: &'static str = "/notices";
+    /// Joined as bytes with the other owners' (`notices.rs`): read by no one.
+    type Answer = NoticeList;
 }
 
 impl Route for Status {
@@ -639,6 +661,18 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
+/// How every transaction ends, the same for each (`transact`'s closures,
+/// one for each caller, carry none of it): the head written back, the
+/// store's fault if any, what it leaves the ledger saying kept in `left`
+/// (`told`; packs sold here or not), and when the next sweep is due.
+#[inline(never)]
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
+    save(store, ledger);
+    store.checked()?;
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok())));
+    Ok(ledger.next_sweep_ms(now))
+}
+
 /// Writes the head back, and an org's budget in its own row, which no
 /// head's rewrite touches.
 fn save(store: &SqlStore, ledger: &Ledger) {
@@ -681,28 +715,52 @@ impl LedgerCell {
     /// ledger's now: the head is written back whatever `op` answers (a
     /// refusal changed nothing but the month it rolled to), and a store
     /// that failed rolls everything back. Answers `op`'s
-    /// answer and when the next sweep is due (the ledger's clock).
+    /// answer and when the next sweep is due (the ledger's clock); the
+    /// what it leaves the ledger saying is in `left`.
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
         let now = js::now_ms() + self.offset_ms()?;
-        let (sql, cfg) = (self.sql(), self.cfg);
+        let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            save(&store, &ledger);
-            store.checked()?;
-            Ok((answer, ledger.next_sweep_ms(now)))
+            Ok((answer, settled(&store, &ledger, now, cfg, &left)?))
         })
     }
 
     /// `transact`, then the alarm set for the next sweep when it is due
-    /// sooner than this activation last set it.
+    /// sooner than this activation last set it, and its person told when
+    /// what their ledger says changed (`told`).
     async fn mutate<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
         let (answer, next) = self.transact(op)?;
         if self.armed.get().is_none_or(|armed| next < armed) {
             self.arm(next).await?;
         }
+        self.told();
         answer.map_err(Failed::Refused)
+    }
+
+    /// Its person's pages told (`changed`) when what the ledger says (its
+    /// notices, `Ledger::told_key`) is not what it last told them (FIN-458,
+    /// `GET /api/notices`): its standing, or anything else its notices say,
+    /// a seat's Buy credit. Kept in its meta, so a change by the
+    /// clock alone (a month's credit, its sweep) is told too, and told once.
+    /// An org's ledger tells no one; none told yet is news too (`said::news`).
+    /// Told after the answer (`wait_until`), never on its path: a gate's ask
+    /// waits on no page. Best effort: a page not told reads it next time.
+    #[inline(never)]
+    fn told(&self) {
+        let Some(said) = self.left.take() else { return };
+        if self.told.borrow().as_deref() == Some(said.as_str()) {
+            return;
+        }
+        let Ok(Some(payer)) = self.meta("payer") else { return };
+        *self.told.borrow_mut() = Some(said.clone());
+        let Some(Payer::Person(person)) = Payer::parse(&payer) else { return };
+        if !core::said::news(self.meta("told").ok().flatten().as_deref(), &said) || self.set_meta("told", &said).is_err() {
+            return;
+        }
+        crate::principal::tell_later(&self.state, &self.env, vec![person], "ledger.told-failed");
     }
 
     /// Sets the alarm for `at` on the ledger's clock.
@@ -722,6 +780,7 @@ impl LedgerCell {
         let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
+        self.told();
         Ok(swept)
     }
 
@@ -809,6 +868,22 @@ impl LedgerCell {
                 let Status {} = decode(&body)?;
                 let book = &self.cfg.book;
                 reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
+            }
+            NoticesOf::PATH => {
+                // read alone, outside any transaction, as nothing is written:
+                // the head as last written (its body, `{}`, says nothing). A
+                // ledger no call has written yet has none to tell (its
+                // standing ok, or a guest's), and an org's tells no one.
+                let now = js::now_ms() + self.offset_ms()?;
+                let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
+                let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
+                    (Some(Payer::Person(_)), Some(row)) => {
+                        let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+                        ledger.said(now, self.cfg.stripe().is_ok())
+                    }
+                    _ => vec![],
+                };
+                reply(NoticeList { notices })
             }
             OrgStatus::PATH => {
                 let OrgStatus {} = decode(&body)?;
@@ -1002,7 +1077,7 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
 /// `ask`'s round trip, one copy for every route (the cell's Wasm is held
 /// to a budget, and a copy per route type costs it): route `path`'s
 /// answer, as bytes, or its refusal.
-async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
+pub(crate) async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
     assert!(Payer::parse(payer).is_some(), "a ledger is a payer's, named as `Payer::name` names it");
     let headers = Headers::new();
     headers.set(PAYER_HEADER, payer)?;

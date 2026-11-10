@@ -66,6 +66,7 @@ use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFau
 pub mod gate;
 pub mod org;
 pub mod quote;
+pub mod said;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
@@ -963,6 +964,28 @@ impl Ledger {
         let mut money = self.money;
         money.roll(Month::of(now_ms));
         money
+    }
+
+    /// What this ledger tells its person (FIN-458; `said::standing`): its
+    /// standing short of `Ok` for want of credit, with a pack to buy when
+    /// packs are `sold` and they hold an active seat the registry gave them
+    /// (a pack's buyer holds one: `PackBegin`; a deployment's default plan,
+    /// which no registry pushed, `seat_seq` 0, is none). An org's ledger
+    /// tells no one here.
+    pub fn said(&self, now_ms: i64, sold: bool) -> Vec<fragment_proto::notice::Notice> {
+        if self.org.is_some() {
+            return vec![];
+        }
+        let seat = matches!(self.money.plan, Plan::Seat | Plan::SeatAlwaysOn) && self.money.seat == SeatState::Active && self.money.seat_seq > 0;
+        said::standing(self.standing(now_ms), sold && seat).into_iter().collect()
+    }
+
+    /// What the ledger keeps of what it last told its person (`told` in its
+    /// meta): its notices as `said` says them, so whatever changes them is
+    /// told to their pages once (`said::news`), its standing or anything
+    /// else they say (a seat's Buy credit). As the route answers them.
+    pub fn told_key(&self, now_ms: i64, sold: bool) -> String {
+        serde_json::to_string(&fragment_proto::notice::NoticeList { notices: self.said(now_ms, sold) }).expect("notices serialize")
     }
 
     pub fn standing(&self, now_ms: i64) -> Standing {
