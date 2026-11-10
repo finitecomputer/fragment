@@ -2150,14 +2150,16 @@ pub fn disk_clear(total: u64, free: u64) -> bool {
     (total - free) as u128 * 100 <= total as u128 * DISK_CLEAR_USED_PCT as u128 || free >= DISK_CLEAR_FREE_MIN
 }
 
-/// The start whose disk to read once `event` was applied to `life`: the
-/// one that just came up (its `Ready`), or an awake one whose save just
-/// worked. Never before: a start is ready, and its deadline met, without
-/// waiting on a read; and never a sleep's save, whose stop follows at once
-/// (its next start reads it).
+/// The start whose disk to read once `event` was applied to `life`: an
+/// awake one whose save just worked. Never a sleep's save, whose stop
+/// follows at once (its next start reads it). A start reads its own disk
+/// in its start, its restore in place and its guest not yet let go (the
+/// cell's `try_start`, within the start's deadline): read once it is
+/// ready, the read raced its guest's first seconds, and an owner's wake
+/// answered after it (FIN-462).
 pub fn reads_disk_after(event: &Event, life: &Lifecycle) -> Option<u64> {
     match (event, &life.phase) {
-        (Event::Ready { generation: g } | Event::Saved { generation: g, .. }, Phase::Awake { generation, .. }) if g == generation => Some(*g),
+        (Event::Saved { generation: g, .. }, Phase::Awake { generation, .. }) if g == generation => Some(*g),
         _ => None,
     }
 }
@@ -2166,24 +2168,28 @@ pub fn reads_disk_after(event: &Event, life: &Lifecycle) -> Option<u64> {
 /// its answer): POSIX `df` in bytes, which GNU's and BusyBox's both print.
 pub const DISK_READ: &str = "df -P -B1 /";
 
-/// A computer's disk from `DISK_READ`'s answer, read at `at_ms`: the line
+/// A computer's disk from `DISK_READ`'s answer, read at `at_ms` in start
+/// `generation`'s container: the line
 /// after its header, its size and what is available (to the guest's user,
 /// as a restore's floor counts it). None for an answer it cannot read.
-pub fn disk_of_df(out: &str, at_ms: i64) -> Option<ComputerDisk> {
+pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
     let mut lines = out.lines().filter(|l| !l.trim().is_empty());
     lines.next().filter(|h| h.starts_with("Filesystem"))?;
     let cols: Vec<&str> = lines.next()?.split_whitespace().collect();
     let (total, free) = (cols.get(1)?.parse::<u64>().ok()?, cols.get(3)?.parse::<u64>().ok()?);
-    (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms })
+    (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation })
 }
 
 /// A computer's disk, as a read found it (`disk_of_df`): its size and what
-/// is free, in bytes; when it was read.
+/// is free, in bytes; when it was read, and the start whose container it
+/// read (0 in a read stored before it was kept).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerDisk {
     pub total: u64,
     pub free: u64,
     pub at: i64,
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Hex digits in an image's version (`version_of`).
@@ -3213,7 +3219,7 @@ mod tests {
         let run = |total: u64, frees: &[u64]| -> Vec<bool> {
             let mut s = Saves::default();
             frees.iter().enumerate().map(|(i, free)| {
-                assert!(s.measured(ComputerDisk { total, free: *free, at: T + i as i64 }));
+                assert!(s.measured(ComputerDisk { total, free: *free, at: T + i as i64, generation: 1 }));
                 matches!(told(&s).as_slice(), [ComputerNotice::DiskFilling { total: t, free: f }] if *t == total && *f == *free)
             }).collect()
         };
@@ -3226,12 +3232,18 @@ mod tests {
         // replay and order
         let mut s = Saves::default();
         assert!(told(&s).is_empty() && s.disk().is_none(), "never read: nothing told");
-        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10 }));
-        assert!(!s.measured(ComputerDisk { total: 20 * GB, free: 15 * GB, at: T + 5 }), "a late read of an earlier moment");
+        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10, generation: 1 }));
+        assert!(!s.measured(ComputerDisk { total: 20 * GB, free: 15 * GB, at: T + 5, generation: 1 }), "a late read of an earlier moment");
         assert_eq!(told(&s), vec![ComputerNotice::DiskFilling { total: 20 * GB, free: 3 * GB }]);
-        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10 }), "the same read again: the same");
+        assert!(s.measured(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10, generation: 1 }), "the same read again: the same");
         assert_eq!(told(&s).len(), 1);
-        assert!(std::panic::catch_unwind(|| Saves::default().measured(ComputerDisk { total: GB, free: 2 * GB, at: T })).is_err(), "more free than its size");
+        assert!(std::panic::catch_unwind(|| Saves::default().measured(ComputerDisk { total: GB, free: 2 * GB, at: T, generation: 1 })).is_err(), "more free than its size");
+        // a read stored by a release before reads named their start: kept, its start 0
+        let mut stored = serde_json::to_value(&s).unwrap();
+        stored["disk"].as_object_mut().unwrap().remove("generation");
+        let old: Saves = serde_json::from_value(stored).unwrap();
+        assert_eq!(old.disk(), Some(ComputerDisk { total: 20 * GB, free: 3 * GB, at: T + 10, generation: 0 }));
+        assert_eq!(told(&old), told(&s));
         // saves stored before the disk was read, or before the latch: none told
         let mut stored = serde_json::to_value(&s).unwrap();
         stored.as_object_mut().unwrap().remove("disk");
@@ -3240,14 +3252,14 @@ mod tests {
         assert!(old.disk().is_none() && told(&old).is_empty());
     }
 
-    /// Goal (Codex on #1015: a read before `Ready` could push a start past
-    /// its deadline): a start's disk is read only once its `Ready` was
-    /// applied (the start awake, its deadline met), an awake save's once its
-    /// `Saved` was; never a late `Ready` of a start no longer under way, a
-    /// sleep's save (its stop follows), nor any other event. Method: the
-    /// lifecycle's steps, and what each says to read after.
+    /// Goal: after an event, a disk is read only once an awake save's
+    /// `Saved` was applied; never after a start's `Ready` (a start reads its
+    /// own in the start, before its guest runs: FIN-462), a late `Ready` of
+    /// a start no longer under way, a sleep's save (its stop follows), nor
+    /// any other event. Method: the lifecycle's steps, and what each says to
+    /// read after.
     #[test]
-    fn a_disk_is_read_only_after_its_start_is_ready() {
+    fn a_disk_is_read_after_an_awake_save_only() {
         let mut l = Lifecycle::new();
         l.apply(Event::Wake { why: Wake::Owner }, T);
         assert_eq!(reads_disk_after(&Event::Wake { why: Wake::Owner }, &l), None, "starting: nothing read");
@@ -3256,12 +3268,13 @@ mod tests {
         late.apply(Event::Alarm, T + START_DEADLINE_MS);
         late.apply(Event::Ready { generation: 1 }, T + START_DEADLINE_MS + 1);
         assert_eq!(reads_disk_after(&Event::Ready { generation: 1 }, &late), None);
-        // ready within it: read after, the start awake and its alarm the awake one
+        // ready within it: awake, and nothing read after (its start read it)
         let s = l.apply(Event::Ready { generation: 1 }, T + START_DEADLINE_MS - 1);
         assert!(matches!(l.phase, Phase::Awake { generation: 1, .. }) && s.alarm_ms.is_some_and(|a| a > T + START_DEADLINE_MS - 1));
-        assert_eq!(reads_disk_after(&Event::Ready { generation: 1 }, &l), Some(1));
-        // an awake save that worked: read after
+        assert_eq!(reads_disk_after(&Event::Ready { generation: 1 }, &l), None);
+        // an awake save that worked: read after; another start's: not
         assert_eq!(reads_disk_after(&Event::Saved { generation: 1, seq: 1 }, &l), Some(1));
+        assert_eq!(reads_disk_after(&Event::Saved { generation: 2, seq: 1 }, &l), None);
         // a sleep's save: its stop follows, nothing read
         l.apply(Event::Sleep, T + START_DEADLINE_MS + 10);
         assert_eq!(reads_disk_after(&Event::Saved { generation: 1, seq: 1 }, &l), None);
@@ -3274,10 +3287,10 @@ mod tests {
     fn a_disk_is_read_from_df() {
         let gnu = "Filesystem          1-blocks          Used    Available Capacity Mounted on\noverlay        1998232485888 1450459369472 536433389568      74% /\n";
         let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\noverlay              1998232485888 1450465140736 536427945984  73% /\n";
-        assert_eq!(disk_of_df(gnu, T), Some(ComputerDisk { total: 1_998_232_485_888, free: 536_433_389_568, at: T }));
-        assert_eq!(disk_of_df(busybox, T).map(|d| d.free), Some(536_427_945_984));
+        assert_eq!(disk_of_df(gnu, T, 3), Some(ComputerDisk { total: 1_998_232_485_888, free: 536_433_389_568, at: T, generation: 3 }));
+        assert_eq!(disk_of_df(busybox, T, 3).map(|d| d.free), Some(536_427_945_984));
         for bad in ["", "overlay 10 5 5 50% /", "Filesystem 1-blocks Used Available Capacity Mounted on", "Filesystem x\noverlay ten 5 five 50% /", "Filesystem x\noverlay 10 0 11 0% /", "Filesystem x\noverlay 0 0 0 0% /"] {
-            assert_eq!(disk_of_df(bad, T), None, "{bad:?}");
+            assert_eq!(disk_of_df(bad, T, 3), None, "{bad:?}");
         }
     }
 
