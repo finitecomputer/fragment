@@ -102,6 +102,7 @@ df -h ~ /tmp
 Then download it in the background, and wait for it to finish:
 
 ```sh
+id="<the id from the link>"
 curl -fsSL -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN" -o ~/home-import/home.zip "https://www.googleapis.com/drive/v3/files/$id?alt=media&supportsAllDrives=true"
 md5sum ~/home-import/home.zip
 ```

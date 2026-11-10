@@ -145,6 +145,13 @@ struct State {
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
+    /// what each sabotaging commit writes (none: `competitor.txt`)
+    #[serde(skip)]
+    competitor: Option<Vec<(String, Option<Vec<u8>>)>>,
+    /// another writer's commit to main, landed just before the next commit
+    /// pack, which is then served as ever (`land_before_next_commit`)
+    #[serde(skip)]
+    before_commit: Option<Vec<(String, Option<Vec<u8>>)>>,
     /// commit packs that land before `sabotage` starts (`sabotage_commit_packs_after`)
     #[serde(skip)]
     sabotage_after: u32,
@@ -198,6 +205,10 @@ struct State {
     /// reads (`?access=read`) is theirs.
     #[serde(skip)]
     viewing: BTreeSet<String>,
+    /// The upload limit the caller's list advertises (`limits`), if any
+    /// (`advertise_upload_max`); none, as an older platform's.
+    #[serde(skip)]
+    upload_max: Option<u64>,
 }
 
 struct Inner {
@@ -562,7 +573,10 @@ impl Inner {
             // owner's, so a bare label resolves (`Client::fragment`)
             if path == "/api/fragments" && m == "GET" {
                 let fragments: Vec<Value> = st.repos.values().map(|r| json!({ "name": r.name, "role": "owner" })).collect();
-                return Response::json(200, &json!({ "fragments": fragments }));
+                return Response::json(200, &match st.upload_max {
+                    Some(n) => json!({ "fragments": fragments, "limits": { "uploadMaxBytes": n, "filesPerMessage": 8 } }),
+                    None => json!({ "fragments": fragments }),
+                });
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
@@ -739,12 +753,15 @@ impl Inner {
         if st.packs_failing {
             return problem(503, "commits are unavailable (the fake's commit outage lever)");
         }
+        if let Some(theirs) = st.before_commit.take() {
+            st.commit(url, Write { branch: "main", message: "another writer", author: "another", changes: &theirs, from: None });
+        }
         if st.sabotage > 0 && st.sabotage_after > 0 {
             st.sabotage_after -= 1;
         } else if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
-            let competitor = [("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))];
+            let competitor = st.competitor.clone().unwrap_or_else(|| vec![("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))]);
             let (_, tip) = st.commit(url, Write { branch: "main", message: "competitor", author: "competitor", changes: &competitor, from: None });
             return cas_failed("main", &tip);
         }
@@ -1263,6 +1280,20 @@ impl CodeStorage {
         self.with(|st| st.sabotage = n);
     }
 
+    /// Another writer's commit of `files` (path, bytes; `None` deletes) to
+    /// main lands just before the next commit pack, which is then served as
+    /// ever: its CAS, if it names one, sees the moved head; one naming none
+    /// lands on it.
+    pub fn land_before_next_commit(&self, files: Vec<(String, Option<Vec<u8>>)>) {
+        self.with(|st| st.before_commit = Some(files));
+    }
+
+    /// `sabotage_commit_packs(n)`, each competitor's commit writing `files`
+    /// (path, bytes; `None` deletes) instead of `competitor.txt`.
+    pub fn sabotage_commit_packs_with(&self, n: u32, files: Vec<(String, Option<Vec<u8>>)>) {
+        self.with(|st| (st.sabotage, st.competitor) = (n, Some(files)));
+    }
+
     /// Every commit pack answers 503 and lands nothing while `on`: a
     /// commit outage, its repos and reads as ever.
     pub fn fail_commit_packs(&self, on: bool) {
@@ -1316,6 +1347,12 @@ impl CodeStorage {
     /// Host `refresh` nudges received (with `host_routes`).
     pub fn refresh_count(&self) -> u32 {
         self.with(|st| st.refreshes)
+    }
+
+    /// The upload limit the caller's list (`GET /api/fragments`, with
+    /// `host_routes`) advertises from now on; None, none.
+    pub fn advertise_upload_max(&self, bytes: Option<u64>) {
+        self.with(|st| st.upload_max = bytes);
     }
 
     /// Turns on the search write API for fragment `name` (with

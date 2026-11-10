@@ -22,7 +22,7 @@
 //! tries in all (`fragment_core::backoff::claim_retry_ms`). Past them it
 //! waits on its person's next sign-in, which tries it afresh.
 
-use fragment_core::{backoff, mail};
+use fragment_core::{backoff, levers, mail};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, Reason, Role};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ pub(crate) struct NoticesOf {
 
 impl Call for NoticesOf {
     const PATH: &'static str = "/invites/notices";
-    type Answer = serde_json::Value;
+    type Answer = fragment_proto::notice::NoticeList;
 }
 
 /// `POST /invites/answer`: the asker's yes (`yes`) or no to `fragment`'s
@@ -272,17 +272,21 @@ impl RegistryCell {
     }
 
     /// What the registry tells `b.person` (`NoticesOf`): their invites, in
-    /// words.
-    fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
-        let notices: Vec<fragment_proto::notice::Notice> = self
+    /// words; on a local fleet, one to a `must-answer…` fragment as one
+    /// that must be answered (`fragment_core::levers::must_answer_invite`).
+    fn notices_of(&self, b: NoticesOf) -> CellResult<fragment_proto::notice::NoticeList> {
+        let fleet = self.cfg.test_hooks.then_some(if self.cfg.levers_scoped { levers::Fleet::Branch } else { levers::Fleet::Local });
+        let notices = self
             .waiting_on(&b.person)?
             .iter()
             .map(|i| {
                 let s = |k: &str| i[k].as_str().unwrap_or_default();
-                fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
+                let mut n = fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str());
+                n.must_answer = levers::must_answer_invite(fleet, s("fragment"));
+                n
             })
             .collect();
-        Ok(serde_json::json!({ "notices": notices }))
+        Ok(fragment_proto::notice::NoticeList { notices })
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their

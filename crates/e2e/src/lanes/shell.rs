@@ -1705,6 +1705,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
+    must_answer_ui(s, api, &mut b, &session, &shots)?;
     older_release_ui(s, api, &mut b, &session)?;
     // a guest, in this browser, who then signs in to this seat
     guest_ui(s, api, &mut b, &email, &shots)?;
@@ -2217,6 +2218,102 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     Ok(())
 }
 
+/// Invites `email` to a new fragment of `sharer`'s labeled
+/// `must-answer-{base}`, whose invite must be answered on a local fleet
+/// (FIN-458: no owner asks one yet; `fragment_core::levers::
+/// must_answer_invite`). Its name; the notice's id is `invite:{name}`.
+fn invite_must(s: &Suite, api: &Api, sharer: &fragment_nip98::Keys, email: &str, base: &str) -> Result<String> {
+    let name = s.named(api, sharer, &format!("must-answer-{base}"))?;
+    let r = api.create(sharer, &name)?;
+    anyhow::ensure!(r.status == 200, "{name} made: {r}");
+    let r = api.signed(sharer, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "{email} invited to {name}: {r}");
+    Ok(name)
+}
+
+/// What the page shows of a notice that must be answered: whether it is
+/// open, its id and words, whether it covers the whole page (what is at
+/// its middle is in it), and the band's rows.
+const MUST_ANSWER_SEEN: &str = "(() => { const d = document.getElementById('must-answer'); const r = d.getBoundingClientRect(); const at = document.elementFromPoint(innerWidth / 2, innerHeight / 2); \
+    return { open: d.open, id: d.dataset.id ?? null, words: d.innerText, covers: d.open && r.width >= innerWidth - 1 && r.height >= innerHeight - 1 && d.contains(at), \
+    band: [...document.querySelectorAll('#computer-notices .computer-notice')].map((n) => n.dataset.id ?? n.dataset.kind) }; })()";
+
+/// Presses `label` among the shown must-answer notice's answers.
+fn answer_must(b: &mut Browser, page: &Page, label: &str) -> Result<()> {
+    b.eval(page, &format!("([...document.querySelectorAll('#must-answer button')].find((x) => x.textContent === {}).click(), true)", js(label)))?;
+    Ok(())
+}
+
+/// A notice that must be answered (FIN-458, Paul 2026-11-09), which no
+/// owner asks yet: two invites to `must-answer` fragments (`invite_must`).
+/// Each shows alone over the whole page, never in the band, the oldest
+/// first; Escape leaves it; an answer refused (the registry's `DownFor`
+/// lever) stays, in the server's words; answered, the read after it has it
+/// no more and the next shows; the last answered, the page is as it was.
+/// A guest's welcome: `guest_ui`.
+fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let email = super::signin::who(api, session)?["email"].as_str().context("their email")?.to_string();
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open(&format!("{}/", api.base))?;
+    b.viewport(&page, 1280, 800, false)?;
+    anyhow::ensure!(b.until(&page, "!!document.querySelector('#sidebar .row')", wait), "their shell, drawn");
+    let sharer = api.person()?;
+    let first = format!("invite:{}", invite_must(s, api, &sharer, &email, "1")?);
+    let next = format!("invite:{}", invite_must(s, api, &sharer, &email, "2")?);
+    let shown = b.until(&page, &format!("document.getElementById('must-answer').dataset.id === {}", js(&first)), wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    let in_band = |seen: &Value| seen["band"].as_array().is_some_and(|b| b.iter().any(|x| x.as_str().is_some_and(|x| x == first || x == next)));
+    s.ok(
+        "a notice that must be answered shows alone, over the whole page, the oldest first, its words and its answers, told live; the band has none of it",
+        shown && seen["covers"] == json!(true) && seen["words"].as_str().is_some_and(|w| w.contains("invited you to view it.") && w.contains("Accept") && w.contains("Decline")) && !in_band(&seen),
+        &seen,
+    );
+    let _ = b.screenshot(&page, &shots.join("must-answer.png"));
+    b.press(&page, "Escape", false)?;
+    b.press(&page, "Escape", false)?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let kept = b.eval(&page, MUST_ANSWER_SEEN)?;
+    s.ok("Escape, pressed twice, leaves it over the page", kept["covers"] == json!(true) && kept["id"] == json!(first), &kept);
+    // the page's own keys take nothing while it shows: Ctrl/Cmd+K (the
+    // launcher's), from the cover's focus and from the page's body
+    b.eval(
+        &page,
+        "(() => { for (const at of [document.activeElement, document.body]) for (const meta of [false, true]) \
+         at.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: !meta, metaKey: meta, bubbles: true, cancelable: true })); return true; })()",
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let keys = b.eval(&page, "({ search: document.getElementById('search-dialog').open, cover: document.getElementById('must-answer').open })")?;
+    s.ok("the page's own keys take nothing while it shows: Ctrl/Cmd+K opens no launcher over it", keys == json!({ "search": false, "cover": true }), &keys);
+    // a dialog the page opens over it (a frame's ask, an answer's
+    // continuation) waits under it: the cover is shown again on top
+    b.eval(&page, "(document.getElementById('search-dialog').showModal(), true)")?;
+    let raised = b.until(&page, "document.getElementById('search-dialog').open && (() => { const d = document.getElementById('must-answer'); return d.open && d.contains(document.elementFromPoint(innerWidth / 2, innerHeight / 2)); })()", wait);
+    s.ok("a dialog the page opens while it shows waits under it: the cover on top, the other open beneath", raised, b.eval(&page, MUST_ANSWER_SEEN)?);
+    // its Accept refused once, by the registry (its lever)
+    let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/invites/answer", "times": 1 } })))?;
+    anyhow::ensure!(down.status == 200, "the registry's next answer to an invite refused: {down}");
+    answer_must(b, &page, "Accept")?;
+    let refused = b.until(&page, "/try again shortly/.test(document.getElementById('must-answer').innerText)", wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    s.ok("an answer it refuses: it stays, saying why in the server's words", refused && seen["id"] == json!(first) && seen["covers"] == json!(true), &seen);
+    answer_must(b, &page, "Decline")?;
+    let shown = b.until(&page, &format!("document.getElementById('must-answer').dataset.id === {}", js(&next)), wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    s.ok("answered, and read again without it: the next shows, as alone", shown && seen["covers"] == json!(true) && !in_band(&seen), &seen);
+    answer_must(b, &page, "Decline")?;
+    let gone = b.until(&page, "!document.getElementById('must-answer').open", wait);
+    // the dialog that waited under it is the page's now
+    let waited = b.eval(&page, "document.getElementById('search-dialog').open")?;
+    s.ok("the last answered, the dialog that waited under it is the page's", gone && waited == json!(true), &waited);
+    b.eval(&page, "(document.getElementById('search-dialog').close(), true)")?;
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    let usable = b.eval(&page, "document.getElementById('sidebar').contains(document.elementFromPoint(40, 120))")?;
+    s.ok("the last answered: no cover, the page as it was, theirs to use", gone && !in_band(&seen) && usable == json!(true), json!({ "seen": seen, "usable": usable }));
+    b.close(page)?;
+    Ok(())
+}
+
 /// A shell that reads an older release (a deploy going out, rolled back, a
 /// reload the release watcher put off), one from before notices (FIN-458):
 /// its `/api/notices` is no route (404). Nothing is told, and that is no
@@ -2348,6 +2445,15 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("guest-welcome.png"));
+    // a notice that must be answered reaches a guest too, over the welcome
+    // (FIN-458: someone moving to this platform may come as a guest)
+    let asked = format!("invite:{}", invite_must(s, api, &api.person()?, &guest, "g")?);
+    let shown = b.until(&page, &format!("document.getElementById('must-answer').dataset.id === {}", js(&asked)), wait);
+    let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
+    let _ = b.screenshot(&page, &shots.join("guest-must-answer.png"));
+    answer_must(b, &page, "Decline")?;
+    let gone = b.until(&page, &format!("!document.getElementById('must-answer').open && {welcome}"), wait);
+    s.ok("a guest is asked too: the notice that must be answered over their welcome, which is there once it is answered", shown && seen["covers"] == json!(true) && gone, &seen);
     // settings: Billing's guest state, then Account
     let still = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
     let settled = go(b, "/settings", &format!("{settings} && {still}"))?;
