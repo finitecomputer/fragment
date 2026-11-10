@@ -643,11 +643,13 @@ member). Any other agent is 403; a person naming `for` 400:
 | method & path | body → answer |
 | --- | --- |
 | `GET /api/invites` | → `InvitesWaiting {invites: [{fragment, role, title, from, email, expiresAt}]}`: those waiting on their emails, soonest to run out first; `title` the fragment's as sent, `from` the sharer's email (an agent's: its owner's; null when no one signs in as them now) |
-| `POST /api/invites/{fragment}/accept` | `{}` or none (else 400) → `InviteAccepted {fragment, role}`, the fragment in their list before it answers. None waiting: 404 (`reason: gone`); the fragment's refusal keeps it |
+| `POST /api/invites/{fragment}/accept` | `{}` or none (else 400) → `InviteAccepted {fragment, role, open}`, the fragment in their list before it answers, `open` its page (Notices). None waiting: 404 (`reason: gone`); the fragment's refusal keeps it |
 | `POST /api/invites/{fragment}/decline` | the same → `{ok, declined}`; none waiting: 404 (`reason: gone`) |
 
-Their pages are told when the invites waiting on them change: `{type:
-"invited"}` on `GET /api/fragments/watch`.
+Each waiting invite is also a notice of theirs (Notices), with Accept and
+Decline. Their pages are told when the invites waiting on them change:
+`{type: "changed"}` on `GET /api/fragments/watch`, as for any notice
+(`invited`, sent before FIN-458, no more).
 
 ### Who has access to what
 
@@ -1941,19 +1943,25 @@ registration go first.
 
 What the platform tells a person, each owner's notices in its own words
 (`Notice`, `fragment_proto::notice`), the most pressing first. Each owner
-works them out when asked and the router joins them, keeping none: today
-the person's computer's (docs/computers.md, "What its owner is told").
-`kind` is for tests and logs; a client draws every notice the same way
-and never reads it. An action `post`s its `body` (none: `{}`) to a
-platform route with the person's own credential, the route its owner's
-(below), then the client reads its notices again; or it `open`s an
-`https:` page or a `mailto:` address. `until`: when what a notice tells
-ends by the clock alone; a client counts down to it and drops the notice
-then. Their pages are told when notices change (`watch`'s `changed`).
+works them out when asked and the router joins them, keeping none: the
+person's computer's (docs/computers.md, "What its owner is told"), then
+the registry's, an invite waiting on an email of theirs (Invites by
+email). An owner that does not answer fails the read. `kind` is for tests
+and logs; a client draws every notice the same way and never reads it.
+An action `post`s its `body` (none: `{}`) to a platform route with the
+person's own credential, the route its owner's, then the client reads its
+notices again; or it `open`s an `https:` page or a `mailto:` address.
+A post's answer may name a page to open (`open`: an invite's fragment,
+say), which the client opens once that read has it: one of the person's
+fragments in place, any other address as a page. A post refused shows the
+server's own words for it (its `message`) on the notice, with its button
+back. `until`: when what a notice tells ends by the clock alone; a client
+counts down to it and drops the notice then. Their pages are told when
+notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`; none while they have no computer |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites' |
 
 ## Computers (docs/computers.md)
 
