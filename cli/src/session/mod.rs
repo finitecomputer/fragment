@@ -286,8 +286,8 @@ fn read(source: Source, spool: &mut Spool, upload_max: u64, own: Option<&Path>) 
         }
         Source::Home(home, db) => {
             // a zip's database is copied out with what SQLite reads beside
-            // it, into a folder of the import's own that goes with it
-            let scratch = crate::home::source::Scratch::new()?;
+            // it, into the import's own folder, and goes with it
+            let scratch = crate::home::source::Scratch::in_dir(&spool.dir)?;
             let local = home.local(&db, &scratch)?;
             for beside in ["-wal", "-shm"] {
                 if home.get(&format!("{db}{beside}")).is_some() {
@@ -1331,6 +1331,11 @@ mod tests {
         let spool_of = |path: &Path, layout: Option<&str>| {
             let mut spool = Spool::new(BTreeSet::new()).unwrap();
             read(source(path, layout).unwrap(), &mut spool, fragment_proto::limits::BLOB_MAX_BYTES, None).unwrap();
+            // the copies out of a zip were made in the import's own folder,
+            // and are gone from it: read by its path, never counted among
+            // what other tests make
+            let left: Vec<_> = std::fs::read_dir(&spool.dir).unwrap().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name() != "media").map(|e| e.path()).collect();
+            assert!(left.is_empty(), "the copies out of the zip are gone: {left:?}");
             hermes::tests::spooled(&spool)
         };
         let from_folder = spool_of(&home.join("state.db"), None);
@@ -1341,12 +1346,9 @@ mod tests {
         crate::home::source::tests::zip_of(&staged, &[("workspace/notes.md", b"n"), ("agent/hermes-home/state.db", &db)]);
         let layout = dir.join("layout.json");
         std::fs::write(&layout, r#"{"format":"fragment-home-layout/1","name":"x","hermes_home":"agent/hermes-home"}"#).unwrap();
-        let tmp_before: Vec<_> = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("fragment-home-{}-", std::process::id()))).map(|e| e.path()).collect();
         assert_eq!(spool_of(&bare, None), from_folder, "a bare Hermes home's zip");
         assert_eq!(spool_of(&staged, Some(layout.to_str().unwrap())), from_folder, "a stage, through its layout");
         assert_eq!(spool_of(&dir.join("home"), Some("hermes")), from_folder, "a folder named with a layout");
-        let tmp_after: Vec<_> = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("fragment-home-{}-", std::process::id()))).map(|e| e.path()).collect();
-        assert_eq!(tmp_before.len(), tmp_after.len(), "the copies out of the zips are gone");
         let e = source(&staged, None).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("holds no state.db: name the home's layout"), "{e}");
     }
