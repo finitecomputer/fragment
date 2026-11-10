@@ -1,0 +1,153 @@
+{
+  "version": 1,
+  "sample": true,
+  "taken_at": "2026-11-10T15:00:00Z",
+  "brain": {
+    "name": "hq--k3x9",
+    "title": "Finite HQ",
+    "url": null,
+    "visibility": "members",
+    "index": { "line": "140 pages, all searchable", "pages": 140, "sections": 1208, "pending": 0 }
+  },
+  "wikis": [
+    {
+      "id": "customers", "pages": 18, "updated": "2026-11-09",
+      "log": [
+        { "date": "2026-11-09", "title": "Acme renewal thread; Northwind onboarding call notes" },
+        { "date": "2026-11-08", "title": "Telegram: Globex pilot questions" },
+        { "date": "2026-11-05", "title": "Updated the Initech account page" }
+      ],
+      "outputs": []
+    },
+    {
+      "id": "launch", "pages": 12, "updated": "2026-11-06",
+      "log": [
+        { "date": "2026-11-06", "title": "Launch plan v3 from Drive; pricing page copy" },
+        { "date": "2026-10-30", "title": "Release notes from GitHub" }
+      ],
+      "outputs": [
+        { "path": "launch/output/weekly-brief-2026-11-07.md", "title": "Weekly launch brief, 7 Nov" },
+        { "path": "launch/output/press-faq.md", "title": "Press FAQ" }
+      ]
+    },
+    {
+      "id": "research", "pages": 21, "updated": "2026-11-09",
+      "log": [
+        { "date": "2026-11-09", "title": "Agent platforms roundup, week 45" },
+        { "date": "2026-11-02", "title": "Three papers on retrieval for long documents" }
+      ],
+      "outputs": [{ "path": "research/output/market-map.md", "title": "Market map" }]
+    },
+    {
+      "id": "executive", "pages": 4, "updated": "2026-11-03",
+      "log": [{ "date": "2026-11-03", "title": "Refreshed from delivery and sales" }],
+      "outputs": [{ "path": "executive/output/board-update-q4.md", "title": "Board update, Q4" }]
+    },
+    {
+      "id": "team", "pages": 7, "updated": "2026-11-04",
+      "log": [{ "date": "2026-11-04", "title": "Offsite agenda and decisions" }],
+      "outputs": []
+    }
+  ],
+  "sources": [
+    {
+      "id": "gmail", "label": "Gmail", "kind": "connector", "provider": "Google",
+      "flows": [{ "wiki": "customers", "count": 9, "last": "2026-11-09" }, { "wiki": "launch", "count": 5, "last": "2026-11-03" }],
+      "items": [
+        { "path": "customers/raw/2026-11-09-acme-renewal-thread.md", "title": "Acme renewal thread", "captured": "2026-11-09" },
+        { "path": "customers/raw/2026-11-07-northwind-kickoff.md", "title": "Northwind kickoff follow-up", "captured": "2026-11-07" },
+        { "path": "launch/raw/2026-11-03-press-embargo.md", "title": "Press embargo dates", "captured": "2026-11-03" }
+      ]
+    },
+    {
+      "id": "drive", "label": "Google Drive", "kind": "connector", "provider": "Google",
+      "flows": [{ "wiki": "launch", "count": 6, "last": "2026-11-06" }, { "wiki": "research", "count": 3, "last": "2026-10-21" }],
+      "items": [
+        { "path": "launch/raw/2026-11-06-launch-plan-v3.md", "title": "Launch plan v3", "captured": "2026-11-06" },
+        { "path": "launch/raw/2026-11-01-pricing-page-copy.md", "title": "Pricing page copy", "captured": "2026-11-01" },
+        { "path": "research/raw/2026-10-21-customer-survey-results.md", "title": "Customer survey results", "captured": "2026-10-21" }
+      ]
+    },
+    {
+      "id": "web", "label": "The web", "kind": "connector", "provider": "Pages an agent read",
+      "flows": [{ "wiki": "research", "count": 11, "last": "2026-11-09" }],
+      "items": [
+        { "path": "research/raw/2026-11-09-agent-platforms-roundup.md", "title": "Agent platforms roundup", "captured": "2026-11-09" },
+        { "path": "research/raw/2026-11-02-long-context-retrieval.md", "title": "Long-context retrieval, compared", "captured": "2026-11-02" }
+      ]
+    },
+    {
+      "id": "telegram", "label": "Telegram", "kind": "connector", "provider": "Telegram connector",
+      "flows": [{ "wiki": "customers", "count": 4, "last": "2026-11-08" }],
+      "items": [
+        { "path": "customers/raw/2026-11-08-globex-pilot-questions.md", "title": "Globex pilot questions", "captured": "2026-11-08" }
+      ]
+    },
+    {
+      "id": "x", "label": "X", "kind": "connector", "provider": "X API",
+      "flows": [{ "wiki": "research", "count": 2, "last": "2026-10-28" }, { "wiki": "launch", "count": 2, "last": "2026-10-25" }],
+      "items": [
+        { "path": "research/raw/2026-10-28-thread-on-agent-memory.md", "title": "A thread on agent memory", "captured": "2026-10-28" }
+      ]
+    },
+    {
+      "id": "calendar", "label": "Google Calendar", "kind": "connector", "provider": "Google",
+      "flows": [{ "wiki": "team", "count": 4, "last": "2026-11-04" }],
+      "items": [
+        { "path": "team/raw/2026-11-04-offsite.md", "title": "Offsite, 4 Nov", "captured": "2026-11-04" }
+      ]
+    },
+    {
+      "id": "github", "label": "GitHub", "kind": "connector", "provider": "",
+      "flows": [{ "wiki": "launch", "count": 3, "last": "2026-10-30" }],
+      "items": [
+        { "path": "launch/raw/2026-10-30-release-notes.md", "title": "Release notes, 30 Oct", "captured": "2026-10-30" }
+      ]
+    },
+    {
+      "id": "manual", "label": "Written in", "kind": "connector", "provider": "No source: typed by a person or an agent",
+      "flows": [{ "wiki": "team", "count": 3, "last": "2026-10-20" }, { "wiki": "customers", "count": 2, "last": "2026-10-14" }],
+      "items": [
+        { "path": "team/raw/2026-10-20-hiring-plan.md", "title": "Hiring plan", "captured": "2026-10-20" }
+      ]
+    },
+    {
+      "id": "brain:delivery--c3d4", "label": "delivery--c3d4", "kind": "brain", "provider": "A child brain",
+      "flows": [{ "wiki": "executive", "count": 3, "last": null }],
+      "items": [{ "path": "team/wiki/launch.md", "title": "team/wiki/launch.md", "captured": null }]
+    },
+    {
+      "id": "brain:sales--m7p2", "label": "sales--m7p2", "kind": "brain", "provider": "A child brain",
+      "flows": [{ "wiki": "executive", "count": 2, "last": null }],
+      "items": [{ "path": "pipeline/wiki/q4.md", "title": "pipeline/wiki/q4.md", "captured": null }]
+    }
+  ],
+  "workflows": [
+    {
+      "id": "hermes--a1b2#1", "agent": "hermes--a1b2", "agent_title": "Hermes", "said": "at 08:00, Monday through Friday",
+      "text": "Read new Gmail threads from customers and file each one as a source in hq--k3x9's customers/ wiki, then update their account pages.",
+      "sources": ["gmail"], "wikis": ["customers"], "paused": false, "last_at": "2026-11-10T08:00:00Z", "next_at": "2026-11-11T08:00:00Z"
+    },
+    {
+      "id": "hermes--a1b2#2", "agent": "hermes--a1b2", "agent_title": "Hermes", "said": "at 18:00, every day",
+      "text": "Save the day's Telegram messages from the customer group into hq--k3x9 customers/raw and note follow-ups in its inventory.",
+      "sources": ["telegram"], "wikis": ["customers"], "paused": false, "last_at": "2026-11-09T18:00:00Z", "next_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "id": "hermes--a1b2#3", "agent": "hermes--a1b2", "agent_title": "Hermes", "said": "at 09:00, on Friday",
+      "text": "Read the launch folder in Google Drive and refresh hq--k3x9 launch/ with what changed.",
+      "sources": ["drive"], "wikis": ["launch"], "paused": false, "last_at": "2026-11-06T09:00:00Z", "next_at": "2026-11-13T09:00:00Z"
+    },
+    {
+      "id": "scout--q9w8#1", "agent": "scout--q9w8", "agent_title": "Scout", "said": "at 07:00, on Monday",
+      "text": "Search the web and X for news about agent platforms and summarize it into hq--k3x9 research/.",
+      "sources": ["web", "x"], "wikis": ["research"], "paused": false, "last_at": "2026-11-09T07:00:00Z", "next_at": "2026-11-16T07:00:00Z"
+    }
+  ],
+  "readers": [
+    { "id": "npub1hermes", "kind": "agent", "label": "Hermes", "role": "editor" },
+    { "id": "npub1scout", "kind": "agent", "label": "Scout", "role": "editor" },
+    { "id": "npub1atlas", "kind": "agent", "label": "Atlas", "role": "viewer" },
+    { "id": "people", "kind": "people", "label": "People", "role": "1 owner, 2 editors, 2 viewers", "count": 5 }
+  ]
+}
