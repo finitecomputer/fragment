@@ -22,7 +22,7 @@
 //! tries in all (`fragment_core::backoff::claim_retry_ms`). Past them it
 //! waits on its person's next sign-in, which tries it afresh.
 
-use fragment_core::{backoff, mail};
+use fragment_core::{backoff, levers, mail};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, Reason, Role};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -67,11 +67,6 @@ impl Call for NoticesOf {
     const PATH: &'static str = "/invites/notices";
     type Answer = fragment_proto::notice::NoticeList;
 }
-
-/// FIN-458: no owner asks a notice that must be answered yet, so on a fleet
-/// with test levers an invite to a fragment whose label has this in it is
-/// one: the e2e's proof of the cover, and the iOS UI test's (docs/api.md).
-const MUST_ANSWER_LABEL: &str = "must-answer";
 
 /// `POST /invites/answer`: the asker's yes (`yes`) or no to `fragment`'s
 /// invite waiting on an email of theirs. Answers the role they hold there
@@ -277,16 +272,17 @@ impl RegistryCell {
     }
 
     /// What the registry tells `b.person` (`NoticesOf`): their invites, in
-    /// words; on a test fleet, one to a `must-answer…` fragment as one that
-    /// must be answered (`MUST_ANSWER_LABEL`).
+    /// words; on a local fleet, one to a `must-answer…` fragment as one
+    /// that must be answered (`fragment_core::levers::must_answer_invite`).
     fn notices_of(&self, b: NoticesOf) -> CellResult<fragment_proto::notice::NoticeList> {
+        let fleet = self.cfg.test_hooks.then_some(if self.cfg.levers_scoped { levers::Fleet::Branch } else { levers::Fleet::Local });
         let notices = self
             .waiting_on(&b.person)?
             .iter()
             .map(|i| {
                 let s = |k: &str| i[k].as_str().unwrap_or_default();
                 let mut n = fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str());
-                n.must_answer = self.cfg.test_hooks && s("fragment").contains(MUST_ANSWER_LABEL);
+                n.must_answer = levers::must_answer_invite(fleet, s("fragment"));
                 n
             })
             .collect();

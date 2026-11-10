@@ -2219,10 +2219,9 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
 }
 
 /// Invites `email` to a new fragment of `sharer`'s labeled
-/// `must-answer-{base}`, whose invite must be answered on a test fleet
-/// (FIN-458: no owner asks one yet; `MUST_ANSWER_LABEL`,
-/// cell/src/registry/invites.rs). Its name; the notice's id is
-/// `invite:{name}`.
+/// `must-answer-{base}`, whose invite must be answered on a local fleet
+/// (FIN-458: no owner asks one yet; `fragment_core::levers::
+/// must_answer_invite`). Its name; the notice's id is `invite:{name}`.
 fn invite_must(s: &Suite, api: &Api, sharer: &fragment_nip98::Keys, email: &str, base: &str) -> Result<String> {
     let name = s.named(api, sharer, &format!("must-answer-{base}"))?;
     let r = api.create(sharer, &name)?;

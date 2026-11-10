@@ -1961,9 +1961,9 @@ answered; a client shows it alone over everything (a guest's welcome
 too), never in the band, until the read after one of its actions has it
 no more, the first such in the list first (each owner lists its own
 oldest first). A client from before it shows it as any other. No owner
-asks one yet; on a fleet with test levers alone, an invite to a fragment
-whose label has `must-answer` in it is one, the proof of the clients'
-cover. Their pages are told when notices change (`watch`'s `changed`).
+asks one yet; on a local fleet with test levers alone (dev's, the e2e's:
+never a branch deployment, nor production), an invite to a fragment whose
+label has `must-answer` in it is one, the proof of the clients' cover. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
