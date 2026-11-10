@@ -115,13 +115,22 @@ async fn ask(env: &Env, person: &str, op: &str, body: Option<&RawValue>) -> Cell
     crate::routed::ask_bytes(env, "VAULT", person, op, &body).await
 }
 
+/// `vault/<op>/<name>`, `name` a secret's name's form
+/// (`fragment_core::vault::name_form`), refused (400) before any route is
+/// built: a caller's name never carries a dot segment, separator or escape
+/// that would choose another op (`../delete/…`).
+fn op_path(op: &str, name: &str) -> CellResult<String> {
+    rules::name_form(name).map_err(|e| CellError::invalid(e.to_string()))?;
+    Ok(format!("vault/{op}/{name}"))
+}
+
 /// Puts `put` (a `PutSecret`'s JSON) into `person`'s Vault under `name`,
 /// sealed there, under the rules of the person's own `PUT
 /// /api/vault/{name}`; set again, it is replaced whole. The seam for the
 /// platform's own code (FIN-463's hand-off): its answer is the `Secret`
 /// set, as JSON, never its value.
 pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &RawValue) -> CellResult<Vec<u8>> {
-    ask(env, person, &format!("vault/put/{name}"), Some(put)).await
+    ask(env, person, &op_path("put", name)?, Some(put)).await
 }
 
 /// What a move reads of a kept `Secret`: where it goes.
@@ -147,7 +156,7 @@ struct Moved(String, String);
 /// it has one home at the end and is never lost between. A Nostr key is
 /// refused: it never leaves.
 pub(crate) async fn take(env: &Env, person: &str, name: &str, to: &str) -> CellResult<Taken> {
-    crate::routed::ask_object(env, "VAULT", person, &format!("vault/take/{name}"), &to).await
+    crate::routed::ask_object(env, "VAULT", person, &op_path("take", name)?, &to).await
 }
 
 /// `to`'s move of `name`, kept there, completed: removed from `person`'s
@@ -155,12 +164,12 @@ pub(crate) async fn take(env: &Env, person: &str, name: &str, to: &str) -> CellR
 /// claimed for `to` (one its person set since stays). Again, it removes
 /// nothing.
 pub(crate) async fn moved(env: &Env, person: &str, name: &str, to: &str, revision: &str) -> CellResult<()> {
-    crate::routed::ask_bytes(env, "VAULT", person, &format!("vault/moved/{name}"), &Moved(to.to_string(), revision.to_string())).await.map(drop)
+    crate::routed::ask_bytes(env, "VAULT", person, &op_path("moved", name)?, &Moved(to.to_string(), revision.to_string())).await.map(drop)
 }
 
 /// Removes `name` from `person`'s Vault: its answer, a `SecretRemoved`.
 pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<Vec<u8>> {
-    ask(env, person, &format!("vault/delete/{name}"), None).await
+    ask(env, person, &op_path("delete", name)?, None).await
 }
 
 /// `/api/vault[/{name}]`, signed by `signed`: the person's own, never an

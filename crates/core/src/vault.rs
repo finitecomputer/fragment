@@ -98,12 +98,20 @@ impl std::fmt::Display for VaultError {
 
 impl std::error::Error for VaultError {}
 
-/// Whether `name` may name a secret: a catalog name's form, and none the
+/// Whether `name` has a secret's name's form: a catalog name's (1 to 32 of
+/// a-z, 0-9 and -). Checked before a name goes anywhere, a Vault's route
+/// above all: no dot, slash or percent sign gets there to choose another.
+pub fn name_form(name: &str) -> Result<(), VaultError> {
+    match catalog::valid_name(name) {
+        true => Ok(()),
+        false => Err(VaultError::Name(format!("{name:?} is not one: 1 to 32 of a-z, 0-9 and -, not starting or ending with -"))),
+    }
+}
+
+/// Whether `name` may name a secret: its form (`name_form`), and none the
 /// deployment's catalog uses (a placeholder names one or the other).
 pub fn name_ok(name: &str, catalog: &Catalog) -> Result<(), VaultError> {
-    if !catalog::valid_name(name) {
-        return Err(VaultError::Name(format!("{name:?} is not one: 1 to 32 of a-z, 0-9 and -, not starting or ending with -")));
-    }
+    name_form(name)?;
     if catalog.get(name).is_some() {
         return Err(VaultError::Name(format!("{name:?} is a provider this deployment offers: name it otherwise")));
     }
@@ -325,6 +333,14 @@ mod tests {
         let many: Vec<String> = (0..17).map(|i| format!("a{i}--k3x9")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &many), &catalog()), Err(VaultError::Agents(_))));
+    }
+
+    #[test]
+    fn a_name_that_could_choose_another_route_is_no_name() {
+        for bad in ["../delete/nostr", "%2e%2e/delete/nostr", "%2E%2E%2Fdelete%2Fnostr", "..%2fdelete%2fnostr", "nostr/x", "nostr/../delete", "..", ".", "a.b", "a%2fb", "a\\b", "a?b", "a#b", ""] {
+            assert!(name_form(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(name_form("telegram-bot"), Ok(()));
     }
 
     /// One Vault row, as the cell's `secrets` table keeps it: the value's

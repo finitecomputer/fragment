@@ -948,7 +948,7 @@ enum SecretCmd {
         hosts: Vec<String>,
         /// Move this secret of your Vault here instead (`fragment vault
         /// list`): kept here, gone from your Vault, no value read
-        #[arg(long = "from-vault", value_name = "SECRET")]
+        #[arg(long = "from-vault", value_name = "SECRET", value_parser = vault_name)]
         from_vault: Option<String>,
     },
     List { name: String },
@@ -962,6 +962,7 @@ enum VaultCmd {
     /// goes on a request (`Authorization: Bearer` unless named). Its hosts,
     /// place and agents change only with its value
     Set {
+        #[arg(value_parser = vault_name)]
         name: String,
         /// An agent that may use it, by its fragment's name (repeat for more)
         #[arg(long = "agent", required = true, value_name = "AGENT")]
@@ -988,8 +989,15 @@ enum VaultCmd {
     /// Your secrets, by name: never a value
     List,
     Rm {
+        #[arg(value_parser = vault_name)]
         name: String,
     },
+}
+
+/// A Vault secret's name, of its form (`fragment_core::vault::name_form`)
+/// before it goes in any URL: none chooses another route (`../…`).
+fn vault_name(name: &str) -> Result<String, String> {
+    fragment_core::vault::name_form(name).map(|()| name.to_string()).map_err(|e| e.to_string())
 }
 
 /// A Vault secret's value: from a hidden prompt at a terminal, else stdin
@@ -3236,6 +3244,13 @@ mod tests {
         assert!(parses(&["fragment", "vault", "set", "nostr-ada", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98"]));
         assert!(!parses(&["fragment", "vault", "set", "linear", "--to", "api.linear.app"]), "a Vault secret names its agents");
         assert!(!parses(&["fragment", "vault", "set", "linear", "lin_api_value", "--agent", "ada--k3x9"]), "no value on argv");
+        // a Vault name of its form alone goes in a URL: none chooses another route
+        for bad in ["../computers/x", "%2e%2e/delete/nostr", "..%2fdelete%2fnostr", "linear/x", "Linear"] {
+            assert!(!parses(&["fragment", "vault", "set", bad, "--agent", "ada--k3x9"]), "vault set {bad}");
+            assert!(!parses(&["fragment", "vault", "rm", bad]), "vault rm {bad}");
+            assert!(!parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", bad]), "--from-vault {bad}");
+        }
+        assert!(parses(&["fragment", "vault", "rm", "linear"]) && parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", "telegram-bot"]), "a name of its form");
         assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--header", "x-key", "--query", "key"]), "one place");
         assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--format", "Bearer {}"]), "a format is a header's");
         assert!(parses(&["fragment", "vault", "list"]) && parses(&["fragment", "vault", "rm", "linear"]));
