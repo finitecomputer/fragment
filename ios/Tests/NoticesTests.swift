@@ -206,4 +206,89 @@ struct NoticesTests {
         #expect(other.fragments.contains { $0.name == "garden--k3x9" })
         #expect(other.answered == nil, "nor after a failed one")
     }
+
+    /// A stub where an invite is told until its Accept is refused, 404 in
+    /// the server's words (taken back meanwhile), and then no more.
+    private func refusingStub() -> Stub {
+        final class Gone: Sendable { let now = Mutex(false) }
+        let gone = Gone()
+        return Stub { seen, _ in
+            switch seen.route {
+            case "GET /api/fragments": return (200, #"{"fragments":[{"name":"juniper--a2","kind":"agent","role":"owner","title":"Juniper"}]}"#)
+            case "GET /api/notices":
+                return gone.now.withLock { $0 } ? (200, #"{"notices":[]}"#)
+                    : (200, #"{"notices":[{"id":"invite:garden--k3x9","kind":"invite","level":"info","title":"Garden plans","actions":[{"label":"Accept","post":"/api/invites/garden--k3x9/accept","body":{}},{"label":"Decline","post":"/api/invites/garden--k3x9/decline","body":{}}]}]}"#)
+            case "POST /api/invites/garden--k3x9/accept":
+                gone.now.withLock { $0 = true }
+                return (404, #"{"error":"not_found","message":"No invite to garden--k3x9 waits on you: it was taken back, answered, or ran out."}"#)
+            default: return (404, #"{"error":"not_found","message":"no route"}"#)
+            }
+        }
+    }
+
+    /// A refusal outlives its notice (a reviewer on #1170): Accept refused,
+    /// the read after it no longer has the invite, and its refusal stays.
+    @MainActor @Test func aRefusalOutlivesItsNotice() async throws {
+        let stub = refusingStub()
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        let notice = try #require(library.notices.first)
+        _ = await library.act(notice, notice.actions[0], api: api)
+        #expect(library.notices.isEmpty, "the read after it no longer has the invite")
+        #expect(library.failedNotices[notice.id] != nil, "its refusal stays")
+    }
+
+    /// The refusal a line of its own: the notice's title and the server's
+    /// words, through later reads, until dismissed.
+    @MainActor @Test func aRefusalIsALineOfItsOwnUntilDismissed() async throws {
+        let stub = refusingStub()
+        let api = try stub.api()
+        let library = Library()
+        await library.load(api)
+        let notice = try #require(library.notices.first)
+        _ = await library.act(notice, notice.actions[0], api: api)
+        await library.load(api)
+        let refusal = try #require(library.refusals.first)
+        #expect(library.refusals.count == 1 && refusal.id == "invite:garden--k3x9")
+        #expect(refusal.failure == NoticeFailure(said: "No invite to garden--k3x9 waits on you: it was taken back, answered, or ran out.", refused: true, title: "Garden plans", warns: false))
+        library.failedNotices[refusal.id] = nil
+        #expect(library.refusals.isEmpty, "dismissed")
+    }
+
+    /// A notice's actions are one answer (a reviewer on #1170, for the web;
+    /// here `acting` held it already): while Accept is out, Decline posts
+    /// nothing and the notice is acting (the band's every button of it off),
+    /// and the same the other way round, its answer slow.
+    @MainActor @Test func aNoticesActionsAreOneAnswer() async throws {
+        for (first, second) in [(0, 1), (1, 0)] {
+            final class Held: Sendable { let gate = Mutex<Gate?>(nil) }
+            let held = Held()
+            let stub = Stub { seen, _ in
+                switch seen.route {
+                case "GET /api/fragments": return (200, #"{"fragments":[{"name":"juniper--a2","kind":"agent","role":"owner","title":"Juniper"}]}"#)
+                case "GET /api/notices": return (200, #"{"notices":[{"id":"invite:garden--k3x9","kind":"invite","level":"info","title":"Garden plans","actions":[{"label":"Accept","post":"/api/invites/garden--k3x9/accept","body":{}},{"label":"Decline","post":"/api/invites/garden--k3x9/decline","body":{}}]}]}"#)
+                case "POST /api/invites/garden--k3x9/accept", "POST /api/invites/garden--k3x9/decline":
+                    held.gate.withLock { $0 }?.pass()
+                    return (200, #"{"ok":true}"#)
+                default: return (404, #"{"error":"not_found","message":"no route"}"#)
+                }
+            }
+            let api = try stub.api()
+            let library = Library()
+            await library.load(api)
+            let notice = try #require(library.notices.first)
+            let gate = Gate()
+            held.gate.withLock { $0 = gate }
+            let out = Task { await library.act(notice, notice.actions[first], api: api) }
+            try await waitUntil("its first answer is out") { stub.seen.contains { $0.method == "POST" } }
+            #expect(library.acting.contains(notice.id), "the notice is acting: every button of it off")
+            #expect(await library.act(notice, notice.actions[second], api: api) == nil)
+            gate.open()
+            _ = await out.value
+            let posts = stub.seen.filter { $0.method == "POST" }.map(\.path)
+            #expect(posts == ["/api/invites/garden--k3x9/\(first == 0 ? "accept" : "decline")"], "one answer posted: \(posts)")
+            #expect(!library.acting.contains(notice.id))
+        }
+    }
 }
