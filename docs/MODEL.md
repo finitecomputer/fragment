@@ -112,6 +112,7 @@ Every change is checked against this table.
 | What members are doing: each one's newest listed record | the channel's records | the fragment's `listed`, and each member's list row (docs/api.md, Listed records) |
 | Native iPhone drafts and pending sends | protected, backup-excluded Application Support files, scoped to platform and person (`ios/Sources/ChatDraftStore.swift`) | bounded to 32 saved chats, 16 pending sends each; a send is saved before HTTP, retried only with the same id and body, never once refused; editing, saving and loading hold one set of bounds (`SavedChat`), and no saved file stops a chat; device keys live only in Keychain |
 | A person's own view of their fragments (archived, docked, read up to) | their list, the `Principal` cell | none |
+| A finite.computer old agent's move: its roster row, its person's answers, its state and deadlines, the mover's command | the `Migrations` object (docs/migrations.md; removable with the move) | none: the mover acts on its commands alone, and staff read and act through its operators' routes |
 | A person's export | their list, the `Principal` cell, and its archive in R2 | the archive is a copy as read, never updated, deleted after seven days (docs/api.md, Export) |
 
 ## Schemas: the platform objects' steps

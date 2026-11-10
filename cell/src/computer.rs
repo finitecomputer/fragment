@@ -2347,7 +2347,7 @@ impl ComputerCell {
             false => None,
         };
         let saves = self.saves()?;
-        let (keys, more) = js::blob_list(&self.env, &self.backups_prefix()).await?;
+        let (keys, more) = js::blob_list(&self.env, js::BLOBS, &self.backups_prefix()).await?;
         Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.all().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
     }
 

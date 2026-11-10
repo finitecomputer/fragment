@@ -166,7 +166,10 @@ earliest deadline of any row.
 | a staged attempt's objects | the alarm | 14 days after `staged` | deleted (the old host's backup remains) |
 | archived → expired | the alarm | cutoff + 90 days | deleted |
 
-A `failed` report counts as an attempt, as a stall does. Staff act on a
+A stage's `failed` report counts as an attempt, as a stall does. A
+retirement's `failed` keeps its command for the mover to try again: the
+moved mark it ends in is what finite.computer redirects by, so only its
+day's deadline holds it for staff. Staff act on a
 held move: `retry` (a new attempt), `restart-old` (the old agent runs
 again, the offer is open again), `retire` (the import went well enough
 by hand), and `withdraw` (out of the move).
@@ -209,5 +212,6 @@ answer but 404, and `deploy` makes no bucket):
 }
 ```
 
-The cell reads it as `FRAGMENT_MIGRATIONS`. The cutoff (phase 2) and
-the credit grant come with their own PRs.
+`cutoff_ms`, once set, is phase 2's cutoff, in ms since the epoch. The
+cell reads them as `FRAGMENT_MIGRATIONS_MOVER` and
+`FRAGMENT_MIGRATIONS_CUTOFF_MS`. The credit grant comes with its own PR.

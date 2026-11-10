@@ -49,6 +49,7 @@ pub mod live;
 pub mod mail;
 pub mod manifest;
 pub mod migrate;
+pub mod migrations;
 pub mod media;
 pub mod models;
 pub mod multipart;

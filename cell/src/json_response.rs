@@ -21,6 +21,11 @@ fn json_encoded(builder: ResponseBuilder, encoded: serde_json::Result<String>) -
     }
 }
 
+/// JSON another object answered, passed on as its bytes, unread.
+pub(crate) fn json_passed(bytes: Vec<u8>) -> CellResult<Response> {
+    json_encoded(Response::builder(), String::from_utf8(bytes).map_err(|_| serde_json::Error::io(std::io::ErrorKind::InvalidData.into())))
+}
+
 pub(crate) fn json_response<T: serde::Serialize>(value: &T) -> CellResult<Response> {
     Ok(json_answer(value)?.with_headers(no_store()))
 }

@@ -139,7 +139,7 @@ impl FragmentCell {
         let key = self.blob_key(sha)?;
         let size = bytes.len() as u64;
         if js::blob_head(&self.env, &key).await?.is_none() {
-            js::blob_put_bytes(&self.env, &key, &bytes).await?;
+            js::blob_put_bytes(&self.env, js::BLOBS, &key, &bytes).await?;
         }
         self.record_blob(sha, size, mime)
     }
