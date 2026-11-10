@@ -411,6 +411,9 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
         None => &Import::Compatibility,
     };
     let update = body.to_string();
+    // an account host's grant: Pipes keeps its host only as an account is
+    // made (WorkOS takes `metadata` on create alone)
+    let replace = tokens.metadata().is_some();
     if let Some(m) = tokens.metadata() {
         body["metadata"] = m.clone();
     }
@@ -421,6 +424,18 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
         Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&key), &create).await?,
     };
     Ok(match (import, imported(status, &answer)) {
+        // one there already, of an account host: replaced, never updated,
+        // so its token and its host are always one grant's (an update would
+        // keep the earlier grant's host, another org's, beside this token).
+        // A delete that lands and a make that fails leaves none: the person
+        // connects again
+        (Import::Compatibility, Imported::Conflict) if replace => {
+            pipes_delete(env, api, provider, user, None).await?;
+            match imported(confidential_request(&url, Method::Post, "application/json", Some(&key), &create).await?.0, &Value::Null) {
+                i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
+                _ => Imported::Refused,
+            }
+        }
         (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &update).await?.0, &Value::Null) {
             i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
             _ => Imported::Refused,
