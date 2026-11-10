@@ -73,6 +73,11 @@ pub const OUTBOX_MAX: usize = 32;
 /// What an adoption lets go, at most (`Link::leftovers`): past it, another
 /// contact is still let go the moment it writes or connects.
 pub const LEFTOVERS_MAX: usize = 256;
+/// Leftovers asked of the core at once, at most: a start asks its catch-up
+/// first, then these, and each one settled asks the next, so its commands
+/// never pass what the core's writer holds (`run::WRITER_MAX`).
+pub const LEFTOVERS_ASKED: usize = 16;
+const _: () = assert!(LEFTOVERS_ASKED + 8 < 64, "a start's asks fit in what the core's writer holds (run::WRITER_MAX)");
 
 /// Where the link is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,8 +333,6 @@ impl Link {
             Input::Started { rollback } => {
                 // an unlink the last life could not finish, first
                 out.extend(self.cleanup.map(|c| Action::Ask(c.cmd())));
-                // then what an adoption still lets go
-                out.extend(self.leftovers.iter().map(|l| Action::Ask(l.cmd())));
                 match &self.phase {
                     Phase::Off => {}
                     // the answer died with the last life
@@ -356,6 +359,9 @@ impl Link {
                         out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
                     }
                 }
+                // then what an adoption still lets go, a batch at a time,
+                // after the catch-up, so no flood of them crowds it out
+                out.extend(self.leftovers.iter().take(LEFTOVERS_ASKED).map(|l| Action::Ask(l.cmd())));
             }
             Input::Said(resp) => self.said(resp, &mut out),
             Input::Failed { cmd, what } => {
@@ -584,10 +590,22 @@ impl Link {
     /// A leftover gone (or refused for good), and what comes after it
     /// (a group left: its delete), asked at once.
     fn settle(&mut self, done: Leftover, then: Option<Leftover>, out: &mut Vec<Action>) {
-        self.leftovers.retain(|l| *l != done);
-        if let Some(next) = then.filter(|n| !self.leftovers.contains(n)) {
-            self.leftovers.push(next);
-            out.push(Action::Ask(next.cmd()));
+        let Some(at) = self.leftovers.iter().position(|l| *l == done) else { return };
+        match then.filter(|n| !self.leftovers.contains(n)) {
+            // its next step in its place, asked now
+            Some(next) => {
+                self.leftovers[at] = next;
+                out.push(Action::Ask(next.cmd()));
+            }
+            None => {
+                self.leftovers.remove(at);
+                // one of the batch asked is done: the next not yet asked
+                if at < LEFTOVERS_ASKED {
+                    if let Some(next) = self.leftovers.get(LEFTOVERS_ASKED - 1) {
+                        out.push(Action::Ask(next.cmd()));
+                    }
+                }
+            }
         }
         out.push(Action::Save);
     }
@@ -1085,12 +1103,13 @@ mod tests {
         assert_eq!(
             started,
             vec![
+                Action::Ask(Cmd::ContactInfo { contact: 3 }),
+                Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None }),
                 Action::Ask(Cmd::Delete { contact: 4, notify: true }),
                 Action::Ask(Cmd::LeaveGroup { group: 1 }),
                 Action::Ask(Cmd::DeleteAddress),
-                Action::Ask(Cmd::ContactInfo { contact: 3 }),
-                Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None }),
-            ]
+            ],
+            "its catch-up first"
         );
         // its catch-up: 9..=40 is the old conversation, 41 and 42 came while it moved
         let item = |id: i64| Item { id, shared: Some(format!("m{id}")), ..msg(3, None, &format!("text {id}")) };
@@ -1105,6 +1124,33 @@ mod tests {
         assert!(link.leftovers.is_empty());
         assert_eq!(link.contact(), Some(3), "the owner stays bound");
         assert!(!link.apply(Input::Started { rollback: false }).iter().any(|a| matches!(a, Action::Ask(Cmd::Delete { .. } | Cmd::LeaveGroup { .. } | Cmd::DeleteAddress))), "nothing left to let go");
+    }
+
+    /// Goal (Codex's review): an identity with many leftovers never crowds
+    /// out its start's catch-up: that is asked first, then a batch of
+    /// leftovers within what the core's writer holds, each one settled
+    /// asking the next, until every one was asked.
+    #[test]
+    fn many_leftovers_are_asked_a_batch_at_a_time() {
+        let many: Vec<Leftover> = (10..10 + 200).map(Leftover::Contact).collect();
+        let mut link = Link::default();
+        link.apply(Input::Adopt { owner: 3, name: "p", newest: 0, leftovers: &many });
+        let started = link.apply(Input::Started { rollback: false });
+        assert_eq!(started[..2], [Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
+        assert_eq!(started.len(), 2 + LEFTOVERS_ASKED, "a batch, within the writer's room (64)");
+        let mut asked: Vec<i64> = started.iter().filter_map(|a| if let Action::Ask(Cmd::Delete { contact, .. }) = a { Some(*contact) } else { None }).collect();
+        let mut pending: std::collections::VecDeque<i64> = asked.iter().copied().collect();
+        // bounded: each answer settles one
+        while let Some(c) = pending.pop_front() {
+            let next = link.apply(Input::Said(&Resp::Deleted { contact: c, by_them: false }));
+            let more: Vec<i64> = next.iter().filter_map(|a| if let Action::Ask(Cmd::Delete { contact, .. }) = a { Some(*contact) } else { None }).collect();
+            assert!(more.len() <= 1, "one for one");
+            pending.extend(&more);
+            asked.extend(more);
+        }
+        asked.sort();
+        assert_eq!(asked, (10..210).collect::<Vec<_>>(), "every one asked, once");
+        assert!(link.leftovers.is_empty());
     }
 
     /// Goal (replay, restart): an adoption is taken once and only while
