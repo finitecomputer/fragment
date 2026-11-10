@@ -1905,6 +1905,9 @@ fn run(cli: Cli) -> Result<()> {
             if j && watch {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
+            // every pass refuses it too (`read_local`); this one is before
+            // the watcher takes the folder or anything is asked of the host
+            sync::refuse_dir(&dir, dirs::home_dir().as_deref()).map_err(|e| usage(e.to_string()))?;
             let opts = SyncOptions {
                 mode: match mode.as_deref() {
                     _ if live => Mode::Pull,
@@ -2877,6 +2880,7 @@ fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
         crate::sync::SyncError::Cs(CsError::OutcomeUnknown(_)) => anyhow::Error::new(CodedError { code: Code::OutcomeUnknown, msg: e.to_string() }),
         // the host's refusal keeps its code (a viewer's sync is forbidden)
         crate::sync::SyncError::Cs(CsError::Host(refused)) | crate::sync::SyncError::Host(refused) => anyhow::Error::new(refused),
+        crate::sync::SyncError::Refused(folder) => anyhow::Error::new(CodedError::from(folder)),
         other => anyhow!("{other}"),
     }
 }
