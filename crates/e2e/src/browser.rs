@@ -154,6 +154,25 @@ pub struct Page {
     target: String,
 }
 
+/// How a page's document came back (`Browser::back`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Came {
+    /// The document that left, as the back/forward cache kept it.
+    Restored,
+    /// A new document, loaded: the browser's reasons the cache had none
+    /// to give (`notRestoredExplanations`).
+    Loaded(Value),
+}
+
+impl std::fmt::Display for Came {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Came::Restored => f.write_str("restored from the back/forward cache"),
+            Came::Loaded(why) => write!(f, "loaded again, the cache unused: {why}"),
+        }
+    }
+}
+
 /// A page's fetch held where a test says, then let go: a script for a
 /// page's `eval`. `window.__hold`, a RegExp, holds each fetch whose URL it
 /// matches (`window.__held` its releases: `window.__held.splice(0).forEach((go) => go())`);
@@ -1048,15 +1067,55 @@ impl Browser {
         bail!("a click aimed at {selector} never reached it: {}", hit.join("; then "))
     }
 
-    /// The page's history entry before this one, as Back takes it: a
-    /// document the back/forward cache kept comes back as it was.
-    pub fn back(&mut self, page: &Page) -> Result<()> {
+    /// The page's history entry before this one, as Back takes it, and how
+    /// its document came, as the browser reports it: the one the
+    /// back/forward cache kept (`Page.frameNavigated`'s `type`), or a new
+    /// one, answered once its default context is there (as `navigate`'s)
+    /// with the browser's reasons it kept none (`Page.backForwardCacheNotUsed`,
+    /// in either order with the commit). A page left before it finished
+    /// loading is not kept while it still parses (`Loading`), and once
+    /// parsed is kept and finishes that load after it is restored, its
+    /// first `load` and `pageshow` then (FIN-460).
+    pub fn back(&mut self, page: &Page) -> Result<Came> {
         let history = self.send("Page.getNavigationHistory", json!({}), Some(&page.session))?;
         let at = history["currentIndex"].as_u64().context("a page's history names its entry")?;
         anyhow::ensure!(at > 0, "no history entry before this one");
         let entry = history["entries"][at as usize - 1]["id"].clone();
-        self.send("Page.navigateToHistoryEntry", json!({ "entryId": entry }), Some(&page.session))?;
-        Ok(())
+        self.send("Page.enable", json!({}), Some(&page.session))?;
+        self.send("Runtime.enable", json!({}), Some(&page.session))?;
+        self.next += 1;
+        let id = self.next;
+        let msg = json!({ "id": id, "method": "Page.navigateToHistoryEntry", "params": { "entryId": entry }, "sessionId": page.session });
+        self.ws.send(Message::Text(msg.to_string().into()))?;
+        let (mut answered, mut kind, mut why, mut context) = (false, None::<String>, None::<Value>, None::<Value>);
+        let t0 = Instant::now();
+        while t0.elapsed() < NAVIGATED_MAX {
+            let Message::Text(t) = self.ws.read()? else { continue };
+            let v = message(&t)?;
+            if v["id"].as_u64() == Some(id) {
+                if !v["error"].is_null() {
+                    bail!("Page.navigateToHistoryEntry: {}", v["error"]);
+                }
+                answered = true;
+            } else if v["sessionId"] == page.session.as_str() {
+                let p = &v["params"];
+                match v["method"].as_str() {
+                    Some("Page.frameNavigated") if p["frame"]["id"] == page.target.as_str() => kind = p["type"].as_str().map(str::to_string),
+                    Some("Page.backForwardCacheNotUsed") if p["frameId"] == page.target.as_str() => why = Some(p["notRestoredExplanations"].clone()),
+                    Some("Runtime.executionContextCreated") if p["context"]["auxData"]["isDefault"] == true && p["context"]["auxData"]["frameId"] == page.target.as_str() => context = Some(p["context"]["id"].clone()),
+                    Some("Runtime.executionContextDestroyed") if context.as_ref() == Some(&p["executionContextId"]) => context = None,
+                    Some("Runtime.executionContextsCleared") => context = None,
+                    _ => {}
+                }
+            }
+            match kind.as_deref() {
+                Some("BackForwardCacheRestore") if answered => return Ok(Came::Restored),
+                Some(_) if answered && context.is_some() && why.is_some() => return Ok(Came::Loaded(why.unwrap_or_default())),
+                _ => {}
+            }
+            self.keep(v);
+        }
+        bail!("back: its document did not come in {NAVIGATED_MAX:.0?} (answered: {answered}, committed as: {kind:?}, the cache's reasons: {why:?})")
     }
 
     /// The page's (or frame's) document now, as its loader names it: a new

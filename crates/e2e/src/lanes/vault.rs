@@ -26,6 +26,17 @@ fn put(api: &Api, keys: &Keys, name: &str, body: &Value) -> Result<Reply> {
     api.signed(keys, "PUT", &format!("/api/vault/{name}"), Some(body))
 }
 
+/// The CLI in `home`, `value` and a line end piped on its stdin, as a
+/// person's shell pipes a secret: never on its command line.
+fn piped_cli(s: &Suite, api: &Api, home: &std::path::Path, args: &[&str], value: &str) -> Result<std::process::Output> {
+    use std::io::Write;
+    let mut c = s.bare_cli();
+    c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
+    let mut child = c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
+    child.stdin.take().expect("piped").write_all(format!("{value}\n").as_bytes())?;
+    Ok(child.wait_with_output()?)
+}
+
 /// Every node log the run has written so far, whole.
 fn logs(s: &Suite) -> String {
     let mut text = String::new();
@@ -139,11 +150,34 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{r} {again}"),
     );
 
+    // the CLI: a value piped on stdin, never on its command line, and never
+    // in what it prints
+    let home = s.dir("vault-home");
+    s.login(&api, &home);
+    let piped = sentinel();
+    let out = piped_cli(s, &api, &home, &["vault", "set", "cli-key", "--agent", "ada--k3x9", "--to", "api.example.com", "--header", "x-api-key", "--json"], &piped)?;
+    let printed = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let listed = s.cli(&api, &home, &["vault", "list"]);
+    let listed_text = format!("{}{}", String::from_utf8_lossy(&listed.stdout), String::from_utf8_lossy(&listed.stderr));
+    s.ok(
+        "the CLI sets a secret from stdin (its line end trimmed) and lists it, never printing the value",
+        out.status.success() && printed.contains("\"x-api-key\"") && !printed.contains(&piped) && listed.status.success() && listed_text.contains("cli-key  api.example.com  for ada--k3x9") && !listed_text.contains(&piped),
+        format!("{printed} / {listed_text}"),
+    );
+    let empty = piped_cli(s, &api, &home, &["vault", "set", "cli-empty", "--agent", "ada--k3x9"], "")?;
+    let argv = s.cli(&api, &home, &["vault", "set", "cli-argv", &piped, "--agent", "ada--k3x9"]);
+    let gone = s.cli(&api, &home, &["vault", "rm", "cli-key"]);
+    s.ok(
+        "an empty value is refused before anything is sent, a value on the command line is no argument the CLI takes, and rm removes it",
+        !empty.status.success() && !argv.status.success() && gone.status.success() && String::from_utf8_lossy(&gone.stdout).contains("secret cli-key removed"),
+        format!("{} / {} / {}", String::from_utf8_lossy(&empty.stderr), String::from_utf8_lossy(&argv.stderr), String::from_utf8_lossy(&gone.stdout)),
+    );
+
     // never in a log
     let text = logs(s);
     s.ok(
         "no value put (a token, its rotation, a Nostr key) is in any node log",
-        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec),
+        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&piped),
         format!("{} bytes of logs", text.len()),
     );
     Ok(())
