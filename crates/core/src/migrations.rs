@@ -47,6 +47,18 @@ pub const KEEP_MS: i64 = 14 * DAY_MS;
 pub const ARCHIVE_KEEP_MS: i64 = 90 * DAY_MS;
 /// Phase 2 moves in flight at once: the rest wait their turn.
 pub const ARCHIVING_MAX: usize = 8;
+/// A person on the roster's comp (F5), given once as they open the move:
+/// a seat for this long...
+pub const COMP_MS: i64 = 30 * DAY_MS;
+/// ...and this much credit, granted on their ledger once, by its id
+/// (`comp_grant_id`).
+pub const COMP_GRANT_MICROS: i64 = 25 * crate::price::USD;
+
+/// The comp's grant's id on `person`'s ledger: one a person, ever (a
+/// ledger answers the same id again as it did, granting nothing).
+pub fn comp_grant_id(person: &str) -> String {
+    format!("move:{person}")
+}
 
 /// The routine that starts a stage's import, on its new agent's own
 /// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;

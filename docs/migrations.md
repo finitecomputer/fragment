@@ -69,6 +69,22 @@ the alarm's deadlines, staff's acts) tells their open pages
 (`principal::tell_changed`, at most 32 people a call), which read their
 notices again.
 
+## The comp (F5)
+
+A person on the roster who opens the move (`/move`, `migrations::visit`)
+and has an old agent the roster offers or moves is given, once:
+
+- `COMP_GRANT_MICROS` ($25) of credit on their ledger, `GrantCredit` by
+  `migrations` with id `move:<person>` (`comp_grant_id`): a ledger answers
+  the same id again as it did, so it is granted once a person, ever;
+- a comped `seat` for `COMP_MS` (30 days, `CompSeat.untilMs`), which the
+  registry ends then. One who holds a seat already keeps theirs.
+
+Then Migrations marks them (`people.comped_ms`) and no visit gives it
+again. A visit cut off before the mark gives it again, each step
+answering as it did. A guest makes no agent (decision 25), so the comp
+comes before `/move` makes the new ones.
+
 ## The mover's routes
 
 | Route | Body → answer | Rules |
@@ -254,4 +270,4 @@ answer but 404, and `deploy` makes no bucket):
 
 `cutoff_ms`, once set, is phase 2's cutoff, in ms since the epoch. The
 cell reads them as `FRAGMENT_MIGRATIONS_MOVER` and
-`FRAGMENT_MIGRATIONS_CUTOFF_MS`. The credit grant comes with its own PR.
+`FRAGMENT_MIGRATIONS_CUTOFF_MS`.

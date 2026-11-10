@@ -261,6 +261,27 @@ fn a_grant_adds_purchased_credit_once() {
     assert_eq!(g.balance(), USD);
 }
 
+/// Goal: the finite.computer move's credit (F5) is granted once a person,
+/// ever, as the cell asks it (`migrations::comp_grant_id`): asked again,
+/// after a restart, and months later (past `REF_KEEP_MS`: a command is
+/// never forgotten), it grants nothing more; another person's is theirs.
+#[test]
+fn the_moves_credit_is_granted_once_a_person_ever() {
+    use crate::migrations::{comp_grant_id, COMP_GRANT_MICROS};
+    let comp = |person: &str| Op::Grant(GrantCredit { id: comp_grant_id(person), micros: COMP_GRANT_MICROS, by: "migrations".into(), why: "the finite.computer move's credit".into() });
+    let mut w = World::guest();
+    w.replays(comp("npub1ada"));
+    assert_eq!((w.status().purchased_micros, COMP_GRANT_MICROS), (25 * USD, 25 * USD));
+    let mut later = w.restarted();
+    later.replays(comp("npub1ada"));
+    later.now += 400 * 24 * 60 * 60 * 1000;
+    later.ok(comp("npub1ada"));
+    assert_eq!(later.ledger.totals().purchased, 25 * USD, "once, whenever it is asked again");
+    let mut other = World::guest();
+    other.ok(comp("npub1bea"));
+    assert_eq!(other.status().purchased_micros, 25 * USD);
+}
+
 #[test]
 fn a_grant_outside_its_rules_is_refused() {
     let mut w = World::seat();

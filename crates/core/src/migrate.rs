@@ -139,6 +139,7 @@ pub const REGISTRY: Class = Class {
         step!("public_addresses", "registry/0007_public_addresses.sql"),
         step!("org_content", "registry/0008_org_content.sql"),
         step!("key_sessions", "registry/0009_key_sessions.sql"),
+        step!("comp_until", "registry/0010_comp_until.sql"),
     ],
     variants: &[],
     kept: &[],
@@ -166,7 +167,7 @@ pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vaul
 /// Every platform class, as the lock lists them.
 /// The finite.computer move's one object (docs/migrations.md): removable
 /// with the move, by a `deleted_classes` tag (the debt ledger).
-pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql"), step!("opened_manifest", "migrations/0002_opened_manifest.sql"), step!("routine_generation", "migrations/0003_routine_generation.sql"), step!("people_by_person", "migrations/0004_people_by_person.sql")], variants: &[], kept: &[] };
+pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql"), step!("opened_manifest", "migrations/0002_opened_manifest.sql"), step!("routine_generation", "migrations/0003_routine_generation.sql"), step!("people_by_person", "migrations/0004_people_by_person.sql"), step!("people_comped", "migrations/0005_people_comped.sql")], variants: &[], kept: &[] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 8] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT, &MIGRATIONS];
