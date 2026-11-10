@@ -782,7 +782,7 @@ mod tests {
             assert_eq!((out.headers, out.query.as_deref()), (h(&[("authorization", "Bearer ya29.oauth")]), Some("key=AIza-vault")));
         }
         assert_eq!(resolved(&plan.wanted, &[(connected.clone(), "ya29.oauth".to_string())]).len(), 1, "the Vault's unanswered is left out, never filled with the connection's");
-        assert!(resolved(&[connected.clone()], &[(connected, String::new())]).is_empty(), "an empty secret is none");
+        assert!(resolved(std::slice::from_ref(&connected), &[(connected.clone(), String::new())]).is_empty(), "an empty secret is none");
     }
 
     /// Invalid: what the scan refuses, before any secret is asked for.
