@@ -116,6 +116,20 @@ pub fn is_e2e_fragment(name: &str) -> bool {
     fragment_proto::split_fragment_name(name).is_some_and(|(label, _)| label.starts_with(E2E_LABEL_PREFIX))
 }
 
+/// What a fragment's label has in it for an invite to it to be told as a
+/// notice that must be answered (`must_answer_invite`).
+pub const MUST_ANSWER_LABEL: &str = "must-answer";
+
+/// Whether an invite to `fragment` is told as a notice that must be
+/// answered (FIN-458), on a fleet whose levers are `levers` (none: no test
+/// secret). No owner asks one yet, so this is the clients' cover's proof:
+/// a fragment whose label has `MUST_ANSWER_LABEL` in it, on a local fleet
+/// alone (dev's, the e2e's), where everyone is a developer's test. On a
+/// branch deployment anyone could so cover the shell of anyone they invite.
+pub fn must_answer_invite(levers: Option<Fleet>, fragment: &str) -> bool {
+    levers == Some(Fleet::Local) && fragment_proto::split_fragment_name(fragment).is_some_and(|(label, _)| label.contains(MUST_ANSWER_LABEL))
+}
+
 /// Why a test secret is not honoured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -301,6 +315,22 @@ mod tests {
         assert!(is_e2e_fragment("e2e-1a2b3c-todo--k3x9"));
         for other in ["todo--k3x9", "my-e2e-todo--k3x9", "e2e--k3x9", "e2e-todo.paul", "e2e-", "e2e-todo"] {
             assert!(!is_e2e_fragment(other), "{other}");
+        }
+    }
+
+    /// Goal: an invite covers its invitee's shell only where everyone is a
+    /// developer's test (a local fleet, dev's or the e2e's), never on a
+    /// branch deployment, where anyone could so cover anyone they invite,
+    /// and never on production; and only one to a `must-answer` fragment.
+    #[test]
+    fn a_must_answer_invite_is_a_local_fleets_alone() {
+        for name in ["must-answer-1-0a1b2c--k3x9", "e2e-0a1b2c-must-answer-g--k3x9"] {
+            assert!(must_answer_invite(Some(Fleet::Local), name), "{name}");
+            assert!(!must_answer_invite(Some(Fleet::Branch), name), "{name} on a branch deployment");
+            assert!(!must_answer_invite(None, name), "{name} without levers");
+        }
+        for other in ["todo--k3x9", "must-answer", "todo--must"] {
+            assert!(!must_answer_invite(Some(Fleet::Local), other), "{other}");
         }
     }
 

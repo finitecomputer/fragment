@@ -61,6 +61,7 @@ use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -278,6 +279,10 @@ const _: () = assert!(SLEEP_STEPS_MS <= 14 * 60_000, "docs/api.md: a sleep answe
 /// streams through (`egress_api`), at most the router's
 /// `limits::BLOB_MAX_BYTES`.
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// An answer to a request a Vault filled is read whole, every spelling of
+/// each value it echoes named, up to this long; past it (or an event
+/// stream) each value's own bytes are named as it streams.
+const ANSWER_HIDDEN_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
 /// Awake intervals one flush sends (one is made every five minutes awake).
@@ -444,6 +449,11 @@ pub struct ComputerCell {
     /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
     /// only: a restart forgets them, and they lapse on their own bounds.
     relays: RefCell<fragment_core::relay::Leases>,
+    /// The hosts its egress catches, as its running start's `arm` set them
+    /// (its generation's): a guest's read of its view arms again when its
+    /// agents' Vault secrets name a host more. In memory only: a new
+    /// isolate arms again at the next read.
+    armed: RefCell<Option<(u64, Vec<String>)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -468,6 +478,7 @@ impl DurableObject for ComputerCell {
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
+            armed: RefCell::new(None),
             relays: RefCell::default(),
             schema,
         }
@@ -1155,7 +1166,8 @@ impl ComputerCell {
             }));
         }
         let id = self.must(MetaKey::Id)?;
-        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
+        let hosts = self.swap_hosts().await?;
+        self.arm(generation, &id, hosts).await?;
         Ok(None)
     }
 
@@ -1299,9 +1311,73 @@ impl ComputerCell {
         self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])
     }
 
-    /// The hosts the swap intercepts: every provider's in the catalog.
-    fn swap_hosts(&self) -> JsValue {
-        js::to_js(&json!(self.cfg.providers.hosts()))
+    /// The hosts the swap intercepts: every provider's in the catalog, and
+    /// each its agents' Vault secrets go to (`vault_usable`).
+    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
+        let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
+        let usable = self.vault_usable(&fragments).await;
+        let mut hosts = self.cfg.providers.hosts();
+        hosts.extend(usable.into_iter().flat_map(|u| u.2));
+        hosts.sort_unstable();
+        hosts.dedup();
+        Ok(hosts)
+    }
+
+    /// Sets its running start `generation`'s egress intercepts (entry.mjs
+    /// `arm`): the platform's own hosts and `hosts`, kept as armed. False:
+    /// that start was superseded.
+    async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
+        let g = JsValue::from_f64(generation as f64);
+        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
+        let done = armed.as_bool() == Some(true);
+        if done {
+            *self.armed.borrow_mut() = Some((generation, hosts));
+        }
+        Ok(done)
+    }
+
+    /// Arms its running start again when `vault_hosts` names a host its
+    /// egress does not catch yet (an agent's Vault secret set since it
+    /// started), so a guest that reads a placeholder reaches the swap with
+    /// it. Asleep, its next start arms them all. A failure is logged: the
+    /// placeholder then goes out uncaught, and fills nothing.
+    async fn arm_more(&self, vault_hosts: Vec<String>) {
+        let Ok(life) = self.lifecycle() else { return };
+        let Some(generation) = life.running() else { return };
+        let armed = self.armed.borrow().clone();
+        let mut hosts = armed.filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        if vault_hosts.iter().all(|h| hosts.contains(h)) {
+            return;
+        }
+        hosts.extend(self.cfg.providers.hosts());
+        hosts.extend(vault_hosts);
+        hosts.sort_unstable();
+        hosts.dedup();
+        let armed = match self.meta(MetaKey::Id) {
+            Ok(Some(id)) => self.arm(generation, &id, hosts).await,
+            _ => return,
+        };
+        if let Err(e) = armed {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "arm": "vault", "error": e.message }));
+        }
+    }
+
+    /// The Vault secrets each of its agents (`fragments`) may use, as its
+    /// owner's Vault answers (vault.rs `names`). A Vault that does not
+    /// answer is logged and lends none: the catalog's credentials never
+    /// wait on it.
+    async fn vault_usable(&self, fragments: &[String]) -> Vec<crate::vault::Usable> {
+        let owner = match self.meta(MetaKey::Owner) {
+            Ok(Some(owner)) if !fragments.is_empty() => owner,
+            _ => return vec![],
+        };
+        match crate::vault::names(&self.env, &owner, fragments).await {
+            Ok(usable) => usable,
+            Err(e) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "names", "error": e.message }));
+                vec![]
+            }
+        }
     }
 
     /// Whether the guest reaches code.storage through its egress
@@ -1451,6 +1527,8 @@ impl ComputerCell {
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
+        // what its egress catches, asked before it starts (its agents' Vault's)
+        let hosts = self.swap_hosts().await?;
         // a wipe that began while this start awaited starts nothing: the
         // check and the start are one turn (the host's start is synchronous)
         if self.wiped.get() {
@@ -1458,8 +1536,7 @@ impl ComputerCell {
         }
         let started_ms = js::now_ms();
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
-        if armed.as_bool() != Some(true) {
+        if !self.arm(generation, &id, hosts).await? {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
         }
         if self.lever_take(MetaKey::FailStarts) {
@@ -1979,10 +2056,24 @@ impl ComputerCell {
         }
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
-        if catalog.is_empty() || view.agents.is_empty() {
+        if view.agents.is_empty() {
             return Ok(view);
         }
         let keys = crate::keys::tag_keys(&self.env).await?;
+        // each agent's person's Vault's secrets bound to it, as own keys with
+        // no variable (FIN-466): their hosts caught before the guest can know one
+        let fragments: Vec<String> = view.agents.iter().map(|a| a.fragment.clone()).collect();
+        let usable = self.vault_usable(&fragments).await;
+        self.arm_more(usable.iter().flat_map(|u| u.2.iter().cloned()).collect()).await;
+        for crate::vault::Usable(of, name, hosts) in usable {
+            if let Some(agent) = view.agents.iter_mut().find(|a| a.fragment == of) {
+                let tag = keys[0].tag(&view.computer, &agent.fragment, &name);
+                agent.credentials.push(AgentCredential { provider: name.clone(), kind: Kind::Own, env: vec![], placeholder: Placeholder::new(Kind::Own, &name, &tag).text(), hosts, model_base: None });
+            }
+        }
+        if catalog.is_empty() {
+            return Ok(view);
+        }
         let states = self.connection_states(&view.owner).await;
         let own = self.own_key_names()?;
         for agent in &mut view.agents {
@@ -3051,9 +3142,11 @@ impl ComputerCell {
         let keys = crate::keys::tag_keys(&self.env).await?;
         let mut agent: Option<&str> = None;
         for p in &b.placeholders {
-            let provider = self.cfg.providers.get(&p.provider).ok_or_else(|| CellError::invalid(format!("no provider {:?} on this deployment", p.provider)))?;
-            if !provider.hosts.contains(&b.host) {
-                return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {}", provider.name, provider.hosts.join(", "), b.host)));
+            // a name no catalog row has is its agent's person's Vault's to answer
+            if let Some(provider) = self.cfg.providers.get(&p.provider) {
+                if !provider.hosts.contains(&b.host) {
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {}", provider.name, provider.hosts.join(", "), b.host)));
+                }
             }
             let named = swap::agent_of(&keys, &id, &fragments, &p.provider, &p.tag).ok_or_else(|| {
                 CellError::new(
@@ -3072,8 +3165,10 @@ impl ComputerCell {
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
         let narrowed = stored_connections(row["connections"].as_str().unwrap_or_default(), agent)?;
         let mut secrets = vec![];
-        for p in &b.placeholders {
-            let provider = self.cfg.providers.get(&p.provider).expect("checked above");
+        // a Vault's secret (a name no catalog row has) is its egress's to ask
+        // the agent's person's Vault for, this agent's now that its tag says so
+        for p in b.placeholders.iter().filter(|p| self.cfg.providers.get(&p.provider).is_some()) {
+            let provider = self.cfg.providers.get(&p.provider).expect("a catalog's, filtered so");
             if !may_use(&narrowed, &provider.name) {
                 let list = narrowed.as_deref().unwrap_or_default();
                 return Err(CellError::new(
@@ -3795,31 +3890,90 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let url = req.url()?;
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     let headers_in: Vec<(String, String)> = req.headers().entries().filter(|(name, _)| !HOP_HEADERS.contains(&name.as_str()) && !name.starts_with("x-fragment-")).collect();
-    let plan = Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(|e| CellError::new(e.code(), e.to_string()))?;
+    let refused = |e: swap::SwapError| CellError::new(e.code(), e.to_string());
+    let found = swap::found(&headers_in, url.query(), url.path()).map_err(refused)?;
+    // a name no catalog row has is its agent's person's Vault's (FIN-466):
+    // its row is known once the Vault answers, and the request is planned then
+    let vaulted = found.iter().any(|p| cfg.providers.get(&p.provider).is_none());
+    if !vaulted {
+        Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(refused)?;
+    }
     let method = req.method();
     let body = match method {
         Method::Get | Method::Head => vec![],
         _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
     };
-    let mut secrets = BTreeMap::new();
+    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    // each placeholder's secret, by its provider and tag
+    let mut answered: Vec<(String, String, String)> = vec![];
+    let mut vault_rows = vec![];
+    // what a Vault filled (never a signature), by name: named so in the answer
+    let mut filled: Vec<(String, String)> = vec![];
+    // a Vault's secret that goes as a half of basic auth, if one does
+    let mut basic: Option<String> = None;
+    let mut signed = false;
     // whose ledger a key's call goes on, and as which agent
     let mut payer: Option<(String, String, String)> = None;
-    if !plan.is_empty() {
-        let asked: Vec<Value> = plan.wanted.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
+    if !found.is_empty() {
+        let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
         let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
-            if let Some(p) = plan.wanted.iter().find(|w| w.provider == provider && w.tag == tag) {
-                secrets.insert(p.clone(), secret.to_string());
-            }
-        }
-        if secrets.len() != plan.wanted.len() || secrets.values().any(String::is_empty) {
-            return Err(CellError::host("the computer resolved fewer credentials than were asked for"));
+            answered.push((provider.to_string(), tag.to_string(), secret.to_string()));
         }
         let field = |k: &str| answer[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the computer named no {k}")));
-        payer = Some((field("agent")?, field("owner")?, field("identity")?));
+        let (agent, owner, identity) = (field("agent")?, field("owner")?, field("identity")?);
+        // a Vault's secrets, asked of the agent's person's Vault: each bound
+        // to this agent, toward this host; a signature over the request as
+        // it goes, over https
+        let vaulted: Vec<&Placeholder> = found.iter().filter(|p| cfg.providers.get(&p.provider).is_none()).collect();
+        if !vaulted.is_empty() {
+            let ask = crate::vault::FillAsk {
+                agent: agent.clone(),
+                host: host.clone(),
+                names: vaulted.iter().map(|p| p.provider.clone()).collect(),
+                method: method.as_ref().to_string(),
+                url: format!("https://{host}{}{query}", url.path()),
+                body_sha256: (!body.is_empty()).then(|| hex::encode(Sha256::digest(&body))),
+            };
+            for (p, crate::vault::Filled(secret, place, is_signed)) in vaulted.iter().zip(crate::vault::fill(env, &owner, &ask).await?) {
+                let (placing, _) = fragment_core::vault::placing(&place).map_err(|e| CellError::host(format!("a Vault secret's place: {e}")))?;
+                let placement = placing.placement();
+                if matches!(placement, fragment_core::catalog::Placement::Basic { .. }) {
+                    basic = Some(p.provider.clone());
+                }
+                match is_signed {
+                    true => signed = true,
+                    false => filled.push((p.provider.clone(), secret.clone())),
+                }
+                answered.push((p.provider.clone(), p.tag.clone(), secret));
+                // the Vault checked this host is one of its own
+                vault_rows.push(fragment_core::vault::row(&p.provider, vec![host.clone()], placement));
+            }
+        }
+        payer = Some((agent, owner, identity));
     }
-    let out_parts = plan.apply(&headers_in, url.query(), &cfg.providers, &secrets);
+    let catalog = cfg.providers.with(vault_rows);
+    let plan = Plan::of(&headers_in, url.query(), url.path(), &catalog, &host).map_err(refused)?;
+    if signed && plan.wanted.len() > 1 {
+        return Err(CellError::invalid("a request a Vault signs carries no other placeholder: its signature covers the request as it is sent"));
+    }
+    let mut secrets = BTreeMap::new();
+    for p in &plan.wanted {
+        if let Some((_, _, s)) = answered.iter().find(|(provider, tag, s)| *provider == p.provider && *tag == p.tag && !s.is_empty()) {
+            secrets.insert(p.clone(), s.clone());
+        }
+    }
+    if secrets.len() != plan.wanted.len() {
+        return Err(CellError::host("the computer resolved fewer credentials than were asked for"));
+    }
+    let out_parts = plan.apply(&headers_in, url.query(), &catalog, &secrets);
+    // a Vault's half of basic auth goes as the header's base64, which a
+    // short password's own spellings would not name: named whole too
+    if let Some(name) = &basic {
+        let header = out_parts.headers.iter().find(|(h, _)| h == "authorization").and_then(|(_, v)| v.strip_prefix("Basic "));
+        filled.extend(header.map(|b| (name.clone(), b.to_string())));
+    }
     let headers = Headers::new();
     for (name, value) in &out_parts.headers {
         headers.set(name, value)?;
@@ -3827,7 +3981,12 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     if !body.is_empty() {
         headers.set("content-length", &body.len().to_string())?;
     }
-    let query = out_parts.query.map(|q| format!("?{q}")).unwrap_or_default();
+    // a signed request goes with the query its signature covers, byte for
+    // byte (it carries no other placeholder, so nothing in it was swapped)
+    let query = match signed {
+        true => query,
+        false => out_parts.query.map(|q| format!("?{q}")).unwrap_or_default(),
+    };
     let target = match &cfg.swap_upstream {
         Some(upstream) => {
             headers.set("x-fragment-upstream-host", &host)?;
@@ -3861,9 +4020,11 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let call = fragment_core::price::KeyCall { method: method.as_ref(), host: &host, path: url.path(), body: &body, status: answered };
         let used: Vec<(&Placeholder, Usage)> = keys.iter().map(|p| (*p, fragment_core::price::key_usage(&p.provider, &call))).collect();
         // each call the provider answered is the agent's (decision 37), a key's at its price
+        // a Vault's secret is no catalog row to count (its own uses are Later: FIN-466)
         let uses: Vec<Value> = plan
             .wanted
             .iter()
+            .filter(|p| cfg.providers.get(&p.provider).is_some())
             .map(|p| {
                 let usage = used.iter().find(|(k, _)| *k == p).map(|(_, u)| u);
                 let micros = usage.map_or(0, |u| book.price(u).map_or(0, |priced| priced.charge));
@@ -3880,6 +4041,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
             if !rows.is_empty() {
                 crate::meter::charge(&env, &owner, rows).await;
             }
+            if uses.is_empty() {
+                return;
+            }
             if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
                 console_error!("{}", json!({ "egress": "swap", "used": e.message }));
             }
@@ -3890,7 +4054,63 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status }));
     }
-    sent
+    match sent {
+        Ok(resp) if !filled.is_empty() => hidden(resp, &filled).await,
+        sent => sent,
+    }
+}
+
+/// An answer that may echo a Vault's value, with each value named as its
+/// secret (`{{name}}`), as a job's fetch names its own (Paul, 2026-11-09:
+/// echoed values hidden): in its headers, and in its body. A body read
+/// whole (up to `ANSWER_HIDDEN_MAX_BYTES`, not an event stream) has every
+/// spelling of a value named (`secrets::redact`), or its bytes, not text;
+/// past that, or an event stream, each value's own bytes are named as it
+/// streams (`secrets::Streamed`), a value split across pieces too.
+async fn hidden(mut resp: Response, filled: &[(String, String)]) -> CellResult<Response> {
+    let redact = |text: String| filled.iter().fold(text, |t, (name, value)| fragment_core::secrets::redact(t, &BTreeMap::from([(name.clone(), value.clone())])));
+    let headers = Headers::new();
+    for (name, value) in resp.headers().entries() {
+        headers.set(&name, &redact(value))?;
+    }
+    let status = resp.status_code();
+    // no body (a HEAD's, a 204's): its headers were all it could echo
+    if !matches!(resp.body(), ResponseBody::Stream(_)) || matches!(status, 101 | 204 | 304) {
+        return Ok(resp.with_headers(headers));
+    }
+    let kind = resp.headers().get("content-type")?.unwrap_or_default();
+    let mut stream = resp.stream()?;
+    let mut streamed = fragment_core::secrets::Streamed::new(filled);
+    let mut read = vec![];
+    if !kind.starts_with("text/event-stream") {
+        // bounded: each piece read adds to `read`, which stops at its cap
+        while read.len() <= ANSWER_HIDDEN_MAX_BYTES {
+            match stream.next().await {
+                Some(piece) => read.extend(piece?),
+                None => {
+                    let body = match String::from_utf8(read) {
+                        Ok(text) => redact(text).into_bytes(),
+                        Err(e) => [streamed.push(&e.into_bytes()), streamed.finish()].concat(),
+                    };
+                    headers.set("content-length", &body.len().to_string())?;
+                    return Ok(Response::from_bytes(body)?.with_status(status).with_headers(headers));
+                }
+            }
+        }
+    }
+    // a stream: what was read so far, then the rest as it comes, each named
+    let _ = headers.delete("content-length");
+    let first = streamed.push(&read);
+    let rest = futures_util::stream::unfold(Some((stream, streamed)), |state| async move {
+        let (mut stream, mut streamed) = state?;
+        match stream.next().await {
+            Some(Ok(piece)) => Some((Ok::<Vec<u8>, worker::Error>(streamed.push(&piece)), Some((stream, streamed)))),
+            Some(Err(e)) => Some((Err(e), None)),
+            None => Some((Ok(streamed.finish()), None)),
+        }
+    });
+    let body = futures_util::stream::once(async move { Ok::<Vec<u8>, worker::Error>(first) }).chain(rest);
+    Ok(Response::from_stream(body)?.with_status(status).with_headers(headers))
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

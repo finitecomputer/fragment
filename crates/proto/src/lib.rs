@@ -2536,6 +2536,7 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod migrations;
 pub mod notice;
 pub mod org;
 #[cfg(feature = "schema")]

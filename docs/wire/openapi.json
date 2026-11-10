@@ -146,6 +146,96 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Command": {
+        "description": "One thing to do to one old agent, flat: its `kind`, and the fields\nthat kind has. Every step is idempotent on the mover's side: a stop of\na stopped runtime does nothing, and a stage uploads the same parts again.",
+        "properties": {
+          "as": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Mark"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`retire`: how the old agent is marked moved."
+          },
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "`command_id`: `<old>:<attempt>:<step>`.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CommandKind"
+          },
+          "old": {
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Phase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`stop_and_stage`: its phase."
+          },
+          "secrets": {
+            "default": [],
+            "description": "`stop_and_stage`: the secrets to hand on (none until the vault: FIN-466).",
+            "items": {
+              "$ref": "#/components/schemas/SecretKind"
+            },
+            "type": "array"
+          },
+          "stage": {
+            "default": null,
+            "description": "`stop_and_stage`: the stage to upload (`stage_id`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "old",
+          "attempt",
+          "kind"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "CommandKind": {
+        "description": "What a command asks.\n\nOpen (`x-fragment-open`, docs/wire): the mover leaves a command it\ndoes not know in the mailbox, done by no one, and the move is held\nwhen its deadline passes.",
+        "oneOf": [
+          {
+            "const": "stop_and_stage",
+            "description": "Stop the old agent, then upload its zip as `stage`, in parts, and\ncomplete it (the manifest last).",
+            "type": "string"
+          },
+          {
+            "const": "retire",
+            "description": "Retire it (a verified backup first) and mark it moved, `as`.",
+            "type": "string"
+          },
+          {
+            "const": "restart",
+            "description": "Start it again: staff gave it back (`restart-old`).",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
       "Counts": {
         "properties": {
           "events": {
@@ -534,6 +624,27 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Has": {
+        "description": "Which secrets it holds (never their values).",
+        "properties": {
+          "nostr": {
+            "type": "boolean"
+          },
+          "openrouter": {
+            "type": "boolean"
+          },
+          "telegram": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "telegram",
+          "openrouter",
+          "nostr"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
       "IdentityKind": {
         "description": "What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key\nstays the fragment's and is not registered. An agent has a designated\nowner, a person.",
         "enum": [
@@ -542,6 +653,29 @@
         ],
         "type": "string",
         "x-fragment-direction": "out"
+      },
+      "LeftBehind": {
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "why": {
+            "description": "`cache`, `runtime`, `secret`, … (the classifier's class).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "bytes",
+          "why"
+        ],
+        "type": "object",
+        "x-fragment-direction": "both"
       },
       "ListWatchFrame": {
         "description": "A frame of `GET /api/fragments/watch`, the socket that follows a\nsigner's list. Frames name nothing: on `changed` the page reads its\nlist, and what it is told (`GET /api/notices`), again with its own\ncredential. The cell writes these as constant text\n(cell/src/principal.rs).\n\nOpen (`x-fragment-open`, docs/wire): a reader ignores a frame it does\nnot know (the shell's list, the iOS app).",
@@ -1351,6 +1485,113 @@
         "x-fragment-direction": "out",
         "x-fragment-open": true
       },
+      "Mailbox": {
+        "description": "`GET /api/migrations/mover/mailbox`: what the mover is told to do,\noldest first, at most `MAILBOX_MAX`. A command stays until a report on\nit is taken, so reading again is the retry.",
+        "properties": {
+          "commands": {
+            "items": {
+              "$ref": "#/components/schemas/Command"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "commands"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Manifest": {
+        "description": "`manifest.json`, as the mover writes it beside the zip (last).",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bytes": {
+            "description": "The files inside it, uncompressed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "format": {
+            "description": "`STAGE_FORMAT`.",
+            "type": "string"
+          },
+          "layout": {
+            "description": "How the folder is laid out, for the importer: `finite-computer`.",
+            "type": "string"
+          },
+          "left": {
+            "default": [],
+            "description": "What stayed behind, and why (`MANIFEST_LEFT_MAX` of them).",
+            "items": {
+              "$ref": "#/components/schemas/LeftBehind"
+            },
+            "type": "array"
+          },
+          "left_more": {
+            "default": null,
+            "description": "Paths left behind past the list, if any.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "old": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/Phase"
+          },
+          "zip_bytes": {
+            "description": "The zip's size and SHA-256 (hex).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "zip_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "old",
+          "phase",
+          "attempt",
+          "layout",
+          "zip_bytes",
+          "zip_sha256",
+          "bytes",
+          "files"
+        ],
+        "type": "object",
+        "x-fragment-direction": "both"
+      },
+      "Mark": {
+        "description": "How a retired old agent is marked on the old platform.",
+        "oneOf": [
+          {
+            "const": "migrated",
+            "description": "Its person brought it over.",
+            "type": "string"
+          },
+          {
+            "const": "archived",
+            "description": "Phase 2: staged and turned off at the cutoff.",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out"
+      },
       "Member": {
         "properties": {
           "addedAt": {
@@ -1447,6 +1688,96 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "MoveAt": {
+        "description": "The move's state, after a call that may have changed it.",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/MoveState"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "MoveState": {
+        "description": "Where one old agent's move is (docs/migrations.md, \"The state machine\").\n\nOpen (`x-fragment-open`, docs/wire): a reader (the mover) takes a\nstate it does not know as one it does not act on.",
+        "oneOf": [
+          {
+            "const": "listed",
+            "description": "On the roster; its person is not known here yet.",
+            "type": "string"
+          },
+          {
+            "const": "open",
+            "description": "Offered to its person.",
+            "type": "string"
+          },
+          {
+            "const": "later",
+            "description": "\"Not now\": offered again a day later.",
+            "type": "string"
+          },
+          {
+            "const": "never",
+            "description": "\"Never\": not offered, until they ask again.",
+            "type": "string"
+          },
+          {
+            "const": "asked",
+            "description": "\"Yes\": the mover is told to stop and stage it.",
+            "type": "string"
+          },
+          {
+            "const": "staging",
+            "description": "The mover stopped it and is staging it.",
+            "type": "string"
+          },
+          {
+            "const": "importing",
+            "description": "Staged: its new agent is bringing itself over.",
+            "type": "string"
+          },
+          {
+            "const": "retiring",
+            "description": "Imported: the mover is told to retire the old one.",
+            "type": "string"
+          },
+          {
+            "const": "moved",
+            "description": "Done: the old agent is retired and marked migrated.",
+            "type": "string"
+          },
+          {
+            "const": "held",
+            "description": "Stuck: staff take it from here (`HeldReason`).",
+            "type": "string"
+          },
+          {
+            "const": "archiving",
+            "description": "Phase 2: staged and retired at the cutoff, unasked.",
+            "type": "string"
+          },
+          {
+            "const": "archived",
+            "description": "Phase 2: its stage is kept 90 days, for a late Yes.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Phase 2: its 90 days passed; its stage is deleted.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Gone from the roster before it was asked (moved by hand, or no\nlonger live).",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
+      },
       "Notice": {
         "description": "One thing a person is told, in the server's words, with what they may do\nabout it.",
         "properties": {
@@ -1476,6 +1807,11 @@
           },
           "level": {
             "$ref": "#/components/schemas/NoticeLevel"
+          },
+          "mustAnswer": {
+            "default": false,
+            "description": "It must be answered (FIN-458): a client shows it alone, over\neverything, until one of its actions goes through, and the read\nafter no longer has it. The first such in the list first: its\nowner lists its own oldest first. A client from before it shows it\nas any other.",
+            "type": "boolean"
           },
           "text": {
             "default": null,
@@ -1577,6 +1913,44 @@
         ],
         "type": "object",
         "x-fragment-direction": "out"
+      },
+      "OldBrain": {
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "bytes"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "OldSite": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "public": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "public"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
       },
       "OpDecl": {
         "description": "An operation as `fragment.json` declares it.",
@@ -1714,6 +2088,15 @@
         ],
         "type": "object",
         "x-fragment-direction": "out"
+      },
+      "Phase": {
+        "description": "Which phase a stage is of: one the person asked for (`p1`), or one we\nmade at the cutoff for someone who never answered (`p2`).",
+        "enum": [
+          "p1",
+          "p2"
+        ],
+        "type": "string",
+        "x-fragment-direction": "both"
       },
       "Pinned": {
         "description": "Its answer: the fragment, and whether it is pinned now.",
@@ -1950,6 +2333,102 @@
         "x-fragment-direction": "out",
         "x-fragment-open": true
       },
+      "Report": {
+        "description": "`POST /api/migrations/mover/agents/{old}/report`: what happened on the\ncommand it names. Taken only for that old agent's current command;\nanother (a stale attempt's) is 409, changing nothing. `seq` only grows\nper command: one taken already is a 200 that changes nothing.\n\nFlat, one shape for every kind, read as plain fields: its `kind`, and\nthe fields that kind has. `stopped` (the old agent is a folder now);\n`progress`, `bytes` and `files` so far; `staged` (`POST …/complete`\ndone), `manifest_sha256`, `bytes` and `files` in all; `failed` (the\nplatform decides whether to try again), `step` and `why`; `retired`\n(and marked moved), `receipt`; `restarted`. Another kind, or a field a\nkind needs and lacks, is 400.",
+        "properties": {
+          "bytes": {
+            "default": null,
+            "description": "Bytes and files staged so far (`progress`), or in all (`staged`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "files": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "manifest_sha256": {
+            "default": null,
+            "description": "`staged`: the manifest's SHA-256 (hex), as `POST …/complete` answered it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receipt": {
+            "default": null,
+            "description": "`retired`: Core's retirement snapshot's id.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "step": {
+            "default": null,
+            "description": "`failed`: the step, and why (`TEXT_MAX_BYTES` each).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "why": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "command",
+          "seq",
+          "kind"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "Reported": {
+        "description": "A report's answer: the move's state after it, its attempt, and\nwhether this report changed anything (false: its `seq` was taken).",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/MoveState"
+          },
+          "taken": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "state",
+          "attempt",
+          "taken"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
       "Role": {
         "description": "A member's role in a fragment. `Public` is the floor anyone who can see\nthe fragment holds; the others are granted. Ordered weakest first.",
         "enum": [
@@ -1959,6 +2438,143 @@
           "owner"
         ],
         "type": "string",
+        "x-fragment-direction": "out"
+      },
+      "Roster": {
+        "description": "`PUT /api/migrations/mover/roster`: every live old agent and its\nowner, whole. A snapshot replaces the last: a row the person has not\nanswered Yes to that is missing from it is withdrawn, and a row in\nflight is left as it is. The same `snapshot` again changes nothing.",
+        "properties": {
+          "observed_ms": {
+            "description": "When the mover read the old platform, ms since the epoch.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "people": {
+            "description": "At most `ROSTER_PEOPLE_MAX`, each WorkOS id once.",
+            "items": {
+              "$ref": "#/components/schemas/RosterPerson"
+            },
+            "type": "array"
+          },
+          "snapshot": {
+            "description": "The mover's id for this snapshot (`TEXT_MAX_BYTES`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot",
+          "observed_ms",
+          "people"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "RosterAgent": {
+        "description": "An old agent as the roster lists it: what the person is asked about.",
+        "properties": {
+          "brains": {
+            "default": [],
+            "description": "Brains its person owns (`ROSTER_LIST_MAX`).",
+            "items": {
+              "$ref": "#/components/schemas/OldBrain"
+            },
+            "type": "array"
+          },
+          "has": {
+            "$ref": "#/components/schemas/Has"
+          },
+          "last_active_ms": {
+            "default": null,
+            "description": "When it was last used, ms since the epoch.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "old": {
+            "description": "Its id (`valid_old`).",
+            "type": "string"
+          },
+          "picture_url": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sites": {
+            "default": [],
+            "description": "Sites it owns (`ROSTER_LIST_MAX`).",
+            "items": {
+              "$ref": "#/components/schemas/OldSite"
+            },
+            "type": "array"
+          },
+          "sizes": {
+            "$ref": "#/components/schemas/Sizes"
+          }
+        },
+        "required": [
+          "old",
+          "name",
+          "sizes",
+          "has"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "RosterPerson": {
+        "description": "A person on the roster: their WorkOS user (the one both platforms sign\nthem in as) and their live old agents.",
+        "properties": {
+          "agents": {
+            "description": "At most `ROSTER_AGENTS_MAX`, each old id once in the roster.",
+            "items": {
+              "$ref": "#/components/schemas/RosterAgent"
+            },
+            "type": "array"
+          },
+          "email": {
+            "description": "Their email on the old platform: where phase 2's mail goes.",
+            "type": "string"
+          },
+          "workos_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workos_id",
+          "email",
+          "agents"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "RosterTaken": {
+        "description": "The roster's answer: the rows it offered at once (new rows of a person\nbound here already: a person is bound when they open the move), the\nrows it withdrew, and whether it was the last snapshot again (then\nnothing changed).",
+        "properties": {
+          "bound": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "replay": {
+            "type": "boolean"
+          },
+          "withdrawn": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bound",
+          "withdrawn",
+          "replay"
+        ],
+        "type": "object",
         "x-fragment-direction": "out"
       },
       "SearchAnswer": {
@@ -2019,6 +2635,24 @@
           "setAt"
         ],
         "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "SecretKind": {
+        "description": "A secret an old agent holds that its person may bring (FIN-466's vault;\nnot handed on yet).",
+        "oneOf": [
+          {
+            "enum": [
+              "telegram_bot_token",
+              "openrouter_key"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "nostr_nsec",
+            "description": "The old agent's Nostr key: it signs for the old platform's services alone.",
+            "type": "string"
+          }
+        ],
         "x-fragment-direction": "out"
       },
       "SecretList": {
@@ -2148,6 +2782,171 @@
           "visibility",
           "members",
           "guests"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Sizes": {
+        "description": "An old agent's bytes by class, as the one classifier counts them (the\nstaged class is `move`).",
+        "properties": {
+          "cache": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "history": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "move": {
+            "description": "What is staged: history, work, owned brains and sites.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "work": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cache",
+          "history",
+          "work",
+          "move",
+          "total"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "StageComplete": {
+        "description": "`POST …/complete`: the stage's manifest, for its zip made whole from\nthe parts taken (their bytes in all its `zip_bytes`; R2 refuses a part\nbut the last under `PART_MIN_BYTES`), the manifest written last. The\nsame complete again answers the same; one cut off between the zip and\nits manifest is not made again (its attempt stalls, and the next stages\nafresh).",
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/Manifest"
+          }
+        },
+        "required": [
+          "manifest"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "StageCompleted": {
+        "description": "The manifest as written, by its SHA-256 (hex): what the mover's\n`staged` report names.",
+        "properties": {
+          "manifest_sha256": {
+            "type": "string"
+          },
+          "zip_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "manifest_sha256",
+          "zip_bytes"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "StageDone": {
+        "description": "`POST /api/migrations/stages/{stage}/done`: the import ended, well or\nnot. The same `ok` again changes nothing.",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "report_sha256": {
+            "default": null,
+            "description": "The SHA-256 (hex) of the report the agent wrote its owner.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "why": {
+            "default": null,
+            "description": "Why it failed (`TEXT_MAX_BYTES`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "StageOpened": {
+        "description": "`POST /api/migrations/stages/{stage}/open`: the stage's manifest. Then\n`GET …/zip` reads the zip by ranges.",
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/Manifest"
+          },
+          "stage": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "manifest"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "StagePart": {
+        "description": "One part taken (`PUT …/parts/{n}`), and each part `GET …/parts` lists.",
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "etag": {
+            "description": "R2's etag for it.",
+            "type": "string"
+          },
+          "n": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sha256": {
+            "description": "Its SHA-256 (hex), as the mover's signed URL named it: kept for the\nmover's resume. The bytes stream to R2 unread; the zip's own SHA-256\nin the manifest is what the importer checks.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "n",
+          "bytes",
+          "sha256",
+          "etag"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "StageParts": {
+        "description": "`GET …/parts`: the parts taken so far, by number.",
+        "properties": {
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/StagePart"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "parts"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -3733,6 +4532,1116 @@
         ]
       }
     },
+    "/api/migrations/mover/agents/{old}/report": {
+      "post": {
+        "operationId": "migrations.report",
+        "parameters": [
+          {
+            "description": "The old agent's id (Core's project id).",
+            "in": "path",
+            "name": "old",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Report"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reported"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "What happened on an old agent's current command: a stale command's report is 409 and changes nothing.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/mailbox": {
+      "get": {
+        "operationId": "migrations.mailbox",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mailbox"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "What the mover is told to do, oldest first: each command stays until a report on it is taken.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/roster": {
+      "put": {
+        "operationId": "migrations.roster",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Roster"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RosterTaken"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`, `registry_unavailable`",
+            "x-fragment-codes": [
+              "deploying",
+              "registry_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The mover's roster, whole: every live old agent and its owner. Rows not yet asked that it leaves out are withdrawn.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/stages/{stage}/complete": {
+      "post": {
+        "operationId": "migrations.complete",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StageComplete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageCompleted"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The stage's zip made whole from its parts, then its manifest written, last.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/stages/{stage}/parts": {
+      "get": {
+        "operationId": "migrations.parts",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageParts"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The stage's parts taken so far, to resume an upload: their numbers, sizes, hashes and etags, never their bytes.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/stages/{stage}/parts/{n}": {
+      "put": {
+        "operationId": "migrations.part",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The part's number, 1 to `PARTS_MAX`.",
+            "in": "path",
+            "name": "n",
+            "required": true,
+            "schema": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The part's SHA-256 (hex), as the mover computed it: kept with the part for its resume.",
+            "in": "query",
+            "name": "sha256",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {}
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StagePart"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "One part of the stage's zip, streamed unread into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.",
+        "tags": [
+          "migrations"
+        ],
+        "x-fragment-takes": "application/octet-stream"
+      }
+    },
+    "/api/migrations/stages/{stage}/done": {
+      "post": {
+        "operationId": "migrations.done",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StageDone"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveAt"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/stages/{stage}/open": {
+      "post": {
+        "operationId": "migrations.open",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageOpened"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The new agent bound to the move opens its stage: its manifest.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/stages/{stage}/zip": {
+      "get": {
+        "operationId": "migrations.zip",
+        "parameters": [
+          {
+            "description": "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it.",
+            "in": "path",
+            "name": "stage",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/zip": {}
+            },
+            "description": "OK: the bytes, whole."
+          },
+          "206": {
+            "content": {
+              "application/zip": {}
+            },
+            "description": "Partial Content: the range a `Range` header asked for."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The stage's zip, for the new agent bound to the move while it imports, by ranges (`Range: bytes=…`).",
+        "tags": [
+          "migrations"
+        ],
+        "x-fragment-bytes": "application/zip"
+      }
+    },
     "/api/notices": {
       "get": {
         "operationId": "notices.list",
@@ -4330,6 +6239,10 @@
     {
       "description": "A fragment's live socket: records as they are appended, presence, drafts and queries.",
       "name": "live"
+    },
+    {
+      "description": "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move.",
+      "name": "migrations"
     },
     {
       "description": "A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.",

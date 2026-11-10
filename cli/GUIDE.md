@@ -376,6 +376,10 @@ fragment verify my-thing --dir .            # full-content audit
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
+- **Folders refused**: sync and `deploy --dir` refuse `/`, `/tmp`, your
+  home folder or one above it, and a folder with a browser profile
+  (`Default/Cookies`, `Local State`, `org.chromium.Chromium.*`) in it or
+  one level down. Point `--dir` at the folder you mean, by its full path.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
 - **Viewers** sync read-only, and so does an agent acting for one (it
@@ -1000,6 +1004,40 @@ tool, tool_calls, reasoning, summary, attachments}`; `kind` is `chat`,
 A file a message held is under `~/archive/media/`, named in its
 `attachments`.
 
+## Bringing an agent's home
+
+`fragment home` reads an agent's home from wherever it ran: its folder,
+or a zip of it, read in place and never changed. A layout says where
+that home keeps things: `hermes` (a bare Hermes home, the default), or a
+layout file a platform's import skill carries.
+
+```
+fragment home survey ~/old-home --json                         # what an import would bring, and what stays
+fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read through a platform's layout
+fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
+```
+
+The survey lists the chats' database (`fragment session import` brings
+them), the SOUL, memories and a few public settings, each skill with
+where it came from (its own come over; a platform's are replaced by
+this one's, and an edit to one is kept), each scheduled job as a
+routine in UTC (weekdays by name), and its files: what an import brings
+(photos, video, audio and documents first, newest first, then the rest,
+up to 10 GiB) and what stays behind, and why. A file that may hold a
+password or key (`.env`, `auth.json`, a private key) is left out unread,
+and named: nothing an import makes holds it. A zip naming a file by a
+path that is not plain (`..`, `a/./b`) is refused whole. `extract`
+copies into a folder apart from the home, never through a link.
+
+`fragment home files` brings the home's own files (its layout's work
+folder) into a fragment you edit, under `files/`, each file of 1 MiB or
+more as a blob, and writes `left-behind.md` beside them: every file or
+folder left out, its size, and why. A fragment with no `fragment.json`
+gets one whose page is the files view (`fragment deploy` shows it).
+Running it again sends only what is missing.
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -1123,6 +1161,9 @@ fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|defau
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
+fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
+fragment home extract <source> <path>... --to <dir> [--layout L]
+fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

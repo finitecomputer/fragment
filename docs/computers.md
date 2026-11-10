@@ -649,6 +649,14 @@ provider's own hosts.
   placeholder is the same.
 - Each call a provider answered is counted in the computer's `uses`; an
   operator key's is charged to its agent's owner (docs/ledger.md).
+- **A person's Vault** (FIN-466; docs/secrets.md, "A person's Vault"):
+  each secret bound to an agent, with a host, is one of its credentials,
+  kind `own`, named by the secret, with no variable. Its hosts join the
+  catalog's in the egress's intercepts (the computer arms them again as
+  its guest reads its view). The intercept asks the Vault for it per
+  request, plans it beside the catalog's rows, and names each value it
+  filled in the answer (`{{name}}`); a Nostr key's is a signature the
+  Vault makes. A Vault's calls are not counted in `uses`.
 
 ### An agent's own model
 
