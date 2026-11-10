@@ -713,6 +713,26 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
         after.0.status == 200 && after.0.body["comp"] == false && after.1.body["comp"] == false && purchased(api, &gina) == 25_000_000 && purchased(api, &hank) == 25_000_000,
         json!([after.0.body, after.1.body]),
     );
+    // a visit cut off after its credit, before its seat: the next asks for
+    // the same end, fixed at the first attempt, never a later one
+    let joy = api.person()?;
+    let joy_people = vec![RosterPerson { workos_id: s.workos.user(&Api::email_of(&joy)).id, email: format!("{run}-j1@old.test"), agents: vec![agent(&format!("{run}-j1"))] }];
+    anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s2"), observed_ms: 1_800_000_000_000, people: [people.to_vec(), joy_people].concat() })?.status == 200, "the roster");
+    let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/orgs/comp", "times": 1 } })))?;
+    anyhow::ensure!(down.status == 200, "the registry's next comp refused: {down}");
+    let t0 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let cut = visit(api, &joy)?;
+    let t1 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    std::thread::sleep(Duration::from_secs(2));
+    let retried = visit(api, &joy)?;
+    let until = retried.body["untilMs"].as_i64().unwrap_or(0);
+    const MONTH_MS: i64 = 30 * DAY_MS;
+    s.ok(
+        "a visit cut off after its credit and before its seat is tried again by the next, asking for the same end, fixed at the first attempt (not 30 days from the retry); after it, nothing more",
+        cut.status != 200 && retried.status == 200 && retried.body["comp"] == true && (t0 + MONTH_MS..=t1 + MONTH_MS).contains(&until)
+            && purchased(api, &joy) == 25_000_000 && seat(api, &joy)["seat"]["comped"] == true && visit(api, &joy)?.body["comp"] == false,
+        json!([cut.status, retried.body, t0, t1]),
+    );
     // a comp with an end ends then, by itself (the registry's alarm)
     let ivy = api.person()?;
     let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64 + 3_000;

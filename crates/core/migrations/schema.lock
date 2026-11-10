@@ -38,7 +38,7 @@ step Migrations 1 baseline dcdbff021844dd7c
 step Migrations 2 opened_manifest 8ba2596d7c018f5c
 step Migrations 3 routine_generation ad1b55b48c743941
 step Migrations 4 people_by_person 87d4690491d35ee6
-step Migrations 5 people_comped 4f22a5b23445bef5
+step Migrations 5 people_comped edd3cbbee6194f4f
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -235,7 +235,7 @@ Migrations index moves_deadline: CREATE INDEX moves_deadline ON moves (deadline_
 Migrations index moves_state: CREATE INDEX moves_state ON moves (state)
 Migrations index moves_workos: CREATE INDEX moves_workos ON moves (workos_id)
 Migrations table parts: CREATE TABLE parts (stage TEXT NOT NULL, n INTEGER NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (stage, n))
-Migrations table people: CREATE TABLE people (workos_id TEXT PRIMARY KEY, email TEXT NOT NULL, person TEXT, comped_ms INTEGER)
+Migrations table people: CREATE TABLE people (workos_id TEXT PRIMARY KEY, email TEXT NOT NULL, person TEXT, comp_until_ms INTEGER, comped_ms INTEGER)
 Migrations index people_person: CREATE INDEX people_person ON people (person)
 Migrations table routines: CREATE TABLE routines (stage TEXT PRIMARY KEY, agent TEXT NOT NULL, tries INTEGER NOT NULL, next_ms INTEGER NOT NULL)
 Migrations table sweeps: CREATE TABLE sweeps (prefix TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)

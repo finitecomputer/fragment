@@ -232,8 +232,8 @@ pub(crate) async fn visit(env: &Env, cfg: &Config, person: &str) -> CellResult<R
         return Err(CellError::host("a WorkOS user's id is not one"));
     }
     let bound: Bound = crate::json_body(&ask(env, format!("bind/{subject}"), person.to_string()).await?)?;
-    if bound.comp {
-        comp(env, person, &subject).await?;
+    if let Some(until_ms) = bound.until_ms {
+        comp(env, person, &subject, until_ms).await?;
     }
     crate::json_answer(&bound)
 }
@@ -242,8 +242,9 @@ pub(crate) async fn visit(env: &Env, cfg: &Config, person: &str) -> CellResult<R
 /// by its id (`comp_grant_id`: the same id again grants nothing), then a
 /// month's seat comped (one they hold already, theirs, is left as it is),
 /// then Migrations told, so no visit gives it again. Cut off anywhere, the
-/// next visit does it again, each step answering as it did.
-async fn comp(env: &Env, person: &str, subject: &str) -> CellResult<()> {
+/// next visit does it again, each step answering as it did: the seat asked
+/// to end at `until_ms`, fixed at the first attempt (one past it, none).
+async fn comp(env: &Env, person: &str, subject: &str, until_ms: i64) -> CellResult<()> {
     let grant = fragment_proto::ledger::GrantCredit {
         id: machine::comp_grant_id(person),
         micros: machine::COMP_GRANT_MICROS,
@@ -253,8 +254,12 @@ async fn comp(env: &Env, person: &str, subject: &str) -> CellResult<()> {
     crate::ledger::ask(env, person, &grant).await?;
     let profiles = crate::ask_registry(env, &crate::registry::calls::Profiles { ids: vec![person.to_string()], emails_of: vec![person.to_string()] }).await?;
     let email = profiles.profiles.get(person).and_then(|p| p.email.clone()).ok_or_else(|| CellError::host(format!("{person} has no email to comp")))?;
-    let comp = fragment_proto::org::CompSeat { email, kind: fragment_proto::org::SeatKind::Seat, org: None, until_ms: Some(js::now_ms() + machine::COMP_MS) };
-    match crate::ask_registry(env, &crate::registry::orgs::CompSeatCall { by: NAME.into(), comp }).await {
+    let comp = fragment_proto::org::CompSeat { email, kind: fragment_proto::org::SeatKind::Seat, org: None, until_ms: Some(until_ms) };
+    let asked = match until_ms > js::now_ms() {
+        true => crate::ask_registry(env, &crate::registry::orgs::CompSeatCall { by: NAME.into(), comp }).await.map(|_| ()),
+        false => Ok(()),
+    };
+    match asked {
         // a seat of theirs already (paid, or another kind): theirs, as it is
         Err(e) if e.code == ErrorCode::Conflict => console_log!("migrations.comp: {person} holds a seat: {}", e.message),
         r => {
@@ -510,12 +515,15 @@ struct AgentIn {
     old: String,
 }
 
-/// A bind's answer (`visit`): how many moves it offered, and whether its
-/// person is owed the comp.
+/// A bind's answer (`visit`): how many moves it offered, whether its
+/// person is owed the comp, and when its seat ends (fixed at its first
+/// attempt: `comp_due`).
 #[derive(serde::Serialize, Deserialize)]
 struct Bound {
     bound: u32,
     comp: bool,
+    #[serde(default, rename = "untilMs", skip_serializing_if = "Option::is_none")]
+    until_ms: Option<i64>,
 }
 
 /// An offer as its notice reads it (`RosterAgent`'s name and picture).
@@ -693,7 +701,8 @@ impl MigrationsCell {
             ("roster", []) => crate::json_answer(&self.roster(&body)?),
             ("bind", [workos_id]) => {
                 let bound = self.bind(workos_id, &body)?;
-                crate::json_answer(&Bound { bound, comp: self.comp_due(workos_id)? })
+                let until_ms = self.comp_due(workos_id)?;
+                crate::json_answer(&Bound { bound, comp: until_ms.is_some(), until_ms })
             }
             // the comp given (F5): never again
             ("comped", [workos_id]) => {
@@ -953,14 +962,18 @@ impl MigrationsCell {
         }
     }
 
-    /// Whether the WorkOS user's person is owed the move's comp (F5): they
-    /// have an old agent the roster offers or moves, and were not comped.
-    fn comp_due(&self, workos_id: &str) -> CellResult<bool> {
-        let rows = self.parts().rows(
-            "SELECT 1 AS n FROM people p WHERE p.workos_id = ? AND p.comped_ms IS NULL AND EXISTS (SELECT 1 FROM moves m WHERE m.workos_id = p.workos_id AND m.state <> 'withdrawn')",
-            vec![text_value(workos_id)],
+    /// When the move's comp (F5) the WorkOS user's person is owed ends, if
+    /// they are owed it (an old agent the roster offers or moves, and not
+    /// comped yet): fixed at its first attempt, so a visit cut off and
+    /// tried again asks for the same end, never a later one.
+    fn comp_due(&self, workos_id: &str) -> CellResult<Option<i64>> {
+        let parts = self.parts();
+        parts.exec(
+            "UPDATE people SET comp_until_ms = COALESCE(comp_until_ms, ?) WHERE workos_id = ? AND comped_ms IS NULL AND EXISTS (SELECT 1 FROM moves m WHERE m.workos_id = people.workos_id AND m.state <> 'withdrawn')",
+            vec![SqlStorageValue::Integer(self.now()? + machine::COMP_MS), text_value(workos_id)],
         )?;
-        Ok(!rows.is_empty())
+        let rows = parts.rows("SELECT comp_until_ms FROM people WHERE workos_id = ? AND comped_ms IS NULL", vec![text_value(workos_id)])?;
+        Ok(rows.first().and_then(|r| r["comp_until_ms"].as_i64()))
     }
 
     /// The mover's commands, oldest first.
