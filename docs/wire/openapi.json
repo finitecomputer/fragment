@@ -4969,12 +4969,7 @@
         ],
         "requestBody": {
           "content": {
-            "application/octet-stream": {
-              "schema": {
-                "contentMediaType": "application/octet-stream",
-                "type": "string"
-              }
-            }
+            "application/octet-stream": {}
           },
           "required": true
         },
@@ -5376,23 +5371,13 @@
         "responses": {
           "200": {
             "content": {
-              "application/zip": {
-                "schema": {
-                  "contentMediaType": "application/zip",
-                  "type": "string"
-                }
-              }
+              "application/zip": {}
             },
             "description": "OK: the bytes, whole."
           },
           "206": {
             "content": {
-              "application/zip": {
-                "schema": {
-                  "contentMediaType": "application/zip",
-                  "type": "string"
-                }
-              }
+              "application/zip": {}
             },
             "description": "Partial Content: the range a `Range` header asked for."
           },
