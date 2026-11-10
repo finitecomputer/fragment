@@ -1,6 +1,6 @@
 //! Versioned schemas for the platform's own Durable Objects: `Fragment`'s
-//! supervisor, `Registry`, `Principal`, `Ledger`, `Computer` and
-//! `SearchIndex` (an app facet's SQLite is its author's). Each class declares its steps in
+//! supervisor, `Registry`, `Principal`, `Ledger`, `Computer`,
+//! `SearchIndex` and `Vault` (an app facet's SQLite is its author's). Each class declares its steps in
 //! order, one SQL file each under `crates/core/migrations/<class>/`. An
 //! object keeps the steps it took in its `_schema` table, one row each
 //! (the step's number, name and SHA-256, whether it ran or was adopted,
@@ -159,12 +159,17 @@ pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline",
 /// (`deleteAll`), so it keeps nothing.
 pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("baseline", "searchindex/0001_baseline.sql"), step!("fences", "searchindex/0002_fences.sql")], variants: &[], kept: &[] };
 
+/// A person's Vault (FIN-466): its secrets; a wipe empties it and keeps
+/// the row that says so.
+pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+
+/// Every platform class, as the lock lists them.
 /// The finite.computer move's one object (docs/migrations.md): removable
 /// with the move, by a `deleted_classes` tag (the debt ledger).
 pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql"), step!("opened_manifest", "migrations/0002_opened_manifest.sql")], variants: &[], kept: &[] };
 
 /// Every platform class, as the lock lists them.
-pub const CLASSES: [&Class; 7] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &MIGRATIONS];
+pub const CLASSES: [&Class; 8] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT, &MIGRATIONS];
 
 /// What the runner needs of an object's SQLite: statements run, and rows
 /// read, each an object of its columns. The cell's is the object's
@@ -886,7 +891,7 @@ mod tests {
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
         for commit in &commits {
             // a class made since versions has no object from before them
-            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != MIGRATIONS.name) {
+            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != VAULT.name && c.name != MIGRATIONS.name) {
                 let ddl = std::fs::read_to_string(root.join(commit).join(format!("{}.sql", class.name.to_ascii_lowercase()))).expect("a class's schema");
                 let db = Lite::new();
                 db.exec(&ddl).expect("as it ran");

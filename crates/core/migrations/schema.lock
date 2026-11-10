@@ -32,6 +32,7 @@ step Computer 3 key_hour 6c22fff2c2414701
 step Computer 4 key_caps 3a6f4f9976a3efe3
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
+step Vault 1 baseline ecff84048657043f
 step Migrations 1 baseline dcdbff021844dd7c
 step Migrations 2 opened_manifest 8ba2596d7c018f5c
 
@@ -218,6 +219,9 @@ SearchIndex table sections: CREATE TABLE sections ( id INTEGER PRIMARY KEY, sour
 SearchIndex index sections_source: CREATE INDEX sections_source ON sections (source)
 SearchIndex table sources: CREATE TABLE sources ( source TEXT PRIMARY KEY, revision TEXT NOT NULL, title TEXT NOT NULL, at TEXT, fields TEXT NOT NULL, chunks INTEGER NOT NULL)
 SearchIndex table vectors: CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, code BLOB NOT NULL, q BLOB NOT NULL)
+
+Vault table secrets: CREATE TABLE secrets (name TEXT PRIMARY KEY, sealed TEXT NOT NULL, secret TEXT NOT NULL)
+Vault table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 Migrations table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Migrations table moves: CREATE TABLE moves ( old TEXT PRIMARY KEY, workos_id TEXT NOT NULL, state TEXT NOT NULL, reason TEXT, held_from TEXT, phase TEXT NOT NULL, attempt INTEGER NOT NULL, agent TEXT, command TEXT, seq INTEGER NOT NULL, since_ms INTEGER NOT NULL, progress_ms INTEGER, staged_ms INTEGER, routine_ms INTEGER, routines INTEGER NOT NULL, opened INTEGER NOT NULL, expires_ms INTEGER, by_staff INTEGER NOT NULL, deadline_ms INTEGER, offer TEXT NOT NULL)

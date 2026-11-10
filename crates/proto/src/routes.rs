@@ -18,6 +18,7 @@ use serde_json::Value;
 use crate::live::{LiveIn, LiveOut};
 use crate::migrations::{Mailbox, MoveAt, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
+use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
     Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
@@ -163,7 +164,7 @@ pub struct Route {
 pub const ANY_ROUTE: [ErrorCode; 2] = [ErrorCode::Deploying, ErrorCode::SchemaRefused];
 
 /// Each group's tag: its name and what its routes are about.
-pub const TAGS: [(&str, &str); 7] = [
+pub const TAGS: [(&str, &str); 8] = [
     ("fragments", "A signer's list of the fragments they hold a role on, and their own view of each."),
     ("notices", "What the platform tells a person, each in its own words, with what they may do about it."),
     ("search", "A signer's search over their own list."),
@@ -171,6 +172,7 @@ pub const TAGS: [(&str, &str); 7] = [
     ("channels", "A fragment's channels: its records, read, posted and drafted."),
     ("live", "A fragment's live socket: records as they are appended, presence, drafts and queries."),
     ("migrations", "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move."),
+    ("vault", "A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered."),
 ];
 
 // Each route's credentials are what its dispatch takes (cell/src/lib.rs):
@@ -189,6 +191,7 @@ const NAME: Param = Param { name: "name", at: ParamAt::Path, required: true, sch
 const OLD: Param = Param { name: "old", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The old agent's id (Core's project id)." };
 const STAGE: Param = Param { name: "stage", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it." };
 const PART: Param = Param { name: "n", at: ParamAt::Path, required: true, schema: shape::<u32>, doc: "The part's number, 1 to `PARTS_MAX`." };
+const SECRET: Param = Param { name: "secret", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The secret's name: 1 to 32 of a-z, 0-9 and -." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
 
 pub const ROUTES: &[Route] = &[
@@ -471,12 +474,45 @@ pub const ROUTES: &[Route] = &[
         operation: "migrations.done",
         method: Method::Post,
         path: "/api/migrations/stages/{stage}/done",
-        summary: "The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.",
+        summary: "The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.",
         auth: SIGNATURE,
         params: &[STAGE],
         request: Some(Body::Json(ty::<StageDone>())),
         answer: Answer::Json(ty::<MoveAt>()),
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "vault.list",
+        method: Method::Get,
+        path: "/api/vault",
+        summary: "The signer's secrets, by name, each with its hosts, place and agents: never a value.",
+        auth: SIGNED,
+        params: &[],
+        request: None,
+        answer: Answer::Json(ty::<SecretList>()),
+        errors: &[Unauthenticated, Forbidden],
+    },
+    Route {
+        operation: "vault.put",
+        method: Method::Put,
+        path: "/api/vault/{secret}",
+        summary: "Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.",
+        auth: SIGNED,
+        params: &[SECRET],
+        request: Some(Body::Json(ty::<PutSecret>())),
+        answer: Answer::Json(ty::<Secret>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest],
+    },
+    Route {
+        operation: "vault.remove",
+        method: Method::Delete,
+        path: "/api/vault/{secret}",
+        summary: "Removes a secret: its agents' next use of it is refused.",
+        auth: SIGNED,
+        params: &[SECRET],
+        request: None,
+        answer: Answer::Json(ty::<SecretRemoved>()),
+        errors: &[Unauthenticated, Forbidden],
     },
 ];
 
