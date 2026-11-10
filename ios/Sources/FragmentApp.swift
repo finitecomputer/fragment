@@ -61,8 +61,16 @@ final class Library {
     var asked: Notice? { notices.first(where: \.mustAnswer) }
     /// A fragment of theirs an action's answer named, for the page to open
     /// (`FragmentRoot`): set by the first read begun after the answer if
-    /// it lists it (`act`).
+    /// it lists it (`act`), taken by `takeAnswered`.
     var answered: FragmentSummary?
+    /// The page an answer named, to open now: none while a notice must be
+    /// answered (it waits, kept, until none is: a cover of the next would
+    /// close it), and once.
+    func takeAnswered() -> FragmentSummary? {
+        guard asked == nil, let fragment = answered else { return nil }
+        answered = nil
+        return fragment
+    }
     @ObservationIgnored private var loadID = UUID()
     /// Reads begun (`load`), and a page an action's answer named with the
     /// number of the first read begun after the answer: the first list
@@ -577,7 +585,8 @@ struct FragmentRoot: View {
         }
         // one that must be answered, alone over everything, until it is
         // (what the page itself presents closes first: one at a time)
-        .fullScreenCover(item: Binding(get: { library.asked }, set: { _ in })) { notice in
+        // (an answer's page waits for the last of them to go: `takeAnswered`)
+        .fullScreenCover(item: Binding(get: { library.asked }, set: { _ in }), onDismiss: openAnswered) { notice in
             MustAnswerView(library: library, api: api, notice: notice).interactiveDismissDisabled()
         }
         .onChange(of: library.asked?.id, initial: true) { _, id in
@@ -593,11 +602,7 @@ struct FragmentRoot: View {
             if case .chat(let name) = left { library.leftChat(name) }
         }
         // a fragment an action's answer named, the read after it listing it
-        .onChange(of: library.answered) { _, fragment in
-            guard let fragment else { return }
-            library.answered = nil
-            open(fragment)
-        }
+        .onChange(of: library.answered) { _, _ in openAnswered() }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }
         }
@@ -642,6 +647,10 @@ struct FragmentRoot: View {
     private func toggleSidebar() {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
+    }
+    /// The page an answer named, opened now if nothing must be answered.
+    private func openAnswered() {
+        if let fragment = library.takeAnswered() { open(fragment) }
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }

@@ -220,4 +220,20 @@ struct NoticesTests {
         #expect(other.fragments.contains { $0.name == "garden--k3x9" })
         #expect(other.answered == nil, "nor after a failed one")
     }
+
+    /// An answer's page waits while a notice must be answered (Codex on the
+    /// must-answer cover): answering A opens a page, B must be answered
+    /// next; the page is taken once nothing is asked, never lost.
+    @MainActor @Test func anAnswersPageWaitsWhileANoticeMustBeAnswered() throws {
+        let told = try read(#"{"notices":[{"id":"asked:terms","kind":"asked","level":"info","title":"New terms","mustAnswer":true}]}"#)
+        let library = Library()
+        library.fragments = [try JSONDecoder().decode(FragmentSummary.self, from: Data(#"{"name":"garden--k3x9","kind":"app","role":"editor","title":"Garden plans"}"#.utf8))]
+        library.answered = library.fragments.first
+        library.notices = told
+        #expect(library.takeAnswered() == nil, "not while B must be answered")
+        #expect(library.answered?.name == "garden--k3x9", "kept, not lost")
+        library.notices = []
+        #expect(library.takeAnswered()?.name == "garden--k3x9", "taken once nothing is asked")
+        #expect(library.takeAnswered() == nil, "and once")
+    }
 }
