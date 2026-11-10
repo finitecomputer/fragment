@@ -249,6 +249,70 @@ final class FragmentUITests: XCTestCase {
         screenshot(app, "Invite accepted")
         XCTAssertTrue(invite.waitForNonExistence(timeout: 10), "and the invite is told no more")
     }
+
+    /// Notices that must be answered (FIN-458) show alone over the whole app,
+    /// never in the band, the oldest first: an answer refused keeps it,
+    /// saying why in the server's words; answered, the next; the last
+    /// answered, the app as it was. No owner asks one yet: on a local fleet
+    /// an invite to a `must-answer` fragment is one, and the dev stack
+    /// staged two ahead (`FRAGMENT_UITEST_ASKED`, their fragments, oldest
+    /// first); the test refuses its first answer, and the reads after its
+    /// second (`downFor`).
+    func testNoticesThatMustBeAnsweredShowAloneUntilAnswered() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let secret = env["FRAGMENT_UITEST_SECRET"],
+              case let names = (env["FRAGMENT_UITEST_ASKED"] ?? "").split(separator: ",").map(String.init), names.count == 2 else {
+            throw XCTSkip("no dev stack or asked notices named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_SECRET, FRAGMENT_UITEST_ASKED: two fragments)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let asked = { (name: String) in app.descendants(matching: .any).matching(identifier: "mustAnswer:invite:\(name)").firstMatch }
+        let (first, next) = (names[0], names[1])
+        XCTAssertTrue(asked(first).waitForExistence(timeout: 30), "the oldest shows, over the whole app")
+        XCTAssertTrue(asked(first).buttons["Accept"].exists && asked(first).buttons["Decline"].exists, "its words and its answers")
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "notice:invite:\(first)").firstMatch.exists, "never in the band")
+        screenshot(app, "Must answer, light")
+        downFor(server, secret: secret, path: "/invites/answer", times: 1)
+        asked(first).buttons["Accept"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "try again shortly")).firstMatch.waitForExistence(timeout: 20), "refused: why, in the server's words")
+        XCTAssertTrue(asked(first).exists, "and it stays")
+        // Decline goes through, and every read after it fails: the cover
+        // says so, with Try again, which reads again and posts nothing
+        downFor(server, secret: secret, path: "/invites/notices", times: 100)
+        asked(first).buttons["Decline"].tap()
+        XCTAssertTrue(asked(first).staticTexts["Couldn't refresh your computer"].waitForExistence(timeout: 20), "the read's failure, in the cover")
+        XCTAssertTrue(asked(first).buttons["Decline"].exists, "the notice as last read, under it")
+        screenshot(app, "Must answer, read failed")
+        downFor(server, secret: secret, path: "/invites/notices", times: 0)
+        asked(first).buttons["Try again"].tap()
+        XCTAssertTrue(asked(next).waitForExistence(timeout: 30), "read again, without it: the next")
+        XCUIDevice.shared.appearance = .dark
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "dark, drawn")], timeout: 2)
+        screenshot(app, "Must answer, dark")
+        asked(next).buttons["Decline"].tap()
+        XCTAssertTrue(asked(next).waitForNonExistence(timeout: 30), "the last answered: the app as it was")
+        XCUIDevice.shared.appearance = .light
+    }
+
+    /// The registry's next `times` calls to `path` refused, in its words
+    /// (its `DownFor` lever, with the dev stack's test secret; 0 answers them
+    /// again): set just before the tap, as the registry keeps it in memory,
+    /// which it loses idle.
+    private func downFor(_ server: String, secret: String, path: String, times: Int) {
+        var request = URLRequest(url: URL(string: server)!.appending(path: "api/test/registry"))
+        request.httpMethod = "POST"
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["downFor": ["path": path, "times": times]])
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue(secret, forHTTPHeaderField: "x-fragment-test-secret")
+        let set = expectation(description: "the registry's next \(times) calls to \(path) refused")
+        URLSession.shared.dataTask(with: request) { _, response, _ in
+            if (response as? HTTPURLResponse)?.statusCode == 200 { set.fulfill() }
+        }.resume()
+        wait(for: [set], timeout: 10)
+    }
 }
 
 /// Flows against a real platform: this machine's `cargo xtask dev`, named by

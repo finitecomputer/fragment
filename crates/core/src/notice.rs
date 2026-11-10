@@ -38,6 +38,13 @@ pub fn size(bytes: u64) -> String {
 }
 
 /// A span of time as a person reads it, a count whole and rounded down
+/// A day as a notice says it, "November 16", on UTC's calendar: what a
+/// date a seat ends on reads as (`registry::said::seat_ends`).
+pub fn date(ms: i64) -> String {
+    let (_, month, day) = crate::cron::civil(ms.div_euclid(24 * 60 * 60 * 1000));
+    format!("{} {day}", crate::schedule::MONTH_NAMES[month as usize - 1])
+}
+
 /// ("the 40 minutes before it stopped" reads with any of them): "1 minute"
 /// under two, then minutes, hours from two, days from two.
 pub fn span(ms: i64) -> String {
