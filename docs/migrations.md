@@ -69,6 +69,26 @@ the alarm's deadlines, staff's acts) tells their open pages
 (`principal::tell_changed`, at most 32 people a call), which read their
 notices again.
 
+## The page (F6)
+
+`/move`, a view of the shell's (cell/shell/move-page.js), reached from
+the offer's Yes, and from Settings while the person has old agents. On
+it, the offer's cover stands aside: it is answered there.
+
+- `GET /api/migrations/offers` (`Offers`): the person's old agents, each
+  where its move is in the server's words (`fragment_core::migrations::said`):
+  on finite.computer, stopping, copying, bringing over, done, paused for
+  staff. The page reads it again every few seconds while a move is under
+  way.
+- The one question: which to bring over, each by the name its new agent
+  takes (the old one's, prefilled). A Never'd one has Ask again.
+- Bring over: `POST /api/migrations/offers` opens the move (binds them;
+  the comp, once), the page waits for the seat to reach the ledger, then
+  for each, one at a time, a new agent is made as Settings' Add makes one
+  (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
+  {agent}` posted: the old agent is stopped then. One new agent per old
+  agent. A refusal shows the server's words.
+
 ## The comp (F5)
 
 A person on the roster who opens the move (`/move`, `migrations::visit`)

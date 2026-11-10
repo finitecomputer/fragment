@@ -85,6 +85,8 @@ bound Notice.until default null
 bound NoticeAction.body default null
 bound NoticeAction.open default null
 bound NoticeAction.post default null
+bound Offer.agent default null
+bound Offer.image default null
 bound OldBrain.bytes range u64
 bound OpDecl.description default null
 bound OpDecl.ephemeral default false
@@ -356,7 +358,14 @@ field NoticeAction.label required string
 field NoticeAction.open optional string|null
 field NoticeAction.post optional string|null
 field NoticeList.notices required array<Notice>
+field Offer.agent optional string|null
+field Offer.image optional string|null
+field Offer.name required string
+field Offer.old required string
+field Offer.said required string
+field Offer.state required MoveState
 field OfferYes.agent required string
+field Offers.offers required array<Offer>
 field OldBrain.bytes required integer
 field OldBrain.id required string
 field OldBrain.title required string
@@ -627,6 +636,12 @@ route migrations.never accepts session
 route migrations.never path migrations.never.path
 route migrations.never query migrations.never.query
 route migrations.never response MoveAt
+route migrations.offers GET /api/migrations/offers
+route migrations.offers accepts nip98
+route migrations.offers accepts session
+route migrations.offers path migrations.offers.path
+route migrations.offers query migrations.offers.query
+route migrations.offers response Offers
 route migrations.open POST /api/migrations/stages/{stage}/open
 route migrations.open accepts nip98
 route migrations.open path migrations.open.path
@@ -655,6 +670,12 @@ route migrations.roster path migrations.roster.path
 route migrations.roster query migrations.roster.query
 route migrations.roster request Roster
 route migrations.roster response RosterTaken
+route migrations.visit POST /api/migrations/offers
+route migrations.visit accepts nip98
+route migrations.visit accepts session
+route migrations.visit path migrations.visit.path
+route migrations.visit query migrations.visit.query
+route migrations.visit response Offers
 route migrations.yes POST /api/migrations/offers/{old}/yes
 route migrations.yes accepts nip98
 route migrations.yes accepts session
@@ -780,7 +801,9 @@ type Notice out object
 type NoticeAction out object
 type NoticeLevel out enum open
 type NoticeList out object
+type Offer out object
 type OfferYes in object
+type Offers out object
 type OldBrain in object
 type OldSite in object
 type OpDecl out object
@@ -864,6 +887,8 @@ type migrations.mailbox.path in object
 type migrations.mailbox.query in object
 type migrations.never.path in object
 type migrations.never.query in object
+type migrations.offers.path in object
+type migrations.offers.query in object
 type migrations.open.path in object
 type migrations.open.query in object
 type migrations.part.path in object
@@ -874,6 +899,8 @@ type migrations.report.path in object
 type migrations.report.query in object
 type migrations.roster.path in object
 type migrations.roster.query in object
+type migrations.visit.path in object
+type migrations.visit.query in object
 type migrations.yes.path in object
 type migrations.yes.query in object
 type migrations.zip.path in object

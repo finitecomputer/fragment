@@ -578,3 +578,18 @@ test("an offer to bring an old agent over (the move's): its picture beside its w
   await settle();
   assert.deepEqual(p.asked().words, ["Bring Ada over from finite.computer?", "You'll get a month free.", "Not now: this move is asked."]);
 });
+
+test("on the platform's page one of its answers opens (the move's /move), a notice that must be answered stands aside, there alone: anywhere else it covers the page", (t) => {
+  const offer = {
+    id: "move:prj_1", kind: "move_offer", level: "info", title: "Bring Ada over from finite.computer?", mustAnswer: true,
+    actions: [{ label: "Yes", open: "https://chat.test/move" }, { label: "Not now", post: "/api/migrations/offers/prj_1/later" }],
+  };
+  globalThis.location = { origin: "https://chat.test", href: "https://chat.test/move", pathname: "/move" };
+  t.after(() => delete globalThis.location);
+  const here = page(t, [offer]);
+  assert.equal(here.asked(), null, "on /move: answered there");
+  assert.deepEqual(here.shown(), [], "and not in the band");
+  globalThis.location = { origin: "https://chat.test", href: "https://chat.test/settings", pathname: "/settings" };
+  const elsewhere = page(t, [offer]);
+  assert.equal(elsewhere.asked()?.id, "move:prj_1", "anywhere else: over the page");
+});

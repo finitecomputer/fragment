@@ -2009,6 +2009,8 @@ machine behind them, are docs/migrations.md. Without the deployment's
 
 | method & path | who | answer |
 | --- | --- | --- |
+| `GET /api/migrations/offers` | a person (an agent 403) | → `Offers {offers: [{old, name, image?, state, said, agent?}]}`: their old agents, each where its move is, in the server's words |
+| `POST /api/migrations/offers` | a person | opens the move: binds them, and gives its comp once (docs/migrations.md, "The comp") → `Offers` |
 | `POST /api/migrations/offers/{old}/later`, `…/never`, `…/ask-again` | the old agent's person (another's 404, an agent 403) | → `MoveAt {state}`; an answer its state does not take 409 |
 | `POST /api/migrations/offers/{old}/yes` | its person | `OfferYes {agent}`, an agent of their own (another's 403) → `MoveAt {state}` |
 | `GET /api/migrations/offers/{old}/picture` | its person | → the roster's picture of it, a PNG, JPEG, WebP or GIF of at most 1 MiB; none 404 |

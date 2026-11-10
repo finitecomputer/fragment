@@ -393,14 +393,19 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // A making that failed before its chat, asked from a page, is Add's to say
   // (it rejects): nothing is drawn over the page, and Add again goes on with
   // what was made.
-  async function addAgent({ name, role, runtime = "hermes" }) {
+  // `quiet` (the move's page): its chat is made but not opened, the page
+  // staying as it is; answered with what was made (`{chat, id, computer}`).
+  async function addAgent({ name, role, runtime = "hermes", quiet = false }) {
     if (setup) throw new Error("Another agent is being made: finish it in its chat first.");
     const placed = new Set([...agents().values()].map((a) => a.fragment));
     const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
-    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, quiet, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    lastMade = null;
     const unsaid = await creatingAgent();
     if (unsaid) throw new Error(unsaid);
+    return lastMade;
   }
+  let lastMade = null;
   // The first run's agent, named as an earlier try named it, if one did.
   async function defaultAgent() {
     await load();
@@ -427,7 +432,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
     setupChanged({ chat: chatName });
     await load();
-    if (!hasFrame(chatName)) openChat(chatName);
+    if (!setup.quiet && !hasFrame(chatName)) openChat(chatName);
 
     // These can run together once the chat is on screen. The computer is
     // assigned before it wakes, with the agent's configuration deployed.
@@ -506,6 +511,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     }
     setupRun = (async () => {
       const made = await defaultAgent();
+      lastMade = made;
       const t0 = Date.now();
       for (;;) {
         let ready = false;

@@ -217,6 +217,14 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: [`MoveAt`](#moveat)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
+#### `migrations.offers`
+
+`GET /api/migrations/offers`: The signer's old finite.computer agents, each where its move is, in the server's words.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`Offers`](#offers)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
+
 #### `migrations.open`
 
 `POST /api/migrations/stages/{stage}/open`: The new agent bound to the move opens its stage: its manifest.
@@ -260,6 +268,14 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Body: [`Roster`](#roster)
 - Answer: [`RosterTaken`](#rostertaken)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
+
+#### `migrations.visit`
+
+`POST /api/migrations/offers`: The signer opens the move: bound to their old agents by the WorkOS user they sign in as, and given its comp once (a month's seat and its credit). Then their old agents, as GET answers them.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`Offers`](#offers)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
 
 #### `migrations.yes`
 
@@ -774,6 +790,19 @@ out. `GET /api/notices`: the signer's notices, the most pressing first.
 | --- | --- | --- | --- |
 | `notices` | `array` of [`Notice`](#notice) | required |  |
 
+### `Offer`
+
+out. One old agent of the person's, and where its move is.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agent` | `string` or `null` | optional | The new agent it is brought into, after Yes. |
+| `image` | `string` or `null` | optional | Its picture, a platform path (`…/offers/{old}/picture`), when the roster has one. |
+| `name` | `string` | required | Its name on finite.computer. |
+| `old` | `string` | required |  |
+| `said` | `string` | required | Where it is, in the server's words. |
+| `state` | [`MoveState`](#movestate) | required |  |
+
 ### `OfferYes`
 
 in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a new agent of their own, which the move's stage is imported into.
@@ -781,6 +810,14 @@ in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a new ag
 | field | type | | |
 | --- | --- | --- | --- |
 | `agent` | `string` | required | The new agent: its identity's id or npub. |
+
+### `Offers`
+
+out. `GET /api/migrations/offers` (`POST`: the person opens the move, and is given its comp once): the person's old agents, each where its move is, in the server's words. `/move` draws them.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `offers` | `array` of [`Offer`](#offer) | required |  |
 
 ### `OldBrain`
 

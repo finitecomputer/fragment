@@ -611,7 +611,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
 /// `/move` here; Not now answered there, the page is theirs. Its pictures,
 /// at 1280 and 390 px, light and dark.
 pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move-ui", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Chrome]) {
+    if !s.section("move-ui", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Chrome, Need::LocalDocker, Need::Computers]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -660,6 +660,7 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
             b.close(page)?;
         }
     }
+    move_page_ui(s, api, &mut b, &mover, &session, &old, &shots)?;
     println!("      (screenshots: {})", shots.display());
     Ok(())
 }
@@ -720,5 +721,84 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
     let held = seat(api, &ivy)["seat"]["kind"] == "seat";
     let ended = s.eventually(Duration::from_secs(30), || seat(api, &ivy)["seat"].is_null());
     s.ok("a comp with an end holds until then, and then ends by itself", r.status == 200 && held && ended, seat(api, &ivy));
+    Ok(())
+}
+
+/// F6, the move's page, in Chrome: the offer's Yes opens `/move` in place,
+/// the cover standing aside there; the one question (which, by what
+/// name); Bring over makes the guest's comp, then a new agent (its chat not
+/// opened), then posts its Yes; then the move as the server says it goes:
+/// stopping, then (the fake mover staging it) bringing it over. Pictures
+/// at 1280 and 390 px, light and dark.
+fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover: &Mover, session: &str, old: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let agent_wait = Duration::from_secs(180);
+    let me = super::signin::who(api, session)?;
+    let id = me["id"].as_str().context("their identity")?.to_string();
+    // a guest, as someone from finite.computer arrives (this fleet's default plan is a seat)
+    let made_guest = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": format!("{old}-guest"), "plan": "guest" })))?;
+    anyhow::ensure!(made_guest.status == 200, "a guest: {made_guest}");
+    // answered Not now above: Never, then Ask again, through their own routes, offers it again now
+    for verb in ["never", "ask-again"] {
+        let r = super::shell::shell(api, session, "POST", &format!("/api/migrations/offers/{old}/{verb}"), Some(&json!({})), &[])?;
+        anyhow::ensure!(r.status == 200, "{verb}: {r}");
+    }
+    let row = format!("document.querySelector('#move-page .move-row[data-old={}]')", serde_json::to_string(old)?);
+    let said = format!("({row}?.querySelector('p')?.textContent ?? '')");
+    let page = b.open(&format!("{}/", api.base))?;
+    b.viewport(&page, 1280, 800, false)?;
+    b.color_scheme(&page, "light")?;
+    anyhow::ensure!(b.until(&page, "document.getElementById('must-answer').open && !!document.querySelector('#must-answer a')", wait), "the offer, over the page");
+    b.eval(&page, "(document.querySelector('#must-answer a').click(), true)")?;
+    let opened = b.until(&page, &format!("location.pathname === '/move' && !!{row} && !document.getElementById('must-answer').open"), wait);
+    let seen = b.eval(&page, &format!("(() => {{ const r = {row}; return {{ words: r?.innerText, name: r?.querySelector('.move-name')?.value, picked: r?.querySelector('input[type=checkbox]')?.checked, bring: !!document.querySelector('#move-page button.primary'), cover: document.getElementById('must-answer').open }}; }})()"))?;
+    s.ok(
+        "Yes opens /move here: the old agent, its words, whether to bring it and the name it takes, prefilled; the offer's cover stands aside on the page that answers it",
+        opened && seen["words"].as_str().is_some_and(|w| w.contains("Juniper is on finite.computer.")) && seen["name"] == "Juniper" && seen["picked"] == true && seen["bring"] == true && seen["cover"] == false,
+        &seen,
+    );
+    let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));
+    for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+        let p = b.open(&format!("{}/move", api.base))?;
+        b.viewport(&p, width, height, phone)?;
+        b.color_scheme(&p, scheme)?;
+        let _ = b.until(&p, &format!("!!{row}?.querySelector('img')?.naturalWidth"), wait);
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = b.screenshot(&p, &shots.join(format!("move-{width}-{scheme}.png")));
+        b.close(p)?;
+    }
+
+    // Bring over
+    b.eval(&page, "(document.querySelector('#move-page button.primary').click(), true)")?;
+    let making = b.until(&page, &format!("/^Making Juniper/.test({said})"), agent_wait);
+    let _ = b.screenshot(&page, &shots.join("move-making-1280-light.png"));
+    let asked = b.until(&page, &format!("{row}?.dataset.state === 'asked'"), agent_wait);
+    let moves = api.signed(&s.operator, "GET", "/api/admin/migrations", None)?;
+    let m = moves.body["moves"].as_array().and_then(|ms| ms.iter().find(|m| m["old"] == old)).cloned().unwrap_or_default();
+    let ledger = super::shell::shell(api, session, "GET", "/api/ledger", None, &[])?;
+    let seat = super::shell::shell(api, session, "GET", "/api/seat", None, &[])?;
+    let still = b.eval(&page, "location.pathname")?;
+    let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
+    s.ok(
+        "Bring over: the guest is given the comp (a comped seat, $25), a new agent is made with its chat not opened (the page stays), and its Yes starts the move: stopping, in the server's words",
+        making && asked && still == "/move" && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Stopping Juniper on finite.computer…") && m["state"] == "asked" && m["agent"].is_string()
+            && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
+        json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still }),
+    );
+    // the mover stops it and stages it: the page follows, read again
+    mover.run_once()?;
+    let importing = b.until(&page, &format!("{said} === 'Bringing Juniper over…'"), Duration::from_secs(60));
+    let _ = b.screenshot(&page, &shots.join("move-importing-1280-light.png"));
+    s.ok("the move as it goes, read again while under way: the mover staged it, and the page says it is being brought over", importing, b.eval(&page, &said)?);
+    for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+        let p = b.open(&format!("{}/move", api.base))?;
+        b.viewport(&p, width, height, phone)?;
+        b.color_scheme(&p, scheme)?;
+        let _ = b.until(&p, &format!("{said} === 'Bringing Juniper over…'"), wait);
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = b.screenshot(&p, &shots.join(format!("move-importing-{width}-{scheme}.png")));
+        b.close(p)?;
+    }
+    b.close(page)?;
     Ok(())
 }

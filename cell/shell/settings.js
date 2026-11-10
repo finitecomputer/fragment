@@ -314,9 +314,19 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
     // their sign-ins, when they linked several before linking went (off
     // until WorkOS offers an account picker: docs/api.md, Sign-in)
     if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
-    account.append(legalLinks());
+    // their old finite.computer agents, when they have any: the move's page
+    // (FIN-463), where one said Never to is asked again (none, or no move
+    // on this deployment: no line)
+    const moves = api("GET", "/api/migrations/offers").then((v) => v.offers ?? [], () => []);
     // the person's seat, credit and org (billing.js), and why agents stop
     const billing = await billingSections(billingHelpers, ledger, mySeat, back);
+    if ((await moves).length) {
+      const open = el("button", null, "Open");
+      open.type = "button";
+      open.onclick = () => location.assign("/move");
+      account.append(actionLine("Agents from finite.computer", open));
+    }
+    account.append(legalLinks());
     if (lost()) return;
     // a guest has no agents to stop, nor a computer, skills or connections
     // for them, nor apps to publish: a seat to get comes first, then who they
