@@ -1881,6 +1881,8 @@ $("history-link").onclick = () => openHistory();
 const movePage = createMovePage($("move-page"), {
   api, el, setGuest, reload: () => load(),
   addAgent: (spec) => onboarding.addAgent(spec),
+  ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
+  identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
 });
 function openMove(push = true) {
   if (push) at(MOVE);

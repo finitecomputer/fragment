@@ -87,7 +87,9 @@ it, the offer's cover stands aside: it is answered there.
   for each, one at a time, a new agent is made as Settings' Add makes one
   (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
   {agent}` posted: the old agent is stopped then. One new agent per old
-  agent. A refusal shows the server's words.
+  agent: its agent.json keeps the old one it was made for (`from`), so a
+  Yes that never arrived, or a reload, goes on with it, never a second. A
+  refusal shows the server's words.
 
 ## The comp (F5)
 

@@ -395,11 +395,13 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // what was made.
   // `quiet` (the move's page): its chat is made but not opened, the page
   // staying as it is; answered with what was made (`{chat, id, computer}`).
-  async function addAgent({ name, role, runtime = "hermes", quiet = false }) {
+  // `from`: the old finite.computer agent it is made for, kept in its
+  // agent.json (`from`), so the page finds it again (move-page.js `madeFor`).
+  async function addAgent({ name, role, runtime = "hermes", quiet = false, from = null }) {
     if (setup) throw new Error("Another agent is being made: finish it in its chat first.");
     const placed = new Set([...agents().values()].map((a) => a.fragment));
     const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
-    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, quiet, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, quiet, from, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
     lastMade = null;
     const unsaid = await creatingAgent();
     if (unsaid) throw new Error(unsaid);
@@ -469,6 +471,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       // what it runs on, as the bridge reads it (docs/bridge.md): Claude
       // Code named, Hermes (none named) with its tier
       const runs = setup.runtime === "claude" ? { runtime: "claude" } : { tier: DEFAULT_AGENT_TIER };
+      if (setup.from) runs.from = setup.from;
       const files = [{ path: "SOUL.md", text: job(owner) }, { path: "agent.json", text: JSON.stringify(runs, null, 2) + "\n" }];
       // its role, beside its name in its fragment.json (`meta.role`)
       if (setup.role) {

@@ -8,13 +8,17 @@
 // may make agents), then, one at a time, a new agent is made as Settings'
 // Add makes one (onboarding.js `addAgent`, its chat not opened) and its
 // Yes posted (`…/offers/{old}/yes {agent}`), which stops the old agent and
-// starts the move. A Never'd one has Ask again. Nothing is drawn ahead of
+// starts the move. One new agent an old one: the agent keeps which old one
+// it was made for (agent.json `from`), so a Yes that never arrived, or a
+// reload, is gone on with that agent, never a second (`madeFor`). A Never'd one has Ask again. Nothing is drawn ahead of
 // the server: each step shows while its call is out, and every line after
 // is the server's, read again while a move is under way. A refusal is the
 // server's words.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
-// `addAgent`, `setGuest`, `reload` (the list again), and `timers`.
+// `addAgent`, `setGuest`, `reload` (the list again), `ownAgents` (their
+// agent fragments' names), `identityOf` (an agent fragment's identity, once
+// its computer has it), and `timers`.
 
 const IN_FLIGHT = new Set(["asked", "staging", "importing", "retiring", "archiving"]);
 const ASKABLE = new Set(["open", "later", "archived"]);
@@ -66,7 +70,10 @@ export function createMovePage(root, h) {
       box.type = "checkbox";
       box.checked = chosen.get(o.old) ?? true;
       box.disabled = busy;
-      box.onchange = () => chosen.set(o.old, box.checked);
+      box.onchange = () => {
+        chosen.set(o.old, box.checked);
+        draw();
+      };
       const name = el("input", "move-name");
       Object.assign(name, { type: "text", value: named.get(o.old) ?? o.name, maxLength: 64, disabled: busy, autocomplete: "off" });
       name.setAttribute("aria-label", `Name for ${o.name} here`);
@@ -150,6 +157,22 @@ export function createMovePage(root, h) {
     }
   }
 
+  // The agent of theirs made for `old` before (its agent.json's `from`)
+  // that no move is bound to: `{id}` once its computer has it, else
+  // `{fragment}` (its making cut short: `addAgent` makes on from it, found
+  // by its name), or null.
+  async function madeFor(old) {
+    const bound = new Set((offers ?? []).map((o) => o.agent).filter(Boolean));
+    for (const fragment of h.ownAgents()) {
+      const json = await api("GET", `/api/f/${fragment}/file?path=agent.json`).catch(() => null);
+      if (json?.from !== old) continue;
+      const id = h.identityOf(fragment);
+      if (id && bound.has(id)) continue;
+      return id ? { id } : { fragment };
+    }
+    return null;
+  }
+
   async function bring() {
     const picks = offers.filter((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true)).map((o) => ({ o, name: (named.get(o.old) ?? o.name).trim() || o.name }));
     if (!picks.length || busy) return;
@@ -160,9 +183,12 @@ export function createMovePage(root, h) {
       await api("POST", "/api/migrations/offers", {});
       await seated();
       for (const { o, name } of picks) {
-        doing = { old: o.old, said: `Making ${name}…` };
+        // one new agent an old one: one made for it before (a Yes that
+        // never arrived, a reload) is the one, made on if it was cut short
+        const before = await madeFor(o.old);
+        doing = { old: o.old, said: before?.id ? `Starting ${o.name}'s move…` : `Making ${name}…` };
         draw();
-        const made = await h.addAgent({ name, role: null, quiet: true });
+        const made = before?.id ? before : await h.addAgent({ name, role: null, quiet: true, from: o.old });
         if (!made?.id) throw new Error(`${name} wasn't made. Try again.`);
         doing = { old: o.old, said: `Starting ${o.name}'s move…` };
         draw();
