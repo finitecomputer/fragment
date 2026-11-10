@@ -50,13 +50,26 @@ final class Library {
     var computerPhase: String?
     /// What they are told (`GET /api/notices`, `NoticesBand`), as last read;
     /// whether that read failed (what it said before stays); the notices
-    /// whose last action failed, by id, until one goes through or the
-    /// notice is gone; and those with an action under way.
+    /// whose last action failed, by id, and why (`Library.said`), until one
+    /// goes through or the notice is gone; and those with an action under way.
     var notices: [Notice] = []
     var noticesFailed = false
-    var failedNotices: Set<String> = []
+    var failedNotices: [String: String] = [:]
     var acting: Set<String> = []
+    /// A fragment of theirs an action's answer named, for the page to open
+    /// (`FragmentRoot`): set by the first read begun after the answer if
+    /// it lists it (`act`).
+    var answered: FragmentSummary?
     @ObservationIgnored private var loadID = UUID()
+    /// Reads begun (`load`), and a page an action's answer named with the
+    /// number of the first read begun after the answer: the first list
+    /// read of those to come back, or to fail, decides it there and then,
+    /// once (`decide`), newest or not (`load` lets the newest read begun win
+    /// what is shown, which says nothing of when a list was read); a read
+    /// after that never opens it, the person maybe elsewhere by then. It
+    /// goes with this library, and so with the account it was asked in.
+    @ObservationIgnored private var begun = 0
+    @ObservationIgnored private var held: (page: URL, after: Int)?
     @ObservationIgnored private var settle: Task<Void, Never>?
     @ObservationIgnored private var titling: Set<String> = []
 
@@ -94,8 +107,10 @@ final class Library {
     /// The fragment of the person's list a link is a page of (the web's
     /// "Open" for one: templates/chat/site/chat.js `openBeside`), opening at
     /// that page; none for another's or any other address, which Safari opens.
-    func fragment(linkedBy url: URL) -> FragmentSummary? {
-        guard let name = MessageLinks.fragmentName(url, pages: pages), var found = fragments.first(where: { $0.name == name }) else { return nil }
+    func fragment(linkedBy url: URL) -> FragmentSummary? { fragment(linkedBy: url, in: fragments) }
+    /// The same, in `list` (a list read, not yet shown: `decide`).
+    func fragment(linkedBy url: URL, in list: [FragmentSummary]) -> FragmentSummary? {
+        guard let name = MessageLinks.fragmentName(url, pages: pages), var found = list.first(where: { $0.name == name }) else { return nil }
         if found.kind != "chat" { found.link = url }
         return found
     }
@@ -204,14 +219,19 @@ final class Library {
     }
     func load(_ api: FragmentAPI) async {
         let requestID = UUID(); loadID = requestID
+        begun += 1
+        let number = begun
         loading = true
         defer { if loadID == requestID { loading = false } }
         do {
             var response = try await api.fragments()
-            guard loadID == requestID, !Task.isCancelled else { return }
             for index in response.indices {
                 if let picture = response[index].picture { response[index].picture = URL(string: picture, relativeTo: api.baseURL)?.absoluteString }
             }
+            // the first list after an answer decides its page, there and then,
+            // newest or not (a newer read only reads later); cancelled, as none
+            decide(number, in: Task.isCancelled ? nil : response)
+            guard loadID == requestID, !Task.isCancelled else { return }
             // A list read again that says the same changes nothing: what a
             // chat's view draws from it (its agents, their faces) is not
             // drawn again for each message the list is told of.
@@ -222,11 +242,24 @@ final class Library {
                 identities[agent.name] = status.npub
             }
             if loadID == requestID { error = nil }
-        } catch { if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription } }
+        } catch {
+            if loadID == requestID && !Task.isCancelled { self.error = error.localizedDescription }
+            // its list not read, newest or not: a page held for it opens never
+            decide(number, in: nil)
+        }
         await loadNotices(api, requestID)
         await loadImported(api, requestID)
         await loadPages(api)
         await titleUntitled(api)
+    }
+    /// A page held for the read numbered `number` or an older one
+    /// (`held`), decided once by the first list read after its answer
+    /// (`list`; none: that read failed or was cancelled): listed there, the
+    /// page is `answered`; else nothing opens, now or after.
+    private func decide(_ number: Int, in list: [FragmentSummary]?) {
+        guard let page = held, number >= page.after else { return }
+        held = nil
+        if let list { answered = fragment(linkedBy: page.page, in: list) }
     }
     /// The person's agents in their computer's order (`ComputerView.agents`,
     /// docs/api.md), as the web's sidebar takes them (cell/shell/chat-list.js
@@ -260,23 +293,40 @@ final class Library {
         guard let read else { return }
         let told = read?.notices ?? []
         if notices != told { notices = told }
-        failedNotices.formIntersection(told.map(\.id))
+        failedNotices = failedNotices.filter { id, _ in told.contains { $0.id == id } }
+    }
+    /// Why an action failed, as its notice says it (Paul, 2026-11-09): the
+    /// server's own words for its refusal, else this page's for a call that
+    /// never reached it (the network).
+    static func said(_ error: Error) -> String {
+        switch error {
+        case APIError.refused(let words), APIError.server(let words), APIError.absent(let words): words
+        default: "Couldn't do that. Try again."
+        }
     }
     /// A notice's action: its route posted with its body, then everything
     /// read again (`load`, whose newest read wins), which decides what
-    /// shows whatever the post answered. Failed, the notice says so, as
-    /// that read finds it, to tap again.
-    func act(_ notice: Notice, _ action: Notice.Action, api: FragmentAPI) async {
-        guard let post = action.post, !acting.contains(notice.id) else { return }
+    /// shows whatever the post answered. Failed, the notice says why, as
+    /// that read finds it, to tap again. Its answer may name a page to open
+    /// (an invite's app, a checkout), an http(s) address alone: one of
+    /// theirs opens here if the first read begun after the answer lists it
+    /// (`held`, `answered`); any other, it answers, for Safari.
+    func act(_ notice: Notice, _ action: Notice.Action, api: FragmentAPI) async -> URL? {
+        guard let post = action.post, !acting.contains(notice.id) else { return nil }
         acting.insert(notice.id)
         defer { acting.remove(notice.id) }
+        var answer: JSONValue = .null
         do {
-            let _: JSONValue = try await api.request(String(post.drop { $0 == "/" }), method: "POST", body: action.body ?? .object([:]))
-            failedNotices.remove(notice.id)
+            answer = try await api.request(String(post.drop { $0 == "/" }), method: "POST", body: action.body ?? .object([:]))
+            failedNotices[notice.id] = nil
         } catch {
-            failedNotices.insert(notice.id)
+            failedNotices[notice.id] = Self.said(error)
         }
+        let page = answer["open"].string.flatMap { URL(string: $0) }.flatMap { ["https", "http"].contains($0.scheme?.lowercased()) ? $0 : nil }
+        let outside = page.flatMap { MessageLinks.fragmentName($0, pages: pages) == nil ? $0 : nil }
+        if let page, outside == nil { held = (page, begun + 1) }
         await load(api)
+        return outside
     }
     private func loadPages(_ api: FragmentAPI) async {
         guard pages == nil, let mine = fragments.first(where: { $0.role == "owner" }) else { return }
@@ -430,6 +480,7 @@ enum ShellPage: Equatable { case launcher, startingChat, chat(String), history, 
 
 struct FragmentRoot: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var library = Library()
     /// The app's one account (`FragmentApp`), shared with every other window.
@@ -529,6 +580,12 @@ struct FragmentRoot: View {
         }
         .onChange(of: page) { left, _ in
             if case .chat(let name) = left { library.leftChat(name) }
+        }
+        // a fragment an action's answer named, the read after it listing it
+        .onChange(of: library.answered) { _, fragment in
+            guard let fragment else { return }
+            library.answered = nil
+            open(fragment)
         }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }
