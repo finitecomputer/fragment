@@ -44,7 +44,8 @@ struct SidebarDrawer: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let width = min(350, max(1, geometry.size.width - 36))
+            // The screen's width on a phone; on a wider screen, a column's
+            let width = min(480, max(1, geometry.size.width))
             ZStack(alignment: .leading) {
                 if isPresented {
                     Color.black.opacity(0.25 * max(0, 1 + Double(dragOffset / width)))
@@ -52,7 +53,7 @@ struct SidebarDrawer: View {
                         .onTapGesture { close() }
                         .accessibilityHidden(true)
                         .transition(.opacity)
-                    SidebarView(library: library, page: page, api: api, navigate: navigate)
+                    SidebarView(library: library, page: page, api: api, navigate: navigate, close: close)
                         .frame(width: width)
                         .offset(x: dragOffset)
                         .transition(.move(edge: .leading))
@@ -115,6 +116,7 @@ struct SidebarView: View {
     let page: ShellPage
     let api: FragmentAPI
     let navigate: (ShellPage) -> Void
+    let close: () -> Void
     @State private var renamingChat: FragmentSummary?
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
@@ -130,34 +132,39 @@ struct SidebarView: View {
             HStack {
                 Text("Finite.Computer").font(.headline)
                 Spacer()
-                Button("Search or start a new chat", systemImage: "square.and.pencil") { navigate(.launcher) }
-                    .labelStyle(.iconOnly).buttonStyle(.glass).accessibilityIdentifier("sidebarNewChat")
+                Button("Close", systemImage: "xmark") { close() }
+                    .labelStyle(.iconOnly).buttonStyle(.glass).buttonBorderShape(.circle).accessibilityIdentifier("sidebarClose")
             }.padding(20)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(library.sidebarAgents) { agent in
-                        Menu {
-                            Button("New chat with \(agent.displayTitle)", systemImage: "square.and.pencil") {
-                                library.selectedAgent = agent.name; navigate(.launcher)
-                            }
-                            Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
-                            Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
-                                Task { await library.pin(agent, api: api) }
-                            }
-                            if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
-                                Section(chat.displayTitle) { chatActions(chat) }
-                            }
-                        } label: {
-                            HStack(spacing: 12) {
-                                AgentAvatar(agent: agent)
-                                Text(agent.displayTitle).font(.headline)
-                                if agent.pinned == true {
-                                    Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
+                        HStack(spacing: 8) {
+                            Menu {
+                                Button("Agent settings", systemImage: "person.crop.circle") { library.selectedAgent = agent.name; navigate(.settings) }
+                                Button(agent.pinned == true ? "Unpin" : "Pin to top", systemImage: agent.pinned == true ? "pin.slash" : "pin") {
+                                    Task { await library.pin(agent, api: api) }
                                 }
-                                Spacer()
-                                Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
-                            }.padding(12).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
-                        }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
+                                if let chat = currentChat, let identity = library.identities[agent.name], (chat.agents ?? []).contains(identity) {
+                                    Section(chat.displayTitle) { chatActions(chat) }
+                                }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    AgentAvatar(agent: agent)
+                                    Text(agent.displayTitle).font(.headline)
+                                    if agent.pinned == true {
+                                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+                                }.padding(12).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+                            }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
+                            // a new chat with this agent: the launcher, its words to come
+                            Button { library.selectedAgent = agent.name; navigate(.launcher) } label: {
+                                Image(systemName: "square.and.pencil").font(.system(size: 17, weight: .medium)).frame(width: 40, height: 40)
+                            }
+                            .buttonStyle(.glass).buttonBorderShape(.circle)
+                            .accessibilityLabel("New chat with \(agent.displayTitle)").accessibilityIdentifier("agentNewChat-\(agent.name)")
+                        }
                         ForEach(library.chats.filter { ($0.agents ?? []).first == library.identities[agent.name] }) { chat in
                             chatRow(chat)
                         }
@@ -174,14 +181,23 @@ struct SidebarView: View {
                     }
                 }.padding(.horizontal, 12)
             }.refreshable { await library.load(api) }
-            VStack(spacing: 4) {
-                footer("History", icon: "clock", page: .history)
-                footer("Your Apps", icon: "square.grid.2x2", page: .apps)
-                footer("Settings", icon: "gearshape", page: .settings)
+            HStack(alignment: .bottom, spacing: 12) {
+                VStack(spacing: 4) {
+                    footer("History", icon: "clock", page: .history)
+                    footer("Your Apps", icon: "square.grid.2x2", page: .apps)
+                    footer("Settings", icon: "gearshape", page: .settings)
+                }
+                // Search, or start a chat from what is typed: the launcher (the web's ⌘K)
+                Button { navigate(.launcher) } label: {
+                    Image(systemName: "magnifyingglass").font(.system(size: 20, weight: .semibold)).frame(width: 56, height: 56)
+                }
+                .buttonStyle(.glass).buttonBorderShape(.circle)
+                .accessibilityLabel("Search or start a new chat").accessibilityIdentifier("sidebarSearch")
+                .padding(.bottom, 4)
             }.padding(12)
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .padding(.vertical, 8).padding(.leading, 8)
+        .padding(8)
         .alert("Name this chat", isPresented: Binding(get: { renamingChat != nil }, set: { if !$0 { renamingChat = nil } })) {
             TextField("Chat name", text: $chatTitle)
             Button("Save") {
