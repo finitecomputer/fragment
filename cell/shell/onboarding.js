@@ -258,8 +258,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // list again (`owesFirstAgent`, `resumeAdd`) and goes on from what was made.
   const SETUP_WAIT_MS = 4 * 60_000;
   // the first run or an Add while it runs, or after it failed (Try again, in
-  // its chat): { label, title, role, job, added, agent, written, chat, made,
-  // joined, ready, error }; null otherwise
+  // its chat): { label, title, role, job, added, agent, chat, stage,
+  // failedStage, error }; null otherwise
+  const SETUP_STAGES = ["writing", "making", "joining", "waiting_ready", "done"];
+  const setupStage = () => setup.stage === "failed" ? setup.failedStage : setup.stage;
   let setup = null;
   let setupRun = null;
   // What the first run's chat shows of it (the roster's `setup`, to that
@@ -268,14 +270,18 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   function setupFor(name) {
     if (!setup || setup.chat !== name) return null;
     // its name as the list says it once it is made (renamed meanwhile, the new one)
-    const made = allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === setup.label);
-    const t = made ? titleOf(made.name) : setup.title;
-    const step = (text, done, now) => ({ text, state: done ? "done" : !now ? "todo" : setup.error ? "failed" : "doing" });
+    const agent = allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === setup.label);
+    const t = agent ? titleOf(agent.name) : setup.title;
+    const stage = SETUP_STAGES.indexOf(setupStage());
+    const made = stage >= SETUP_STAGES.indexOf("joining");
+    const joined = stage >= SETUP_STAGES.indexOf("waiting_ready");
+    const ready = setupStage() === "done";
+    const step = (text, done, now) => ({ text, state: done ? "done" : !now ? "todo" : setup.stage === "failed" ? "failed" : "doing" });
     return {
       steps: [
-        step(setup.made ? `${t} is made` : `Making ${t}`, setup.made, !setup.made),
-        step(setup.joined ? `${t} is in this chat` : `Adding ${t} to this chat`, setup.joined, setup.made && !setup.joined),
-        step(setup.ready ? `${t} is ready` : computerView()?.phase === "awake" ? `${t} is starting on its computer` : `Its computer: ${PHASE[computerView()?.phase] ?? "not made yet"}`, setup.ready, setup.joined && !setup.ready),
+        step(made ? `${t} is made` : `Making ${t}`, made, !made),
+        step(joined ? `${t} is in this chat` : `Adding ${t} to this chat`, joined, made && !joined),
+        step(ready ? `${t} is ready` : computerView()?.phase === "awake" ? `${t} is starting on its computer` : `Its computer: ${PHASE[computerView()?.phase] ?? "not made yet"}`, ready, joined && !ready),
       ],
       error: setup.error,
     };
@@ -375,7 +381,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
         continue;
       }
       if (setup) return;
-      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+      setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, agent: agent.name, chat: null, stage: "writing", failedStage: null, error: null };
       return creatingAgent();
     }
   }
@@ -397,7 +403,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     if (setup) throw new Error("Another agent is being made: finish it in its chat first.");
     const placed = new Set([...agents().values()].map((a) => a.fragment));
     const left = allFragments().find((f) => f.kind === "agent" && own(f) && titleOf(f.name) === name && !placed.has(f.name) && !agentsOwnChat(f.name));
-    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, agent: left?.name ?? null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+    setup = { label: left ? labelOf(left.name) : freeLabel(slug(name)), title: name, role: role || null, runtime, job: addedJob, added: true, agent: left?.name ?? null, chat: null, stage: "writing", failedStage: null, error: null };
     const unsaid = await creatingAgent();
     if (unsaid) throw new Error(unsaid);
   }
@@ -411,7 +417,7 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       const chat = agent ? null : chats().find(unjoined);
       const earlier = agent ? labelOf(agent.fragment) : chat ? labelOf(chat.name).slice(0, -"-chat".length) : null;
       const title = agent ? titleOf(agent.fragment) : (earlier && nameOfLabel(earlier)) || pickName();
-      setup = { label: earlier ?? freeLabel(slug(title)), title, role: null, job: firstSoul, added: false, agent: null, written: false, chat: null, made: false, joined: false, ready: false, error: null };
+      setup = { label: earlier ?? freeLabel(slug(title)), title, role: null, job: firstSoul, added: false, agent: null, chat: null, stage: "writing", failedStage: null, error: null };
     }
     return makeAgent();
   }
@@ -420,9 +426,12 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // including a create whose response was lost. The chat's frame opens
   // once: a draft in it stays put.
   async function makeAgent() {
-    setupChanged({ error: null });
+    setupChanged({ stage: setupStage(), failedStage: null, error: null });
     const { label } = setup;
-    if (setup.added) await agentWritten();
+    if (setup.added && setup.stage === "writing") {
+      await agentWritten();
+      setupChanged({ stage: "making" });
+    }
     const chatName = allFragments().find((f) => f.kind === "chat" && own(f) && labelOf(f.name) === `${label}-chat`)?.name ??
       (await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: FIRST_CHAT })).name;
     setupChanged({ chat: chatName });
@@ -435,15 +444,16 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // Finish both before offering Retry: no previous create is left in flight.
     for (const result of prepared) if (result.status === "rejected") throw result.reason;
     const computer = prepared[1].value;
-    const agent = await agentWritten();
+    const agent = setup.stage === "writing" ? await agentWritten() : setup.agent;
+    setupChanged({ stage: "making" });
     const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent)}`, {});
     const id = assigned.agents.find((a) => a.fragment === agent)?.identity;
     if (!id) throw new Error("its computer did not take it");
     await api("POST", `/api/f/${agent}/deploy`, {});
-    setupChanged({ made: true });
+    setupChanged({ stage: "joining" });
     // its joining is what lets the chat's page send (and wakes its computer)
     await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
-    setupChanged({ joined: true });
+    setupChanged({ stage: "waiting_ready" });
     await hello(agent, chatName);
     api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
     await load();
@@ -457,7 +467,6 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     let agent = setup.agent ?? allFragments().find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label)?.name;
     if (!agent) agent = (await api("POST", "/api/fragments", { label, template: "agent", title })).name;
     setupChanged({ agent });
-    if (setup.written) return agent;
     const written = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then(() => true, (e) => { if (e.status === 404) return false; throw e; });
     if (!written) {
       const owner = person().email || "your person";
@@ -473,7 +482,6 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       }
       await api("POST", `/api/f/${agent}/files`, { key: "agent-default", message: "its job", files });
     }
-    setupChanged({ written: true });
     return agent;
   }
   // Ready: its computer awake, and the agent following its chat (its wake
@@ -518,12 +526,12 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
         if (Date.now() - t0 > SETUP_WAIT_MS) throw new Error("Its computer is taking longer than usual to start. What you send waits for it; Try again looks again.");
         await new Promise((r) => setTimeout(r, 1500));
       }
-      setupChanged({ ready: true });
+      setupChanged({ stage: "done" });
       setup = null;
       rosterChanged();
       await load();
     })().catch((err) => {
-      if (setup) setupChanged({ error: err.message || "It did not answer." });
+      if (setup) setupChanged({ failedStage: setupStage(), stage: "failed", error: err.message || "It did not answer." });
       // its chat says it (its steps)
       if (setup?.chat && hasFrame(setup.chat)) return null;
       if (page()) {
@@ -581,8 +589,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   return { signIn, showLayout, welcome, switchForm, noSeatSaid, setupFor, owesFirstAgent, resumeFirstRun, creatingAgent, addAgent,
     setupChat: () => setup?.chat ?? null,
     setupState: () => setup && [setup.chat, setupFor(setup.chat)],
-    setupPending: () => setup && !setup.joined,
-    retrySetup: (name) => { if (name === setup?.chat && setup.error) creatingAgent(); },
+    setupPending: () => setup && SETUP_STAGES.indexOf(setupStage()) < SETUP_STAGES.indexOf("waiting_ready"),
+    retrySetup: (name) => { if (name === setup?.chat && setup.stage === "failed") creatingAgent(); },
     putOff: () => firstRunPutOff,
   };
 }
