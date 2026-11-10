@@ -540,6 +540,8 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
     if let Ok(w) = tab {
         w.close();
     }
+    // the object's clock back as it was, for the sections after
+    later_by(-DAY_MS)?;
     Ok(())
 }
 
