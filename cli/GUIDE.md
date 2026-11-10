@@ -1000,6 +1000,31 @@ tool, tool_calls, reasoning, summary, attachments}`; `kind` is `chat`,
 A file a message held is under `~/archive/media/`, named in its
 `attachments`.
 
+## Bringing an agent's home
+
+`fragment home` reads an agent's home from wherever it ran: its folder,
+or a zip of it, read in place and never changed. A layout says where
+that home keeps things: `hermes` (a bare Hermes home, the default), or a
+layout file a platform's import skill carries.
+
+```
+fragment home survey ~/old-home --json                         # what an import would bring, and what stays
+fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read through a platform's layout
+fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
+```
+
+The survey lists the chats' database (`fragment session import` brings
+them), the SOUL, memories and a few public settings, each skill with
+where it came from (its own come over; a platform's are replaced by
+this one's, and an edit to one is kept), each scheduled job as a
+routine in UTC (weekdays by name), and its files: what an import brings
+(photos, video, audio and documents first, newest first, then the rest,
+up to 10 GiB) and what stays behind, and why. A file that may hold a
+password or key (`.env`, `auth.json`, a private key) is left out unread,
+and named: nothing an import makes holds it. A zip naming a file by a
+path that is not plain (`..`, `a/./b`) is refused whole. `extract`
+copies into a folder apart from the home, never through a link.
+
 ## Agents
 
 An agent is an identity of its own, and you own it: an agent fragment
@@ -1123,6 +1148,8 @@ fragment ledger [grant <who> <usd> --why W [--id ID] | key-cap <key> <usd>|defau
 fragment quote [<name> <amount>…]        # what a job would cost, and what is left
 fragment export [--out FILE]             fragment channel <name> [<channel>] [--after N] [--follow]
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
+fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
+fragment home extract <source> <path>... --to <dir> [--layout L]
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>
