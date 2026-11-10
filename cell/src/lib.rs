@@ -256,7 +256,7 @@ fn registry_unavailable(why: String) -> CellError {
 }
 
 /// One call to the registry at `path`: its 200's body, or its refusal.
-async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<Vec<u8>> {
+pub(crate) async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<Vec<u8>> {
     let make = || {
         let headers = Headers::new();
         headers.set("content-type", "application/json")?;

@@ -1477,6 +1477,11 @@
           "level": {
             "$ref": "#/components/schemas/NoticeLevel"
           },
+          "mustAnswer": {
+            "default": false,
+            "description": "It must be answered (FIN-458): a client shows it alone, over\neverything, until one of its actions goes through, and the read\nafter no longer has it. The first such in the list first: its\nowner lists its own oldest first. A client from before it shows it\nas any other.",
+            "type": "boolean"
+          },
           "text": {
             "default": null,
             "description": "A sentence or two under it.",

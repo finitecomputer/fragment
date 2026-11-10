@@ -1969,8 +1969,14 @@ say), which the client opens once that read has it: one of the person's
 fragments in place, any other address as a page. A post refused shows the
 server's own words for it (its `message`) on the notice, with its button
 back. `until`: when what a notice tells ends by the clock alone; a client
-counts down to it and drops the notice then. Their pages are told when
-notices change (`watch`'s `changed`).
+counts down to it and drops the notice then. `mustAnswer`: it must be
+answered; a client shows it alone over everything (a guest's welcome
+too), never in the band, until the read after one of its actions has it
+no more, the first such in the list first (each owner lists its own
+oldest first). A client from before it shows it as any other. No owner
+asks one yet; on a local fleet with test levers alone (dev's, the e2e's:
+never a branch deployment, nor production), an invite to a fragment whose
+label has `must-answer` in it is one, the proof of the clients' cover. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
