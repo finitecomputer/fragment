@@ -4,28 +4,34 @@
 //! sealed for this object (`keys::seal`) and never comes out: no route,
 //! answer, log or event names one.
 //!
+//! - **One protocol**: every call is `vault/<op>[/<name>]`, a put's body
+//!   its `PutSecret` as its person sent it, on the Vault its person's
+//!   identity names (only the platform's own code reaches one:
+//!   `VAULT_HEADER`). The Vault decides; the router finds it and passes its
+//!   answer on as it came.
 //! - **Its routes** (the router's `/api/vault`, `route` below): the person
 //!   alone, never an agent, lists (names only), puts and removes.
-//! - **Its seam** (`put`, `delete`): what the platform's own code puts for
-//!   a person, as FIN-463's migration hands an old agent's keys over. The
-//!   rules are one (`fragment_core::vault::check`).
+//! - **Its seam** (`put`, `delete`): the same calls, for the platform's own
+//!   code (FIN-463's hand-off). The rules are one (`fragment_core::vault`).
+//! - **A secret is kept as its value, sealed, and its `Secret` as JSON**
+//!   (what every answer names), so a list is those texts, read nowhere.
 //! - **Its wipe** (wipe.rs, the ledger's step): emptied in one step, and a
 //!   row kept that says so; nothing is put after.
 
 use std::cell::Cell;
 
 use fragment_core::vault::{self as rules, Placing};
-use fragment_proto::vault::{Place, PutSecret, Secret, SecretList, SecretRemoved};
+use fragment_proto::vault::{PutSecret, Secret, SecretRemoved};
 use fragment_proto::{ErrorCode, IdentityKind};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::value::RawValue;
+use serde_json::Value;
 use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
-use crate::json_response::{json_bytes, json_response};
+use crate::json_response::json_bytes;
 use crate::routed::Signed;
 
 /// What a value is sealed for: this class, and the object's id.
@@ -35,62 +41,45 @@ const SEAL_CLASS: &str = "Vault";
 /// the platform's own code calls one, and the router passes no such header.
 pub(crate) const VAULT_HEADER: &str = "x-fragment-vault";
 
-/// `vault/put`'s body: a secret for `person`, under `name`.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PutAsk {
-    person: String,
-    name: String,
-    put: PutSecret,
+/// `vault/<op>[/<name>]` on `person`'s Vault, `body` its JSON: its answer,
+/// as it wrote it.
+async fn ask(env: &Env, person: &str, op: &str, body: Option<&RawValue>) -> CellResult<Vec<u8>> {
+    crate::routed::ask_bytes(env, "VAULT", person, op, &body).await
 }
 
-/// `vault/list`'s and `vault/delete`'s bodies.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Named {
-    person: String,
-    #[serde(default)]
-    name: Option<String>,
+/// Puts `put` (a `PutSecret`'s JSON) into `person`'s Vault under `name`,
+/// sealed there, under the rules of the person's own `PUT
+/// /api/vault/{name}`; set again, it is replaced whole. The seam for the
+/// platform's own code (FIN-463's hand-off): its answer is the `Secret`
+/// set, as JSON, never its value.
+pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &RawValue) -> CellResult<Vec<u8>> {
+    ask(env, person, &format!("vault/put/{name}"), Some(put)).await
 }
 
-/// `vault/delete`'s answer.
-#[derive(Serialize, Deserialize)]
-struct Removed {
-    removed: bool,
-}
-
-/// Puts `put` into `person`'s Vault under `name`, sealed there, under the
-/// same rules as the person's own `PUT /api/vault/{name}`. Set again, it
-/// is replaced whole. The seam for the platform's own code (FIN-463's
-/// hand-off), answered as the Vault answers it: the `Secret` set, as JSON,
-/// never its value.
-pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &PutSecret) -> CellResult<Vec<u8>> {
-    crate::routed::ask_bytes(env, "VAULT", person, "vault/put", &PutAsk { person: person.into(), name: name.into(), put: put.clone() }).await
-}
-
-/// Removes `name` from `person`'s Vault: whether there was one.
-pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<bool> {
-    let r: Removed = crate::routed::ask_object(env, "VAULT", person, "vault/delete", &Named { person: person.into(), name: Some(name.into()) }).await?;
-    Ok(r.removed)
+/// Removes `name` from `person`'s Vault: its answer, a `SecretRemoved`.
+pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<Vec<u8>> {
+    ask(env, person, &format!("vault/delete/{name}"), None).await
 }
 
 /// `/api/vault[/{name}]`, signed by `signed`: the person's own, never an
 /// agent's (their agents use its secrets, never set or list them). The
-/// router finds their Vault and passes its answers on as they came.
+/// router finds their Vault, hands it the body as it came, and passes its
+/// answer on.
 pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     if signed.identity.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "a vault is its person's alone: their agents use its secrets, and never set, list or remove one"));
     }
     let person = signed.identity.id.as_str();
-    match (method, rest) {
-        (Method::Get, []) => json_bytes(crate::routed::ask_bytes(env, "VAULT", person, "vault/list", &Named { person: person.into(), name: None }).await?),
+    let answer = match (method, rest) {
+        (Method::Get, []) => ask(env, person, "vault/list", None).await?,
         (Method::Put, [name]) => {
-            let p: PutSecret = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts, place?, agents}}: {e}")))?;
-            json_bytes(put(env, person, name, &p).await?)
+            let raw: Box<RawValue> = crate::json_body(body)?;
+            put(env, person, name, &raw).await?
         }
-        (Method::Delete, [name]) => json_response(&SecretRemoved { name: name.to_string(), removed: delete(env, person, name).await? }),
-        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
-    }
+        (Method::Delete, [name]) => delete(env, person, name).await?,
+        (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
+    };
+    json_bytes(answer)
 }
 
 #[durable_object]
@@ -141,130 +130,83 @@ impl VaultCell {
     }
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
+        let path = req.path();
         // a wipe ends a vault that refuses its schema too
-        if let Some(route) = req.path().strip_prefix("/wipe/") {
+        if let Some(route) = path.strip_prefix("/wipe/") {
             // only a wipe's orchestrator sets the header (routed.rs `marker`)
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")));
             }
-            return Ok(Response::from_json(&self.wipe(route).await?)?);
+            return Ok(Response::from_bytes(self.wipe(route)?.into_bytes())?);
         }
         if req.headers().get(VAULT_HEADER)?.is_none() {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no route {}", req.path())));
+            return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
         }
         self.schema.ready()?;
-        let path = req.path();
-        // each call reads its own type from the call's bytes, once
-        let body = req.bytes().await?;
-        fn read<'a, T: Deserialize<'a>>(path: &str, body: &'a [u8]) -> CellResult<T> {
-            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{path}: {e}")))
-        }
-        fn answer(a: &impl Serialize) -> CellResult<Response> {
-            Ok(Response::from_json(a)?)
-        }
-        match path.as_str() {
-            "/vault/put" => {
-                let b: PutAsk = read(&path, &body)?;
-                answer(&self.put(&b.person, &b.name, &b.put).await?)
-            }
-            "/vault/list" => {
-                let b: Named = read(&path, &body)?;
-                self.person_is(&b.person, false)?;
-                answer(&SecretList { secrets: self.secrets()? })
-            }
-            "/vault/delete" => {
-                let b: Named = read(&path, &body)?;
-                self.person_is(&b.person, false)?;
-                let name = b.name.ok_or_else(|| CellError::invalid("vault/delete names its secret"))?;
-                let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.as_str().into()])?.is_empty();
-                self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.as_str().into()])?;
-                if removed {
-                    console_log!("{}", json!({ "vault": "removed", "name": name }));
-                }
-                answer(&Removed { removed })
-            }
-            other => Err(CellError::new(ErrorCode::NotFound, format!("no route {other}"))),
-        }
+        let answer = match path.trim_start_matches('/').split('/').collect::<Vec<_>>()[..] {
+            ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "list"] => self.list()?,
+            ["vault", "delete", name] => self.delete(name)?,
+            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
+        };
+        Ok(Response::from_bytes(answer.into_bytes())?)
     }
 
-    /// Refuses a call for anyone but the person this vault is: the first
-    /// put names them for good (`write`), and a vault no put named holds
-    /// nothing of anyone's.
-    fn person_is(&self, person: &str, write: bool) -> CellResult<()> {
-        if !fragment_core::npub::is_identity(person) {
-            return Err(CellError::invalid("a vault's call names its person"));
-        }
-        let rows = self.rows("SELECT value FROM meta WHERE key = 'person'", vec![])?;
-        match rows.first().and_then(|r| r["value"].as_str()) {
-            Some(p) if p != person => Err(CellError::host(format!("this vault is {p}'s, not {person}'s"))),
-            Some(_) => Ok(()),
-            None if write => {
-                self.sql().exec("INSERT INTO meta (key, value) VALUES ('person', ?)", vec![person.into()])?;
-                Ok(())
-            }
-            None => Ok(()),
-        }
-    }
-
-    async fn put(&self, person: &str, name: &str, put: &PutSecret) -> CellResult<Secret> {
+    /// `put` checked, sealed and kept under `name`: its `Secret` as JSON.
+    async fn put(&self, name: &str, put: &PutSecret) -> CellResult<String> {
+        let wiped = || CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing");
         if self.wiped.get() {
-            return Err(CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing"));
+            return Err(wiped());
         }
         let checked = rules::check(name, put, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
         if checked.placing == Placing::Nip98 && fragment_nip98::Keys::from_secret_hex(&put.value).is_none() {
             return Err(CellError::invalid(format!("a secret's value: {}", rules::NOSTR_KEY)));
         }
         // sealed first (reading the host secret may yield): the checks and
-        // the write below share one turn
+        // the write below share one turn, and a wipe that ended meanwhile
+        // stops it
         let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
-        // a wipe that ended while it sealed: nothing is put after it
         if self.wiped.get() {
-            return Err(CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing"));
+            return Err(wiped());
         }
-        self.person_is(person, true)?;
         let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
         let held = self.rows("SELECT COUNT(*) AS n FROM secrets", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
         if !exists && held >= rules::SECRETS_MAX as u64 {
             return Err(CellError::invalid(format!("a vault keeps at most {} secrets: remove one first", rules::SECRETS_MAX)));
         }
-        let at = js::now_ms();
+        let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: js::now_ms() };
+        let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec(
-            "INSERT INTO secrets (name, sealed, hosts, place, agents, set_at) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, hosts = excluded.hosts, place = excluded.place, agents = excluded.agents, set_at = excluded.set_at",
-            vec![name.into(), sealed.into(), text(&checked.hosts).into(), text(&checked.place).into(), text(&checked.agents).into(), SqlStorageValue::Integer(at)],
+            "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret",
+            vec![name.into(), sealed.into(), text.as_str().into()],
         )?;
-        // what was set, never the value
-        console_log!("{}", json!({ "vault": "set", "name": name, "hosts": checked.hosts.len(), "agents": checked.agents.len() }));
-        Ok(Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: at })
+        Ok(text)
     }
 
-    /// Every secret held, by name: never a value.
-    fn secrets(&self) -> CellResult<Vec<Secret>> {
-        let rows = self.rows("SELECT name, hosts, place, agents, set_at FROM secrets ORDER BY name", vec![])?;
+    /// Every secret held, by name, as `SecretList`'s JSON: the texts kept,
+    /// never a value.
+    fn list(&self) -> CellResult<String> {
+        let rows = self.rows("SELECT secret FROM secrets ORDER BY name", vec![])?;
         assert!(rows.len() <= rules::SECRETS_MAX, "a vault keeps at most SECRETS_MAX secrets");
-        rows.iter()
-            .map(|r| {
-                let field = |k: &str| r[k].as_str().unwrap_or_default();
-                let bad = |k: &str, e: serde_json::Error| CellError::host(format!("a stored secret's {k}: {e}"));
-                Ok(Secret {
-                    name: field("name").to_string(),
-                    hosts: crate::json_text(field("hosts")).map_err(|e| bad("hosts", e))?,
-                    place: crate::json_text::<Place>(field("place")).map_err(|e| bad("place", e))?,
-                    agents: crate::json_text(field("agents")).map_err(|e| bad("agents", e))?,
-                    set_at: r["set_at"].as_i64().unwrap_or_default(),
-                })
-            })
-            .collect()
+        let texts: Vec<&str> = rows.iter().filter_map(|r| r["secret"].as_str()).collect();
+        Ok(format!("{{\"secrets\":[{}]}}", texts.join(",")))
+    }
+
+    /// `name` removed: `SecretRemoved`'s JSON.
+    fn delete(&self, name: &str) -> CellResult<String> {
+        let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
+        self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
+        serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))
     }
 
     /// A wipe's calls (docs/api.md, Operators; wipe.rs): `view` →
     /// `{wiped, held}`; `end` → `{wiped, held}`: every table made again
-    /// empty, with the row that says it was wiped, in one step (no await).
-    /// Again, it changes nothing.
-    async fn wipe(&self, route: &str) -> CellResult<Value> {
+    /// empty, with the row that says it was wiped, in one step. Again, it
+    /// changes nothing.
+    fn wipe(&self, route: &str) -> CellResult<String> {
         let held = || -> CellResult<bool> { Ok(!self.rows("SELECT name FROM secrets LIMIT 1", vec![])?.is_empty()) };
         match route {
-            "view" => Ok(json!({ "wiped": self.wiped.get(), "held": held()? })),
+            "view" => Ok(format!("{{\"wiped\":{},\"held\":{}}}", self.wiped.get(), held()?)),
             "end" => {
                 let had = held()?;
                 let sql = self.sql();
@@ -274,14 +216,9 @@ impl VaultCell {
                 }
                 self.wiped.set(true);
                 assert!(!held()?, "a wiped vault holds nothing");
-                Ok(json!({ "wiped": true, "held": had }))
+                Ok(format!("{{\"wiped\":true,\"held\":{had}}}"))
             }
             other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
-}
-
-/// A stored field's JSON text, written once.
-fn text(v: &impl Serialize) -> String {
-    serde_json::to_string(v).expect("a stored field serializes")
 }

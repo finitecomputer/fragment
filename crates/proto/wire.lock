@@ -296,11 +296,11 @@ field Pinned.name required string
 field Pinned.pinned required boolean
 field Pins.live required string|null
 field Pins.main required string|null
-field Place.basic optional BasicHalf|null
+field Place.basic optional string|null
 field Place.format optional string|null
 field Place.header optional string|null
 field Place.query optional string|null
-field Place.sign optional Signing|null
+field Place.sign optional string|null
 field PostRecord.body required any
 field PostRecord.id required string
 field Posted.record required ChannelRecord
@@ -482,7 +482,6 @@ route vault.remove path vault.remove.path
 route vault.remove query vault.remove.query
 route vault.remove response SecretRemoved
 type Archived out object
-type BasicHalf both enum
 type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
@@ -579,7 +578,6 @@ type SetArchived in object
 type SetDock in object
 type SetPinned in object
 type Sharing out object
-type Signing both enum
 type Until out object
 type UploadLimits out object
 type Urls out object
@@ -620,8 +618,6 @@ type vault.put.path in object
 type vault.put.query in object
 type vault.remove.path in object
 type vault.remove.query in object
-value BasicHalf password
-value BasicHalf user
 value ErrorCode already_exists
 value ErrorCode app_failed
 value ErrorCode budget_used_up
@@ -750,7 +746,6 @@ value Role editor
 value Role owner
 value Role public
 value Role viewer
-value Signing nip98
 value Visibility link
 value Visibility members
 value Visibility public

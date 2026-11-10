@@ -8,7 +8,7 @@
 //! and agents are set only with its value, so no one who cannot read the
 //! value (no one can) sends it anywhere its setter did not mean.
 
-use fragment_proto::vault::{BasicHalf, Place, PutSecret, Signing};
+use fragment_proto::vault::{Place, PutSecret};
 
 use crate::catalog::{self, Catalog, Half, Placement};
 
@@ -97,17 +97,13 @@ pub fn name_ok(name: &str, catalog: &Catalog) -> Result<(), VaultError> {
 /// auth, or a signature.
 pub fn placing(place: &Place) -> Result<(Placing, Place), VaultError> {
     let refused = || VaultError::Place("one of {\"header\", \"format\"?}, {\"query\"}, {\"basic\": \"user\"|\"password\"} or {\"sign\": \"nip98\"}".into());
-    let placing = match (&place.header, &place.format, &place.query, place.basic, place.sign) {
+    let placing = match (&place.header, &place.format, &place.query, place.basic.as_deref(), place.sign.as_deref()) {
         (None, None, None, None, None) => Placing::Fill(Placement::Header { name: "authorization".into(), format: "Bearer {}".into() }),
         (Some(name), format, None, None, None) => Placing::Fill(Placement::Header { name: name.clone(), format: format.clone().unwrap_or_else(|| "{}".into()) }),
         (None, None, Some(name), None, None) => Placing::Fill(Placement::Query { name: name.clone() }),
-        (None, None, None, Some(half), None) => Placing::Fill(Placement::Basic {
-            half: match half {
-                BasicHalf::User => Half::User,
-                BasicHalf::Password => Half::Password,
-            },
-        }),
-        (None, None, None, None, Some(Signing::Nip98)) => Placing::Nip98,
+        (None, None, None, Some("user"), None) => Placing::Fill(Placement::Basic { half: Half::User }),
+        (None, None, None, Some("password"), None) => Placing::Fill(Placement::Basic { half: Half::Password }),
+        (None, None, None, None, Some("nip98")) => Placing::Nip98,
         _ => return Err(refused()),
     };
     if let Placing::Fill(p) = &placing {
@@ -197,11 +193,11 @@ mod tests {
     fn each_place_reads_as_the_catalog_s_and_a_signature_as_its_header() {
         let q = check("k", &put("v", &["a.example.com"], Place { query: Some("key".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("query");
         assert_eq!(q.placing, Placing::Fill(Placement::Query { name: "key".into() }));
-        let b = check("k", &put("v", &["a.example.com"], Place { basic: Some(BasicHalf::Password), ..Place::default() }, &[AGENT]), &catalog()).expect("basic");
+        let b = check("k", &put("v", &["a.example.com"], Place { basic: Some("password".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("basic");
         assert_eq!(b.placing, Placing::Fill(Placement::Basic { half: Half::Password }));
         let h = check("k", &put("v", &["a.example.com"], Place { header: Some("x-api-key".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("header");
         assert_eq!(h.placing, Placing::Fill(Placement::Header { name: "x-api-key".into(), format: "{}".into() }));
-        let s = check("nostr-ada", &put(NSEC, &["finite.site"], Place { sign: Some(Signing::Nip98), ..Place::default() }, &[AGENT]), &catalog()).expect("sign");
+        let s = check("nostr-ada", &put(NSEC, &["finite.site"], Place { sign: Some("nip98".into()), ..Place::default() }, &[AGENT]), &catalog()).expect("sign");
         assert_eq!(s.placing, Placing::Nip98);
         assert_eq!(s.placing.placement(), Placement::Header { name: "authorization".into(), format: "Nostr {}".into() });
     }
@@ -224,7 +220,7 @@ mod tests {
         for v in ["", "has space", "tab\tin", "é", &"x".repeat(VALUE_MAX_BYTES + 1)] {
             assert!(matches!(check("k", &put(v, &["a.example.com"], Place::default(), &[AGENT]), &catalog()), Err(VaultError::Value(_))), "{v:?}");
         }
-        let sign = Place { sign: Some(Signing::Nip98), ..Place::default() };
+        let sign = Place { sign: Some("nip98".into()), ..Place::default() };
         // not hex, upper case, short
         for v in ["nsec1abc", &NSEC.to_uppercase(), &NSEC[..62]] {
             assert!(matches!(check("k", &put(v, &["a.example.com"], sign.clone(), &[AGENT]), &catalog()), Err(VaultError::Value(_))), "{v:?}");
@@ -248,8 +244,10 @@ mod tests {
         let hop = Place { header: Some("host".into()), ..Place::default() };
         let ours = Place { header: Some("x-fragment-agent".into()), ..Place::default() };
         let no_slot = Place { header: Some("authorization".into()), format: Some("Bearer".into()), ..Place::default() };
-        let sign_and_header = Place { header: Some("authorization".into()), sign: Some(Signing::Nip98), ..Place::default() };
-        for p in [two, format_alone, hop, ours, no_slot, sign_and_header] {
+        let sign_and_header = Place { header: Some("authorization".into()), sign: Some("nip98".into()), ..Place::default() };
+        let other_half = Place { basic: Some("both".into()), ..Place::default() };
+        let other_sign = Place { sign: Some("nip46".into()), ..Place::default() };
+        for p in [two, format_alone, hop, ours, no_slot, sign_and_header, other_half, other_sign] {
             assert!(matches!(check("k", &put(NSEC, &["a.example.com"], p.clone(), &[AGENT]), &catalog()), Err(VaultError::Place(_))), "{p:?}");
         }
     }

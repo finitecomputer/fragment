@@ -47,31 +47,15 @@ pub struct Place {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub query: Option<String>,
+    /// `user` or `password`: which half of basic auth it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
-    pub basic: Option<BasicHalf>,
+    pub basic: Option<String>,
+    /// `nip98`: a NIP-98 signature over the request (kind 27235, its URL,
+    /// method and body), in `Authorization: Nostr …`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
-    pub sign: Option<Signing>,
-}
-
-/// Which half of HTTP basic auth (`user:password`) a secret is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum BasicHalf {
-    User,
-    Password,
-}
-
-/// A signature a secret makes over a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum Signing {
-    /// NIP-98 HTTP auth (kind 27235) over the request's URL, method and
-    /// body, in `Authorization: Nostr …`.
-    Nip98,
+    pub sign: Option<String>,
 }
 
 /// A secret as its person reads it: everything but its value.

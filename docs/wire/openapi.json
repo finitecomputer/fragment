@@ -18,15 +18,6 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
-      "BasicHalf": {
-        "description": "Which half of HTTP basic auth (`user:password`) a secret is.",
-        "enum": [
-          "user",
-          "password"
-        ],
-        "type": "string",
-        "x-fragment-direction": "both"
-      },
       "ChannelNewest": {
         "description": "`GET /api/f/<name>/channels/<channel>/newest` (the channel's reader):\neach poster's newest record of each kind the channel keeps the newest\nof (`ChannelDecl::newest`), the newest first, at most\n`limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past\nits retention) is none; a channel that keeps no kind answers none.",
         "properties": {
@@ -1771,15 +1762,12 @@
         "description": "Where a secret goes on a request: one of a header in a format\n(`{\"header\": \"authorization\", \"format\": \"Bearer {}\"}`), a query\nparameter (`{\"query\": \"key\"}`), a half of basic auth (`{\"basic\":\n\"password\"}`), or a NIP-98 signature over the request (`{\"sign\":\n\"nip98\"}`: the Vault signs, its key never leaves it). None of them,\n`Authorization: Bearer {}`.",
         "properties": {
           "basic": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BasicHalf"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null
+            "default": null,
+            "description": "`user` or `password`: which half of basic auth it is.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "format": {
             "default": null,
@@ -1804,15 +1792,12 @@
             ]
           },
           "sign": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Signing"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null
+            "default": null,
+            "description": "`nip98`: a NIP-98 signature over the request (kind 27235, its URL,\nmethod and body), in `Authorization: Nostr …`.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object",
@@ -2166,17 +2151,6 @@
         ],
         "type": "object",
         "x-fragment-direction": "out"
-      },
-      "Signing": {
-        "description": "A signature a secret makes over a request.",
-        "oneOf": [
-          {
-            "const": "nip98",
-            "description": "NIP-98 HTTP auth (kind 27235) over the request's URL, method and\nbody, in `Authorization: Nostr …`.",
-            "type": "string"
-          }
-        ],
-        "x-fragment-direction": "both"
       },
       "Until": {
         "description": "A time a notice counts down to: a client shows `said`, then how long\nuntil `at` (\" in 23 min\"), live, and drops the notice once it passes.",

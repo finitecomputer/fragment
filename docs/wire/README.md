@@ -207,12 +207,6 @@ out. Its answer: the fragment, and whether it is archived now.
 | `archived` | `boolean` | required |  |
 | `name` | `string` | required |  |
 
-### `BasicHalf`
-
-both. Which half of HTTP basic auth (`user:password`) a secret is.
-
-Values: `user`, `password`.
-
 ### `ChannelNewest`
 
 out. `GET /api/f/<name>/channels/<channel>/newest` (the channel's reader): each poster's newest record of each kind the channel keeps the newest of (`ChannelDecl::newest`), the newest first, at most `limits::NEWEST_KEPT_MAX`. A record the channel no longer keeps (past its retention) is none; a channel that keeps no kind answers none.
@@ -644,11 +638,11 @@ both, closed. Where a secret goes on a request: one of a header in a format (`{"
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `basic` | [`BasicHalf`](#basichalf) or `null` | optional |  |
+| `basic` | `string` or `null` | optional | `user` or `password`: which half of basic auth it is. |
 | `format` | `string` or `null` | optional | The header's value, `{}` the secret; with `header` alone, `{}`. |
 | `header` | `string` or `null` | optional |  |
 | `query` | `string` or `null` | optional |  |
-| `sign` | [`Signing`](#signing) or `null` | optional |  |
+| `sign` | `string` or `null` | optional | `nip98`: a NIP-98 signature over the request (kind 27235, its URL, method and body), in `Authorization: Nostr …`. |
 
 ### `PostRecord`
 
@@ -792,12 +786,6 @@ out. A fragment's sharing, in its owner's list (the platform's page): who may op
 | `members` | `integer` | required |  |
 | `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
-
-### `Signing`
-
-both. A signature a secret makes over a request.
-
-Values: `nip98`.
 
 ### `Until`
 
