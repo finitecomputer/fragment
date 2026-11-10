@@ -412,30 +412,32 @@ impl Streamed {
     }
 
     /// The held bytes, each value in them named: what may go out, and what
-    /// must wait (unless `last`) for it may begin a value.
+    /// must wait (unless `last`): the held bytes from the first place that
+    /// begins a value without holding all of it. Only those wait, so an
+    /// event that could not begin one goes out at once, the stream still
+    /// open; and a value that begins a longer one waits for the longer.
     fn named(&mut self, last: bool) -> (Vec<u8>, Vec<u8>) {
         let held = std::mem::take(&mut self.held);
-        let longest = self.needles.iter().map(|(v, _)| v.len()).max().unwrap_or(0);
         let mut out = Vec::with_capacity(held.len());
-        let mut at = 0;
-        // bounded: each pass moves `at` past a value or to the end
-        while at < held.len() {
-            // at the first place a value begins, the longest one there
-            let found = (at..held.len()).find_map(|i| self.needles.iter().filter(|(v, _)| held[i..].starts_with(v)).max_by_key(|(v, _)| v.len()).map(|(v, name)| (i, v.len(), name)));
-            match found {
-                Some((i, len, name)) => {
+        let (mut at, mut i) = (0, 0);
+        // bounded: each pass moves `i` past a byte or a value, or stops
+        while i < held.len() {
+            let rest = &held[i..];
+            if !last && self.needles.iter().any(|(v, _)| v.len() > rest.len() && v.starts_with(rest)) {
+                break;
+            }
+            match self.needles.iter().filter(|(v, _)| rest.starts_with(v)).max_by_key(|(v, _)| v.len()) {
+                Some((v, name)) => {
                     out.extend_from_slice(&held[at..i]);
                     out.extend_from_slice(name);
-                    at = i + len;
+                    i += v.len();
+                    at = i;
                 }
-                None => break,
+                None => i += 1,
             }
         }
-        let rest = &held[at..];
-        // the tail that could begin a value waits, unless the body ended
-        let keep = if last { 0 } else { rest.len().min(longest.saturating_sub(1)) };
-        out.extend_from_slice(&rest[..rest.len() - keep]);
-        (out, rest[rest.len() - keep..].to_vec())
+        out.extend_from_slice(&held[at..i]);
+        (out, held[i..].to_vec())
     }
 }
 
@@ -793,5 +795,69 @@ mod tests {
         assert_eq!(out, [&[0xff, 0xfe][..], b"{{bot}}", &[0x00]].concat());
         let mut none = Streamed::new(&[]);
         assert_eq!([none.push(b"as it came"), none.finish()].concat(), b"as it came");
+    }
+
+    /// A test token, 32 bytes, as long as many an API key.
+    const TOKEN: &str = "tok_0123456789abcdefghijklmnopqr";
+
+    /// Goal: an event stream left open gets each event as it comes. Valid:
+    /// a whole event, and heartbeats after it, go out at once with a long
+    /// value in play (32 bytes, then 4 KiB); nothing waits for the end.
+    #[test]
+    fn an_open_event_stream_gets_each_event_at_once() {
+        assert_eq!(TOKEN.len(), 32);
+        let long = "k".repeat(4096);
+        for value in [TOKEN.to_string(), long] {
+            let mut s = Streamed::new(&[("key".to_string(), value)]);
+            assert_eq!(s.push(b"data: ok\n\n"), b"data: ok\n\n");
+            for _ in 0..3 {
+                assert_eq!(s.push(b": ping\n\n"), b": ping\n\n");
+            }
+            assert_eq!(s.finish(), b"");
+        }
+    }
+
+    /// Valid: a value split in two at every offset, or one byte at a time,
+    /// is still named, after a false start that begins it; nothing else
+    /// changes, and the value never goes out whole or in part.
+    #[test]
+    fn a_value_split_at_every_offset_is_named() {
+        let values = [("key".to_string(), TOKEN.to_string())];
+        let body = format!("data: tok_01 then {TOKEN}\n\n");
+        let want = "data: tok_01 then {{key}}\n\n";
+        for cut in 0..=body.len() {
+            let (a, b) = body.as_bytes().split_at(cut);
+            let mut s = Streamed::new(&values);
+            let first = s.push(a);
+            let out = [first.clone(), s.push(b), s.finish()].concat();
+            assert_eq!(String::from_utf8(out).expect("text"), want, "cut at {cut}");
+            // what went out before the value was whole holds none of it past its false start
+            assert!(!String::from_utf8(first).expect("text").contains("tok_012"), "cut at {cut}");
+        }
+        let mut s = Streamed::new(&values);
+        let mut out: Vec<u8> = body.bytes().flat_map(|b| s.push(&[b])).collect();
+        out.extend(s.finish());
+        assert_eq!(String::from_utf8(out).expect("text"), want);
+    }
+
+    /// Valid: a tail that begins a value waits, and goes out as it was once
+    /// the next piece shows it is not one; a value that begins a longer one
+    /// waits too, so the longer is named whole. Replay: the body's end
+    /// lets a held tail go.
+    #[test]
+    fn a_tail_that_may_begin_a_value_waits_until_it_cannot() {
+        let mut s = Streamed::new(&[("key".to_string(), TOKEN.to_string())]);
+        assert_eq!(s.push(b"data: tok_01"), b"data: ");
+        assert_eq!(s.push(b"x\n\n"), b"tok_01x\n\n");
+        assert_eq!(s.push(b"tok_"), b"");
+        assert_eq!(s.finish(), b"tok_");
+        let values = [("short".to_string(), "abc".to_string()), ("long".to_string(), "abcdef".to_string())];
+        let mut s = Streamed::new(&values);
+        assert_eq!(s.push(b"abc"), b"");
+        assert_eq!(s.push(b"def!"), b"{{long}}!");
+        assert_eq!(s.push(b"abc"), b"");
+        assert_eq!(s.push(b"x"), b"{{short}}x");
+        assert_eq!(s.push(b"abcd"), b"");
+        assert_eq!(s.finish(), b"{{short}}d");
     }
 }
