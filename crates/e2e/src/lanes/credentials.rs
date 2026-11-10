@@ -895,6 +895,9 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
     "a request the Vault signs that carries another placeholder is refused, and reaches no provider",
     "removed from the Vault, a secret's next use is refused, and reaches no provider",
     "no value the Vault holds is in the guest's view, in any answer it was given, or in a node log",
+    "an answer that echoes a Vault's value as an event stream, or among bytes that are no text, names it as its secret, never the value",
+    "basic auth: a short password's header echoed back is named as its secret, never its base64",
+    "a signed request goes with the query its signature covers, byte for byte, an empty piece and all",
 ];
 
 /// A Vault's secret, as its person puts it (`PUT /api/vault/{name}`).
@@ -926,7 +929,8 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     vault_put(api, w, "e2e-vault-other", json!({ "value": other, "hosts": [other_host], "agents": ["someone--k3x9"] }))?;
     vault_put(api, w, "e2e-vault-parked", json!({ "value": other, "hosts": [], "agents": [w.agent] }))?;
     vault_put(api, w, "e2e-nostr", json!({ "value": nostr.secret_hex(), "hosts": [host], "place": { "sign": "nip98" }, "agents": [w.agent] }))?;
-    let names = ["e2e-vault", "e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr"];
+    vault_put(api, w, "e2e-vault-basic", json!({ "value": "pw12", "hosts": [host], "place": { "basic": "password" }, "agents": [w.agent] }))?;
+    let names = ["e2e-vault", "e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic"];
     let made: std::collections::BTreeMap<&str, String> = names.iter().map(|n| (*n, placeholder(s, w.id, w.agent, n))).collect();
     let ph = |name: &str| made[name].clone();
 
@@ -979,6 +983,26 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let r = say(s, 608, &format!("fetch http://{host}/v1/me?key={} with {}", ph("e2e-vault-query"), ph("e2e-nostr")), &mut said)?;
     s.ok(VAULT_CHECKS[6], r.starts_with("fetched 400") && r.contains("no other placeholder") && s.upstream.seen().len() == before, &r);
 
+    let stream = say(s, 610, &format!("fetch http://{host}/echo-stream with {}", ph("e2e-vault")), &mut said)?;
+    let binary = say(s, 611, &format!("fetch http://{host}/echo-binary with {}", ph("e2e-vault")), &mut said)?;
+    s.ok(
+        VAULT_CHECKS[9],
+        stream.starts_with("fetched 200") && stream.contains("Bearer {{e2e-vault}}") && binary.starts_with("fetched 200") && binary.contains("Bearer {{e2e-vault}}") && !stream.contains(&value) && !binary.contains(&value),
+        json!({ "stream": stream, "binary": binary }),
+    );
+    let before = s.upstream.seen().len();
+    let r = say(s, 612, &format!("fetch http://{host}/v1/me with {} as basic user", ph("e2e-vault-basic")), &mut said)?;
+    let seen = last_seen(s, before);
+    let sent = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("user:pw12"));
+    s.ok(VAULT_CHECKS[10], r.starts_with("fetched 200") && seen["auth"]["authorization"] == sent && r.contains("Basic {{e2e-vault-basic}}") && !r.contains(&sent[6..]), json!({ "said": r, "seen": seen }));
+    let before = s.upstream.seen().len();
+    let target = "/v1/sites/redirect?a=1&&b=2";
+    let r = say(s, 613, &format!("fetch http://{host}{target} with {}", ph("e2e-nostr")), &mut said)?;
+    let seen = last_seen(s, before);
+    let header = seen["auth"]["authorization"].as_str().unwrap_or_default().to_string();
+    let signer = fragment_nip98::verify(Some(&header), "GET", &format!("https://{host}{target}"), b"", now, 120);
+    s.ok(VAULT_CHECKS[11], r.starts_with("fetched 200") && seen["target"] == target && signer.as_deref() == Ok(nostr.pubkey_hex()), json!({ "said": r, "seen": seen, "signer": format!("{signer:?}") }));
+
     let gone = api.signed(w.owner, "DELETE", "/api/vault/e2e-vault", None)?;
     let before = s.upstream.seen().len();
     let r = say(s, 609, &format!("fetch http://{host}/v1/me with {}", ph("e2e-vault")), &mut said)?;
@@ -994,7 +1018,7 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let secrets = [value.as_str(), other.as_str(), &nostr.secret_hex()];
     let leaked: Vec<&str> = secrets.iter().copied().filter(|v| said.iter().any(|t| t.contains(v)) || logs.contains(v)).collect();
     s.ok(VAULT_CHECKS[8], !logs.is_empty() && leaked.is_empty(), json!({ "answers": said.len(), "log bytes": logs.len(), "leaked": leaked.len() }));
-    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr"] {
+    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic"] {
         api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
     }
     Ok(turns)
