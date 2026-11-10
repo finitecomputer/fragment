@@ -2013,7 +2013,9 @@ mod tests {
         let d = load(&file).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         let o = catalog.get("linear").and_then(|p| p.connection_oauth.as_ref()).expect("its connect");
-        assert_eq!((o.client_id.as_str(), o.scopes.as_slice(), o.revoke.as_deref()), ("linear-client", ["write".to_string()].as_slice(), Some("https://api.linear.app/oauth/revoke")));
+        let scopes = |a: fragment_core::catalog::ConnectionAccess| o.access.of(a).scopes.clone();
+        assert_eq!((o.client_id.as_str(), o.revoke.as_deref()), ("linear-client", Some("https://api.linear.app/oauth/revoke")));
+        assert_eq!((scopes(fragment_core::catalog::ConnectionAccess::Read), scopes(fragment_core::catalog::ConnectionAccess::Write)), (vec!["read".to_string()], vec!["write".to_string()]), "read only asks for read, read and write for write");
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_LINEAR".into(), "fragment-linear-oauth-secret")));
     }
 

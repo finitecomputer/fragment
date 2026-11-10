@@ -43,6 +43,17 @@ The connection (`linear`) is swapped for `api.linear.app` (the GraphQL API)
 and `uploads.linear.app` (files attached to issues) only. It is one Linear
 workspace: the one your owner picked when they connected it.
 
+## Read only
+
+Your owner picks, as they connect Linear, whether you may only read
+(issues, projects, teams, comments) or read and write (also create and
+change issues, and comment). Connected read only, Linear refuses every
+change for want of its `write` scope (a `forbidden` error whose message
+names `write`, from Linear rather than your computer): tell your owner,
+in plain words, that they connected Linear read only, and that they can
+allow changes in Settings → Connections → Allow changes. Do not retry it
+until they say they have; go on reading.
+
 ## The helper
 
 ```bash
@@ -104,7 +115,7 @@ priorityLabel, updatedAt, state: {name}, team: {key}, assignee}`; `get` adds
 | Problem | Fix |
 |---------|-----|
 | `not_connected` | Your owner connects Linear in Settings → Connections |
-| `forbidden` | Your owner left Linear off this agent's connections |
+| `forbidden` | Your owner left Linear off this agent's connections, or (its message naming `write`) connected Linear read only: they allow changes in Settings → Connections |
 | `authentication_error` | Your owner reconnects Linear in Settings → Connections |
 | `no_such_team` / `no_such_state` | List them: `$LAPI teams`, or the issue's team's states with `graphql` |
 | `invalid_input`, `Entity not found` | The identifier or id is wrong, or not in the connected workspace |
