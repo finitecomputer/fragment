@@ -139,35 +139,49 @@ fn fact(src: &Source, path: &str) -> Option<FileFact> {
     src.get(path).map(|e| FileFact { path: e.path.clone(), bytes: e.size })
 }
 
-/// A YAML scalar as the settings file writes one, or `None`.
+/// A setting's value as the settings file writes one, when it is a name
+/// (`Europe/Berlin`, `openrouter/model-x`, `warm`), or `None`: anything
+/// else (a flow mapping or list, words, a URL) is not read, so no more of
+/// the file than a name ever reaches the plan.
 fn scalar(v: &str) -> Option<String> {
-    let v = v.split(" #").next().unwrap_or_default().trim().trim_matches(['"', '\'']);
-    (!["", "|", ">", "null", "~"].contains(&v)).then(|| v.to_string())
+    let v = v.split(" #").next().unwrap_or_default().trim();
+    let v = v.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| v.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))).unwrap_or(v);
+    let name = !v.is_empty() && v.len() <= 128 && !v.contains("://") && v.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/:@+-".contains(&b));
+    (name && !["null", "~"].contains(&v)).then(|| v.to_string())
 }
 
 /// `timezone`, `agent.personality` (or `personality`) and `model.default`
-/// (or a scalar `model`), and nothing else, from Hermes' `config.yaml`.
+/// (or a scalar `model`), and nothing else, from Hermes' `config.yaml`: a
+/// key at the top, or one of its section's children (at the indent of its
+/// first child, spaces or tabs), each a name (`scalar`).
 fn config(path: &str, text: &str) -> Config {
     let mut c = Config { path: path.to_string(), ..Config::default() };
-    let mut section = String::new();
+    let (mut section, mut child_indent): (String, Option<String>) = (String::new(), None);
     for line in text.lines() {
-        let indented = line.starts_with("  ") && !line.starts_with("   ");
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent: String = line.chars().take_while(|ch| *ch == ' ' || *ch == '\t').collect();
         let Some((key, value)) = line.trim().split_once(':') else { continue };
         let (key, value) = (key.trim(), scalar(value));
-        if !line.starts_with([' ', '\t']) {
-            section = key.to_string();
+        if indent.is_empty() {
+            (section, child_indent) = (key.to_string(), None);
             match key {
                 "timezone" => c.timezone = value.or(c.timezone.take()),
                 "personality" => c.personality = value.or(c.personality.take()),
                 "model" => c.model = value.or(c.model.take()),
                 _ => {}
             }
-        } else if indented {
-            match (section.as_str(), key) {
-                ("agent", "personality") => c.personality = value.or(c.personality.take()),
-                ("model", "default") => c.model = value.or(c.model.take()),
-                _ => {}
-            }
+            continue;
+        }
+        // a section's children are at its first child's indent; deeper is nested
+        if *child_indent.get_or_insert_with(|| indent.clone()) != indent {
+            continue;
+        }
+        match (section.as_str(), key) {
+            ("agent", "personality") => c.personality = value.or(c.personality.take()),
+            ("model", "default") => c.model = value.or(c.model.take()),
+            _ => {}
         }
     }
     c
@@ -298,6 +312,16 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         assert!(!json.contains("secret") && !json.contains("123456"), "nothing else is read: {json}");
         assert_eq!(config("c", "model: plain/model\n").model.as_deref(), Some("plain/model"));
+        // a flow mapping or sequence is no scalar: nothing of it is read
+        let flow = config("c", "model: {default: example/model, api_key: SYNTHETIC_MUST_NOT_EXPORT}\ntimezone: [a, b]\nagent: {personality: kind, token: SYNTHETIC_TOO}\n");
+        let json = serde_json::to_string(&flow).unwrap();
+        assert!(!json.contains("SYNTHETIC") && flow.model.is_none() && flow.timezone.is_none() && flow.personality.is_none(), "{json}");
+        // a child indented by four spaces, or a tab, is its section's
+        let deep = config("c", "agent:\n    personality: warm\nmodel:\n\tdefault: tabbed/model\n");
+        assert_eq!((deep.personality.as_deref(), deep.model.as_deref()), (Some("warm"), Some("tabbed/model")));
+        // a value that is no name (words, a URL with a password) is not read
+        assert!(config("c", "agent:\n  personality: you are a helpful bot\n").personality.is_none());
+        assert!(config("c", "model: https://user:pw@example.org/m\n").model.is_none());
     }
 
     #[test]
