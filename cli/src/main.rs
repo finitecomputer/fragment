@@ -279,6 +279,13 @@ enum Cmd {
         #[command(subcommand)]
         sub: SecretCmd,
     },
+    /// Your Vault: secrets your agents use without holding them (a token,
+    /// a bot's, a Nostr key). A value is read from a hidden prompt or
+    /// stdin, never the command line, and never shown again
+    Vault {
+        #[command(subcommand)]
+        sub: VaultCmd,
+    },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -935,6 +942,61 @@ enum SecretCmd {
     },
     List { name: String },
     Rm { name: String, key: String },
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Set a secret, whole: its value (from a hidden prompt, or stdin),
+    /// the agents that may use it, the hosts it may go to, and where it
+    /// goes on a request (`Authorization: Bearer` unless named). Its hosts,
+    /// place and agents change only with its value
+    Set {
+        name: String,
+        /// An agent that may use it, by its fragment's name (repeat for more)
+        #[arg(long = "agent", required = true, value_name = "AGENT")]
+        agents: Vec<String>,
+        /// A host it may be sent to (repeat for more): `api.example.com`,
+        /// no scheme, port, or path. None: kept, and sent nowhere
+        #[arg(long = "to", value_name = "HOST")]
+        hosts: Vec<String>,
+        /// In this header, as `--format` says (`{}` the value)
+        #[arg(long, conflicts_with_all = ["query", "basic", "sign"])]
+        header: Option<String>,
+        #[arg(long, requires = "header")]
+        format: Option<String>,
+        /// In this query parameter
+        #[arg(long, conflicts_with_all = ["basic", "sign"])]
+        query: Option<String>,
+        /// As basic auth's `user` or `password`
+        #[arg(long, value_parser = ["user", "password"], conflicts_with = "sign")]
+        basic: Option<String>,
+        /// A Nostr key (64 hex) that signs each request (`nip98`), never sent
+        #[arg(long, value_parser = ["nip98"])]
+        sign: Option<String>,
+    },
+    /// Your secrets, by name: never a value
+    List,
+    Rm {
+        name: String,
+    },
+}
+
+/// A Vault secret's value: from a hidden prompt at a terminal, else stdin
+/// whole, its line end trimmed. Never argv or the environment, which `ps`,
+/// shell history and child processes keep.
+fn vault_value(name: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    let value = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("value for {name} (hidden): ")).context("reading the value from the terminal")?
+    } else {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf.trim_end_matches(['\r', '\n']).to_string()
+    };
+    if value.is_empty() {
+        return Err(usage(format!("empty value for {name}: type it at the prompt, or pipe it on stdin")));
+    }
+    Ok(value)
 }
 
 /// Where `fragment inbox` reads its token, before stdin.
@@ -2294,6 +2356,33 @@ fn run(cli: Cli) -> Result<()> {
                 println!("secret {key} removed");
             }
         },
+        Cmd::Vault { sub } => match sub {
+            VaultCmd::Set { name, agents, hosts, header, format, query, basic, sign } => {
+                use fragment_proto::vault::{Place, PutSecret as PutVault, Secret};
+                let place = Place { header, format, query, basic, sign };
+                let value = vault_value(&name)?;
+                let set: Secret = c.call_as(c.put_json(&format!("/api/vault/{name}"), &PutVault { value, hosts, place, agents })?)?;
+                // what was set, never the value
+                json_exit(j, &set);
+                match set.hosts.is_empty() {
+                    true => println!("secret {name} set for {}: parked, sent to no host", set.agents.join(", ")),
+                    false => println!("secret {name} set for {}, toward {}", set.agents.join(", "), set.hosts.join(", ")),
+                }
+            }
+            VaultCmd::List => {
+                let v: fragment_proto::vault::SecretList = c.call_as(c.get("/api/vault")?)?;
+                json_exit(j, &v);
+                for s in &v.secrets {
+                    let to = if s.hosts.is_empty() { "(parked)".to_string() } else { s.hosts.join(" ") };
+                    println!("{}  {}  for {}", s.name, to, s.agents.join(" "));
+                }
+            }
+            VaultCmd::Rm { name } => {
+                let v: fragment_proto::vault::SecretRemoved = c.call_as(c.delete(&format!("/api/vault/{name}"))?)?;
+                json_exit(j, &v);
+                println!("{}", if v.removed { format!("secret {name} removed") } else { format!("no secret {name}") });
+            }
+        },
         Cmd::Inbox { name, payload, source } => {
             let token = from_env_or_stdin(INBOX_TOKEN_ENV, "inbox token")?;
             let payload_v: Value = serde_json::from_str(&payload).unwrap_or(Value::String(payload));
@@ -3111,6 +3200,13 @@ mod tests {
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY"]), "a secret names its hosts");
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value", "--to", "api.example.com"]), "no value on argv");
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value"]));
+        assert!(parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--to", "api.linear.app"]));
+        assert!(parses(&["fragment", "vault", "set", "nostr-ada", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98"]));
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--to", "api.linear.app"]), "a Vault secret names its agents");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "lin_api_value", "--agent", "ada--k3x9"]), "no value on argv");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--header", "x-key", "--query", "key"]), "one place");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--format", "Bearer {}"]), "a format is a header's");
+        assert!(parses(&["fragment", "vault", "list"]) && parses(&["fragment", "vault", "rm", "linear"]));
         assert!(parses(&["fragment", "inbox", "x--k3x9", "--payload", "{}"]));
         assert!(!parses(&["fragment", "inbox", "x--k3x9", "--token", "t0ken", "--payload", "{}"]), "no inbox token on argv");
     }
