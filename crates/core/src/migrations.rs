@@ -120,6 +120,10 @@ pub struct Move {
     pub routine_ms: Option<i64>,
     pub routines: u32,
     pub opened: bool,
+    /// Its imports so far, one more at each (`importing`), never reset:
+    /// its routines' keys name it, so a retry's never repeat an earlier
+    /// import's (`routine_key`).
+    pub generation: u32,
     /// Phase 2: when its stage expires (the cutoff, plus `ARCHIVE_KEEP_MS`).
     pub expires_ms: Option<i64>,
     /// Withdrawn by staff: a roster that lists it again leaves it so.
@@ -129,8 +133,8 @@ pub struct Move {
 /// A move's columns in the object's `moves` table, in order: the last,
 /// its deadline, derived from the rest (`Move::deadline`), for the alarm
 /// to find it by.
-pub const COLUMNS: [&str; 19] = [
-    "old", "workos_id", "state", "reason", "held_from", "phase", "attempt", "agent", "command", "seq", "since_ms", "progress_ms", "staged_ms", "routine_ms", "routines", "opened", "expires_ms", "by_staff", "deadline_ms",
+pub const COLUMNS: [&str; 20] = [
+    "old", "workos_id", "state", "reason", "held_from", "phase", "attempt", "agent", "command", "seq", "since_ms", "progress_ms", "staged_ms", "routine_ms", "routines", "opened", "expires_ms", "by_staff", "generation", "deadline_ms",
 ];
 
 /// A column's value, as SQLite takes it.
@@ -166,6 +170,7 @@ impl Move {
             Col::Int(i64::from(self.opened)),
             opt_int(self.expires_ms),
             Col::Int(i64::from(self.by_staff)),
+            Col::Int(i64::from(self.generation)),
             opt_int(self.deadline()),
         ]
     }
@@ -203,6 +208,7 @@ impl Move {
             opened: int("opened") == Some(1),
             expires_ms: int("expires_ms"),
             by_staff: int("by_staff") == Some(1),
+            generation: int("generation").and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
         })
     }
 }
@@ -277,6 +283,7 @@ impl Move {
             opened: false,
             expires_ms: None,
             by_staff: false,
+            generation: 0,
         }
     }
 
@@ -311,6 +318,13 @@ impl Move {
 
     fn prefix(&self) -> String {
         stage_prefix(self.phase, &self.old, self.attempt)
+    }
+
+    /// Its import's routine's key, as the agent's fragment appends it once:
+    /// the same for each try of one delivery, and new for each routine of
+    /// each import (`generation`), a retry's included.
+    pub fn routine_key(&self) -> Option<String> {
+        self.stage().map(|stage| format!("migration:{stage}:{}.{}", self.generation, self.routines))
     }
 
     /// Whether its person may still be asked (or the cutoff take it).
@@ -425,6 +439,7 @@ impl Move {
             routine_ms: Some(now),
             routines: 1,
             opened: false,
+            generation: self.generation + 1,
             ..self.clone()
         };
         let stage = to.stage().expect("an import is of an attempt");
@@ -1230,6 +1245,29 @@ mod tests {
         let withdrawn = withdraw(&held, cut + 12).unwrap().unwrap();
         assert_eq!((withdrawn.effects.as_slice(), withdrawn.to.deadline()), (&[][..], Some(expiry)), "kept after staff's withdrawal");
         assert_eq!(tick(&withdrawn.to, expiry).expect("its expiry").effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+    }
+
+    /// Each routine a stage's imports send has a key of its own: the once
+    /// more, and a retry's after it was held, never repeat an earlier key
+    /// (the agent's fragment appends a key once, so a repeat never reached
+    /// it). Each try of one delivery reads the same key.
+    #[test]
+    fn a_retried_import_sends_its_routines_under_fresh_keys() {
+        let cut = T0;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let first = to(yes(&ar, AGENT, cut + 10));
+        let once_more = tick(&first, first.deadline().unwrap()).expect("due").to;
+        let held = tick(&once_more, once_more.deadline().unwrap()).expect("due").to;
+        assert_eq!(held.reason, Some(HeldReason::NotOpened));
+        let retried = retry(&held, held.since_ms + 1).unwrap().unwrap();
+        assert_eq!(retried.effects, vec![Effect::Routine { agent: AGENT.into(), stage: "o.p2.1".into() }]);
+        let again = tick(&retried.to, retried.to.deadline().unwrap()).expect("due").to;
+        let keys = [&first, &once_more, &retried.to, &again].map(|m| m.routine_key().expect("importing"));
+        assert_eq!(keys.iter().collect::<std::collections::HashSet<_>>().len(), 4, "{keys:?}");
+        assert_eq!(restarted(&retried.to).routine_key(), retried.to.routine_key(), "one delivery, one key");
     }
 
     #[test]

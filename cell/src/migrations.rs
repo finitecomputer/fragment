@@ -78,12 +78,12 @@ pub(crate) const ROUTINE_HEADER: &str = "x-fragment-move-routine";
 /// and binds them, and the queries built of them: whole at compile time.
 macro_rules! columns {
     () => {
-        "old, workos_id, state, reason, held_from, phase, attempt, agent, command, seq, since_ms, progress_ms, staged_ms, routine_ms, routines, opened, expires_ms, by_staff, deadline_ms"
+        "old, workos_id, state, reason, held_from, phase, attempt, agent, command, seq, since_ms, progress_ms, staged_ms, routine_ms, routines, opened, expires_ms, by_staff, generation, deadline_ms"
     };
 }
 macro_rules! marks {
     () => {
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
     };
 }
 /// A move as staff read it: states and sizes, never a stage's bytes.
@@ -858,7 +858,7 @@ impl MigrationsCell {
         }
         let profiles = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids: vec![agent.to_string()], emails_of: vec![] }).await?;
         let fragment = profiles.profiles.get(agent).and_then(|p| p.fragment.clone()).ok_or_else(|| CellError::host(format!("{agent} has no agent fragment")))?;
-        let key = format!("migration:{stage}:{}", m.routines);
+        let key = m.routine_key().ok_or_else(|| CellError::host(format!("{stage} is no import's")))?;
         crate::routed::object_answer(&self.env, "FRAGMENT", &fragment, &format!("stage/routine/{key}"), machine::routine_text(stage)).await?;
         Ok(())
     }
