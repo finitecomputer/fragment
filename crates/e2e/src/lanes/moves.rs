@@ -459,9 +459,9 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
     let stranger = api.person()?;
     let (none, theirs) = (api.signed(&erin, "GET", &format!("/api/migrations/offers/{f2}/picture"), None)?, api.signed(&stranger, "GET", &format!("/api/migrations/offers/{f1}/picture"), None)?);
     s.ok(
-        "its picture is read for its person (the roster's, as an image); one with none, or another person's, is none (404)",
-        pic.status == 200 && pic.header("content-type") == "image/png" && !pic.bytes.is_empty() && pic.bytes == shell_png.bytes && none.status == 404 && theirs.status == 404,
-        format!("{} {} {} {}", pic.status, pic.header("content-type"), none.status, theirs.status),
+        "its picture is read for its person (the roster's, as an image), kept by no cache (its URL is the same for whoever signs in next); one with none, or another person's, is none (404)",
+        pic.status == 200 && pic.header("content-type") == "image/png" && pic.header("cache-control") == "no-store" && !pic.bytes.is_empty() && pic.bytes == shell_png.bytes && none.status == 404 && theirs.status == 404,
+        format!("{} {} {:?} {} {}", pic.status, pic.header("content-type"), pic.header("cache-control"), none.status, theirs.status),
     );
 
     // another's answers: none of theirs
