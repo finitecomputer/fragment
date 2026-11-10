@@ -370,3 +370,19 @@ for (const [first, second] of [["Accept", "Decline"], ["Decline", "Accept"]]) {
   });
 }
 
+
+test("a refusal outlives its notice's time too: Allow refused, the pause's countdown ends before another read, and the words stay, a line of their own", async (t) => {
+  const c = clock(0);
+  const pause = () => paused({ until: { at: 150_000, said: "Calls resume" } });
+  const p = page(t, [pause()], c);
+  p.tap("key_paused:elevenlabs", "Allow up to $20 an hour");
+  p.calls[0].fail(Object.assign(new Error("That key isn't paused any more."), { status: 409 }));
+  await settle();
+  p.calls[1].ok({ notices: [pause()] });
+  await settle();
+  assert.deepEqual(p.shown()[0].words.at(-1), "That key isn't paused any more.", "under its notice while it shows");
+  c.tick(150_000);
+  assert.deepEqual(p.shown(), [{ id: "key_paused:elevenlabs", words: ["ElevenLabs calls paused: $5.03 this hour", "That key isn't paused any more."], actions: [{ label: "OK", enabled: true }] }], "its time passed: a line of its own, with OK");
+  p.tap("key_paused:elevenlabs", "OK");
+  assert.deepEqual(p.shown(), [], "dismissed, it goes");
+});

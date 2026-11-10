@@ -277,12 +277,14 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const box = document.getElementById("computer-notices");
     const t = now();
     const all = notices() ?? [];
-    // a failure whose notice is gone: a refusal stays, a line of its own; a
-    // call that never reached the server goes with it
-    const gone = [...failed].filter(([id]) => !all.some((n) => n.id === id));
-    for (const [id, f] of gone) if (!f.refused) failed.delete(id);
+
     // a notice a restart answers waits while it runs; one whose time passed is gone
     const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
+    // a failure whose notice is not drawn (the read has it no more, or its
+    // time passed): a refusal stays, a line of its own; a call that never
+    // reached the server goes with it
+    const gone = [...failed].filter(([id]) => !told.some((n) => n.id === id));
+    for (const [id, f] of gone) if (!f.refused) failed.delete(id);
     counting = [];
     // a read that failed, its notices' too: what the last said stays, under its line
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
