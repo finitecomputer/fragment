@@ -146,6 +146,12 @@ pub struct World {
     pub stages: BTreeMap<String, (String, Bytes)>,
     /// Range reads of stages, as they came: (stage, from, to).
     pub stage_reads: Vec<(String, u64, u64)>,
+    /// Each stage read answers this late (a slow platform).
+    pub stage_read_ms: u64,
+    /// The stage its import ends the moment a turn is claimed on any
+    /// chat's `work` (an agent saying `done` as it gets its routine): its
+    /// reads refused from then on, as the platform's are after `done`.
+    pub done_on_claim: Option<String>,
     /// The fragments an agent made for its owner (`POST /api/fragments?for=`),
     /// by name, in order.
     pub made: Vec<String>,
@@ -556,6 +562,8 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         }
         (Method::GET, ["api", "migrations", "stages", stage, "zip"]) => {
             let range = req.headers().get("range").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")?.split_once('-')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            let late = world.lock().unwrap().stage_read_ms;
+            tokio::time::sleep(std::time::Duration::from_millis(late)).await;
             let mut w = world.lock().unwrap();
             let Some((bound, zip)) = w.stages.get(*stage).cloned() else { return refuse(StatusCode::CONFLICT, "that stage is not importing") };
             if agent.as_deref() != Some(bound.as_str()) {
@@ -743,6 +751,12 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     let from = req.headers().get("range").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")?.strip_suffix('-')?.parse::<usize>().ok());
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let mut w = world.lock().unwrap();
+    // an agent saying `done` as its turn is claimed (`done_on_claim`)
+    if method == Method::POST && p[3..] == ["channels", "work"] && serde_json::from_slice::<Value>(&body).is_ok_and(|v| v["body"]["kind"] == "turn.start") {
+        if let Some(stage) = w.done_on_claim.take() {
+            w.stages.remove(&stage);
+        }
+    }
     let Some(f) = w.fragments.get(&fragment) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
     let Some(role) = World::role_in(f, &me, acting_for.as_deref()) else { return refuse(StatusCode::FORBIDDEN, "not a member") };
     match (method, &p[3..]) {
@@ -813,6 +827,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let (Some(id), body) = (v["id"].as_str().map(str::to_string), v["body"].clone()) else { return refuse(StatusCode::BAD_REQUEST, "{id, body}") };
+
             // the platform's rule: a record that relays is its agent's door's alone
             if let Some(r) = body.get("relayed") {
                 use fragment_bridge::simplex::door;

@@ -219,10 +219,12 @@ the files open as they are.
 
 - **The agent never imports it.** The import skill's layout lists
   `.finite-stage/**` as never read (`import-agent-home`).
-- **Its computer's bridge sets it aside** as the move's routine names the
-  stage (the routine's words are `fragment_core::migrations::routine_text`),
-  reading it by ranges as the agent, while the move imports, before the
-  import's `done` ends the stage's reads. It runs nothing then.
+- **The stage's SimpleX files are read before the routine reaches the
+  agent.** Its computer's bridge holds the move's routine (its words are
+  `fragment_core::migrations::routine_text`) until it has set them aside,
+  read by ranges as the agent, or given up (then Link SimpleX, as before),
+  so the import, and its `done`, come after by construction. It runs
+  nothing then.
 - **Only the owner adopts it**, from their Settings ("Keep my SimpleX
   chat"), by a door ticket the platform signs (`adopt`, docs/api.md, "An
   agent's doors"). The bridge binds its link to that contact and lets the

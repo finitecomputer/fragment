@@ -11,8 +11,9 @@
 //! the bridge does, as root, with the agent's own key (the platform answers
 //! a stage's bytes to its bound agent alone, while it imports):
 //!
-//! - **Set aside** as soon as the move's routine names the stage
-//!   (`of_routine`), before its import ends and the stage's routes refuse:
+//! - **Set aside** before the move's routine reaches the agent (`of_routine`;
+//!   driver.rs `feed` holds it until this ends), so its import, and the
+//!   `done` that makes the stage's routes refuse, come after:
 //!   read by ranges (`take_aside`), checked (each file whole by its CRC, a
 //!   SQLite database, within `DB_BYTES_MAX`), and kept in the agent's
 //!   SimpleX directory (`staged/`, root's, 0700) with nothing run. The

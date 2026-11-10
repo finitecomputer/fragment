@@ -48,7 +48,8 @@
 //!   which the core always takes: `--create-bot-display-name` names no
 //!   profile it already has, which is why a rename asks.
 //! - **An owner's old SimpleX conversation** (FIN-463, `stage`): set aside
-//!   as the move's routine names its stage; adopted only by its owner's
+//!   before the move's routine reaches the agent (`set_aside_first`), so
+//!   its import cannot end the stage first; adopted only by its owner's
 //!   ticket (`adopt`), from their Settings: read once in maintenance mode
 //!   (`maintenance_read`: nothing subscribed, so nothing new arrives before
 //!   what the chat held is marked delivered), its door's key registered,
@@ -160,6 +161,11 @@ const MAINT_MS_MAX: u64 = 20_000;
 /// while the platform does not answer; then again at the bridge's next start.
 const SET_ASIDE_TRIES: u32 = 3;
 const SET_ASIDE_RETRY_MS: u64 = 10_000;
+/// A move's routine waits at most this long for its stage's SimpleX files
+/// to be set aside before it reaches the agent; past it the routine goes
+/// on, and Link SimpleX is the way (a stage read past it is in debt to
+/// nothing: each range read has its own deadline, `limits::HTTP_TIMEOUT_MS`).
+const SET_ASIDE_WAIT_MS: u64 = 10 * 60_000;
 /// An adoption committed and not yet finished is tried again this often.
 const COMMIT_RETRY_MS: u64 = 10_000;
 /// Where a link's copies of the files it sends wait, in its directory: a
@@ -241,8 +247,9 @@ pub enum Msg {
     /// (`door::check`, once).
     Ticket { agent: String, act: &'static str, ticket: Box<Ticket>, reply: Answer },
     /// The move's routine named `agent`'s stage: its SimpleX identity, if
-    /// it holds one, set aside.
-    Staged { agent: String, stage: String },
+    /// it holds one, set aside, and `reply` told once it is kept or given
+    /// up on (at once when there is nothing to set aside).
+    Staged { agent: String, stage: String, reply: oneshot::Sender<()> },
     /// A set-aside's end.
     SetAside { agent: String, stage: String, result: Result<Staged, stage::Refusal> },
     /// Its owner keeps their old SimpleX chat (an adoption's ticket taken,
@@ -371,12 +378,19 @@ impl Handle {
         self.answered(|reply| Msg::Adopted { agent: agent.to_string(), nonce: ticket.nonce.clone(), key: Box::new(key), title, reply }).await
     }
 
-    /// The move's routine for `agent` named `stage` (driver.rs, from the
-    /// engine): its SimpleX identity, if the stage holds one, set aside.
-    pub fn staged(&self, agent: &str, stage: &str) {
-        if self.tx.try_send(Msg::Staged { agent: agent.to_string(), stage: stage.to_string() }).is_err() {
-            crate::ev!("simplex.busy", { "dropped": "staged", "agent": agent });
+    /// The move's routine for `agent` named `stage` (driver.rs `feed`,
+    /// before the engine sees it): its SimpleX identity, if the stage holds
+    /// one, set aside, this waiting until it is kept or given up on, within
+    /// `SET_ASIDE_WAIT_MS`. The routine reaches the agent only after, so its
+    /// import cannot end the stage first.
+    pub async fn set_aside_first(&self, agent: &str, stage: &str) {
+        let t0 = Instant::now();
+        let (reply, ended) = oneshot::channel();
+        if self.tx.send(Msg::Staged { agent: agent.to_string(), stage: stage.to_string(), reply }).await.is_err() {
+            return;
         }
+        let waited = tokio::time::timeout(Duration::from_millis(SET_ASIDE_WAIT_MS), ended).await.is_ok();
+        crate::ev!("simplex.routine_released", { "agent": agent, "stage": stage, "waitedMs": t0.elapsed().as_millis() as u64, "timedOut": !waited });
     }
 
     /// Its owner unlinks `agent`, by the ticket their Settings handed its
@@ -925,6 +939,8 @@ struct Slot {
     staged: Option<Staged>,
     /// A set-aside under way.
     staging: bool,
+    /// What waits for it to end: the move's routine (`set_aside_first`).
+    waiting: Vec<oneshot::Sender<()>>,
     /// Adopted, and its owner not yet told it moved: told as its core comes
     /// up (it does not run as the link is bound), after its new name.
     moved: bool,
@@ -1062,7 +1078,15 @@ impl Manager {
             Msg::Ticket { agent, act, ticket, reply } => {
                 let _ = reply.send(self.take(&agent, &ticket, act).map(|()| self.view(&agent, None).expect("its slot")));
             }
-            Msg::Staged { agent, stage } => self.set_aside(&agent, &stage),
+            Msg::Staged { agent, stage, reply } => {
+                self.set_aside(&agent, &stage);
+                match self.slots.get_mut(&agent).filter(|s| s.staging) {
+                    Some(s) => s.waiting.push(reply),
+                    None => {
+                        let _ = reply.send(());
+                    }
+                }
+            }
             Msg::SetAside { agent, stage, result } => self.set_aside_ended(&agent, &stage, result),
             Msg::Adopt { agent, nonce, reply } => {
                 let _ = reply.send(self.adopt_read(&agent, &nonce).await);
@@ -1247,6 +1271,10 @@ impl Manager {
     fn set_aside_ended(&mut self, f: &str, stage_id: &str, result: Result<Staged, stage::Refusal>) {
         let Some(s) = self.slots.get_mut(f) else { return };
         s.staging = false;
+        // the routine waiting on it goes on, whatever the end
+        for w in s.waiting.drain(..) {
+            let _ = w.send(());
+        }
         match result {
             Ok(staged) if s.saved.link.phase == Phase::Off => {
                 crate::ev!("simplex.staged", { "agent": f, "stage": stage_id });
@@ -1458,6 +1486,7 @@ impl Manager {
                 linking: None,
                 staged,
                 staging: false,
+                waiting: Vec::new(),
                 moved: false,
                 adopting: None,
                 committing,
@@ -3662,6 +3691,7 @@ mod tests {
             linking: None,
             staged: None,
             staging: false,
+            waiting: Vec::new(),
             moved: false,
             adopting: None,
             committing: None,
@@ -4008,6 +4038,7 @@ mod tests {
             linking: None,
             staged: None,
             staging: false,
+            waiting: Vec::new(),
             moved: false,
             adopting: None,
             committing: None,
@@ -4139,6 +4170,7 @@ mod tests {
             linking: None,
             staged: None,
             staging: false,
+            waiting: Vec::new(),
             moved: false,
             adopting: None,
             committing: None,

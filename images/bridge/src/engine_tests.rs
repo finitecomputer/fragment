@@ -1226,17 +1226,6 @@ fn tasks_start_routines() {
     // a `tasks` record on another fragment is no task
     let other = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: task(3, json!({ "kind": "joined" })), view: None, since: 0 }, T0);
     assert!(other.effects.is_empty());
-    // the move's routine (FIN-463), posted as the agent by its own fragment:
-    // its stage named for SimpleX, and its turn run as any routine's; the
-    // same words from anyone else name no stage
-    let words = "Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage u1.p1.1.";
-    for (seq, body) in [(4, json!({ "kind": "routine", "text": words, "chat": "talk--k3x9" })), (5, json!({ "kind": "routine", "text": words }))] {
-        let moved = Record { principal: a.identity.clone(), ..task(seq, body) };
-        let m = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: moved, view: None, since: 0 }, T0);
-        assert!(m.effects.contains(&Effect::Staged { agent: a.fragment.clone(), stage: "u1.p1.1".into() }), "homed or not: {:?}", m.effects);
-    }
-    let forged = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(6, json!({ "kind": "routine", "text": words, "chat": "talk--k3x9" })), view: None, since: 0 }, T0);
-    assert!(!forged.effects.iter().any(|f| matches!(f, Effect::Staged { .. })), "its owner's routine names no stage");
 }
 
 /// Goal: a turn the runtime goes quiet on ends as an error; one that waits
@@ -2825,7 +2814,7 @@ impl World {
                     };
                     self.tells.push(Told { life: self.lives, turn, seq, claim, held });
                 }
-                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::Staged { .. } | Effect::ComputerAnswered { .. } | Effect::Runtime { command: Command::Aside { .. }, .. } => {}
+                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::ComputerAnswered { .. } | Effect::Runtime { command: Command::Aside { .. }, .. } => {}
             }
         }
     }
