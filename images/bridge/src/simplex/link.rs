@@ -134,7 +134,24 @@ pub struct Link {
     /// gone, or refuses it for good. At most `LEFTOVERS_MAX`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leftovers: Vec<Leftover>,
+    /// Leftovers this start's core refused for now: each frees its place
+    /// in the batch asked for the next (asked again at the next start).
+    #[serde(skip)]
+    pub refused: Refused,
 }
+
+/// A count of this life's alone: in no file, and in no comparison (as
+/// `Scan`), so a link's state compares by what its file holds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Refused(pub usize);
+
+impl PartialEq for Refused {
+    fn eq(&self, _: &Refused) -> bool {
+        true
+    }
+}
+
+impl Eq for Refused {}
 
 /// What an adopted identity held besides its owner's contact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +378,7 @@ impl Link {
                 }
                 // then what an adoption still lets go, a batch at a time,
                 // after the catch-up, so no flood of them crowds it out
+                self.refused = Refused(0);
                 out.extend(self.leftovers.iter().take(LEFTOVERS_ASKED).map(|l| Action::Ask(l.cmd())));
             }
             Input::Said(resp) => self.said(resp, &mut out),
@@ -383,22 +401,30 @@ impl Link {
                     // while the refusal may pass; a leave refused for good
                     // goes on to the group's delete; anything else, settled
                     Cmd::Delete { contact, .. } if self.leftovers.contains(&Leftover::Contact(*contact)) => {
-                        if !transient(&what) {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::Contact(*contact), &mut out);
+                        } else {
                             self.settle(Leftover::Contact(*contact), None, &mut out);
                         }
                     }
                     Cmd::LeaveGroup { group } if self.leftovers.contains(&Leftover::Group(*group)) => {
-                        if !transient(&what) {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::Group(*group), &mut out);
+                        } else {
                             self.settle(Leftover::Group(*group), Some(Leftover::LeftGroup(*group)), &mut out);
                         }
                     }
                     Cmd::DeleteGroup { group } if self.leftovers.contains(&Leftover::LeftGroup(*group)) => {
-                        if !transient(&what) {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::LeftGroup(*group), &mut out);
+                        } else {
                             self.settle(Leftover::LeftGroup(*group), None, &mut out);
                         }
                     }
                     Cmd::DeleteAddress if self.leftovers.contains(&Leftover::Address) => {
-                        if !transient(&what) {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::Address, &mut out);
+                        } else {
                             self.settle(Leftover::Address, None, &mut out);
                         }
                     }
@@ -600,14 +626,30 @@ impl Link {
             None => {
                 self.leftovers.remove(at);
                 // one of the batch asked is done: the next not yet asked
-                if at < LEFTOVERS_ASKED {
-                    if let Some(next) = self.leftovers.get(LEFTOVERS_ASKED - 1) {
+                let window = LEFTOVERS_ASKED + self.refused.0;
+                if at < window {
+                    if let Some(next) = self.leftovers.get(window - 1) {
                         out.push(Action::Ask(next.cmd()));
                     }
                 }
             }
         }
         out.push(Action::Save);
+    }
+
+    /// A leftover of the batch asked, refused for now: kept, to be asked
+    /// again at the next start, its place in the batch given to the next
+    /// not yet asked (Codex's review: refusals that may pass would
+    /// otherwise hold every place, and the rest wait for a restart). Each
+    /// is asked once a start, so a network that is down asks no more.
+    fn refused_for_now(&mut self, l: Leftover, out: &mut Vec<Action>) {
+        let window = LEFTOVERS_ASKED + self.refused.0;
+        if self.leftovers.iter().position(|x| *x == l).is_some_and(|at| at < window) {
+            self.refused.0 += 1;
+            if let Some(next) = self.leftovers.get(window) {
+                out.push(Action::Ask(next.cmd()));
+            }
+        }
     }
 
     /// A part held until the ratchet is in step; past `OUTBOX_MAX` the
@@ -1151,6 +1193,35 @@ mod tests {
         asked.sort();
         assert_eq!(asked, (10..210).collect::<Vec<_>>(), "every one asked, once");
         assert!(link.leftovers.is_empty());
+        // Codex's second look: refusals that may pass give their places on,
+        // so every one is asked once this start, the address too; those
+        // refused are asked again at the next
+        let mut many: Vec<Leftover> = (10..10 + 40).map(Leftover::Contact).collect();
+        many.push(Leftover::Address);
+        let mut link = Link::default();
+        link.apply(Input::Adopt { owner: 3, name: "p", newest: 0, leftovers: &many });
+        let ask_of = |a: &Action| match a {
+            Action::Ask(Cmd::Delete { contact, .. }) => Some(Leftover::Contact(*contact)),
+            Action::Ask(Cmd::DeleteAddress) => Some(Leftover::Address),
+            _ => None,
+        };
+        let mut pending: std::collections::VecDeque<Leftover> = link.apply(Input::Started { rollback: false }).iter().filter_map(ask_of).collect();
+        let mut asked = vec![];
+        // bounded: each answer asks at most one more, each once
+        while let Some(l) = pending.pop_front() {
+            asked.push(l);
+            let cmd = match l {
+                Leftover::Contact(contact) => Cmd::Delete { contact, notify: true },
+                _ => Cmd::DeleteAddress,
+            };
+            let next = link.apply(Input::Failed { cmd: &cmd, what: "errorAgent BROKER TIMEOUT" });
+            assert!(next.len() <= 1, "one for one");
+            pending.extend(next.iter().filter_map(ask_of));
+        }
+        assert_eq!(asked.len(), 41, "every one asked once this start, never twice");
+        assert!(asked.contains(&Leftover::Address));
+        assert_eq!(link.leftovers.len(), 41, "all kept, for the next start");
+        assert_eq!(link.apply(Input::Started { rollback: false }).iter().filter_map(ask_of).count(), LEFTOVERS_ASKED, "a batch again at the next start");
     }
 
     /// Goal (replay, restart): an adoption is taken once and only while
