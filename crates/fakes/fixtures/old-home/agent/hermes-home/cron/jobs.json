@@ -1,0 +1,7 @@
+{
+  "jobs": [
+    {"id": "a1", "name": "Morning brief", "prompt": "Give Sam the day's orders and the garden's watering rota, in five lines.", "schedule": {"kind": "cron", "expr": "30 7 * * 1-5", "display": "30 7 * * 1-5"}, "enabled": true, "skills": ["helper"], "script": "morning.py"},
+    {"id": "b2", "name": "Watch the feed", "prompt": "Check the order feed for new orders.", "schedule": {"kind": "interval", "minutes": 5, "display": "every 5m"}, "enabled": true},
+    {"id": "c3", "name": "Old reminder", "prompt": "Remind Sam to order flour.", "schedule": {"kind": "cron", "expr": "0 9 * * 1", "display": "0 9 * * 1"}, "enabled": false}
+  ]
+}

@@ -112,17 +112,19 @@ pub const HAND_WRITTEN: [(&str, &str); 11] = [
 /// values the lock lets pass for their readers read past one they do not
 /// know, and where each reader does: a claim of the clients, not of serde,
 /// so each is listed. A new one fails generation until it is.
-pub const OPEN: [(&str, &str); 5] = [
+pub const OPEN: [(&str, &str); 7] = [
+    ("CommandKind", "left in the mailbox by the mover, done by no one, until the move's deadline holds it (docs/migrations.md)"),
     ("ErrorCode", "read by its HTTP status (the CLI's `Resp::refusal`)"),
     ("FragmentKind", "read as `Other` (`#[serde(other)]`, a lock fact)"),
     ("LiveOut", "skipped (the CLI's `channel --follow`, cell/client.mjs, the iOS app)"),
     ("ListWatchFrame", "ignored (the shell's list, the iOS app)"),
+    ("MoveState", "taken as a state the reader does not act on (the mover)"),
     ("NoticeLevel", "drawn as `info` (the shell's band, cell/shell/computer.js `noticeRow`)"),
 ];
 
 /// The modules the wire's types live in, at their top level alone, each
 /// reached from `lib.rs` by a plain `mod` line.
-pub const WIRE_MODULES: [&str; 4] = ["crate", "crate::live", "crate::notice", "crate::routes"];
+pub const WIRE_MODULES: [&str; 6] = ["crate", "crate::live", "crate::migrations", "crate::notice", "crate::routes", "crate::vault"];
 
 /// The modules declared under `#[cfg(feature = "schema")]` (the one
 /// spelling allowed on a `mod`, beside `#[cfg(test)]`): the routes' table

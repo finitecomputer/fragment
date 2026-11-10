@@ -50,12 +50,19 @@ final class Library {
     var computerPhase: String?
     /// What they are told (`GET /api/notices`, `NoticesBand`), as last read;
     /// whether that read failed (what it said before stays); the notices
-    /// whose last action failed, by id, and why (`Library.said`), until one
-    /// goes through or the notice is gone; and those with an action under way.
+    /// whose last action failed, by id (`NoticeFailure`), until one is acted
+    /// on again; and those with an action under way, every action of each
+    /// off meanwhile (an invite's Accept and Decline are one answer).
     var notices: [Notice] = []
     var noticesFailed = false
-    var failedNotices: [String: String] = [:]
+    var failedNotices: [String: NoticeFailure] = [:]
     var acting: Set<String> = []
+    /// The refusals whose notice is not shown at `now` (the last read no
+    /// longer has it, an invite taken back; or its time passed): each a
+    /// line of its own until dismissed, as the band draws it.
+    func refusals(at now: Int64) -> [(id: String, failure: NoticeFailure)] {
+        failedNotices.filter { id, f in f.refused && !notices.contains { $0.id == id && $0.shown(at: now) } }.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
     /// The notice that must be answered now: the first such in the list,
     /// its owner's oldest (`MustAnswerView`).
     var asked: Notice? { notices.first(where: \.mustAnswer) }
@@ -304,7 +311,8 @@ final class Library {
         guard let read else { return }
         let told = read?.notices ?? []
         if notices != told { notices = told }
-        failedNotices = failedNotices.filter { id, _ in told.contains { $0.id == id } }
+        // a refusal outlives its notice; a call that never reached the server goes with it
+        failedNotices = failedNotices.filter { id, f in f.refused || told.contains { $0.id == id } }
     }
     /// Why an action failed, as its notice says it (Paul, 2026-11-09): the
     /// server's own words for its refusal, else this page's for a call that
@@ -313,6 +321,13 @@ final class Library {
         switch error {
         case APIError.refused(let words), APIError.server(let words), APIError.absent(let words): words
         default: "Couldn't do that. Try again."
+        }
+    }
+    /// Whether the server answered it, refusing (its words are `said`'s).
+    static func refused(_ error: Error) -> Bool {
+        switch error {
+        case APIError.refused, APIError.server, APIError.absent: true
+        default: false
         }
     }
     /// A notice's action: its route posted with its body, then everything
@@ -327,11 +342,11 @@ final class Library {
         acting.insert(notice.id)
         defer { acting.remove(notice.id) }
         var answer: JSONValue = .null
+        failedNotices[notice.id] = nil
         do {
             answer = try await api.request(String(post.drop { $0 == "/" }), method: "POST", body: action.body ?? .object([:]))
-            failedNotices[notice.id] = nil
         } catch {
-            failedNotices[notice.id] = Self.said(error)
+            failedNotices[notice.id] = NoticeFailure(said: Self.said(error), refused: Self.refused(error), title: notice.title, warns: notice.warns)
         }
         let page = answer["open"].string.flatMap { URL(string: $0) }.flatMap { ["https", "http"].contains($0.scheme?.lowercased()) ? $0 : nil }
         let outside = page.flatMap { MessageLinks.fragmentName($0, pages: pages) == nil ? $0 : nil }

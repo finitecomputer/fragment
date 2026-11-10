@@ -458,9 +458,12 @@ struct Run {
     /// (`PIECE_BYTES`; smaller on a test fleet's lever, so a small export
     /// puts its entries aside in many pieces, as a large one does).
     piece_bytes: usize,
-    /// The most the archive holds (`ARCHIVE_MAX_BYTES`; smaller on a test
-    /// fleet's lever, so a small export meets its limit).
+    /// The most the archive holds (`ARCHIVE_MAX_BYTES`), and one
+    /// fragment's part of it (`FRAGMENT_MAX_BYTES`); smaller on a test
+    /// fleet's levers, so a small export meets them, or passes the limits
+    /// of before.
     archive_max: u64,
+    fragment_max: u64,
 }
 
 /// How a slice ended.
@@ -565,7 +568,7 @@ impl PrincipalCell {
             h.set("content-length", &row.size.unwrap_or(0).to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
-        let b = js::blob_get(&self.env, &key, range).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
+        let b = js::blob_get(&self.env, js::BLOBS, &key, range).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
         let status = match b.range {
             Some((offset, length)) => {
                 h.set("content-range", &format!("bytes {offset}-{}/{}", offset + length.max(1) - 1, b.size))?;
@@ -588,7 +591,9 @@ impl PrincipalCell {
     /// (1 KiB to `PIECE_BYTES`; `null`, `PIECE_BYTES`), so a small export
     /// puts its entries aside in many pieces, as a large one does. `cap
     /// {steps: bytes | null}` makes the archive's limit `bytes` (`null`,
-    /// `ARCHIVE_MAX_BYTES`), so a small export meets it.
+    /// `ARCHIVE_MAX_BYTES`), so a small export meets it. `scale {steps: k |
+    /// null}` divides the archive's and a fragment's limits by `k`, so a
+    /// small export stands for one as much larger (`null`, 1).
     pub(crate) fn export_lever(&self, body: &[u8]) -> CellResult<Value> {
         assert!(self.test_hooks, "a list's levers answer on fleets with them only");
         #[derive(Deserialize)]
@@ -604,7 +609,8 @@ impl PrincipalCell {
             "piece" if l.steps.is_none_or(|n| (1024..=limits::PIECE_BYTES as u32).contains(&n)) => "piece",
             "piece" => return Err(CellError::invalid(format!("a piece is 1024 to {} bytes", limits::PIECE_BYTES))),
             "cap" => "cap",
-            other => return Err(CellError::new(ErrorCode::NotFound, format!("no export lever {other}: pace, piece, or cap"))),
+            "scale" => "scale",
+            other => return Err(CellError::new(ErrorCode::NotFound, format!("no export lever {other}: pace, piece, cap, or scale"))),
         };
         match l.steps {
             Some(n) => self.run_sql("INSERT INTO export_levers (name, value) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value", vec![name.into(), SqlStorageValue::Integer(i64::from(n))])?,
@@ -651,10 +657,10 @@ impl PrincipalCell {
         let rows: Vec<Row> = if self.wiped.get() { vec![] } else { self.rows_of(ROW, vec![])? };
         for r in rows.iter().filter(|r| r.person == ask.person) {
             if let Some(upload) = &r.upload {
-                js::upload_abort(&self.env, &archive_key(&r.person, &r.id), upload).await?;
+                js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
             }
         }
-        let (deleted, more) = js::blob_delete_under(&self.env, &format!("exports/{}/", ask.person), 10).await?;
+        let (deleted, more) = js::blob_delete_under(&self.env, js::BLOBS, &format!("exports/{}/", ask.person), 10).await?;
         if !more && !self.wiped.get() {
             self.run_sql("UPDATE exports SET state = 'expired', job = NULL, upload = NULL, gone_at = COALESCE(gone_at, ?), metered = 1", vec![SqlStorageValue::Integer(js::now_ms())])?;
         }
@@ -729,9 +735,9 @@ impl PrincipalCell {
         for r in ended {
             if r.gone_at.is_none() {
                 if let Some(upload) = &r.upload {
-                    js::upload_abort(&self.env, &archive_key(&r.person, &r.id), upload).await?;
+                    js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
                 }
-                let (_, more) = js::blob_delete_under(&self.env, &prefix(&r.person, &r.id), 10).await?;
+                let (_, more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix(&r.person, &r.id), 10).await?;
                 if more {
                     continue;
                 }
@@ -810,8 +816,10 @@ impl PrincipalCell {
             }
         }
         let piece_bytes = self.lever("piece")?.map_or(limits::PIECE_BYTES, |n| n as usize);
-        let archive_max = self.lever("cap")?.map_or(limits::ARCHIVE_MAX_BYTES, u64::from);
-        let mut run = Run { id: r.id.clone(), key: archive_key(&r.person, &r.id), tail: Tail::new(limits::PART_BYTES, kept), job, piece: vec![], new_parts: vec![], upload: r.upload.clone(), files: None, piece_bytes, archive_max };
+        let scale = self.lever("scale")?.map_or(1, |k| u64::from(k.max(1)));
+        let archive_max = self.lever("cap")?.map_or(limits::ARCHIVE_MAX_BYTES / scale, u64::from);
+        let fragment_max = limits::FRAGMENT_MAX_BYTES / scale;
+        let mut run = Run { id: r.id.clone(), key: archive_key(&r.person, &r.id), tail: Tail::new(limits::PART_BYTES, kept), job, piece: vec![], new_parts: vec![], upload: r.upload.clone(), files: None, piece_bytes, archive_max, fragment_max };
         let mut pace = self.pace()?;
         let outcome = self.steps(&mut run, now + limits::SLICE_MS, &mut pace).await;
         let outcome = match outcome {
@@ -905,7 +913,7 @@ impl PrincipalCell {
             return Err(fail(ExportFailure::Unavailable, format!("{} of its {} parts are named", parts.len(), run.job.parts)));
         }
         let upload = run.upload.clone().ok_or_else(|| Stop::Retry("the archive's upload has no id".into()))?;
-        let size = match js::upload_complete(&self.env, &run.key, &upload, &parts).await {
+        let size = match js::upload_complete(&self.env, js::BLOBS, &run.key, &upload, &parts).await {
             Ok(size) => size,
             // completed by a finish cut short: the archive is there
             Err(e) => match js::blob_head(&self.env, &run.key).await? {
@@ -939,7 +947,7 @@ impl PrincipalCell {
             Ok(())
         })?;
         console_log!("{}", json!({ "export": r.id, "ready": size }));
-        if let Err(e) = js::blob_delete_under(&self.env, &format!("{}spool/", prefix(&r.person, &r.id)), 10).await {
+        if let Err(e) = js::blob_delete_under(&self.env, js::BLOBS, &format!("{}spool/", prefix(&r.person, &r.id)), 10).await {
             console_error!("{}", json!({ "export": r.id, "spool": "left, for its expiry", "error": e.message }));
         }
         if let Some(to) = job.plan.as_ref().and_then(|p| p.email.clone()) {
@@ -1017,9 +1025,9 @@ impl PrincipalCell {
         if fragment {
             let f = run.job.frag();
             f.bytes += n;
-            if f.bytes > limits::FRAGMENT_MAX_BYTES {
+            if f.bytes > run.fragment_max {
                 let name = f.meta["name"].as_str().unwrap_or("").to_string();
-                return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(limits::FRAGMENT_MAX_BYTES))));
+                return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(run.fragment_max))));
             }
         }
         run.job.written += n;
@@ -1035,17 +1043,17 @@ impl PrincipalCell {
         let upload = match &run.upload {
             Some(u) => u.clone(),
             None => {
-                let u = js::upload_start(&self.env, &run.key, "application/x-tar").await?;
+                let u = js::upload_start(&self.env, js::BLOBS, &run.key, "application/x-tar").await?;
                 self.run_sql("UPDATE exports SET upload = ? WHERE id = ?", vec![u.as_str().into(), run.id.as_str().into()])?;
                 run.upload = Some(u.clone());
                 u
             }
         };
         run.job.parts += 1;
-        if run.job.parts as usize > 10_000 {
-            return Err(fail(ExportFailure::TooLarge, "the archive would pass R2's 10,000 parts"));
+        if run.job.parts as usize > limits::R2_PARTS_MAX {
+            return Err(fail(ExportFailure::TooLarge, format!("the archive would pass R2's {} parts", limits::R2_PARTS_MAX)));
         }
-        let etag = js::upload_part(&self.env, &run.key, &upload, run.job.parts as u16, part).await?;
+        let etag = js::upload_part(&self.env, js::BLOBS, &run.key, &upload, run.job.parts as u16, part).await?;
         run.new_parts.push((run.job.parts, etag));
         run.job.requests += 1;
         Ok(())
@@ -1093,9 +1101,9 @@ impl PrincipalCell {
         if run.job.written + held > run.archive_max {
             return Err(fail(ExportFailure::TooLarge, format!("the archive would pass {}, the most an export holds", bytes_text(run.archive_max))));
         }
-        if open.fragment && run.job.frag.as_ref().is_some_and(|f| f.bytes + held > limits::FRAGMENT_MAX_BYTES) {
+        if open.fragment && run.job.frag.as_ref().is_some_and(|f| f.bytes + held > run.fragment_max) {
             let name = run.job.frag().meta["name"].as_str().unwrap_or("").to_string();
-            return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(limits::FRAGMENT_MAX_BYTES))));
+            return Err(fail(ExportFailure::TooLarge, format!("{name} would pass {}, the most one fragment's part of an export holds", bytes_text(run.fragment_max))));
         }
         if run.piece.len() >= run.piece_bytes {
             self.spool(run).await?;
@@ -1111,7 +1119,7 @@ impl PrincipalCell {
         let n = run.job.spooled;
         let piece = std::mem::take(&mut run.piece);
         let size = piece.len() as u64;
-        js::blob_put_bytes(&self.env, &spool_key(&run.job.person, &run.id, n), &piece).await?;
+        js::blob_put_bytes(&self.env, js::BLOBS, &spool_key(&run.job.person, &run.id, n), &piece).await?;
         run.job.spooled += 1;
         run.job.requests += 1;
         run.job.open.as_mut().expect("a piece is an open entry's").pieces.push((n, size));

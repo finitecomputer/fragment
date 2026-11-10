@@ -235,6 +235,9 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             json_answer(&ask_registry(env, &hook).await?)
         }
+        // the move's object is the whole deployment's, as the registry is
+        (Method::Post, ["migrations"]) if cfg.levers_scoped => Err(no_route("/api/test/migrations")),
+        (Method::Post, ["migrations"]) => crate::migrations::lever(env, cfg, &body).await,
         // a preview's mail goes out for real: only the fake's is a test's
         (Method::Post, ["mail"]) if cfg.levers_scoped => Err(no_route("/api/test/mail")),
         (Method::Post, ["mail"]) => {

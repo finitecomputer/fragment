@@ -66,6 +66,17 @@ struct Notice: Decodable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// An action of a notice that failed (`Library.act`): why, in the server's
+/// words for its refusal (`refused`) or the app's for a call that never
+/// reached it, and its notice's title and level, so a refusal can be said
+/// after its notice is gone.
+struct NoticeFailure: Equatable, Sendable {
+    let said: String
+    let refused: Bool
+    let title: String
+    let warns: Bool
+}
+
 /// What the person is told, over every page: each notice as the server
 /// said it, the most pressing first, and a line when the last read of them
 /// failed (what it said before stays under it, with Try again).
@@ -83,11 +94,13 @@ struct NoticesBand: View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
             let shown = library.notices.filter { $0.shown(at: now) && !$0.mustAnswer }
-            if library.noticesFailed || !shown.isEmpty {
+            let refusals = library.refusals(at: now)
+            if library.noticesFailed || !shown.isEmpty || !refusals.isEmpty {
                 ScrollView {
                     VStack(spacing: 8) {
                         if library.noticesFailed { refresh }
                         ForEach(shown) { notice in row(notice, now: now) }
+                        ForEach(refusals, id: \.id) { refusal in refused(refusal.id, refusal.failure) }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
@@ -98,6 +111,24 @@ struct NoticesBand: View {
                 .clipped()
             }
         }
+    }
+
+    /// A refusal whose notice is gone: its title and the server's words,
+    /// until OK (which asks nothing).
+    private func refused(_ id: String, _ failure: NoticeFailure) -> some View {
+        card(warns: failure.warns) {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(failure.title).font(.subheadline.weight(.semibold))
+                    Text(failure.said).font(.footnote).foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Button { library.failedNotices[id] = nil } label: { Text("OK").foregroundStyle(Color(.systemBackground)) }
+                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("refused:\(id)")
     }
 
     private var refresh: some View {
@@ -113,7 +144,7 @@ struct NoticesBand: View {
                     Text(notice.title).font(.subheadline.weight(.semibold))
                     if let text = notice.text { Text(text).font(.footnote).foregroundStyle(.secondary) }
                     if let until = notice.until { Text(Notice.untilSaid(until, now: now)).font(.footnote).foregroundStyle(.secondary) }
-                    if let why = library.failedNotices[notice.id] { Text(why).font(.footnote).foregroundStyle(.secondary) }
+                    if let why = library.failedNotices[notice.id] { Text(why.said).font(.footnote).foregroundStyle(.secondary) }
                     if let detail = notice.detail { Text(detail).font(.caption2).foregroundStyle(.tertiary).padding(.top, 2) }
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -194,7 +225,7 @@ struct MustAnswerView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(notice.title).font(.title2.weight(.semibold))
                         if let text = notice.text { Text(text).foregroundStyle(.secondary) }
-                        if let why = library.failedNotices[notice.id] { Text(why).foregroundStyle(.secondary) }
+                        if let why = library.failedNotices[notice.id] { Text(why.said).foregroundStyle(.secondary) }
                         if let detail = notice.detail { Text(detail).font(.caption).foregroundStyle(.tertiary) }
                     }
                     .fixedSize(horizontal: false, vertical: true)

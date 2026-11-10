@@ -446,10 +446,40 @@ export function closed(handler) {
 
 /// Who this page is to the fragment: { id, principal, role, platform,
 /// limits } (`platform` the platform's origin, the one page that frames it
-/// with its person's session; `limits` as `limits()` reads them).
-export function me() {
+/// with its person's session; `limits` as `limits()` reads them), once the
+/// socket's hello comes. `me({ email: true })` adds `email` for a signed-in
+/// member, as `__people` gives it (a member's, to a member: decision 48),
+/// none for an anonymous visitor, a link holder or an agent: one more ask,
+/// so a page that only needs its role does not wait on it.
+export async function me({ email = false } = {}) {
   connect();
-  return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));
+  const h = hello ?? (await new Promise((resolve) => helloWaiters.push(resolve)));
+  if (!email) return h;
+  const mine = await emailOf(h.principal);
+  return mine ? { ...h, email: mine } : h;
+}
+
+// How long `me({ email: true })` waits on `__people` before it answers
+// without the email: a page that asked for it is never held by a slow ask.
+const EMAIL_WAIT_MS = 5_000;
+// The caller's own email, asked once a principal; an ask that fails or is
+// cut short is asked again by the next `me({ email: true })`.
+const emails = new Map(); // principal -> Promise<string | null>
+function emailOf(principal) {
+  if (principal.startsWith("anon:")) return Promise.resolve(null);
+  if (!emails.has(principal)) {
+    const url = new URL(`__people?id=${encodeURIComponent(principal)}`, base);
+    const asked = fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(EMAIL_WAIT_MS) })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`__people answered ${r.status}`))))
+      .then((r) => r.profiles?.[principal]?.email ?? null)
+      .catch((e) => {
+        emails.delete(principal);
+        console.warn("fragment.me(): no email", e);
+        return null;
+      });
+    emails.set(principal, asked);
+  }
+  return emails.get(principal);
 }
 
 /// What one message of a person's may carry, as the platform said it last
