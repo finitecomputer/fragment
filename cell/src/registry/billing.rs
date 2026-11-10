@@ -440,11 +440,17 @@ impl RegistryCell {
         Ok(true)
     }
 
-    /// `org`'s seats' holders told their notices changed, after the answer
-    /// (`wait_until`): bounded, an org holds at most `SEATS_PER_ORG_MAX`.
+    /// `org`'s seats' holders told their notices changed: bounded, an org
+    /// holds at most `SEATS_PER_ORG_MAX`.
     fn tell_holders(&self, org: &str) -> CellResult<()> {
         let holders = self.rows::<MemberRow>(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.org = ? AND m.seat IS NOT NULL AND m.person IS NOT NULL"), vec![org.into()])?;
-        let people: Vec<String> = holders.into_iter().filter_map(|m| m.person).collect();
+        self.tell_after(holders.into_iter().filter_map(|m| m.person).collect());
+        Ok(())
+    }
+
+    /// `people`'s pages told their notices changed (FIN-458: their seat is
+    /// the registry's to tell), after the answer (`wait_until`).
+    pub(super) fn tell_after(&self, people: Vec<String>) {
         let env = self.env.clone();
         self.state.wait_until(async move {
             for person in people {
@@ -453,7 +459,6 @@ impl RegistryCell {
                 }
             }
         });
-        Ok(())
     }
 
     /// An orphan subscription's cancel, after its grace (`CancelOrphan`).
