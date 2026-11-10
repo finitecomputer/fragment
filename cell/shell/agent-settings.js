@@ -1,5 +1,6 @@
 import { avatar } from "./agent-identity.js";
 import { icon } from "./icons.js";
+import { providerLabel } from "./connections.js";
 
 export const DEFAULT_AGENT_TIER = "cheap";
 // The runtimes a new agent may be made on (Settings' New agent), each as its
@@ -752,7 +753,7 @@ export function createAgentSettings({ api, el, seg, byName, agentFace, titleOf, 
       if (routes) pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [modelOption("", tierName(tier))]));
       for (const p of modeled) {
         const group = el("optgroup");
-        group.label = `${p.name} (your account)`;
+        group.label = `${providerLabel(p)} (your account)`;
         for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
         pick.append(group);
       }

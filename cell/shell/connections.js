@@ -1,6 +1,11 @@
 import { KIND } from "./frame-messages.js";
 import { icon } from "./icons.js";
 
+// A provider's name for people: the platform's (`ProviderView.name`), or
+// its id where an older release answered without one (a deploy going out,
+// rolled back): the wire adds fields, so a reader takes each as optional.
+export const providerLabel = (p) => p.name || p.provider;
+
 // Provider/account UI keeps failed removals for the current settings visit.
 export function createConnections({ api, el, section, named, seg, computer, getAgents, computerIs, asks, isOpen, reopenSettings }) {
   // ---- connections (decisions 22, 37 and 44): every provider the platform
@@ -93,7 +98,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
         off.disabled = false;
         return;
       }
-      const name = p.name;
+      const name = providerLabel(p);
       await reopenSettings(revoked ? null : [`${name} is disconnected`, `Your agents can no longer use it. ${name} may still list this platform's access to your account: remove it in your ${name} account's security settings.`]).catch(() => {});
     };
     return off;
@@ -101,7 +106,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   // What the person left unticked when they connected an account, in words.
   const notAllowed = (missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map(scopeName))].join(", ")}`);
   // An account of several, for people: its label, or the provider's name.
-  const accountLabel = (p, a) => a.account ?? `A ${p.name} account`;
+  const accountLabel = (p, a) => a.account ?? `A ${providerLabel(p)} account`;
   // A connection that takes several accounts: each of the person's, oldest
   // first, with its label and state, what it was not allowed with a
   // Reconnect to add (that account), and its own Disconnect. One whose
@@ -151,7 +156,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   function accountPick(p, a, theirs) {
     const pick = el("select", "provider-account-pick");
     pick.dataset.agent = a.fragment;
-    named(pick, a.fragment, (t) => `${t}'s ${p.name} account`, "aria-label");
+    named(pick, a.fragment, (t) => `${t}'s ${providerLabel(p)} account`, "aria-label");
     const option = (value, text) => {
       const o = el("option", "", text);
       o.value = value;
@@ -230,7 +235,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     return s;
   }
   function providerCard(p, offered, agents, uses, month) {
-    const name = p.name;
+    const name = providerLabel(p);
     const card = el("article", "provider");
     card.dataset.provider = p.provider;
     card.dataset.kind = p.kind;
