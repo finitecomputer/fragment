@@ -178,7 +178,7 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 #### `migrations.done`
 
-`POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.
+`POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.
 
 - Credentials: NIP-98
 - Body: [`StageDone`](#stagedone)

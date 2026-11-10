@@ -5372,7 +5372,7 @@
             "nip98": []
           }
         ],
-        "summary": "The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.",
+        "summary": "The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.",
         "tags": [
           "migrations"
         ]

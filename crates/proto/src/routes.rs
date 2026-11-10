@@ -474,7 +474,7 @@ pub const ROUTES: &[Route] = &[
         operation: "migrations.done",
         method: Method::Post,
         path: "/api/migrations/stages/{stage}/done",
-        summary: "The new agent says its import ended, well or not: its stage is deleted, and the old agent is retired once it went well.",
+        summary: "The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.",
         auth: SIGNATURE,
         params: &[STAGE],
         request: Some(Body::Json(ty::<StageDone>())),
