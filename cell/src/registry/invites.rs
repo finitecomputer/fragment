@@ -28,7 +28,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use super::calls::{self, AnswerAsked, By, Call, ClaimInvite, InviteEmail};
+use super::calls::{By, Call, ClaimInvite, InviteEmail};
 use super::{body, reply, RegistryCell};
 use crate::error::{CellError, CellResult};
 use crate::js;
@@ -65,8 +65,13 @@ pub(crate) struct NoticesOf {
 
 impl Call for NoticesOf {
     const PATH: &'static str = "/invites/notices";
-    type Answer = serde_json::Value;
+    type Answer = fragment_proto::notice::NoticeList;
 }
+
+/// FIN-458: no owner asks a notice that must be answered yet, so on a fleet
+/// with test levers an invite to a fragment whose label has this in it is
+/// one: the e2e's proof of the cover, and the iOS UI test's (docs/api.md).
+const MUST_ANSWER_LABEL: &str = "must-answer";
 
 /// `POST /invites/answer`: the asker's yes (`yes`) or no to `fragment`'s
 /// invite waiting on an email of theirs. Answers the role they hold there
@@ -219,7 +224,7 @@ impl RegistryCell {
         }
     }
 
-    pub(super) async fn tell_person(&self, person: &str) {
+    async fn tell_person(&self, person: &str) {
         // their notices changed (the one frame: `GET /api/notices` again)
         if let Err(e) = crate::principal::tell_changed(&self.env, person).await {
             console_error!("{}", serde_json::json!({ "invites-told": person, "failed": e.message, "code": e.code }));
@@ -272,36 +277,20 @@ impl RegistryCell {
     }
 
     /// What the registry tells `b.person` (`NoticesOf`): their invites, in
-    /// words; and on a test fleet, what a test asked them (`TestHook::Ask`).
-    async fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
-        let mut notices: Vec<fragment_proto::notice::Notice> = self
+    /// words; on a test fleet, one to a `must-answer…` fragment as one that
+    /// must be answered (`MUST_ANSWER_LABEL`).
+    fn notices_of(&self, b: NoticesOf) -> CellResult<fragment_proto::notice::NoticeList> {
+        let notices = self
             .waiting_on(&b.person)?
             .iter()
             .map(|i| {
                 let s = |k: &str| i[k].as_str().unwrap_or_default();
-                fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
+                let mut n = fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str());
+                n.must_answer = self.cfg.test_hooks && s("fragment").contains(MUST_ANSWER_LABEL);
+                n
             })
             .collect();
-        if self.cfg.test_hooks {
-            notices.extend(self.asked().await?.iter().filter(|a| a.person == b.person).map(calls::Ask::notice));
-        }
-        Ok(serde_json::json!({ "notices": notices }))
-    }
-
-    /// `a.person`'s answer to what a test asked them (`AnswerAsked`): the
-    /// one it refuses says its words; any other ends it, and they are told.
-    async fn answer_asked(&self, a: AnswerAsked) -> CellResult<serde_json::Value> {
-        let mut asked = self.asked().await?;
-        let Some(at) = asked.iter().position(|x| x.person == a.person && x.id == a.id && x.answers.contains(&a.answer)) else {
-            return Err(CellError::new(ErrorCode::NotFound, "That question isn't waiting for an answer any more.").because(Reason::Gone));
-        };
-        if let Some(refused) = asked[at].refused.as_ref().filter(|r| r.answer == a.answer) {
-            return Err(CellError::new(ErrorCode::Conflict, refused.said.clone()));
-        }
-        asked.remove(at);
-        self.keep_asked(&asked).await?;
-        self.tell_person(&a.person).await;
-        Ok(serde_json::json!({ "answered": a.id }))
+        Ok(fragment_proto::notice::NoticeList { notices })
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their
@@ -376,8 +365,7 @@ impl RegistryCell {
         Some(match path {
             InviteEmail::PATH => reply::<InviteEmail>(async { self.invite(body(bytes)?).await }.await),
             InvitesFor::PATH => reply::<InvitesFor>(body(bytes).and_then(|b| self.waiting_for(b))),
-            NoticesOf::PATH => reply::<NoticesOf>(async { self.notices_of(body(bytes)?).await }.await),
-            AnswerAsked::PATH if self.cfg.test_hooks => reply::<AnswerAsked>(async { self.answer_asked(body(bytes)?).await }.await),
+            NoticesOf::PATH => reply::<NoticesOf>(body(bytes).and_then(|b| self.notices_of(b))),
             AnswerInvite::PATH => reply::<AnswerInvite>(async { self.answer_invite(body(bytes)?).await }.await),
             ForgetInvite::PATH => reply::<ForgetInvite>(async { self.forget_invite(body(bytes)?).await }.await),
             _ => return None,

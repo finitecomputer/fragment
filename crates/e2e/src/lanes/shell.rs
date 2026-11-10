@@ -2218,16 +2218,18 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     Ok(())
 }
 
-/// Asks `person` a notice that must be answered (FIN-458), as no owner
-/// asks one yet: the registry's lever (`TestHook::Ask`), its answers Yes,
-/// Not now and Never, one of them refused in its own words if `refused`.
-fn ask_must(api: &Api, person: &str, id: &str, title: &str, refused: Option<(&str, &str)>) -> Result<()> {
-    let refused = refused.map(|(answer, said)| json!({ "answer": answer, "said": said }));
-    let text = "Your chats, agents and apps move with you. Nothing is lost.";
-    let body = json!({ "ask": { "person": person, "id": id, "title": title, "text": text, "answers": ["Yes", "Not now", "Never"], "refused": refused } });
-    let r = api.unsigned("POST", "/api/test/registry", Some(&body))?;
-    anyhow::ensure!(r.status == 200, "asking {person} {id}: {r}");
-    Ok(())
+/// Invites `email` to a new fragment of `sharer`'s labeled
+/// `must-answer-{base}`, whose invite must be answered on a test fleet
+/// (FIN-458: no owner asks one yet; `MUST_ANSWER_LABEL`,
+/// cell/src/registry/invites.rs). Its name; the notice's id is
+/// `invite:{name}`.
+fn invite_must(s: &Suite, api: &Api, sharer: &fragment_nip98::Keys, email: &str, base: &str) -> Result<String> {
+    let name = s.named(api, sharer, &format!("must-answer-{base}"))?;
+    let r = api.create(sharer, &name)?;
+    anyhow::ensure!(r.status == 200, "{name} made: {r}");
+    let r = api.signed(sharer, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "{email} invited to {name}: {r}");
+    Ok(name)
 }
 
 /// What the page shows of a notice that must be answered: whether it is
@@ -2244,26 +2246,28 @@ fn answer_must(b: &mut Browser, page: &Page, label: &str) -> Result<()> {
 }
 
 /// A notice that must be answered (FIN-458, Paul 2026-11-09), which no
-/// owner asks yet: the registry's lever asks two (`ask_must`). Each shows
-/// alone over the whole page, never in the band, the oldest first; Escape
-/// leaves it; an answer refused stays, in the server's words; answered,
-/// the read after it has it no more and the next shows; the last
-/// answered, the page is as it was. A guest's welcome: `guest_ui`.
+/// owner asks yet: two invites to `must-answer` fragments (`invite_must`).
+/// Each shows alone over the whole page, never in the band, the oldest
+/// first; Escape leaves it; an answer refused (the registry's `DownFor`
+/// lever) stays, in the server's words; answered, the read after it has it
+/// no more and the next shows; the last answered, the page is as it was.
+/// A guest's welcome: `guest_ui`.
 fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
-    let id = super::signin::who(api, session)?["id"].as_str().context("who is signed in")?.to_string();
+    let email = super::signin::who(api, session)?["email"].as_str().context("their email")?.to_string();
     b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
     anyhow::ensure!(b.until(&page, "!!document.querySelector('#sidebar .row')", wait), "their shell, drawn");
-    ask_must(api, &id, "move", "Move to finite.chat?", Some(("Not now", "Not now isn't open to you yet: answer Yes or Never.")))?;
-    ask_must(api, &id, "terms", "New terms", None)?;
-    let shown = b.until(&page, "document.getElementById('must-answer').dataset.id === 'asked:move'", wait);
+    let sharer = api.person()?;
+    let first = format!("invite:{}", invite_must(s, api, &sharer, &email, "1")?);
+    let next = format!("invite:{}", invite_must(s, api, &sharer, &email, "2")?);
+    let shown = b.until(&page, &format!("document.getElementById('must-answer').dataset.id === {}", js(&first)), wait);
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
-    let in_band = |seen: &Value| seen["band"].as_array().is_some_and(|b| b.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("asked:"))));
+    let in_band = |seen: &Value| seen["band"].as_array().is_some_and(|b| b.iter().any(|x| x.as_str().is_some_and(|x| x == first || x == next)));
     s.ok(
-        "a notice that must be answered shows alone, over the whole page, the oldest asked first, its words and its answers, told live; the band has none of it",
-        shown && seen["covers"] == json!(true) && seen["words"].as_str().is_some_and(|w| w.contains("Move to finite.chat?") && w.contains("Nothing is lost.") && w.contains("Never")) && !in_band(&seen),
+        "a notice that must be answered shows alone, over the whole page, the oldest first, its words and its answers, told live; the band has none of it",
+        shown && seen["covers"] == json!(true) && seen["words"].as_str().is_some_and(|w| w.contains("invited you to view it.") && w.contains("Accept") && w.contains("Decline")) && !in_band(&seen),
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("must-answer.png"));
@@ -2271,7 +2275,7 @@ fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shot
     b.press(&page, "Escape", false)?;
     std::thread::sleep(std::time::Duration::from_millis(300));
     let kept = b.eval(&page, MUST_ANSWER_SEEN)?;
-    s.ok("Escape, pressed twice, leaves it over the page", kept["covers"] == json!(true) && kept["id"] == json!("asked:move"), &kept);
+    s.ok("Escape, pressed twice, leaves it over the page", kept["covers"] == json!(true) && kept["id"] == json!(first), &kept);
     // the page's own keys take nothing while it shows: Ctrl/Cmd+K (the
     // launcher's), from the cover's focus and from the page's body
     b.eval(
@@ -2282,15 +2286,18 @@ fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shot
     std::thread::sleep(std::time::Duration::from_millis(300));
     let keys = b.eval(&page, "({ search: document.getElementById('search-dialog').open, cover: document.getElementById('must-answer').open })")?;
     s.ok("the page's own keys take nothing while it shows: Ctrl/Cmd+K opens no launcher over it", keys == json!({ "search": false, "cover": true }), &keys);
-    answer_must(b, &page, "Not now")?;
-    let refused = b.until(&page, "/answer Yes or Never/.test(document.getElementById('must-answer').innerText)", wait);
+    // its Accept refused once, by the registry (its lever)
+    let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/invites/answer", "times": 1 } })))?;
+    anyhow::ensure!(down.status == 200, "the registry's next answer to an invite refused: {down}");
+    answer_must(b, &page, "Accept")?;
+    let refused = b.until(&page, "/try again shortly/.test(document.getElementById('must-answer').innerText)", wait);
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
-    s.ok("an answer it refuses: it stays, saying why in the server's words", refused && seen["id"] == json!("asked:move") && seen["covers"] == json!(true), &seen);
-    answer_must(b, &page, "Yes")?;
-    let next = b.until(&page, "document.getElementById('must-answer').dataset.id === 'asked:terms'", wait);
+    s.ok("an answer it refuses: it stays, saying why in the server's words", refused && seen["id"] == json!(first) && seen["covers"] == json!(true), &seen);
+    answer_must(b, &page, "Decline")?;
+    let shown = b.until(&page, &format!("document.getElementById('must-answer').dataset.id === {}", js(&next)), wait);
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
-    s.ok("answered, and read again without it: the next shows, as alone", next && seen["covers"] == json!(true) && seen["words"].as_str().is_some_and(|w| w.contains("New terms")), &seen);
-    answer_must(b, &page, "Never")?;
+    s.ok("answered, and read again without it: the next shows, as alone", shown && seen["covers"] == json!(true) && !in_band(&seen), &seen);
+    answer_must(b, &page, "Decline")?;
     let gone = b.until(&page, "!document.getElementById('must-answer').open", wait);
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
     let usable = b.eval(&page, "document.getElementById('sidebar').contains(document.elementFromPoint(40, 120))")?;
@@ -2432,11 +2439,11 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
     let _ = b.screenshot(&page, &shots.join("guest-welcome.png"));
     // a notice that must be answered reaches a guest too, over the welcome
     // (FIN-458: someone moving to this platform may come as a guest)
-    ask_must(api, &id, "guest", "Move to finite.chat?", None)?;
-    let shown = b.until(&page, "document.getElementById('must-answer').dataset.id === 'asked:guest'", wait);
+    let asked = format!("invite:{}", invite_must(s, api, &api.person()?, &guest, "g")?);
+    let shown = b.until(&page, &format!("document.getElementById('must-answer').dataset.id === {}", js(&asked)), wait);
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
     let _ = b.screenshot(&page, &shots.join("guest-must-answer.png"));
-    answer_must(b, &page, "Yes")?;
+    answer_must(b, &page, "Decline")?;
     let gone = b.until(&page, &format!("!document.getElementById('must-answer').open && {welcome}"), wait);
     s.ok("a guest is asked too: the notice that must be answered over their welcome, which is there once it is answered", shown && seen["covers"] == json!(true) && gone, &seen);
     // settings: Billing's guest state, then Account
