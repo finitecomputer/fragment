@@ -503,6 +503,10 @@ struct FragmentRoot: View {
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
     @State private var pageHeight: CGFloat = 800
+    /// A cover of a notice that must be answered is up, or still going: from
+    /// the notice's arrival to the cover's `onDismiss` (an answer's page waits
+    /// for it, so a sheet never meets a cover going away).
+    @State private var covered = false
 
     var body: some View {
         Group {
@@ -586,11 +590,14 @@ struct FragmentRoot: View {
         // one that must be answered, alone over everything, until it is
         // (what the page itself presents closes first: one at a time)
         // (an answer's page waits for the last of them to go: `takeAnswered`)
-        .fullScreenCover(item: Binding(get: { library.asked }, set: { _ in }), onDismiss: openAnswered) { notice in
+        .fullScreenCover(item: Binding(get: { library.asked }, set: { _ in }), onDismiss: {
+            covered = false
+            openAnswered()
+        }) { notice in
             MustAnswerView(library: library, api: api, notice: notice).interactiveDismissDisabled()
         }
         .onChange(of: library.asked?.id, initial: true) { _, id in
-            if id != nil { openedApp = nil; showingConnection = false; sidebar = false }
+            if id != nil { covered = true; openedApp = nil; showingConnection = false; sidebar = false }
         }
         // the library's reads and its watch, for the account as it is now: a
         // library made anew (`resetNavigation`: its identity or approval
@@ -648,9 +655,11 @@ struct FragmentRoot: View {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
     }
-    /// The page an answer named, opened now if nothing must be answered.
+    /// The page an answer named, opened now if nothing must be answered and
+    /// no cover is up or still going (`covered`): else it waits, kept.
     private func openAnswered() {
-        if let fragment = library.takeAnswered() { open(fragment) }
+        guard !covered, let fragment = library.takeAnswered() else { return }
+        open(fragment)
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }
