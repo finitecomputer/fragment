@@ -172,9 +172,9 @@ fn bytes_a_route_takes_or_answers_hold() {
         let head = |edit: Option<&str>| -> String { base.lines().filter(|l| *l != fact).chain(edit).collect::<Vec<_>>().join("\n") };
         let found = |head: &str| -> Vec<String> { breaches(&parse(&base).unwrap(), &parse(head).unwrap(), &BTreeSet::new()).into_iter().map(|b| b.fact).collect() };
         assert!(found(&base).is_empty(), "{slot}: the same is no breach");
-        assert_eq!(found(&head(None)), [fact.clone()], "{slot}: gone");
+        assert_eq!(found(&head(None)), std::slice::from_ref(&fact), "{slot}: gone");
         let other = format!("route a.get {slot} application/octet-stream");
-        assert_eq!(found(&head(Some(&other))), [fact.clone()], "{slot}: another media type");
+        assert_eq!(found(&head(Some(&other))), std::slice::from_ref(&fact), "{slot}: another media type");
         // and one master's route did not have
         let added = breaches(&parse(BASE).unwrap(), &parse(&base).unwrap(), &BTreeSet::new());
         assert_eq!(added.into_iter().map(|b| b.fact).collect::<Vec<_>>(), [fact], "{slot}: new");
