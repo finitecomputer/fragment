@@ -593,7 +593,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // what they are told (FIN-458): their ledger's words for it, first, with
     // a pack to buy where packs are sold (a seat's holder, as they are)
-    let told = |k: &Keys| -> Result<Value> {
+    let notices_now = |k: &Keys| -> Result<Value> {
         let r = api.signed(k, "GET", "/api/notices", None)?;
         anyhow::ensure!(r.status == 200, "their notices: {r}");
         Ok(r.body["notices"].clone())
@@ -604,7 +604,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let mine = api.signed(&owner, "GET", "/api/seat", None)?.body;
     let sold = !mine["offer"].is_null() && !mine["seat"].is_null();
     let buy = if sold { json!([{ "label": "Buy $25 of credit", "post": "/api/billing/packs", "body": {} }]) } else { json!(null) };
-    let notices = told(&owner)?;
+    let notices = notices_now(&owner)?;
     s.ok(
         "out of credit, they are told so first, in Settings' words, with a pack to buy only where they may buy one (sold, and a seat the registry gave them)",
         notices[0]["id"] == "credit"
@@ -676,7 +676,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let quiet = tab.as_mut().map(|w| (0..10).take_while(|_| w.next().is_ok()).count() < 10).unwrap_or(false);
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
     let lifted = tab.as_mut().map(|w| w.next().unwrap_or_else(|e| json!(format!("{e:#}")))).unwrap_or_else(|e| json!(format!("{e:#}")));
-    let notices = told(&owner)?;
+    let notices = notices_now(&owner)?;
     s.ok(
         "credit back above zero: their pages, quiet before, are told it changed, and they are told of credit no more",
         quiet && lifted == json!({ "type": "changed" }) && credit(&notices).is_none(),
@@ -696,7 +696,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "succeeded" && m(&v, "balanceMicros") <= -2 * USD && v["standing"] == json!({ "standing": "read_only", "why": "overdrawn" }),
         &v,
     );
-    let notices = told(&owner)?;
+    let notices = notices_now(&owner)?;
     let said = credit(&notices).unwrap_or_default();
     s.ok(
         "past the overdraft, they are told that too, in Settings' words",
@@ -750,7 +750,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let w = api.op(&owner, &name, "note", "n-top", json!({ "text": "after the top-up" }))?;
     let v = ledger(api, &owner);
     s.ok("a top-up above zero restores writes", w.status == 200 && v["standing"]["standing"] == "ok", format!("{w} | {v}"));
-    let notices = told(&owner)?;
+    let notices = notices_now(&owner)?;
     s.ok("and they are told of credit no more", credit(&notices).is_none(), &notices);
     lever(api, &trig, "forget-standing", json!({}))?;
     lever(api, &trig, "cron-now", json!({}))?;
