@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::api::Api;
+use crate::api::{Api, Socket};
 use crate::{Need, Suite};
 
 const PUSHED: Duration = Duration::from_secs(20);
@@ -97,20 +97,27 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let told = |k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/notices", None).map(|r| r.body["notices"].clone()).unwrap_or(Value::Null);
     let of = |notices: &Value, id: &str| notices.as_array().into_iter().flatten().find(|n| n["id"] == id).cloned();
     let early = told(&kim);
+    // their pages watch: a trial's end that changes is told them
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = Socket::connect(api, &url, Some(&kim), None, None).map(|(w, _)| w).and_then(|mut w| w.expect("hello").map(|_| w));
+    let quiet = tab.as_mut().map(|w| (0..10).take_while(|_| w.next().is_ok()).count() < 10).unwrap_or(false);
     let end = crate::api::now_s() + 2 * 86_400;
     s.stripe.set_trial_end(&sub, end).map_err(anyhow::Error::msg)?;
     let near = s.eventually(PUSHED, || seat(api, &kim)["seat"]["trialEnds"] == json!(end));
+    let changed = tab.as_mut().map(|w| w.next().unwrap_or_else(|e| json!(format!("{e:#}")))).unwrap_or_else(|e| json!(format!("{e:#}")));
     let notices = told(&kim);
     let ending = of(&notices, "seat-ends").unwrap_or_default();
     s.ok(
-        "a trial is told in its last three days alone: \"Your trial ends on …\", true with a card or without, with Payment and invoices (Stripe's portal) for whoever pays",
+        "a trial is told in its last three days alone (its pages told when its end moves): \"Your trial ends on …\", true with a card or without, with Payment and invoices (Stripe's portal) for whoever pays",
         of(&early, "seat-ends").is_none()
             && near
+            && quiet
+            && changed == json!({ "type": "changed" })
             && ending["title"] == format!("Your trial ends on {}", fragment_core::notice::date(end * 1000))
             && ending["text"] == "Your seat continues with a card on file; without one it lapses then. Nothing of yours is deleted."
             && ending["level"] == "info"
             && ending["actions"] == json!([{ "label": "Payment and invoices", "post": "/api/billing/portal", "body": {} }]),
-        json!({ "early": early, "notices": notices }),
+        json!({ "early": early, "notices": notices, "quiet": quiet, "changed": changed }),
     );
 
     // ---- its places: one bought, one held by an open Checkout, then none

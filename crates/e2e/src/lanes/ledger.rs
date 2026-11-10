@@ -599,18 +599,21 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(r.body["notices"].clone())
     };
     let credit = |notices: &Value| notices.as_array().into_iter().flatten().find(|n| n["id"] == "credit").cloned();
-    let sold = !api.signed(&owner, "GET", "/api/seat", None)?.body["offer"].is_null();
+    // a pack is for a seat the registry gave them (`PackBegin`): this lane's
+    // person is a seat by the deployment's default plan, which is none
+    let mine = api.signed(&owner, "GET", "/api/seat", None)?.body;
+    let sold = !mine["offer"].is_null() && !mine["seat"].is_null();
     let buy = if sold { json!([{ "label": "Buy $25 of credit", "post": "/api/billing/packs", "body": {} }]) } else { json!(null) };
     let notices = told(&owner)?;
     s.ok(
-        "out of credit, they are told so first, in Settings' words, with a pack to buy where packs are sold",
+        "out of credit, they are told so first, in Settings' words, with a pack to buy only where they may buy one (sold, and a seat the registry gave them)",
         notices[0]["id"] == "credit"
             && notices[0]["kind"] == "credit"
             && notices[0]["level"] == "warn"
             && notices[0]["title"] == "Your agents are stopped"
             && notices[0]["text"] == "The credit is used up; adding credit starts them again."
             && (if sold { notices[0]["actions"] == buy } else { notices[0]["actions"].as_array().is_none_or(|a| a.is_empty()) }),
-        json!({ "notices": notices, "sold": sold }),
+        json!({ "notices": notices, "sold": sold, "seat": mine }),
     );
     let calls = s.ai.calls().len();
     // the gate heard the owner within the minute, when they had credit: it asks afresh
