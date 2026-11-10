@@ -79,6 +79,8 @@ pub enum SyncError {
     /// the folder's journal belongs to a different repo than the fragment
     /// being synced — refuse before touching anything
     Repo(String),
+    /// a folder sync never sends (`refuse_dir`), found by any pass's read
+    Refused(DirRefused),
 }
 impl From<CsError> for SyncError {
     fn from(e: CsError) -> Self {
@@ -97,6 +99,7 @@ impl std::fmt::Display for SyncError {
             SyncError::Host(e) => write!(f, "{e}"),
             SyncError::Io(e) => write!(f, "io: {e}"),
             SyncError::Repo(e) => write!(f, "{e}"),
+            SyncError::Refused(e) => write!(f, "{e}"),
         }
     }
 }
@@ -462,8 +465,10 @@ impl Local {
 }
 
 /// Reads the folder for a pass: the journal and a scan against it. No
-/// network.
+/// network. Every pass reads here, a watcher's too, so a folder that
+/// becomes one sync refuses (`refuse_dir`) is refused before it is sent.
 pub fn read_local(dir: &Path, name: &str) -> Result<Local, SyncError> {
+    refuse_dir(dir, dirs::home_dir().as_deref()).map_err(SyncError::Refused)?;
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let Scan { files, stats, refused } = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
     Ok(Local { state, journal, files, stats, refused })
@@ -1437,6 +1442,12 @@ impl std::fmt::Display for DirRefused {
     }
 }
 impl std::error::Error for DirRefused {}
+impl From<DirRefused> for CodedError {
+    /// A folder to point elsewhere: a usage mistake, exit 2.
+    fn from(e: DirRefused) -> Self {
+        CodedError { code: Code::InvalidUsage, msg: e.to_string() }
+    }
+}
 
 /// Refuses `dir` (`DirRefused`) when it is `/`, `/tmp`, `home` or a folder
 /// above `home`, or holds a browser profile at its top level or in a
