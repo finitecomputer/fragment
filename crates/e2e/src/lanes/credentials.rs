@@ -258,8 +258,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 
     // a connection whose read only the platform keeps (its provider has no
     // read-only scope): GET and HEAD alone while read only, refused before
-    // Pipes is asked for a token; the access picked kept as its callback
-    // imports, the owner's read telling the computer
+    // Pipes is asked for a token; the access picked kept by the registry as
+    // its callback imports, and asked of it at each write call
     s.workos.connect(&email, KEPT_CONNECTION, true);
     let access_of = |r: &crate::api::Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == KEPT_CONNECTION)).map(|x| x["access"].clone()).unwrap_or(Value::Null);
     let r = api.signed(w.owner, "GET", "/api/connections", None)?;
