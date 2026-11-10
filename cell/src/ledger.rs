@@ -44,7 +44,7 @@ use std::rc::Rc;
 use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::notice::NoticeList;
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
@@ -94,13 +94,13 @@ pub struct LedgerCell {
     state: State,
     raw: JsValue,
     env: Env,
-    /// The standing its person was last told (`told`), as kept in its meta:
-    /// read once an activation, so a call compares in memory.
-    told: Cell<Option<Standing>>,
-    /// The standing the last transaction left (`settled`), for `told`: kept
-    /// beside, not in, what `transact` answers, so its closures' types (one
-    /// for each caller) carry none of it.
-    left: Rc<Cell<Option<Standing>>>,
+    /// What its person was last told (`told`; `Ledger::told_key`), as kept
+    /// in its meta: read once an activation, so a call compares in memory.
+    told: RefCell<Option<String>>,
+    /// What the last transaction left the ledger saying (`settled`), for
+    /// `told`: kept beside, not in, what `transact` answers, so its
+    /// closures' types (one for each caller) carry none of it.
+    left: Rc<Cell<Option<String>>>,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
     /// When this activation last set the alarm for (the ledger's clock):
@@ -125,7 +125,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, env, told: Cell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
+        LedgerCell { state, raw, env, told: RefCell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -663,13 +663,13 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
 
 /// How every transaction ends, the same for each (`transact`'s closures,
 /// one for each caller, carry none of it): the head written back, the
-/// store's fault if any, the standing it leaves kept in `left` (`told`),
-/// and when the next sweep is due.
+/// store's fault if any, what it leaves the ledger saying kept in `left`
+/// (`told`; packs sold here or not), and when the next sweep is due.
 #[inline(never)]
-fn settled(store: &SqlStore, ledger: &Ledger, now: i64, left: &Cell<Option<Standing>>) -> CellResult<i64> {
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, cfg: &Config, left: &Cell<Option<String>>) -> CellResult<i64> {
     save(store, ledger);
     store.checked()?;
-    left.set(Some(ledger.standing(now)));
+    left.set(Some(ledger.told_key(now, cfg.stripe().is_ok())));
     Ok(ledger.next_sweep_ms(now))
 }
 
@@ -716,7 +716,7 @@ impl LedgerCell {
     /// refusal changed nothing but the month it rolled to), and a store
     /// that failed rolls everything back. Answers `op`'s
     /// answer and when the next sweep is due (the ledger's clock); the
-    /// standing it leaves is in `left`.
+    /// what it leaves the ledger saying is in `left`.
     fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
         let now = js::now_ms() + self.offset_ms()?;
         let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
@@ -724,13 +724,13 @@ impl LedgerCell {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            Ok((answer, settled(&store, &ledger, now, &left)?))
+            Ok((answer, settled(&store, &ledger, now, cfg, &left)?))
         })
     }
 
     /// `transact`, then the alarm set for the next sweep when it is due
     /// sooner than this activation last set it, and its person told when
-    /// their standing changed (`told`).
+    /// what their ledger says changed (`told`).
     async fn mutate<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
         let (answer, next) = self.transact(op)?;
         if self.armed.get().is_none_or(|armed| next < armed) {
@@ -740,23 +740,23 @@ impl LedgerCell {
         answer.map_err(Failed::Refused)
     }
 
-    /// Its person's pages told (`changed`) when their standing is not the
-    /// one last told them (FIN-458: their notices are this ledger's words
-    /// for it, `GET /api/notices`). Kept in its meta, so a change by the
+    /// Its person's pages told (`changed`) when what the ledger says (its
+    /// notices, `Ledger::told_key`) is not what it last told them (FIN-458,
+    /// `GET /api/notices`): its standing, or anything else its notices say,
+    /// a seat's Buy credit. Kept in its meta, so a change by the
     /// clock alone (a month's credit, its sweep) is told too, and told once.
     /// An org's ledger tells no one; none told yet is news too (`said::news`).
     /// Told after the answer (`wait_until`), never on its path: a gate's ask
     /// waits on no page. Best effort: a page not told reads it next time.
     #[inline(never)]
     fn told(&self) {
-        let Some(standing) = self.left.take() else { return };
-        if self.told.get() == Some(standing) {
+        let Some(said) = self.left.take() else { return };
+        if self.told.borrow().as_deref() == Some(said.as_str()) {
             return;
         }
         let Ok(Some(payer)) = self.meta("payer") else { return };
-        self.told.set(Some(standing));
+        *self.told.borrow_mut() = Some(said.clone());
         let Some(Payer::Person(person)) = Payer::parse(&payer) else { return };
-        let said = core::said::told_key(standing);
         if !core::said::news(self.meta("told").ok().flatten().as_deref(), &said) || self.set_meta("told", &said).is_err() {
             return;
         }

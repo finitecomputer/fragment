@@ -980,6 +980,14 @@ impl Ledger {
         said::standing(self.standing(now_ms), sold && seat).into_iter().collect()
     }
 
+    /// What the ledger keeps of what it last told its person (`told` in its
+    /// meta): its notices as `said` says them, so whatever changes them is
+    /// told to their pages once (`said::news`), its standing or anything
+    /// else they say (a seat's Buy credit). As the route answers them.
+    pub fn told_key(&self, now_ms: i64, sold: bool) -> String {
+        serde_json::to_string(&fragment_proto::notice::NoticeList { notices: self.said(now_ms, sold) }).expect("notices serialize")
+    }
+
     pub fn standing(&self, now_ms: i64) -> Standing {
         let money = self.money_at(now_ms);
         match self.org {

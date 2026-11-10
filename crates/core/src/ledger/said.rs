@@ -32,20 +32,10 @@ pub fn standing(standing: Standing, may_buy: bool) -> Option<Notice> {
     })
 }
 
-/// The standing a ledger last told its person, as it keeps it (`told` in
-/// its meta): a number for each, as nothing reads it but `news`.
-pub fn told_key(standing: Standing) -> String {
-    let key = match standing {
-        Standing::Ok => 0,
-        Standing::AgentsStopped { why } => 10 + why as u8,
-        Standing::ReadOnly { why } => 20 + why as u8,
-    };
-    key.to_string()
-}
-
-/// Whether the standing `now` (`told_key`) is news to its person's pages:
-/// anything but what was last told them (`kept`), none told yet too (a
-/// ledger from before these notices, whose page may show one already).
+/// Whether what a ledger says now (`Ledger::told_key`) is news to its
+/// person's pages: anything but what was last told them (`kept`), none
+/// told yet too (a ledger from before these notices, whose page may show
+/// one already).
 pub fn news(kept: Option<&str>, now: &str) -> bool {
     kept != Some(now)
 }
@@ -55,24 +45,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Goal: a page is told whenever the standing differs from the last one
-    /// told, none told yet too: a ledger from before these notices has none
-    /// kept, and its page may show "Your agents are stopped" already, so the
-    /// credit that lifts it must be told; the same standing again is not.
+    /// Goal: a page is told whenever what its ledger says differs from what
+    /// it last told, none told yet too: a ledger from before these notices
+    /// has none kept, and its page may show "Your agents are stopped"
+    /// already, so the credit that lifts it must be told; the same again is
+    /// not.
     #[test]
-    fn a_standing_is_news_unless_it_was_told_last() {
-        let (stopped, ok) = (told_key(Standing::AgentsStopped { why: Why::NoCredit }), told_key(Standing::Ok));
-        assert!(news(None, &ok), "none told yet: told");
-        assert!(news(Some(&stopped), &ok), "lifted: told");
-        assert!(!news(Some(&ok), &ok), "the same again: not told");
-        let all = [Standing::Ok, Standing::AgentsStopped { why: Why::Guest }, Standing::AgentsStopped { why: Why::SeatCanceled }, Standing::AgentsStopped { why: Why::NoCredit }, Standing::ReadOnly { why: Why::Overdrawn }, Standing::ReadOnly { why: Why::NoCredit }];
-        let keys: std::collections::BTreeSet<String> = all.iter().map(|s| told_key(*s)).collect();
-        assert_eq!(keys.len(), all.len(), "each standing its own key");
+    fn what_is_said_is_news_unless_it_was_told_last() {
+        let stopped = serde_json::to_string(&standing(Standing::AgentsStopped { why: Why::NoCredit }, true).into_iter().collect::<Vec<_>>()).expect("serializes");
+        let quiet = "[]";
+        assert!(news(None, quiet), "none told yet: told");
+        assert!(news(Some(&stopped), quiet), "lifted: told");
+        assert!(!news(Some(quiet), quiet), "the same again: not told");
     }
 
-    /// Goal: out of credit, or past the overdraft, the person is told so in
-    /// Settings' words, with a pack to buy when they may; anything else of
-    /// the ledger's standing is no notice of its own.
     #[test]
     fn credit_in_words_with_a_pack_to_buy() {
         let out = standing(Standing::AgentsStopped { why: Why::NoCredit }, true).expect("out of credit is told");
