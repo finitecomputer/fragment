@@ -519,6 +519,18 @@ pub struct Scan {
     pub refused: Vec<NotRepoPath>,
 }
 
+/// What sync sends of `dir`: its `syncable` paths, never following
+/// symlinks, honoring .gitignore exactly when git would (only inside a
+/// repo). A folder that is out is never entered.
+fn walk(dir: &Path) -> ignore::WalkBuilder {
+    let root = dir.to_path_buf();
+    let mut w = ignore::WalkBuilder::new(dir);
+    // `syncable` owns the dotfile rule, as it does for the watcher
+    w.hidden(false).git_ignore(true).git_global(true).git_exclude(true).parents(true);
+    w.filter_entry(move |e| e.depth() == 0 || syncable(&relative(&root, e.path())));
+    w
+}
+
 /// Walk the folder. With state, a size+mtime match adopts the cached hash
 /// (O(changes)); with verify, everything is read and hashed. Takes the
 /// `syncable` paths, never following symlinks, and honors .gitignore
@@ -527,18 +539,7 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
     let mut out = BTreeMap::new();
     let mut refused = Vec::new();
     let mut stats = ScanStats::default();
-    let root = dir.to_path_buf();
-    let walker = ignore::WalkBuilder::new(dir)
-        // `syncable` owns the dotfile rule, as it does for the watcher
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
-        // a folder that is out is never entered
-        .filter_entry(move |e| e.depth() == 0 || syncable(&relative(&root, e.path())))
-        .build();
-    for entry in walker {
+    for entry in walk(dir).build() {
         let entry = entry?;
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -1441,7 +1442,7 @@ impl std::error::Error for DirRefused {}
 /// above `home`, or holds a browser profile at its top level or in a
 /// subfolder: a `Default/Cookies`, a `Local State` or an
 /// `org.chromium.Chromium.*`. It reads those two levels only, and only
-/// names sync would send (`syncable`). `home` is taken both as given and
+/// what sync would send (`walk`). `home` is taken both as given and
 /// with its links resolved: a Hermes terminal's `HOME` is a link into the
 /// agent's work folder. A folder not there yet holds nothing.
 pub fn refuse_dir(dir: &Path, home: Option<&Path>) -> Result<(), DirRefused> {
@@ -1455,15 +1456,20 @@ pub fn refuse_dir(dir: &Path, home: Option<&Path>) -> Result<(), DirRefused> {
             return Err(DirRefused::Home { dir, home: h });
         }
     }
-    let subfolders = fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && syncable(&e.file_name().to_string_lossy()));
-    for at in std::iter::once(dir.clone()).chain(subfolders.map(|e| e.path())) {
-        let chromium = fs::read_dir(&at).into_iter().flatten().flatten().find(|e| e.file_name().to_string_lossy().starts_with("org.chromium.Chromium."));
-        let found = [at.join("Default/Cookies"), at.join("Local State")].into_iter().find(|f| f.is_file()).or(chromium.map(|e| e.path()));
-        if let Some(found) = found {
-            return Err(DirRefused::BrowserProfile { dir, found });
+    let profile = |e: &ignore::DirEntry| {
+        let name = e.file_name().to_string_lossy();
+        let folder = e.file_type().is_some_and(|t| t.is_dir());
+        match &*name {
+            "Default" if folder => Some(e.path().join("Cookies")).filter(|c| c.is_file()),
+            "Local State" if !folder => Some(e.path().to_path_buf()),
+            _ if name.starts_with("org.chromium.Chromium.") => Some(e.path().to_path_buf()),
+            _ => None,
         }
+    };
+    match walk(&dir).max_depth(Some(2)).build().flatten().find_map(|e| profile(&e)) {
+        Some(found) => Err(DirRefused::BrowserProfile { dir, found }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1580,6 +1586,13 @@ mod tests {
         assert_eq!(refuse_dir(&site, Some(&home)), Ok(()));
         assert_eq!(refuse_dir(&site, None), Ok(()));
         assert_eq!(refuse_dir(&root.join("not-yet"), Some(&home)), Ok(()));
+        // a profile the folder's .gitignore keeps out, as the scan does
+        let repo = git_folder("refuse-ignored", "browser-profile/");
+        fs::write(repo.join("index.html"), b"hi").unwrap();
+        fs::create_dir_all(repo.join("browser-profile/Default")).unwrap();
+        fs::write(repo.join("browser-profile/Default/Cookies"), b"x").unwrap();
+        fs::write(repo.join("browser-profile/Local State"), b"x").unwrap();
+        assert_eq!(refuse_dir(&repo, Some(&home)), Ok(()));
     }
 
     #[test]
