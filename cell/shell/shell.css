@@ -626,6 +626,20 @@ iframe[data-blocked] { display: none; }
 /* the shell's form: fields (inputs, selects, text areas) are rounded rectangles, 10px, on the card's white; buttons are pills */
 .settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select, .agent-dialog input:not([type="file"]):not([type="checkbox"]), .agent-dialog select { font: var(--type-field); min-height: 36px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
 .settings-section input[type="checkbox"] { accent-color: var(--accent-blue); }
+/* a check: a checkbox in the platform's look, for picking things (the move's
+   page; any page that picks), still the browser's own control under it: its
+   label, keys, focus and forms. Off, the card's square in the strong border;
+   on, filled with the primary buttons' colour, its tick theirs; the switch's
+   focus ring; under forced colours, the system's own box */
+input.check { position: relative; flex: none; width: 18px; height: 18px; margin: 0; appearance: none; -webkit-appearance: none; border: 1.5px solid var(--border-strong); border-radius: 5px; background: var(--bg-card); cursor: pointer; transition: background .12s, border-color .12s; }
+input.check::before { content: ""; position: absolute; left: 50%; top: 45%; width: 4px; height: 9px; border: solid var(--primary-foreground); border-width: 0 2px 2px 0; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; }
+input.check:checked { border-color: var(--primary); background: var(--primary); }
+input.check:checked::before { opacity: 1; }
+input.check:hover:not(:disabled):not(:checked) { border-color: var(--text-tertiary); }
+input.check:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+input.check:disabled { opacity: .55; cursor: default; }
+@media (prefers-reduced-motion: reduce) { input.check { transition: none; } }
+@media (forced-colors: active) { input.check { appearance: auto; -webkit-appearance: auto; } input.check::before { display: none; } }
 /* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
 label.settings-line { cursor: pointer; }
 .settings-section input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
@@ -995,7 +1009,6 @@ label.settings-line { cursor: pointer; }
 .move-copy strong { display: block; margin-bottom: 2px; color: var(--text-primary); font-size: 15px; }
 .move-copy p { margin: 0; }
 .move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 14px; }
-.move-pick input[type="checkbox"] { flex: none; width: 18px; height: 18px; margin: 0; }
 .move-row > button { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/28px var(--font-sans); }
 .move-layout .form-error { margin: 0 0 12px; }
 @media (max-width: 640px) { .move-layout { padding: 18px 16px 60px; } }

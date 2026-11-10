@@ -794,6 +794,12 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));
+    let picked = check_by_keys(b, &page, shots, 1280, "light")?;
+    s.ok(
+        "the box is the platform's check, not the browser's: reached by Tab, Space unchecks it and checks it again, its focus ring kept, Bring over following each",
+        picked["drawn"] == "none" && picked["off"] == json!({ "checked": false, "focused": true, "ring": true, "bring": false }) && picked["on"] == json!({ "checked": true, "focused": true, "ring": true, "bring": true }) && picked["fill"] != picked["empty"],
+        &picked,
+    );
     for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
         let p = b.open(&format!("{}/move", api.base))?;
         b.viewport(&p, width, height, phone)?;
@@ -801,6 +807,7 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         let _ = b.until(&p, &format!("!!{row}?.querySelector('img')?.naturalWidth"), wait);
         std::thread::sleep(Duration::from_millis(300));
         let _ = b.screenshot(&p, &shots.join(format!("move-{width}-{scheme}.png")));
+        check_by_keys(b, &p, shots, width, scheme)?;
         b.close(p)?;
     }
 
@@ -840,4 +847,30 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     }
     b.close(page)?;
     Ok(())
+}
+
+/// The move page's check, by keys alone: Tab to it, Space to uncheck it (a
+/// picture, its focus ring on), Space to check it again (a picture). What
+/// each left: checked, focused, its ring, Bring over enabled; and how it is
+/// drawn (`appearance`), its fill on and off.
+fn check_by_keys(b: &mut crate::browser::Browser, page: &crate::browser::Page, shots: &std::path::Path, width: u32, scheme: &str) -> Result<Value> {
+    for _ in 0..40 {
+        if b.eval(page, "document.activeElement?.matches('#move-page input.check') === true")? == json!(true) {
+            break;
+        }
+        b.press(page, "Tab", false)?;
+    }
+    const STATE: &str = "(() => { const c = document.querySelector('#move-page input.check'); return { checked: c.checked, focused: document.activeElement === c, ring: c.matches(':focus-visible'), bring: !document.querySelector('#move-page button.primary').disabled }; })()";
+    b.press(page, " ", false)?;
+    std::thread::sleep(Duration::from_millis(200));
+    let off = b.eval(page, STATE)?;
+    let empty = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).backgroundColor")?;
+    let _ = b.screenshot(page, &shots.join(format!("move-unchecked-focus-{width}-{scheme}.png")));
+    b.press(page, " ", false)?;
+    std::thread::sleep(Duration::from_millis(200));
+    let on = b.eval(page, STATE)?;
+    let fill = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).backgroundColor")?;
+    let _ = b.screenshot(page, &shots.join(format!("move-checked-focus-{width}-{scheme}.png")));
+    let drawn = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).appearance")?;
+    Ok(json!({ "drawn": drawn, "off": off, "on": on, "empty": empty, "fill": fill }))
 }
