@@ -235,6 +235,8 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Resul
                     }
                 }
             }
+            // a folder sync refuses stays refused: stop, as a fresh sync would
+            Err(SyncError::Refused(e)) => return Err(crate::api::CodedError::from(e).into()),
             Err(e) => {
                 let at = now_utc();
                 eprintln!("{at} sync failed (retrying in {err_backoff}s): {e}");
@@ -706,5 +708,84 @@ mod tests {
         // an agent acting for its owner names them: a fragment's own route honors `for`
         let agent = crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper--k3x9".into(), acting_for: Some("npub1paul".into()) });
         assert_eq!(watch_url("http://api.fragment.internal", &agent, "t--k3x9", Some("v")), "ws://api.fragment.internal/f/t--k3x9/__watch?view=v&for=npub1paul");
+    }
+
+    /// A browser profile at `dir/at`.
+    fn profile(dir: &Path, at: &str) {
+        fs::create_dir_all(dir.join(at).join("Default")).unwrap();
+        fs::write(dir.join(at).join("Default/Cookies"), b"x").unwrap();
+    }
+
+    /// A folder with `note.md`, and a browser profile `.gitignore` keeps out.
+    fn folder_with_ignored_profile(tag: &str) -> PathBuf {
+        let dir = tmpdir(tag);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".gitignore"), "browser/\n").unwrap();
+        profile(&dir, "browser");
+        fs::write(dir.join("note.md"), "n").unwrap();
+        dir
+    }
+
+    /// Goal (FIN-401, review on #1187): a pass refuses what a fresh sync
+    /// refuses, so a watcher never sends a browser profile that appears, or
+    /// that `.gitignore` stops keeping out, after its first pass.
+    #[test]
+    fn a_watchers_pass_refuses_a_profile_that_appears() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let c = Client::new(&mock.url, auth::fixed(7));
+        let dir = folder_with_ignored_profile("profile-appears");
+        let o = opts();
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
+        assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.pushed == ["note.md"]), "an ignored profile is not sent");
+
+        profile(&dir, "chrome");
+        let refused = watcher.serve(LOCAL, true);
+        assert!(matches!(refused, Err(SyncError::Refused(sync::DirRefused::BrowserProfile { .. }))), "{:?}", refused.err());
+        fs::remove_dir_all(dir.join("chrome")).unwrap();
+        fs::write(dir.join(".gitignore"), "").unwrap();
+        let refused = watcher.serve(LOCAL, true);
+        assert!(matches!(refused, Err(SyncError::Refused(sync::DirRefused::BrowserProfile { .. }))), "{:?}", refused.err());
+        assert_eq!(mock.file_at("t--k3x9", "main", "chrome/Default/Cookies"), None);
+        assert_eq!(mock.file_at("t--k3x9", "main", "browser/Default/Cookies"), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Runs `fragment sync --watch` over `dir` until its first pass sent
+    /// `note.md`, makes `change`, and returns how the watch ended.
+    fn watch_through(tag: &str, change: impl FnOnce(&Path)) -> (anyhow::Error, crate::mockcs::MockServer) {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t--k3x9", &[]);
+        let dir = folder_with_ignored_profile(tag);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (url, at) = (mock.url.clone(), dir.clone());
+        std::thread::spawn(move || tx.send(run(&Client::new(&url, auth::fixed(7)), "t--k3x9", &at, &opts())));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while mock.file_at("t--k3x9", "main", "note.md").is_none() {
+            assert!(std::time::Instant::now() < deadline, "the first pass never sent note.md");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        change(&dir);
+        let ended = rx.recv_timeout(Duration::from_secs(30)).expect("the watch stops at the profile");
+        fs::remove_dir_all(&dir).ok();
+        (ended.expect_err("a refusal"), mock)
+    }
+
+    /// Goal (FIN-401, review on #1187): `fragment sync --watch` stops at a
+    /// browser profile that appears, or that `.gitignore` stops keeping
+    /// out, with a fresh sync's refusal and exit code, and sends none of it.
+    #[test]
+    fn a_watch_stops_at_a_profile_that_appears() {
+        let created = watch_through("stop-created", |dir| profile(dir, "chrome"));
+        let unignored = watch_through("stop-unignored", |dir| {
+            fs::write(dir.join(".gitignore"), "").unwrap();
+            fs::write(dir.join("note.md"), "edited").unwrap();
+        });
+        for (err, mock) in [created, unignored] {
+            assert_eq!(err.downcast_ref::<crate::api::CodedError>().map(|e| e.code), Some(crate::api::Code::InvalidUsage), "{err:#}");
+            assert!(err.to_string().contains("browser profile"), "{err:#}");
+            assert_eq!(mock.file_at("t--k3x9", "main", "chrome/Default/Cookies"), None);
+            assert_eq!(mock.file_at("t--k3x9", "main", "browser/Default/Cookies"), None);
+        }
     }
 }

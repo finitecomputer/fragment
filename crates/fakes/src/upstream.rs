@@ -33,6 +33,7 @@ fn seen_of(req: &Request) -> Value {
         "host": req.header("x-fragment-upstream-host"),
         "method": req.method,
         "path": req.path,
+        "target": req.target,
         "query": req.pairs.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
         "auth": auth,
         "agent": req.header("x-fragment-agent"),
@@ -54,6 +55,14 @@ impl Upstream {
             log.lock().expect("upstream log").push(v.clone());
             if let Some((_, vendor)) = vendors.iter().find(|(host, _)| req.header("x-fragment-upstream-host") == Some(host.as_str())) {
                 return vendor(req);
+            }
+            // what arrived echoed as an event stream, and among bytes that are
+            // no text: the swap names a Vault's value in either (FIN-466)
+            if req.path == "/echo-stream" {
+                return Response::bytes(200, "text/event-stream", format!("data: {v}\n\n").into_bytes());
+            }
+            if req.path == "/echo-binary" {
+                return Response::bytes(200, "application/octet-stream", [&[0xff, 0xfe][..], v.to_string().as_bytes(), &[0x00]].concat());
             }
             // a redirect, for the test that the swap never follows one
             if req.path == "/redirect" {
