@@ -41,6 +41,13 @@ refers to the old platform, and leave out what can't work, saying why.
   starts with the same label). Right after `fragment create`, write the
   full name it printed into `progress.md`, before anything else. Every
   other command below is safe to run twice.
+- **Every folder by its whole path.** Your terminal starts each command
+  in your work folder, not where the last one left off, so a `cd` never
+  carries over. Name every folder whole in every command
+  (`"$HOME/home-import/…"`), never `.` or a bare name, and never `cd`.
+  Before you push or deploy a folder, list its top level: it holds only
+  what you put there (a brain's wikis, a site's files), else stop and say
+  so in the report. A push of the wrong folder sends everything in it.
 - **Tell your owner in plain words.** No commands, paths or JSON.
 - **Run each deploy on its own** and read what it says. Never chain
   `fragment deploy` after other commands with `&&`.

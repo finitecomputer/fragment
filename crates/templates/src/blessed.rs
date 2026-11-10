@@ -371,6 +371,67 @@ mod tests {
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
+    /// A command of the import skill's (FIN-401): the agent's terminal starts
+    /// each command in its work folder, so a `cd` never carries over, and a
+    /// `--dir .` or a `cp … .` after one pushed the work folder itself (its
+    /// browser profile, the export) into a brain. Every folder a command
+    /// names is named whole (`"$…`, `$…`, `~/…`, `/…`), and none runs `cd`.
+    fn the_folders_it_names_are_whole(file: &str, text: &str) -> Vec<String> {
+        let whole = |arg: &str| ["\"$", "\"${", "$", "~/", "/", "\"/", "\"~"].iter().any(|p| arg.starts_with(p));
+        let mut bad = Vec::new();
+        let mut code = false;
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("```") {
+                code = !code;
+                continue;
+            }
+            if !code {
+                continue;
+            }
+            // each command of the line, `&&`, `||`, `;` and `|` apart
+            for cmd in line.split("&&").flat_map(|c| c.split("||")).flat_map(|c| c.split(';')).flat_map(|c| c.split('|')) {
+                let words: Vec<&str> = cmd.split_whitespace().collect();
+                let args = |from: usize| words[from..].iter().copied().filter(|w| !w.starts_with('-') || *w == "-").collect::<Vec<_>>();
+                let say = |why: &str| format!("{file}:{}: {why}: {}", n + 1, line.trim());
+                match words.first().copied() {
+                    Some("cd") => bad.push(say("a `cd` carries over to no later command")),
+                    Some("rm") | Some("mkdir") => {
+                        if let Some(a) = args(1).into_iter().find(|a| !whole(a)) {
+                            bad.push(say(&format!("{a} is no whole path")));
+                        }
+                    }
+                    Some("cp") => {
+                        if let Some(a) = args(1).last().filter(|a| !whole(a)) {
+                            bad.push(say(&format!("its target {a} is no whole path")));
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(at) = words.iter().position(|w| *w == "--dir") {
+                    if words.get(at + 1).is_none_or(|a| !whole(a)) {
+                        bad.push(say("its --dir is no whole path"));
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    /// Goal: the import skill, and its profiles, name every folder whole in
+    /// every command, and run no `cd` (FIN-401). Invalid: what led a
+    /// move's brain to hold its computer's work folder.
+    #[test]
+    fn the_import_skill_names_every_folder_whole() {
+        let files: Vec<_> = data("skills").into_iter().filter(|f| f.path.starts_with("skills/productivity/import-agent-home/") && f.path.ends_with(".md")).collect();
+        assert!(!files.is_empty());
+        let skills = template("skills").unwrap();
+        let bad: Vec<String> = files.iter().flat_map(|f| the_folders_it_names_are_whole(f.path, std::str::from_utf8(&bytes_of(skills, f)).unwrap())).collect();
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        // what FIN-401's guide ran is refused
+        let guide = "```sh\nmkdir -p ~/w && cd ~/w\nfragment sync b --dir .\ncp -R ~/x/. .\nrm -rf site && mkdir site\nfragment deploy b --dir \"$W\"\n```\n";
+        assert_eq!(the_folders_it_names_are_whole("guide.md", guide).len(), 5, "{:?}", the_folders_it_names_are_whole("guide.md", guide));
+    }
+
     #[test]
     fn faults_say_why() {
         assert!(CodeFault::TooManyModules(65).message().contains("64"));
