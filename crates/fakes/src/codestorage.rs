@@ -205,6 +205,10 @@ struct State {
     /// reads (`?access=read`) is theirs.
     #[serde(skip)]
     viewing: BTreeSet<String>,
+    /// The upload limit the caller's list advertises (`limits`), if any
+    /// (`advertise_upload_max`); none, as an older platform's.
+    #[serde(skip)]
+    upload_max: Option<u64>,
 }
 
 struct Inner {
@@ -569,7 +573,10 @@ impl Inner {
             // owner's, so a bare label resolves (`Client::fragment`)
             if path == "/api/fragments" && m == "GET" {
                 let fragments: Vec<Value> = st.repos.values().map(|r| json!({ "name": r.name, "role": "owner" })).collect();
-                return Response::json(200, &json!({ "fragments": fragments }));
+                return Response::json(200, &match st.upload_max {
+                    Some(n) => json!({ "fragments": fragments, "limits": { "uploadMaxBytes": n, "filesPerMessage": 8 } }),
+                    None => json!({ "fragments": fragments }),
+                });
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
@@ -1340,6 +1347,12 @@ impl CodeStorage {
     /// Host `refresh` nudges received (with `host_routes`).
     pub fn refresh_count(&self) -> u32 {
         self.with(|st| st.refreshes)
+    }
+
+    /// The upload limit the caller's list (`GET /api/fragments`, with
+    /// `host_routes`) advertises from now on; None, none.
+    pub fn advertise_upload_max(&self, bytes: Option<u64>) {
+        self.with(|st| st.upload_max = bytes);
     }
 
     /// Turns on the search write API for fragment `name` (with

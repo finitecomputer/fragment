@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 use fragment_proto::limits::BLOB_MAX_BYTES;
-use fragment_proto::RepoPath;
+use fragment_proto::{FragmentList, RepoPath};
 use serde::Serialize;
 
 use super::layout::Layout;
@@ -82,7 +82,7 @@ pub fn left_behind(plan: &Plan, counted: &Counted) -> String {
     ));
     let mut listed = 0;
     for (why, r) in &counted.left_by_why {
-        let said = why.said();
+        let said = counted.said(*why);
         out.push_str(&format!("\n## {}{} ({} files, {})\n\n", said[..1].to_uppercase(), &said[1..], r.files, size(r.bytes)));
         let all: Vec<_> = plan.left.iter().filter(|l| l.why == *why).collect();
         let mut shown = 0;
@@ -104,9 +104,10 @@ pub fn left_behind(plan: &Plan, counted: &Counted) -> String {
     out
 }
 
-/// The plan alone (`--plan`): what would be brought and left, nothing sent.
+/// The plan alone (`--plan`): what would be brought and left, nothing sent
+/// and nothing asked, so not knowing the caller's upload limit.
 pub fn planned(src: &Source, layout: &Layout) -> Result<Counted> {
-    let p = plan::plan(src, layout, plan::FILES_MAX_BYTES, plan::FILES_MAX)?;
+    let p = plan::plan(src, layout, plan::FILES_MAX_BYTES, plan::FILES_MAX, None)?;
     Ok(p.counted(plan::FILES_MAX_BYTES, plan::FILES_MAX))
 }
 
@@ -171,7 +172,11 @@ fn manifest(c: &Client, held: &mut Held, author: &Author, mut head: String) -> R
 /// The files the plan brings, into the fragment `into`, and
 /// `left-behind.md`.
 pub fn bring(c: &Client, src: &Source, layout: &Layout, into: &str) -> Result<Brought> {
-    let plan = plan::plan(src, layout, plan::FILES_MAX_BYTES, plan::FILES_MAX)?;
+    // the most one upload of the caller's may be, as its platform says,
+    // before anything is written: a file past it stays behind, listed
+    let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
+    let upload_max = crate::session::upload_max(&list, c.agent().is_some());
+    let plan = plan::plan(src, layout, plan::FILES_MAX_BYTES, plan::FILES_MAX, Some(upload_max))?;
     let counted = plan.counted(plan::FILES_MAX_BYTES, plan::FILES_MAX);
     let mut held = Held::new(into, Wants::Write);
     if !held.get(c)?.writes() {
@@ -222,10 +227,13 @@ pub fn print(b: &Brought) {
 pub fn print_planned(c: &Counted) {
     println!("Would bring {} files ({}) and leave {} behind ({}); nothing sent", c.brought.files, size(c.brought.bytes), c.left.files, size(c.left.bytes));
     for (why, r) in &c.left_by_why {
-        println!("  {} file{} ({}): {}", r.files, if r.files == 1 { "" } else { "s" }, size(r.bytes), why.said());
+        println!("  {} file{} ({}): {}", r.files, if r.files == 1 { "" } else { "s" }, size(r.bytes), c.said(*why));
     }
     if c.left_by_why.contains_key(&Why::OverCap) {
         println!("  The cap brings photos, video, audio and documents first, the newest first.");
+    }
+    if c.upload_max_bytes.is_none() {
+        println!("  Planned without your upload limit (read when the files are brought): a file past it stays behind then, listed.");
     }
 }
 
@@ -360,6 +368,42 @@ mod tests {
         assert!(left.contains("may hold a password or key") && left.contains("`proj/.npmrc`"), "{left}");
     }
 
+    /// Goal: a file past the caller's upload limit, as the platform
+    /// advertises it, stays behind, listed with why, and the rest land; run
+    /// again, nothing is sent and it is still listed; under a larger limit
+    /// it is brought. Invalid before: planned against a blob's most, its
+    /// upload was refused (413) and stopped the whole import, every run.
+    #[test]
+    fn a_file_past_the_upload_limit_stays_behind_and_the_rest_land() {
+        let t = Temp::new();
+        let zip = t.0.join("home.zip");
+        // small, so each goes in git (the fake keeps no blobs): the rule is
+        // the plan's, whatever the file's size
+        let (clip, photo) = (vec![b'v'; 3_000], vec![b'p'; 2_000]);
+        zip_of(&zip, &[("work/notes/a.md", b"# a"), ("work/videos/clip.mp4", &clip[..]), ("work/photos/p.png", &photo[..])]);
+        let src = super::super::open(&zip, &layout()).unwrap();
+        let mock = crate::mockcs::start();
+        mock.seed_repo(NAME, &[]);
+        mock.advertise_upload_max(Some(2_000));
+        let c = Client::new(&mock.url, crate::auth::fixed(7));
+        let b = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!((b.files, b.left), (2, 1));
+        assert!(mock.file_at(NAME, "main", "files/videos/clip.mp4").is_none());
+        assert!(mock.file_at(NAME, "main", "files/photos/p.png").is_some() && mock.file_at(NAME, "main", "files/notes/a.md").is_some());
+        let left = String::from_utf8(mock.file_at(NAME, "main", LEFT_BEHIND).unwrap()).unwrap();
+        assert!(left.contains("## Larger than one upload here may be (2.0 KB) (1 files, 3.0 KB)\n\n- `videos/clip.mp4` (3.0 KB)"), "{left}");
+
+        let head = mock.branch(NAME, "main");
+        let again = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!((again.files, again.already, again.left), (0, 2, 1), "a rerun stops at nothing");
+        assert_eq!(mock.branch(NAME, "main"), head);
+
+        mock.advertise_upload_max(Some(4_000));
+        let more = bring(&c, &src, &layout(), NAME).unwrap();
+        assert_eq!((more.files, more.already, more.left), (1, 2, 0), "a larger limit brings it");
+        assert_eq!(mock.file_at(NAME, "main", "files/videos/clip.mp4").map(|b| b.len()), Some(3_000));
+    }
+
     /// A fragment its caller only views is refused before anything is sent.
     #[test]
     fn a_fragment_only_viewed_is_refused() {
@@ -386,6 +430,7 @@ mod tests {
                 Left { path: "videos/trip.mov".into(), files: 1, bytes: 3_200_000_000, why: Why::OverCap, kind: Some(Kind::Video) },
                 Left { path: "odd`name.txt".into(), files: 1, bytes: 10, why: Why::OverCap, kind: Some(Kind::Document) },
             ],
+            upload_max_bytes: Some(100_000_000),
         };
         let text = left_behind(&plan, &plan.counted(10, 10));
         assert!(text.contains("Left behind: 1202 files (3.5 GB)"), "{text}");
