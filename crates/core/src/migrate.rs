@@ -164,7 +164,12 @@ pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("bas
 pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
-pub const CLASSES: [&Class; 7] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT];
+/// The finite.computer move's one object (docs/migrations.md): removable
+/// with the move, by a `deleted_classes` tag (the debt ledger).
+pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql")], variants: &[], kept: &[] };
+
+/// Every platform class, as the lock lists them.
+pub const CLASSES: [&Class; 8] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT, &MIGRATIONS];
 
 /// What the runner needs of an object's SQLite: statements run, and rows
 /// read, each an object of its columns. The cell's is the object's
@@ -886,7 +891,7 @@ mod tests {
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
         for commit in &commits {
             // a class made since versions has no object from before them
-            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != VAULT.name) {
+            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != VAULT.name && c.name != MIGRATIONS.name) {
                 let ddl = std::fs::read_to_string(root.join(commit).join(format!("{}.sql", class.name.to_ascii_lowercase()))).expect("a class's schema");
                 let db = Lite::new();
                 db.exec(&ddl).expect("as it ran");

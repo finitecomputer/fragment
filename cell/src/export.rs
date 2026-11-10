@@ -657,7 +657,7 @@ impl PrincipalCell {
         let rows: Vec<Row> = if self.wiped.get() { vec![] } else { self.rows_of(ROW, vec![])? };
         for r in rows.iter().filter(|r| r.person == ask.person) {
             if let Some(upload) = &r.upload {
-                js::upload_abort(&self.env, &archive_key(&r.person, &r.id), upload).await?;
+                js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
             }
         }
         let (deleted, more) = js::blob_delete_under(&self.env, &format!("exports/{}/", ask.person), 10).await?;
@@ -735,7 +735,7 @@ impl PrincipalCell {
         for r in ended {
             if r.gone_at.is_none() {
                 if let Some(upload) = &r.upload {
-                    js::upload_abort(&self.env, &archive_key(&r.person, &r.id), upload).await?;
+                    js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
                 }
                 let (_, more) = js::blob_delete_under(&self.env, &prefix(&r.person, &r.id), 10).await?;
                 if more {
@@ -913,7 +913,7 @@ impl PrincipalCell {
             return Err(fail(ExportFailure::Unavailable, format!("{} of its {} parts are named", parts.len(), run.job.parts)));
         }
         let upload = run.upload.clone().ok_or_else(|| Stop::Retry("the archive's upload has no id".into()))?;
-        let size = match js::upload_complete(&self.env, &run.key, &upload, &parts).await {
+        let size = match js::upload_complete(&self.env, js::BLOBS, &run.key, &upload, &parts).await {
             Ok(size) => size,
             // completed by a finish cut short: the archive is there
             Err(e) => match js::blob_head(&self.env, &run.key).await? {
@@ -1043,7 +1043,7 @@ impl PrincipalCell {
         let upload = match &run.upload {
             Some(u) => u.clone(),
             None => {
-                let u = js::upload_start(&self.env, &run.key, "application/x-tar").await?;
+                let u = js::upload_start(&self.env, js::BLOBS, &run.key, "application/x-tar").await?;
                 self.run_sql("UPDATE exports SET upload = ? WHERE id = ?", vec![u.as_str().into(), run.id.as_str().into()])?;
                 run.upload = Some(u.clone());
                 u
@@ -1053,7 +1053,7 @@ impl PrincipalCell {
         if run.job.parts as usize > limits::R2_PARTS_MAX {
             return Err(fail(ExportFailure::TooLarge, format!("the archive would pass R2's {} parts", limits::R2_PARTS_MAX)));
         }
-        let etag = js::upload_part(&self.env, &run.key, &upload, run.job.parts as u16, part).await?;
+        let etag = js::upload_part(&self.env, js::BLOBS, &run.key, &upload, run.job.parts as u16, part).await?;
         run.new_parts.push((run.job.parts, etag));
         run.job.requests += 1;
         Ok(())
@@ -1119,7 +1119,7 @@ impl PrincipalCell {
         let n = run.job.spooled;
         let piece = std::mem::take(&mut run.piece);
         let size = piece.len() as u64;
-        js::blob_put_bytes(&self.env, &spool_key(&run.job.person, &run.id, n), &piece).await?;
+        js::blob_put_bytes(&self.env, js::BLOBS, &spool_key(&run.job.person, &run.id, n), &piece).await?;
         run.job.spooled += 1;
         run.job.requests += 1;
         run.job.open.as_mut().expect("a piece is an open entry's").pieces.push((n, size));

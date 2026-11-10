@@ -212,9 +212,10 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("vault/") {
         Ok(Some((crate::vault::VAULT_HEADER, "1")))
-    } else if path.starts_with("test/") || path.starts_with("index/") {
+    } else if path.starts_with("test/") || path.starts_with("index/") || path.starts_with("migrations/") {
         // a search index is called by its fragment's supervisor alone:
-        // the router never names one
+        // the router never names one; the move's object is the router's
+        // alone (its routes check who asks before they call it)
         Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
@@ -350,8 +351,9 @@ pub(crate) async fn ask_bytes(env: &Env, binding: &str, name: &str, path: &str, 
 }
 
 /// `ask_object`'s round trip, one copy for every answer's type: its 200's
-/// bytes, or its refusal.
-async fn object_answer(env: &Env, binding: &str, name: &str, path: &str, body: String) -> CellResult<Vec<u8>> {
+/// bytes, or its refusal. The move's router (migrations.rs) asks with a
+/// body already text, and passes its answers on unread.
+pub(crate) async fn object_answer(env: &Env, binding: &str, name: &str, path: &str, body: String) -> CellResult<Vec<u8>> {
     let mut resp = send_again(env, binding, name, || internal_request(path, &body)).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
@@ -390,7 +392,7 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 7] = [
+const PROBED: [(&str, &str, &str); 8] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
@@ -398,6 +400,8 @@ const PROBED: [(&str, &str, &str); 7] = [
     ("Computer", "COMPUTER", "__probe"),
     ("SearchIndex", "SEARCH_INDEX", "__probe"),
     ("Vault", "VAULT", "__probe"),
+    // one object, the move's (migrations.rs): its own name, as the registry's
+    ("Migrations", "MIGRATIONS", crate::migrations::NAME),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`

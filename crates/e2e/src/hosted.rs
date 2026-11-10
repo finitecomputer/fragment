@@ -334,6 +334,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         // no operator the deployment names: a section that needs one declares Need::Deployment
         operator: Keys::generate(),
         // read as the run starts (`sections`): a dry run reads no secret
+        mover: Keys::generate(),
         wiper: None,
         cli,
         scratch,

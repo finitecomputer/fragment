@@ -55,7 +55,7 @@ lever answers only a request carrying the secret in
 gets the 404 a missing route gets, word for word. On a branch the levers
 reach the e2e's own things alone: a fragment lever only an `e2e-…`
 fragment, a ledger or computer lever only an e2e person's (403
-otherwise); the registry's and the mail lever are no route.
+otherwise); the registry's, the move's and the mail lever are no route.
 
 | Route | Body |
 |---|---|
@@ -69,6 +69,7 @@ otherwise); the registry's and the mail lever are no route.
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
+| `POST /api/test/migrations` | `{op, …}`: the move's object (docs/migrations.md), a local fleet's alone like the registry's: `clock {offsetMs}` moves its time, `alarm` runs its supervisor now, `answer {old, answer, agent?}` answers as the old agent's person (`later`, `never`, `ask_again`, `yes` with an agent of theirs) until their routes land, `move {old}` reads a move with its queued sweeps and routines |
 
 Each op is its cell's to define; an unknown one, or one without its
 argument, is 400. One hook is no route: on a local fleet with a test
