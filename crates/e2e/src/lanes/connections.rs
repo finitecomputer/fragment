@@ -105,6 +105,17 @@ fn access_picked(s: &mut Suite, api: &Api, a: &str) -> Result<()> {
     let listed = row(api, a, PROVIDER)?;
     s.ok("read and write with its write scope unticked is said read only, as the grant holds it, with nothing missing of read only",
         r.status == 200 && listed["access"] == "read" && listed["missing"] == json!([]) && listed["granted"] == json!(["mail.read", "files.read", "openid"]), &listed);
+    // the callback checks the grant against the access picked, kept by its
+    // pending row: a grant of read and write's own scope alone is no grant
+    // of read only's (which would refuse it as no-scopes)
+    let (only_write, cookie, _) = granting_as(api, a, "partial-a", Some("mail.send"), "write")?;
+    let r = back(api, &only_write, Some(a), Some(&cookie))?;
+    let listed = row(api, a, PROVIDER)?;
+    s.ok("a grant of read and write's write scope alone connects as asked: read and write, read only's scopes missing",
+        r.status == 200 && listed["access"] == "write" && listed["granted"] == json!(["mail.send"]) && listed["missing"] == json!(["mail.read", "files.read"]), &listed);
+    let (all, cookie, _) = granting(api, a, "partial-a", None)?;
+    let r = back(api, &all, Some(a), Some(&cookie))?;
+    anyhow::ensure!(r.status == 200, "connected read only again for the checks after: {r}");
     Ok(())
 }
 

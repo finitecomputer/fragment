@@ -98,16 +98,18 @@ fn writes(o: &ConnectionOAuth) -> impl Iterator<Item = &String> {
     o.access.write.scopes.iter().filter(|s| !identity(s) && !o.access.read.scopes.contains(s))
 }
 
-/// What a grant of `granted` lets its agents do: read and write while it
-/// holds a scope only read and write asks for (`writes`), else read only.
-/// So it is what the person picked as they connected, unless they left
-/// every such scope unticked, or a reconnect as read only kept an earlier
-/// grant's (a provider that keeps what was granted before: Google's
+/// What a grant of `granted` lets its agents do: read only while every
+/// scope it holds, but signing in, is one read only asks for; else read
+/// and write. A scope its row does not name now (one an earlier row asked
+/// for, or one the provider added) is never taken for reading. So it is
+/// what the person picked as they connected, unless they left every write
+/// scope unticked, or a reconnect as read only kept an earlier grant's (a
+/// provider that keeps what was granted before: Google's
 /// `include_granted_scopes`): it is said as the grant holds it.
 pub fn access_of(o: &ConnectionOAuth, granted: &[String]) -> ConnectionAccess {
-    match writes(o).any(|s| granted.contains(s)) {
-        true => ConnectionAccess::Write,
-        false => ConnectionAccess::Read,
+    match granted.iter().all(|s| identity(s) || o.access.read.scopes.contains(s)) {
+        true => ConnectionAccess::Read,
+        false => ConnectionAccess::Write,
     }
 }
 
@@ -739,6 +741,10 @@ mod tests {
         assert_eq!(of(&["mail.send"]), ConnectionAccess::Write, "a partial grant of read and write");
         assert_eq!(of(&["openid", "mail.read"]), ConnectionAccess::Read, "read and write with its write scope unticked");
         assert_eq!(of(&[]), ConnectionAccess::Read);
+        // a scope read only does not ask for is never taken for reading:
+        // one its row no longer names, or one the provider added
+        assert_eq!(of(&["mail.read", "mail.modify"]), ConnectionAccess::Write, "a write scope the row dropped since");
+        assert_eq!(of(&["mail.read", "admin"]), ConnectionAccess::Write, "a scope the provider granted beside");
         // a sign-in scope only read and write names tells nothing
         let mut signs_in = config();
         signs_in.access.write.scopes.push("openid".into());
