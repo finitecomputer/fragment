@@ -181,15 +181,27 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id).said));
     if (n.detail) copy.append(el("p", "notice-detail", n.detail));
     (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
+    // its picture (an agent's), a platform path; one that won't load goes
+    if (n.image) {
+      const pic = el("img", "notice-image");
+      pic.alt = "";
+      pic.src = n.image;
+      pic.onerror = () => pic.remove();
+      row.append(pic);
+    }
     row.append(copy, actions);
     return row;
   }
   function actionOf(n, a, main) {
     if (a.open) {
-      const link = el("a", null, a.label);
+      const link = el("a", main ? "primary" : null, a.label);
       link.href = a.open;
-      link.target = "_blank";
-      link.rel = "noopener";
+      // a page of the platform's own opens here (`/move`), any other apart
+      const here = globalThis.location?.origin;
+      if (!here || new URL(a.open, here).origin !== here) {
+        link.target = "_blank";
+        link.rel = "noopener";
+      }
       link.dataset.answer = `open ${a.open}`;
       return link;
     }

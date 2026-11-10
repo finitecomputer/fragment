@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
-use crate::migrations::{Mailbox, MoveAt, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
+use crate::migrations::{Mailbox, MoveAt, OfferYes, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
 use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
@@ -171,7 +171,7 @@ pub const TAGS: [(&str, &str); 8] = [
     ("members", "Who is in a fragment."),
     ("channels", "A fragment's channels: its records, read, posted and drafted."),
     ("live", "A fragment's live socket: records as they are appended, presence, drafts and queries."),
-    ("migrations", "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move."),
+    ("migrations", "The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, a person's answers to the offer to bring an old agent over, and a new agent's stage. Removable, with the move."),
     ("vault", "A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered."),
 ];
 
@@ -183,7 +183,8 @@ pub const TAGS: [(&str, &str); 8] = [
 // and the anonymous visitor its visibility lets in (`serve`).
 const SIGNED: &[Auth] = &[Auth::Nip98, Auth::Session];
 // The move's (`/api/migrations/…`): a key's signature alone, the mover's
-// (its npub the deployment's `migrations.mover`) or a new agent's.
+// (its npub the deployment's `migrations.mover`) or a new agent's; but a
+// person's answers to its offer (`/api/migrations/offers/…`), signed.
 const SIGNATURE: &[Auth] = &[Auth::Nip98];
 const VISITOR: &[Auth] = &[Auth::Nip98, Auth::Site, Auth::Frame, Auth::Link, Auth::Anyone];
 
@@ -482,6 +483,50 @@ pub const ROUTES: &[Route] = &[
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
     },
     Route {
+        operation: "migrations.later",
+        method: Method::Post,
+        path: "/api/migrations/offers/{old}/later",
+        summary: "The person's Not now: their old agent's offer is asked again after a day.",
+        auth: SIGNED,
+        params: &[OLD],
+        request: None,
+        answer: Answer::Json(ty::<MoveAt>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.never",
+        method: Method::Post,
+        path: "/api/migrations/offers/{old}/never",
+        summary: "The person's Never: their old agent's offer is asked no more, until they ask again.",
+        auth: SIGNED,
+        params: &[OLD],
+        request: None,
+        answer: Answer::Json(ty::<MoveAt>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.again",
+        method: Method::Post,
+        path: "/api/migrations/offers/{old}/ask-again",
+        summary: "The person's Ask again, after a Never: their old agent's offer is asked again now.",
+        auth: SIGNED,
+        params: &[OLD],
+        request: None,
+        answer: Answer::Json(ty::<MoveAt>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.yes",
+        method: Method::Post,
+        path: "/api/migrations/offers/{old}/yes",
+        summary: "The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.",
+        auth: SIGNED,
+        params: &[OLD],
+        request: Some(Body::Json(ty::<OfferYes>())),
+        answer: Answer::Json(ty::<MoveAt>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict, RegistryUnavailable],
+    },
+    Route {
         operation: "vault.list",
         method: Method::Get,
         path: "/api/vault",
@@ -563,6 +608,7 @@ mod tests {
     fn credentials_are_the_dispatchs() {
         for r in ROUTES {
             match r.path {
+                p if p.starts_with("/api/migrations/offers/") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
                 p if p.starts_with("/api/migrations/") => assert_eq!(r.auth, SIGNATURE, "{}", r.operation),
                 p if p.starts_with("/api/") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
                 p if p.starts_with("/f/{name}/") => assert_eq!(r.auth, VISITOR, "{}", r.operation),

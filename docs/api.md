@@ -1972,7 +1972,9 @@ What the platform tells a person, each owner's notices in its own words
 works them out when asked and the router joins them, keeping none: the
 person's computer's (docs/computers.md, "What its owner is told"), then
 the registry's, an invite waiting on an email of theirs (Invites by
-email). An owner that does not answer fails the read. `kind` is for tests
+email), then the move's, an offer to bring an old agent over
+(docs/migrations.md, "The offer"). An owner that does not answer fails
+the read. `kind` is for tests
 and logs; a client draws every notice the same way and never reads it.
 An action `post`s its `body` (none: `{}`) to a platform route with the
 person's own credential, the route its owner's, then the client reads its
@@ -1986,14 +1988,17 @@ counts down to it and drops the notice then. `mustAnswer`: it must be
 answered; a client shows it alone over everything (a guest's welcome
 too), never in the band, until the read after one of its actions has it
 no more, the first such in the list first (each owner lists its own
-oldest first). A client from before it shows it as any other. No owner
-asks one yet; on a local fleet with test levers alone (dev's, the e2e's:
+oldest first). A client from before it shows it as any other. The move's
+offer is one; on a local fleet with test levers alone (dev's, the e2e's:
 never a branch deployment, nor production), an invite to a fragment whose
-label has `must-answer` in it is one, the proof of the clients' cover. Their pages are told when notices change (`watch`'s `changed`).
+label has `must-answer` in it is one too, the proof of the clients' cover.
+`image`: a picture beside its words (an old agent's), a platform path
+read with the person's credential; an `open` of a platform page opens
+in place. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites' |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites', then the move's offers |
 
 ## The finite.computer move (docs/migrations.md)
 
@@ -2004,6 +2009,9 @@ machine behind them, are docs/migrations.md. Without the deployment's
 
 | method & path | who | answer |
 | --- | --- | --- |
+| `POST /api/migrations/offers/{old}/later`, `…/never`, `…/ask-again` | the old agent's person (another's 404, an agent 403) | → `MoveAt {state}`; an answer its state does not take 409 |
+| `POST /api/migrations/offers/{old}/yes` | its person | `OfferYes {agent}`, an agent of their own (another's 403) → `MoveAt {state}` |
+| `GET /api/migrations/offers/{old}/picture` | its person | → the roster's picture of it, a PNG, JPEG, WebP or GIF of at most 1 MiB; none 404 |
 | `PUT /api/migrations/mover/roster` | the mover (NIP-98 by `migrations.mover`'s key; anyone else 403) | `Roster` → `RosterTaken {bound, withdrawn, replay}` |
 | `GET /api/migrations/mover/mailbox` | the mover | → `Mailbox {commands: [{id, old, attempt, kind, phase?, stage?, as?, secrets?}]}`, at most `MAILBOX_MAX` |
 | `POST /api/migrations/mover/agents/{old}/report` | the mover | `Report {command, seq, kind, bytes?, files?, manifest_sha256?, step?, why?, receipt?}` → `Reported {state, attempt, taken}`; another than the current command 409 |

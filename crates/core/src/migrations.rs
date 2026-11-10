@@ -14,6 +14,7 @@
 //! Removable with the move (docs/technical-debt-ledger.md).
 
 use fragment_proto::migrations::{command_id, stage_id, stage_prefix, Command, CommandKind, HeldReason, Mark, MoveState, Phase, Report, StageDone, ATTEMPTS_MAX};
+use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::Value;
 
 const MINUTE_MS: i64 = 60 * 1000;
@@ -805,6 +806,33 @@ pub fn withdraw(m: &Move, now: i64) -> Outcome {
     }
 }
 
+// ---- what its person is told (F4)
+
+/// An open move, as its person is asked (`GET /api/notices`): a notice that
+/// must be answered, in the server's words. Yes opens `page` (the
+/// platform's `/move`, which asks what the import needs and says Yes);
+/// Not now and Never post to the person's own routes. `picture`: the
+/// roster has one, which the platform reads for them.
+pub fn offer(old: &str, name: &str, picture: bool, page: &str) -> Notice {
+    let post = |label: &str, verb: &str| NoticeAction { label: label.into(), post: Some(format!("/api/migrations/offers/{old}/{verb}")), body: None, open: None };
+    let name = match name.trim() {
+        "" => "your agent",
+        n => n,
+    };
+    Notice {
+        id: format!("move:{old}"),
+        kind: "move_offer".into(),
+        level: NoticeLevel::Info,
+        title: format!("Bring {name} over from finite.computer?"),
+        text: Some("You'll get a month free.".into()),
+        detail: None,
+        until: None,
+        actions: vec![NoticeAction::open("Yes", page), post("Not now", "later"), post("Never", "never")],
+        must_answer: true,
+        image: picture.then(|| format!("/api/migrations/offers/{old}/picture")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Each transition: valid (it moves), invalid (refused, nothing
@@ -1370,5 +1398,25 @@ mod tests {
         assert_eq!(uploadable(&a, "o.p2.1"), Err(Refused::NotNow(MoveState::Archiving)));
         let st = to(report(&a, &report_on(&a, 1, "stopped"), T0 + 1));
         assert_eq!(uploadable(&st, "o.p2.1"), Ok(()));
+    }
+
+    /// Goal: an open move asks its person in the server's words, alone over
+    /// everything (must-answer), with its three answers: Yes opens the page,
+    /// Not now and Never post to the person's own routes; its picture is
+    /// read through the platform, and a nameless agent is still asked.
+    #[test]
+    fn an_offer_asks_in_words_with_its_answers() {
+        let n = offer("prj_1", " Ada ", true, "https://chat.test/move");
+        assert_eq!((n.id.as_str(), n.kind.as_str(), n.level, n.must_answer), ("move:prj_1", "move_offer", NoticeLevel::Info, true));
+        assert_eq!((n.title.as_str(), n.text.as_deref()), ("Bring Ada over from finite.computer?", Some("You'll get a month free.")));
+        let acts: Vec<(&str, Option<&str>, Option<&str>)> = n.actions.iter().map(|a| (a.label.as_str(), a.open.as_deref(), a.post.as_deref())).collect();
+        assert_eq!(
+            acts,
+            vec![("Yes", Some("https://chat.test/move"), None), ("Not now", None, Some("/api/migrations/offers/prj_1/later")), ("Never", None, Some("/api/migrations/offers/prj_1/never"))]
+        );
+        assert!(n.actions.iter().all(|a| a.body.is_none()), "each posts {{}}");
+        assert_eq!(n.image.as_deref(), Some("/api/migrations/offers/prj_1/picture"));
+        let bare = offer("prj_2", "  ", false, "https://chat.test/move");
+        assert_eq!((bare.title.as_str(), bare.image), ("Bring your agent over from finite.computer?", None));
     }
 }

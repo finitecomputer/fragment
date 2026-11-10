@@ -1273,7 +1273,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             json_answer(&share::access(env, &url, &who).await?)
         }
         // what the signer is told now, each owner's in its own words (notices.rs)
-        (Method::Get, ["api", "notices"]) => notices::route(&req, env, &url).await,
+        (Method::Get, ["api", "notices"]) => notices::route(&req, env, cfg, &url).await,
         // the invites waiting on the signer's emails, theirs to answer (share.rs)
         (_, ["api", "invites", rest @ ..]) => {
             let rest = rest.to_vec();
