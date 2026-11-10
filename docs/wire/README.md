@@ -245,6 +245,35 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: bytes (`application/zip`); a `Range` asked is answered 206, that range alone
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
+### vault
+
+A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
+
+#### `vault.list`
+
+`GET /api/vault`: The signer's secrets, by name, each with its hosts, place and agents: never a value.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretList`](#secretlist)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.put`
+
+`PUT /api/vault/{secret}`: Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`PutSecret`](#putsecret)
+- Answer: [`Secret`](#secret)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.remove`
+
+`DELETE /api/vault/{secret}`: Removes a secret: its agents' next use of it is refused.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretRemoved`](#secretremoved)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
 ## Shapes
 
 Each says who writes it: the cell (out: a client reads it), a client
@@ -797,6 +826,18 @@ out. Where its refs point (`PINNED_REFS`).
 | `live` | `string` or `null` | required | The commit installed as `live`; none before the first deploy. |
 | `main` | `string` or `null` | required | The commit `main` points at; none before its first. |
 
+### `Place`
+
+both, closed. Where a secret goes on a request: one of a header in a format (`{"header": "authorization", "format": "Bearer {}"}`), a query parameter (`{"query": "key"}`), a half of basic auth (`{"basic": "password"}`), or a NIP-98 signature over the request (`{"sign": "nip98"}`: the Vault signs, its key never leaves it). None of them, `Authorization: Bearer {}`.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `basic` | `string` or `null` | optional | `user` or `password`: which half of basic auth it is. |
+| `format` | `string` or `null` | optional | The header's value, `{}` the secret; with `header` alone, `{}`. |
+| `header` | `string` or `null` | optional |  |
+| `query` | `string` or `null` | optional |  |
+| `sign` | `string` or `null` | optional | `nip98`: a NIP-98 signature over the request (kind 27235, its URL, method and body), in `Authorization: Nostr …`. |
+
 ### `PostRecord`
 
 in, closed. `POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a record the platform appends as the poster. `id` is the poster's own (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the record it appended and appends nothing; with another body it is 409.
@@ -833,6 +874,17 @@ in. `PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post there: a r
 | --- | --- | --- | --- |
 | `text` | `string` or `null` | optional | At most `limits::RECORD_BODY_MAX_BYTES`. |
 | `turn` | `string` | required |  |
+
+### `PutSecret`
+
+in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Its hosts, place and agents are set only with its value, so no one who cannot read a value sends it anywhere its setter did not mean. Its `Debug` shows the value, as the wire's checker needs: never print one.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
+| `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
+| `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
+| `value` | `string` | required | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. |
 
 ### `Reason`
 
@@ -926,11 +978,40 @@ out. `GET /api/search?q=` (any signer): the signer's fragments whose title or na
 | `fragments` | `array` of [`ListedFragment`](#listedfragment) | required |  |
 | `messages` | `array` of [`MessageHit`](#messagehit) | required |  |
 
+### `Secret`
+
+out. A secret as its person reads it: everything but its value.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of `string` | required |  |
+| `hosts` | `array` of `string` | required |  |
+| `name` | `string` | required |  |
+| `place` | [`Place`](#place) | required |  |
+| `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
+
 ### `SecretKind`
 
 out. A secret an old agent holds that its person may bring (FIN-466's vault; not handed on yet).
 
 Values: `telegram_bot_token`, `openrouter_key`, `nostr_nsec`.
+
+### `SecretList`
+
+out. `GET /api/vault`: the person's secrets, by name.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `secrets` | `array` of [`Secret`](#secret) | required |  |
+
+### `SecretRemoved`
+
+out. `DELETE /api/vault/{secret}`: whether there was one to remove.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `name` | `string` | required |  |
+| `removed` | `boolean` | required |  |
 
 ### `Seen`
 

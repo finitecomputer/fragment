@@ -123,7 +123,7 @@ pub enum Step {
     /// The ended fragments' cleanup done: their members' lists told, their
     /// apps' databases, blobs and repos deleted.
     Cleanup,
-    /// Their ledger.
+    /// Their ledger, and their Vault (its secrets).
     Ledger,
     /// Their and their agents' lists of fragments (`Principal`s).
     Lists,
