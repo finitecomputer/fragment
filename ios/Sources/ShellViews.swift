@@ -117,6 +117,9 @@ struct SidebarView: View {
     let api: FragmentAPI
     let navigate: (ShellPage) -> Void
     let close: () -> Void
+    /// The height of its glass controls: an agent's pill and the round
+    /// buttons beside it and at its foot, drawn alike so they stay one size.
+    static let control: CGFloat = 48
     @State private var renamingChat: FragmentSummary?
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
@@ -160,13 +163,15 @@ struct SidebarView: View {
                                     Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
                                 }
                                 // the new-chat button's glass, and its height
-                                .padding(8).padding(.trailing, 6).glassEffect(.regular.interactive(), in: .capsule)
+                                .padding(.leading, 8).padding(.trailing, 14).frame(height: Self.control)
+                                .glassEffect(.regular.interactive(), in: .capsule)
                             }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
                             // a new chat with this agent: the launcher, its words to come
                             Button { library.selectedAgent = agent.name; navigate(.launcher) } label: {
-                                Image(systemName: "square.and.pencil").font(.system(size: 17, weight: .medium)).frame(width: 40, height: 40)
+                                Image(systemName: "square.and.pencil").font(.system(size: 17, weight: .medium))
+                                    .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                             }
-                            .buttonStyle(.glass).buttonBorderShape(.circle)
+                            .buttonStyle(.plain)
                             .accessibilityLabel("New chat with \(agent.displayTitle)").accessibilityIdentifier("agentNewChat-\(agent.name)")
                         }
                         ForEach(library.chats.filter { ($0.agents ?? []).first == library.identities[agent.name] }) { chat in
@@ -193,9 +198,10 @@ struct SidebarView: View {
                 }
                 // Search, or start a chat from what is typed: the launcher (the web's ⌘K)
                 Button { navigate(.launcher) } label: {
-                    Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium)).frame(width: 40, height: 40)
+                    Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium))
+                        .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                 }
-                .buttonStyle(.glass).buttonBorderShape(.circle)
+                .buttonStyle(.plain)
                 .accessibilityLabel("Search or start a new chat").accessibilityIdentifier("sidebarSearch")
                 .padding(.bottom, 4)
             }.padding(12)
