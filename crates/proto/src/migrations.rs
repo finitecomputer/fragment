@@ -562,9 +562,12 @@ pub struct StageParts {
     pub parts: Vec<StagePart>,
 }
 
-/// `POST …/complete`: the stage's manifest, for its zip made of parts
-/// 1 to n (each but the last at least `PART_MIN_BYTES`, `zip_bytes` in
-/// all). The same complete again answers the same.
+/// `POST …/complete`: the stage's manifest, for its zip made whole from
+/// the parts taken (their bytes in all its `zip_bytes`; R2 refuses a part
+/// but the last under `PART_MIN_BYTES`), the manifest written last. The
+/// same complete again answers the same; one cut off between the zip and
+/// its manifest is not made again (its attempt stalls, and the next stages
+/// afresh).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StageComplete {
