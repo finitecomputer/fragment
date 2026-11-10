@@ -7,7 +7,7 @@
 //! (deserialize). A type both ways must be one schema both ways.
 
 use anyhow::{bail, Result};
-use fragment_proto::routes::{Answer, Auth, ParamAt, Route, ANY_ROUTE, ROUTES, TAGS};
+use fragment_proto::routes::{Answer, Auth, Body, ParamAt, Route, ANY_ROUTE, ROUTES, TAGS};
 use fragment_proto::{ErrorBody, ErrorCode};
 use schemars::generate::SchemaSettings;
 use schemars::SchemaGenerator;
@@ -157,8 +157,17 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
             .collect();
         op["parameters"] = Value::Array(params);
     }
-    if let Some(request) = route.request {
-        op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": (request.schema)(inn).to_value() } } });
+    match route.request {
+        Some(Body::Json(request)) => {
+            op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": (request.schema)(inn).to_value() } } });
+        }
+        // raw bytes: an empty media type object (OpenAPI 3.1, "Considerations
+        // for File Uploads"), no `type: string`, which a reader would decode
+        Some(Body::Bytes { media }) => {
+            op["requestBody"] = json!({ "required": true, "content": { media: {} } });
+            op["x-fragment-takes"] = json!(media);
+        }
+        None => {}
     }
     let mut responses = Map::new();
     match route.answer {
@@ -169,6 +178,12 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
             responses.insert("101".into(), json!({ "description": "Switching Protocols: a WebSocket of JSON text frames (`x-fragment-socket`)." }));
             let sends = sends.map(|s| (s.schema)(inn).to_value()).unwrap_or(Value::Null);
             op["x-fragment-socket"] = json!({ "sends": sends, "receives": (receives.schema)(out).to_value() });
+        }
+        Answer::Bytes { media } => {
+            let content = json!({ media: {} });
+            responses.insert("200".into(), json!({ "description": "OK: the bytes, whole.", "content": content }));
+            responses.insert("206".into(), json!({ "description": "Partial Content: the range a `Range` header asked for.", "content": content }));
+            op["x-fragment-bytes"] = json!(media);
         }
     }
     let mut codes: Vec<ErrorCode> = route.errors.iter().chain(ANY_ROUTE.iter()).copied().collect();

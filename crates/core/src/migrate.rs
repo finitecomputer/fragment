@@ -139,6 +139,7 @@ pub const REGISTRY: Class = Class {
         step!("public_addresses", "registry/0007_public_addresses.sql"),
         step!("org_content", "registry/0008_org_content.sql"),
         step!("key_sessions", "registry/0009_key_sessions.sql"),
+        step!("comp_until", "registry/0010_comp_until.sql"),
     ],
     variants: &[],
     kept: &[],
@@ -161,10 +162,15 @@ pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("bas
 
 /// A person's Vault (FIN-466): its secrets; a wipe empties it and keeps
 /// the row that says so.
-pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql"), step!("claims", "vault/0002_claims.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
-pub const CLASSES: [&Class; 7] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT];
+/// The finite.computer move's one object (docs/migrations.md): removable
+/// with the move, by a `deleted_classes` tag (the debt ledger).
+pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql"), step!("opened_manifest", "migrations/0002_opened_manifest.sql"), step!("routine_generation", "migrations/0003_routine_generation.sql"), step!("people_by_person", "migrations/0004_people_by_person.sql"), step!("people_comped", "migrations/0005_people_comped.sql")], variants: &[], kept: &[] };
+
+/// Every platform class, as the lock lists them.
+pub const CLASSES: [&Class; 8] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &VAULT, &MIGRATIONS];
 
 /// What the runner needs of an object's SQLite: statements run, and rows
 /// read, each an object of its columns. The cell's is the object's
@@ -886,7 +892,7 @@ mod tests {
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
         for commit in &commits {
             // a class made since versions has no object from before them
-            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != VAULT.name) {
+            for class in CLASSES.into_iter().filter(|c| c.name != SEARCH_INDEX.name && c.name != VAULT.name && c.name != MIGRATIONS.name) {
                 let ddl = std::fs::read_to_string(root.join(commit).join(format!("{}.sql", class.name.to_ascii_lowercase()))).expect("a class's schema");
                 let db = Lite::new();
                 db.exec(&ddl).expect("as it ran");

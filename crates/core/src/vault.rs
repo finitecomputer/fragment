@@ -45,6 +45,25 @@ impl Placing {
     }
 }
 
+/// A secret as the swap plans it beside the catalog's providers
+/// (`Catalog::with`): an own key's row of its own, its hosts and its one
+/// place, no environment variable.
+pub fn row(name: &str, hosts: Vec<String>, placement: Placement) -> catalog::Provider {
+    catalog::Provider {
+        name: name.to_string(),
+        kind: catalog::Kind::Own,
+        hosts,
+        placements: vec![placement],
+        env: vec![],
+        price: None,
+        oauth: None,
+        connection_oauth: None,
+        accounts_max: None,
+        models: None,
+        note: None,
+    }
+}
+
 /// A secret that passed, in the form the Vault stores: its hosts and
 /// agents sorted and each once, its place as given (its default spelled out).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,12 +98,20 @@ impl std::fmt::Display for VaultError {
 
 impl std::error::Error for VaultError {}
 
-/// Whether `name` may name a secret: a catalog name's form, and none the
+/// Whether `name` has a secret's name's form: a catalog name's (1 to 32 of
+/// a-z, 0-9 and -). Checked before a name goes anywhere, a Vault's route
+/// above all: no dot, slash or percent sign gets there to choose another.
+pub fn name_form(name: &str) -> Result<(), VaultError> {
+    match catalog::valid_name(name) {
+        true => Ok(()),
+        false => Err(VaultError::Name(format!("{name:?} is not one: 1 to 32 of a-z, 0-9 and -, not starting or ending with -"))),
+    }
+}
+
+/// Whether `name` may name a secret: its form (`name_form`), and none the
 /// deployment's catalog uses (a placeholder names one or the other).
 pub fn name_ok(name: &str, catalog: &Catalog) -> Result<(), VaultError> {
-    if !catalog::valid_name(name) {
-        return Err(VaultError::Name(format!("{name:?} is not one: 1 to 32 of a-z, 0-9 and -, not starting or ending with -")));
-    }
+    name_form(name)?;
     if catalog.get(name).is_some() {
         return Err(VaultError::Name(format!("{name:?} is a provider this deployment offers: name it otherwise")));
     }
@@ -163,6 +190,53 @@ pub fn check(name: &str, put: &PutSecret, catalog: &Catalog) -> Result<Checked, 
     agents.sort();
     agents.dedup();
     Ok(Checked { hosts, place, placing, agents })
+}
+
+/// A secret's move out of its Vault, into a fragment of its person's as
+/// that fragment's secret (FIN-466; the cell's `vault/take` and
+/// `vault/moved`): one home, moved once, never lost.
+///
+/// A take claims the value it reads for one destination (`fragment/KEY`),
+/// kept in the Vault's own row in the turn that reads it; a take for any
+/// other destination is refused while that claim stands. The destination
+/// keeps the value, then completes: the Vault removes it only for its
+/// claimant, and only while it still holds the value taken. So two moves
+/// never both keep it, and a move cut short anywhere leaves it in the
+/// Vault, claimed: the same move again takes it again and finishes it.
+/// A claim has no clock (one that lapsed could let a second destination
+/// keep a value the first had kept already); setting the secret again, or
+/// removing it, ends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimed {
+    /// The secret's name in its Vault.
+    pub name: String,
+    /// The destination its value is claimed for.
+    pub to: String,
+}
+
+impl std::fmt::Display for Claimed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is being moved into {}: move it there again to finish, or set it again in your vault", self.name, self.to)
+    }
+}
+
+impl std::error::Error for Claimed {}
+
+/// May a move into `to` take `name`, its row claimed for `claim`? While
+/// unclaimed, or claimed for `to` itself (a retry, or the same move twice).
+/// The caller writes `to` as its claim in the same turn.
+pub fn take(name: &str, claim: Option<&str>, to: &str) -> Result<(), Claimed> {
+    match claim {
+        Some(other) if other != to => Err(Claimed { name: name.to_string(), to: other.to_string() }),
+        _ => Ok(()),
+    }
+}
+
+/// Does `to`'s completed move of revision `taken` remove the secret, its
+/// row claimed for `claim` and now holding revision `held`? Only for its
+/// claimant, and only the value it took: one set since stays.
+pub fn completes(claim: Option<&str>, held: &str, to: &str, taken: &str) -> bool {
+    claim == Some(to) && held == taken
 }
 
 #[cfg(test)]
@@ -259,5 +333,95 @@ mod tests {
         let many: Vec<String> = (0..17).map(|i| format!("a{i}--k3x9")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         assert!(matches!(check("k", &put("v", &["a.example.com"], Place::default(), &many), &catalog()), Err(VaultError::Agents(_))));
+    }
+
+    #[test]
+    fn a_name_that_could_choose_another_route_is_no_name() {
+        for bad in ["../delete/nostr", "%2e%2e/delete/nostr", "%2E%2E%2Fdelete%2Fnostr", "..%2fdelete%2fnostr", "nostr/x", "nostr/../delete", "..", ".", "a.b", "a%2fb", "a\\b", "a?b", "a#b", ""] {
+            assert!(name_form(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(name_form("telegram-bot"), Ok(()));
+    }
+
+    /// One Vault row, as the cell's `secrets` table keeps it: the value's
+    /// revision and its claim. Its state is the row, so a restart is
+    /// nothing: every step below reads and writes only it.
+    #[derive(Default)]
+    struct Row(Option<(String, Option<String>)>);
+
+    impl Row {
+        fn put(&mut self, revision: &str) {
+            self.0 = Some((revision.to_string(), None));
+        }
+        /// `vault/take`: its revision, the claim written in the same turn.
+        fn take(&mut self, to: &str) -> Result<String, String> {
+            let (revision, claim) = self.0.as_mut().ok_or("404")?;
+            super::take("bot", claim.as_deref(), to).map_err(|e| e.to_string())?;
+            *claim = Some(to.to_string());
+            Ok(revision.clone())
+        }
+        /// `vault/moved`: removed?
+        fn moved(&mut self, to: &str, taken: &str) -> bool {
+            let done = self.0.as_ref().is_some_and(|(held, claim)| completes(claim.as_deref(), held, to, taken));
+            if done {
+                self.0 = None;
+            }
+            done
+        }
+    }
+
+    #[test]
+    fn two_moves_that_both_read_before_either_keeps_it_give_it_one_home() {
+        let mut row = Row::default();
+        row.put("r1");
+        let a = row.take("one/BOT").expect("the first take");
+        let b = row.take("two/BOT");
+        assert_eq!(b, Err("bot is being moved into one/BOT: move it there again to finish, or set it again in your vault".to_string()));
+        // one keeps it, then completes: gone from the Vault, kept once
+        assert!(row.moved("one/BOT", &a));
+        assert!(row.0.is_none());
+        // the refused move, again: nothing is there
+        assert_eq!(row.take("two/BOT"), Err("404".to_string()));
+    }
+
+    #[test]
+    fn a_move_cut_short_is_finished_by_the_same_move_again_and_no_other() {
+        let mut row = Row::default();
+        row.put("r1");
+        // taken, then the destination stops before it completes (a crash,
+        // a restart, a failed answer): the value stays, claimed
+        row.take("one/BOT").expect("the first take");
+        assert!(row.take("two/BOT").is_err(), "no clock frees it for another");
+        assert!(!row.moved("two/BOT", "r1"), "nor completes another's move");
+        let again = row.take("one/BOT").expect("the same move again");
+        assert_eq!(again, "r1");
+        assert!(row.moved("one/BOT", &again));
+        // a replayed completion removes nothing more
+        assert!(!row.moved("one/BOT", &again));
+    }
+
+    #[test]
+    fn the_same_move_twice_at_once_completes_once() {
+        let mut row = Row::default();
+        row.put("r1");
+        let first = row.take("one/BOT").expect("one");
+        let second = row.take("one/BOT").expect("the same destination");
+        assert!(row.moved("one/BOT", &first));
+        assert!(!row.moved("one/BOT", &second));
+    }
+
+    #[test]
+    fn setting_it_again_ends_a_claim_and_keeps_the_new_value() {
+        let mut row = Row::default();
+        row.put("r1");
+        let taken = row.take("one/BOT").expect("taken");
+        // its person sets it again before the move completes: the old
+        // value kept there, the new one here and unclaimed
+        row.put("r2");
+        assert!(!row.moved("one/BOT", &taken));
+        assert_eq!(row.take("two/BOT"), Ok("r2".to_string()));
+        // the first move's completion, late, removes nothing of the new
+        // value, now claimed by another move
+        assert!(!row.moved("one/BOT", &taken));
     }
 }

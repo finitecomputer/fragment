@@ -91,6 +91,9 @@ struct Deployment {
     /// (`--operator-key-file`), never here: the key is the runner's.
     #[serde(default)]
     operators: Vec<String>,
+    /// The finite.computer move (docs/migrations.md; `FRAGMENT_MIGRATIONS_MOVER`, `FRAGMENT_MIGRATIONS_CUTOFF_MS`).
+    /// Without it, none of its routes answer.
+    migrations: Option<Migrations>,
     /// The AI Gateway the model route calls through (its id, named: never
     /// `default`, which makes one that logs). Without it, models are off.
     ai_gateway: Option<String>,
@@ -507,6 +510,58 @@ fn read_secret(path: &Path) -> Result<String> {
     Ok(text)
 }
 
+/// The move's stage bucket is private: no r2.dev URL and no custom domain
+/// (docs/migrations.md, "Who may read a stage"), read from Cloudflare's
+/// own answer. A deploy refuses one that is not, before its Worker goes out.
+fn stage_is_private(api: &crate::cloudflare::Api, bucket: &str) -> Result<()> {
+    let ask = |path: String| -> Result<Value> {
+        let (status, body) = api.call(reqwest::Method::GET, &path, None).map_err(|e| anyhow::anyhow!(e))?;
+        anyhow::ensure!(status == 200 && body["success"] == true, "the move's stage bucket {bucket} ({path}): {}", crate::cloudflare::errors(status, &body));
+        Ok(body["result"].clone())
+    };
+    let managed = ask(format!("/r2/buckets/{bucket}/domains/managed"))?;
+    let custom = ask(format!("/r2/buckets/{bucket}/domains/custom"))?;
+    private(&managed, &custom).map_err(|why| anyhow::anyhow!("the move's stage bucket {bucket} {why}: only the platform may read it (`wrangler r2 bucket dev-url disable`, `wrangler r2 bucket domain remove`), then deploy again"))
+}
+
+/// Whether a bucket's r2.dev URL (`managed`) and custom domains (`custom`),
+/// as Cloudflare answers them, leave it private. Anything else is not.
+fn private(managed: &Value, custom: &Value) -> std::result::Result<(), String> {
+    if managed["enabled"] != false {
+        return Err(format!("has its r2.dev URL on, or says not that it is off ({})", managed["enabled"]));
+    }
+    let domains = custom["domains"].as_array().ok_or("names no list of its custom domains")?;
+    match domains.is_empty() {
+        true => Ok(()),
+        false => Err(format!("has custom domains ({})", domains.iter().map(|d| d["domain"].as_str().unwrap_or("?")).collect::<Vec<_>>().join(", "))),
+    }
+}
+
+/// The move's stage bucket's lifecycle rules (docs/migrations.md,
+/// "Deletion"): its own deletion's backstop. A phase 1 stage goes 16 days
+/// after it was written (its keep is 14), a phase 2 one after 100 (its keep
+/// is 90 past the cutoff), and an upload left unfinished after a day.
+fn stage_lifecycle() -> Value {
+    const DAY_S: u64 = 24 * 60 * 60;
+    let expire = |id: &str, prefix: &str, days: u64| json!({ "id": id, "enabled": true, "conditions": { "prefix": prefix }, "deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": days * DAY_S } } });
+    json!({ "rules": [
+        expire("p1-after-16-days", "p1/", 16),
+        expire("p2-after-100-days", "p2/", 100),
+        { "id": "unfinished-uploads-after-a-day", "enabled": true, "conditions": { "prefix": "" }, "abortMultipartUploadsTransition": { "condition": { "type": "Age", "maxAge": DAY_S } } },
+    ] })
+}
+
+/// The finite.computer move's settings (docs/migrations.md): the mover's
+/// key, which alone signs its routes (it holds the key; the deployment
+/// holds only this npub), and phase 2's cutoff, if set.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Migrations {
+    mover: String,
+    #[serde(default)]
+    cutoff_ms: Option<i64>,
+}
+
 /// The names and hosts one deployment has.
 struct Names {
     /// `fragment` or `fragment-<branch>`: the platform Worker's.
@@ -517,6 +572,9 @@ struct Names {
     /// The meters' queue (cell/src/meter.rs).
     ledger: String,
     bucket: String,
+    /// The finite.computer move's stages (docs/migrations.md): made and
+    /// bound only when the config names `migrations`.
+    stage: String,
     platform_host: String,
     suffix: String,
     /// `--<branch>`, for a branch.
@@ -547,6 +605,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 dead: format!("fragment-deliveries-dead-{b}"),
                 ledger: format!("fragment-ledger-{b}"),
                 bucket: format!("fragment-blobs-{b}"),
+                stage: format!("fragment-migrations-stage-{b}"),
                 platform_host: format!("{b}.{zone}"),
                 suffix: zone.to_string(),
                 label_suffix: Some(format!("--{b}")),
@@ -567,6 +626,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 dead: "fragment-deliveries-dead".into(),
                 ledger: "fragment-ledger".into(),
                 bucket: "fragment-blobs".into(),
+                stage: "fragment-migrations-stage".into(),
                 platform_host: platform.clone(),
                 suffix: suffix.clone(),
                 label_suffix: None,
@@ -1147,6 +1207,16 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
     }
     ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
+    if d.migrations.is_some() {
+        // the move's stages, and the rules that expire them should its own
+        // deletion miss one (set whole each deploy: idempotent)
+        ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.stage]), "the move's stage bucket")?;
+        let rules = dir.join("stage-lifecycle.json");
+        fs::write(&rules, stage_lifecycle().to_string())?;
+        let rules = rules.to_string_lossy().into_owned();
+        ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "lifecycle", "set", &n.stage, "--file", &rules, "--force"]), "the move's stage bucket's lifecycle rules")?;
+        stage_is_private(&api, &n.stage)?;
+    }
     for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
     }
@@ -1249,7 +1319,11 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     c.insert("observability".into(), json!({ "enabled": true, "traces": { "enabled": false } }));
     c.insert("routes".into(), json!(n.routes.iter().map(|r| json!({ "pattern": r.pattern, "zone_name": r.zone })).collect::<Vec<_>>()));
     c.insert("workflows".into(), json!([{ "name": n.jobs, "binding": "JOBS", "class_name": "Job" }]));
-    c.insert("r2_buckets".into(), json!([{ "binding": "BLOBS", "bucket_name": n.bucket }]));
+    let mut buckets = vec![json!({ "binding": "BLOBS", "bucket_name": n.bucket })];
+    if d.migrations.is_some() {
+        buckets.push(json!({ "binding": "STAGE", "bucket_name": n.stage }));
+    }
+    c.insert("r2_buckets".into(), json!(buckets));
     // every queue the checked-in config names, renamed for this deployment
     let renamed = |q: &Value| -> Result<Value> {
         match q.as_str() {
@@ -1317,6 +1391,14 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     }
     if !d.operators.is_empty() {
         v.insert("FRAGMENT_OPERATORS".into(), json!(d.operators.join(",")));
+    }
+    if let Some(m) = &d.migrations {
+        anyhow::ensure!(fragment_core::npub::parse(&m.mover).is_some(), "migrations.mover is the mover's npub, not {:?}", m.mover);
+        anyhow::ensure!(m.cutoff_ms.is_none_or(|c| c > 0), "migrations.cutoff_ms is ms since the epoch");
+        v.insert("FRAGMENT_MIGRATIONS_MOVER".into(), json!(m.mover));
+        if let Some(c) = m.cutoff_ms {
+            v.insert("FRAGMENT_MIGRATIONS_CUTOFF_MS".into(), json!(c.to_string()));
+        }
     }
     if let Some(g) = &d.ai_gateway {
         v.insert("AI_GATEWAY_ID".into(), json!(g));
@@ -1466,6 +1548,9 @@ pub fn teardown(rest: &[String]) -> Result<()> {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q]), "a queue")?;
     }
     println!("removed {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.cell, n.bucket, n.bucket);
+    if d.migrations.is_some() {
+        println!("its move's stage bucket {} stays too (its lifecycle rules empty it)", n.stage);
+    }
     Ok(())
 }
 
@@ -1645,6 +1730,7 @@ mod tests {
             stripe: None,
             observability_read: None,
             operators: vec![],
+            migrations: None,
             ai_gateway: None,
             models: None,
             default_plan: None,
@@ -1780,12 +1866,49 @@ mod tests {
         assert!(args(&["--hosted", "--branch", "p5"]).is_err(), "a config is named");
     }
 
+    /// The move's stage bucket is private only with its r2.dev URL off and
+    /// no custom domain, as Cloudflare says them; anything else, or an
+    /// answer that says neither, is not.
+    #[test]
+    fn the_stage_bucket_is_private_only_when_cloudflare_says_so() {
+        let off = json!({ "bucketId": "b", "domain": "pub-x.r2.dev", "enabled": false });
+        let none = json!({ "domains": [] });
+        assert_eq!(private(&off, &none), Ok(()));
+        assert!(private(&json!({ "enabled": true }), &none).is_err(), "r2.dev on");
+        assert!(private(&json!({}), &none).is_err(), "r2.dev unsaid");
+        assert!(private(&off, &json!({ "domains": [{ "domain": "stage.example.com", "enabled": true }] })).unwrap_err().contains("stage.example.com"));
+        assert!(private(&off, &json!({})).is_err(), "no list");
+    }
+
+    /// The move's stage bucket is bound, and its settings written, only on a
+    /// deployment whose config names `migrations`; a mover that is no npub
+    /// is refused before anything is made; and the bucket's rules expire
+    /// what the move's own deletion misses (docs/migrations.md, "Deletion").
+    #[test]
+    fn the_move_is_bound_only_where_configured() {
+        let n = names(&deployment(None, None), Some("dev")).unwrap();
+        let plain = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(plain["r2_buckets"], json!([{ "binding": "BLOBS", "bucket_name": "fragment-blobs-dev" }]));
+        assert!(plain["vars"].get("FRAGMENT_MIGRATIONS_MOVER").is_none());
+        let npub = fragment_core::npub::encode(&"ab".repeat(32));
+        let mut d = deployment(None, None);
+        d.migrations = Some(Migrations { mover: npub.clone(), cutoff_ms: Some(4_102_444_800_000) });
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(cell["r2_buckets"], json!([{ "binding": "BLOBS", "bucket_name": "fragment-blobs-dev" }, { "binding": "STAGE", "bucket_name": "fragment-migrations-stage-dev" }]));
+        assert_eq!((&cell["vars"]["FRAGMENT_MIGRATIONS_MOVER"], &cell["vars"]["FRAGMENT_MIGRATIONS_CUTOFF_MS"]), (&json!(npub), &json!("4102444800000")));
+        d.migrations = Some(Migrations { mover: "npub1nope".into(), cutoff_ms: None });
+        assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).is_err(), "a mover that is no npub");
+        let rules = stage_lifecycle();
+        let ages: Vec<(String, u64)> = rules["rules"].as_array().unwrap().iter().map(|r| (r["conditions"]["prefix"].as_str().unwrap().to_string(), r.pointer("/deleteObjectsTransition/condition/maxAge").or(r.pointer("/abortMultipartUploadsTransition/condition/maxAge")).unwrap().as_u64().unwrap() / 86_400)).collect();
+        assert_eq!(ages, [("p1/".to_string(), 16), ("p2/".to_string(), 100), (String::new(), 1)]);
+    }
+
     /// A branch is a copy of its own beside the others: every name is
     /// marked, and its hosts are single labels under the zone.
     #[test]
     fn a_branch_names_everything_for_itself() {
         let n = names(&deployment(None, None), Some("dev")).unwrap();
-        assert_eq!((n.cell.as_str(), n.bucket.as_str()), ("fragment-dev", "fragment-blobs-dev"));
+        assert_eq!((n.cell.as_str(), n.bucket.as_str(), n.stage.as_str()), ("fragment-dev", "fragment-blobs-dev", "fragment-migrations-stage-dev"));
         assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
 
         assert_eq!(n.platform_host, "dev.finite.place");

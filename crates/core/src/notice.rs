@@ -38,6 +38,13 @@ pub fn size(bytes: u64) -> String {
 }
 
 /// A span of time as a person reads it, a count whole and rounded down
+/// A day as a notice says it, "November 16", on UTC's calendar: what a
+/// date a seat ends on reads as (`registry::said::seat_ends`).
+pub fn date(ms: i64) -> String {
+    let (_, month, day) = crate::cron::civil(ms.div_euclid(24 * 60 * 60 * 1000));
+    format!("{} {day}", crate::schedule::MONTH_NAMES[month as usize - 1])
+}
+
 /// ("the 40 minutes before it stopped" reads with any of them): "1 minute"
 /// under two, then minutes, hours from two, days from two.
 pub fn span(ms: i64) -> String {
@@ -70,9 +77,60 @@ pub fn provider_name(provider: &str) -> String {
     }
 }
 
+/// The owners' notice lists, each a `NoticeList` as serde_json writes one
+/// (`{"notices":[...]}`), as one list in their order (`GET /api/notices`):
+/// read no further than their brackets, so the router decodes no notice
+/// and encodes none. `None` if one is not such a list.
+pub fn joined(owners: &[&[u8]]) -> Option<Vec<u8>> {
+    const HEAD: &[u8] = br#"{"notices":["#;
+    let mut out = HEAD.to_vec();
+    for owner in owners {
+        let items = owner.strip_prefix(HEAD)?.strip_suffix(b"]}")?;
+        if !items.is_empty() {
+            if out.len() > HEAD.len() {
+                out.push(b',');
+            }
+            out.extend_from_slice(items);
+        }
+    }
+    out.extend_from_slice(b"]}");
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel, NoticeList};
+
+    /// Goal: the owners' lists, joined as bytes, are the one list a client
+    /// reads: every notice of each, in the owners' order, none when none
+    /// has any; and an answer that is not a notice list fails the read
+    /// rather than passing on as one.
+    #[test]
+    fn owners_lists_are_joined_as_they_came() {
+        let notice = |id: &str, text: &str| Notice {
+            id: id.into(),
+            kind: "invite".into(),
+            level: NoticeLevel::Info,
+            title: "Garden plans ]}".into(),
+            text: Some(text.into()),
+            detail: None,
+            until: None,
+            actions: vec![NoticeAction::post("Accept", "/api/invites/g/accept", serde_json::json!({}))],
+            must_answer: id == "b",
+            image: None,
+        };
+        let list = |n: Vec<Notice>| serde_json::to_vec(&NoticeList { notices: n }).expect("a list serializes");
+        let (first, second, none) = (list(vec![notice("a", "[one]")]), list(vec![notice("b", "{two}"), notice("c", "")]), list(vec![]));
+        let joined = joined(&[&first, &none, &second]).expect("lists join");
+        let read: NoticeList = serde_json::from_slice(&joined).expect("one list");
+        assert_eq!(read.notices.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(read.notices[1], notice("b", "{two}"), "each notice as its owner wrote it");
+        assert_eq!(joined, list(vec![notice("a", "[one]"), notice("b", "{two}"), notice("c", "")]), "byte for byte the list made at once");
+        assert_eq!(super::joined(&[&none, &none]), Some(none.clone()), "none told");
+        assert_eq!(super::joined(&[&first, br#"{"error":"deploying"}"#]), None, "an answer not a list is no list");
+        assert_eq!(super::joined(&[br#"{"notices":[],"more":1}"#]), None, "nor a list with more beside it");
+    }
 
     #[test]
     fn dollars_sizes_and_spans() {

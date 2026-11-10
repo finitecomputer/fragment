@@ -55,7 +55,7 @@ lever answers only a request carrying the secret in
 gets the 404 a missing route gets, word for word. On a branch the levers
 reach the e2e's own things alone: a fragment lever only an `e2e-…`
 fragment, a ledger or computer lever only an e2e person's (403
-otherwise); the registry's and the mail lever are no route.
+otherwise); the registry's, the move's and the mail lever are no route.
 
 | Route | Body |
 |---|---|
@@ -69,6 +69,7 @@ otherwise); the registry's and the mail lever are no route.
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
+| `POST /api/test/migrations` | `{op, …}`: the move's object (docs/migrations.md), a local fleet's alone like the registry's: `clock {offsetMs}` moves its time, `alarm` runs its supervisor now, `answer {old, answer, agent?}` answers as the old agent's person (`later`, `never`, `ask_again`, `yes` with an agent of theirs) until their routes land, `move {old}` reads a move with its queued sweeps and routines |
 
 Each op is its cell's to define; an unknown one, or one without its
 argument, is 400. One hook is no route: on a local fleet with a test
@@ -686,7 +687,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once it is gone: 404 to everyone, out of its owner's list, its name free. Its members' lists, app database and blobs go after, by its alarm (`fragment_core::ended`: retried, a part refused or failing ten tries held and tried daily). An agent fragment's agent leaves its computer and is named by it no more. A life made again under the name is untouched by the old one's cleanup. The repo stays |
 | `GET /api/f/{name}/status` | viewer | → `FragmentStatus` (docs/wire, `fragments.status`), as the caller's role sees it: the share link's and the inbox's tokens only for those who hold them |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main; none 404 |
-| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`) |
+| `GET /api/f/{name}/members` | viewer | → `MemberList` (docs/wire, `members.list`); to the owner, and their agent for them, each person's `email` too, as the share sheet shows it (decision 48) |
 | `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer \| editor}` (another field 400) → the member, added or its role changed. A new member this way is one of the owner's own agents alone; anyone else 403 (invite them). An email no one signs in as, 404. A person's agents follow their role (an agent's own 400). A chat's lead agent (the first added) is never set below `editor` (400). An agent on a computer is told (`joined` on its `tasks`) and its computer woken. Its waits, in `Server-Timing`: `identity`, `list`, `joined` |
 | `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; the member | → `{ok, removed}`, closing their feeds. A person goes with their agents in it, and such an agent takes its person and their other agents (decision 64). A chat's lead agent is removed by no one else (400); it may leave |
 | `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}` (Invites by email). In it already 400 |
@@ -695,7 +696,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/visibility` | the same | `{visibility}` → `{ok, visibility}`. Leaving `members` makes a new share link |
 | `POST /api/f/{name}/rotate` | the same | `{scopes?: [inbox, view]}` → `Rotated {inboxToken, viewToken, rotated}`; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/cap` | the owner (never an agent) | Ledger |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host. `{fromVault, hosts}` in place of `value`: a secret of the caller's own Vault moved here (FIN-466), by a Vault name's form alone (400 otherwise, before any Vault route), a person's alone (an agent 403), never a Nostr key's (400); claimed for this `{KEY}` as it is read, kept here, then removed from the Vault (none there: 404; claimed by a move elsewhere: 409, until that move is made again or the secret is set again) |
 | `GET /api/f/{name}/secrets` | editor | → `SecretList {secrets: [{name, hosts}]}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
@@ -1032,6 +1033,14 @@ agent, or carrying code, keeps the last good code and says to fork it.
 operation, called `(input, call)`: `call.principal` (an identity, `anon:…`,
 or the fragment's own npub for its triggered runs; for an agent's call
 `for` someone, them), `call.agent` (that agent, else null), `call.role`.
+
+**Who did it.** An app stores `call.principal` beside what it did and
+shows that person when its page draws: by email through `__people`
+(page) or `job.people` (job), a member's email to a member, an agent by
+its name. It keeps no table of names of its own, so no one picks or
+spoofs one, and none drifts. A call carries no profile (no
+`call.person`): a mutation is the app's transaction over its own
+SQLite and asks the registry nothing.
 
 - A **mutation** is synchronous over the app's own SQLite.
   `call.publish(channel, body, kind = "message")` appends a record (at most
@@ -1563,10 +1572,10 @@ can no longer take its seat seats no one and is canceled.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (holding a good seat, or in an org whose admins give seats: 409) | `{kind?, trialCode?}` → `{url, session}`: Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes. With a trial code (any case, spaces and dashes aside), Stripe's trial of its days, no card asked, no promotion code. A code unknown 404; ended 400; full, or for someone who had a trial or whose org has paid, 409 |
+| `POST /api/billing/checkout` | a person (holding a good seat, or in an org whose admins give seats: 409) | `{kind?, trialCode?}` → `{url, session, open}` (`open`: `url` again, the page a notice's Pay again opens): Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes. With a trial code (any case, spaces and dashes aside), Stripe's trial of its days, no card asked, no promotion code. A code unknown 404; ended 400; full, or for someone who had a trial or whose org has paid, 409 |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else 404) | → `MySeat`: the Checkout's return (`/welcome?checkout={id}`, `/settings?pack={id}`; `=canceled` when abandoned): a completed one applied at once; again, nothing changes |
-| `POST /api/billing/packs` | a seat's holder; an org's admin for a member holding a seat (`member`; else 403; no seat 400) | `{member?}` → `{url, session}`: a credit pack's Checkout; paid, its credit is granted once by its session (`GrantCredit {id: pack:<session>, by: stripe}`). An org buys none: an operator credits it (Ledger) |
-| `POST /api/billing/portal` | who pays for the asker's org (anyone else 403) | → `{url}`: Stripe's portal on the deployment's own configuration |
+| `POST /api/billing/packs` | a seat's holder; an org's admin for a member holding a seat (`member`; else 403; no seat 400) | `{member?}` → `{url, session, open}`: a credit pack's Checkout (`open`: `url` again, the page a notice's Buy credit opens); paid, its credit is granted once by its session (`GrantCredit {id: pack:<session>, by: stripe}`). An org buys none: an operator credits it (Ledger) |
+| `POST /api/billing/portal` | who pays for the asker's org (anyone else 403) | → `{url, open}` (`open`: `url` again, the page a notice's Payment and invoices opens): Stripe's portal on the deployment's own configuration |
 | `POST /api/stripe/webhook` | Stripe (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; anything else, or another deployment's, answered and dropped. A failure is 5xx, which Stripe sends again |
 
 ### Jobs and triggers
@@ -1772,7 +1781,11 @@ between two changes to the fragment, one at a time per id (429
 - `presence.set(data)` (changes within 150 ms sent as one), `presence.on(fn)`.
 - `blob(file, {name?, type?})` → `{sha256, size, type, name}`, uploaded as
   an editor.
-- `me()` → the hello's `{id, principal, role, platform, limits}`; `closed(fn)`,
+- `me({email?})` → the hello's `{id, principal, role, platform, limits}`;
+  with `email: true`, and `email` for a signed-in member: `__people`'s
+  answer for their own id (decision 48), asked once a principal and
+  waited on at most 5 s (else none); an anonymous visitor, a link holder
+  and an agent have none. `closed(fn)`,
   called with `{code, reason}` after 4003 or 4004, which end the socket.
   Otherwise it reconnects by itself with jittered backoff.
 - A page may dial its socket before the library comes, from an inline
@@ -1957,9 +1970,21 @@ registration go first.
 What the platform tells a person, each owner's notices in its own words
 (`Notice`, `fragment_proto::notice`), the most pressing first. Each owner
 works them out when asked and the router joins them, keeping none: the
-person's computer's (docs/computers.md, "What its owner is told"), then
-the registry's, an invite waiting on an email of theirs (Invites by
-email). An owner that does not answer fails the read. `kind` is for tests
+person's ledger's (their agents stopped for want of credit, or their
+fragments read-only past the overdraft, in Settings' words, with Buy
+credit where packs are sold and they hold an active seat; docs/ledger.md),
+the person's computer's (docs/computers.md, "What its owner is told"),
+then the registry's: their seat, lapsed ("Your seat lapsed", Pay again
+for its admin where seats are sold) or a Stripe trial in its last three
+days ("Your trial ends on November 16", Payment and invoices for whoever
+pays; the date on UTC's calendar), and each invite waiting on an email of
+theirs (Invites by email), then the move's, an offer to bring an old
+agent over (docs/migrations.md, "The offer"). A seat's lapse and return
+are told their pages by their ledger, whose standing follows the seat.
+The ledger tells their pages when what it says changes (its standing, or
+a seat's Buy credit), a change by the clock alone (a month's credit) at
+its next call or sweep. An owner that does not answer fails the read.
+`kind` is for tests
 and logs; a client draws every notice the same way and never reads it.
 An action `post`s its `body` (none: `{}`) to a platform route with the
 person's own credential, the route its owner's, then the client reads its
@@ -1969,12 +1994,47 @@ say), which the client opens once that read has it: one of the person's
 fragments in place, any other address as a page. A post refused shows the
 server's own words for it (its `message`) on the notice, with its button
 back. `until`: when what a notice tells ends by the clock alone; a client
-counts down to it and drops the notice then. Their pages are told when
-notices change (`watch`'s `changed`).
+counts down to it and drops the notice then. `mustAnswer`: it must be
+answered; a client shows it alone over everything (a guest's welcome
+too), never in the band, until the read after one of its actions has it
+no more, the first such in the list first (each owner lists its own
+oldest first). A client from before it shows it as any other. The move's
+offer is one; on a local fleet with test levers alone (dev's, the e2e's:
+never a branch deployment, nor production), an invite to a fragment whose
+label has `must-answer` in it is one too, the proof of the clients' cover.
+`image`: a picture beside its words (an old agent's), a platform path
+read with the person's credential; an `open` of a platform page opens
+in place. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites' |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites), then the move's offers |
+
+## The finite.computer move (docs/migrations.md)
+
+Removable, with the move (the debt ledger). Its shapes are
+`fragment_proto::migrations`; what each route means, and the state
+machine behind them, are docs/migrations.md. Without the deployment's
+`migrations`, each is 404.
+
+| method & path | who | answer |
+| --- | --- | --- |
+| `GET /api/migrations/offers` | a person (an agent 403) | → `Offers {offers: [{old, name, image?, state, said, agent?}]}`: their old agents, each where its move is, in the server's words |
+| `POST /api/migrations/offers` | a person | opens the move: binds them, and gives its comp once (docs/migrations.md, "The comp") → `Offers` |
+| `POST /api/migrations/offers/{old}/later`, `…/never`, `…/ask-again` | the old agent's person (another's 404, an agent 403) | → `MoveAt {state}`; an answer its state does not take 409 |
+| `POST /api/migrations/offers/{old}/yes` | its person | `OfferYes {agent}`, an agent of their own (another's 403) → `MoveAt {state}` |
+| `GET /api/migrations/offers/{old}/picture` | its person | → the roster's picture of it, a PNG, JPEG, WebP or GIF of at most 1 MiB; none 404 |
+| `PUT /api/migrations/mover/roster` | the mover (NIP-98 by `migrations.mover`'s key; anyone else 403) | `Roster` → `RosterTaken {bound, withdrawn, replay}` |
+| `GET /api/migrations/mover/mailbox` | the mover | → `Mailbox {commands: [{id, old, attempt, kind, phase?, stage?, as?, secrets?}]}`, at most `MAILBOX_MAX` |
+| `POST /api/migrations/mover/agents/{old}/report` | the mover | `Report {command, seq, kind, bytes?, files?, manifest_sha256?, step?, why?, receipt?}` → `Reported {state, attempt, taken}`; another than the current command 409 |
+| `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=` | the mover, for the stage of its current `stop_and_stage` while it stages (another 403, another state 409) | the part's bytes, streamed unread → `StagePart {n, bytes, sha256, etag}`; past `PART_MAX_BYTES` 413 |
+| `GET /api/migrations/mover/stages/{stage}/parts` | the same | → `StageParts {parts}`: numbers, sizes, hashes, etags; never bytes |
+| `POST /api/migrations/mover/stages/{stage}/complete` | the same | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` |
+| `POST /api/migrations/stages/{stage}/open` | the agent the move is bound to, while it imports (NIP-98) | → `StageOpened {stage, manifest}` |
+| `GET /api/migrations/stages/{stage}/zip` | the same | the zip; `Range` → 206 |
+| `POST /api/migrations/stages/{stage}/done` | the same | `StageDone {ok, report_sha256?, why?}` → `MoveAt {state}` |
+| `GET /api/admin/migrations` | an operator | → `AdminMoves {moves, next?}` (`?after=<old>`) |
+| `POST /api/admin/migrations/{old}` | an operator | `AdminAct {op}` (`retry`, `restart-old`, `retire`, `withdraw`) → `AdminMove` |
 
 ## Computers (docs/computers.md)
 

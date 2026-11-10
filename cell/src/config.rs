@@ -46,6 +46,18 @@ pub struct StripeConfig {
     pub tax: bool,
 }
 
+/// The finite.computer move's settings (`FRAGMENT_MIGRATIONS_MOVER`,
+/// `FRAGMENT_MIGRATIONS_CUTOFF_MS`: plain values, read with no decoder).
+pub struct MigrationsConfig {
+    /// The mover's key, 64 hex (`mover`, an npub): its NIP-98 signature
+    /// alone reaches the mover's routes. The mover holds the key; this
+    /// deployment holds no secret for it.
+    pub mover: String,
+    /// Phase 2's cutoff, ms since the epoch (`cutoff_ms`): unanswered moves
+    /// are staged and retired from then on. None: no phase 2 yet.
+    pub cutoff_ms: Option<i64>,
+}
+
 /// The account's Workers Logs, which the operators' glance reads
 /// (`fragment_core::glance`): configured when its read-only key is bound
 /// (`secrets_store::OBSERVABILITY_READ`) and the account and this
@@ -147,6 +159,10 @@ pub struct Config {
     /// (`parse_list` reads each as 64 hex), that grant credit and set
     /// plans, seats and overdrafts.
     operators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_MIGRATIONS_*` (the deploy config's `migrations`): the
+    /// finite.computer move (docs/migrations.md). Without it, none of its
+    /// routes answer.
+    pub migrations: Option<MigrationsConfig>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
@@ -407,6 +423,11 @@ impl Config {
             }),
             mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
+            // deploy checked both: a value that is not one is a broken deploy
+            migrations: var(env, "FRAGMENT_MIGRATIONS_MOVER").map(|m| MigrationsConfig {
+                mover: fragment_core::npub::parse(&m).unwrap_or_else(|| panic!("FRAGMENT_MIGRATIONS_MOVER is an npub, not {m:?}")),
+                cutoff_ms: var(env, "FRAGMENT_MIGRATIONS_CUTOFF_MS").map(|c| c.parse::<i64>().ok().filter(|c| *c > 0).unwrap_or_else(|| panic!("FRAGMENT_MIGRATIONS_CUTOFF_MS is ms since the epoch, not {c:?}"))),
+            }),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n >= 1)

@@ -28,10 +28,14 @@ struct Notice: Decodable, Identifiable, Equatable, Sendable {
     var detail: String?
     var until: Until?
     var actions: [Action]
+    /// It must be answered: shown alone over the whole app
+    /// (`MustAnswerView`), never in the band, until the read after an
+    /// answer of it has it no more.
+    var mustAnswer: Bool
 
     var warns: Bool { level == "warn" }
 
-    private enum Keys: String, CodingKey { case id, kind, level, title, text, detail, until, actions }
+    private enum Keys: String, CodingKey { case id, kind, level, title, text, detail, until, actions, mustAnswer }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -42,6 +46,7 @@ struct Notice: Decodable, Identifiable, Equatable, Sendable {
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
         until = try c.decodeIfPresent(Until.self, forKey: .until)
         actions = try c.decodeIfPresent([Action].self, forKey: .actions) ?? []
+        mustAnswer = try c.decodeIfPresent(Bool.self, forKey: .mustAnswer) ?? false
     }
 
     /// Whether it still tells something at `now` (ms): one whose time
@@ -61,6 +66,17 @@ struct Notice: Decodable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// An action of a notice that failed (`Library.act`): why, in the server's
+/// words for its refusal (`refused`) or the app's for a call that never
+/// reached it, and its notice's title and level, so a refusal can be said
+/// after its notice is gone.
+struct NoticeFailure: Equatable, Sendable {
+    let said: String
+    let refused: Bool
+    let title: String
+    let warns: Bool
+}
+
 /// What the person is told, over every page: each notice as the server
 /// said it, the most pressing first, and a line when the last read of them
 /// failed (what it said before stays under it, with Try again).
@@ -77,12 +93,14 @@ struct NoticesBand: View {
         // a countdown says its minutes live, and a notice whose time passed goes
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
-            let shown = library.notices.filter { $0.shown(at: now) }
-            if library.noticesFailed || !shown.isEmpty {
+            let shown = library.notices.filter { $0.shown(at: now) && !$0.mustAnswer }
+            let refusals = library.refusals(at: now)
+            if library.noticesFailed || !shown.isEmpty || !refusals.isEmpty {
                 ScrollView {
                     VStack(spacing: 8) {
                         if library.noticesFailed { refresh }
                         ForEach(shown) { notice in row(notice, now: now) }
+                        ForEach(refusals, id: \.id) { refusal in refused(refusal.id, refusal.failure) }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
@@ -95,16 +113,27 @@ struct NoticesBand: View {
         }
     }
 
-    private var refresh: some View {
-        card(warns: false) {
-            HStack {
-                Text("Couldn't refresh your computer").font(.subheadline.weight(.semibold))
-                Spacer()
-                Button { Task { await library.load(api) } } label: { Text("Try again").foregroundStyle(Color(.systemBackground)) }
+    /// A refusal whose notice is gone: its title and the server's words,
+    /// until OK (which asks nothing).
+    private func refused(_ id: String, _ failure: NoticeFailure) -> some View {
+        card(warns: failure.warns) {
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(failure.title).font(.subheadline.weight(.semibold))
+                    Text(failure.said).font(.footnote).foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Button { library.failedNotices[id] = nil } label: { Text("OK").foregroundStyle(Color(.systemBackground)) }
                     .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
             }
         }
-        .accessibilityIdentifier("noticesRefresh")
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("refused:\(id)")
+    }
+
+    private var refresh: some View {
+        card(warns: false) { NoticesRefresh(library: library, api: api) }
+            .accessibilityIdentifier("noticesRefresh")
     }
 
     private func row(_ notice: Notice, now: Int64) -> some View {
@@ -115,7 +144,7 @@ struct NoticesBand: View {
                     Text(notice.title).font(.subheadline.weight(.semibold))
                     if let text = notice.text { Text(text).font(.footnote).foregroundStyle(.secondary) }
                     if let until = notice.until { Text(Notice.untilSaid(until, now: now)).font(.footnote).foregroundStyle(.secondary) }
-                    if let why = library.failedNotices[notice.id] { Text(why).font(.footnote).foregroundStyle(.secondary) }
+                    if let why = library.failedNotices[notice.id] { Text(why.said).font(.footnote).foregroundStyle(.secondary) }
                     if let detail = notice.detail { Text(detail).font(.caption2).foregroundStyle(.tertiary).padding(.top, 2) }
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -155,5 +184,80 @@ struct NoticesBand: View {
             .overlay {
                 if warns { RoundedRectangle(cornerRadius: 14).strokeBorder(Color.red.opacity(0.45)) }
             }
+    }
+}
+
+/// The line a failed read of the notices leaves (`Library.noticesFailed`):
+/// what the last read said stays, and Try again reads again, posting no
+/// answer. The band's, and the cover's too, as the band can't be reached
+/// under it.
+struct NoticesRefresh: View {
+    let library: Library
+    let api: FragmentAPI
+
+    var body: some View {
+        HStack {
+            Text("Couldn't refresh your computer").font(.subheadline.weight(.semibold))
+            Spacer()
+            Button { Task { await library.load(api) } } label: { Text("Try again").foregroundStyle(Color(.systemBackground)) }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
+        }
+    }
+}
+
+/// A notice that must be answered (`mustAnswer`), alone over the whole app
+/// (`FragmentRoot`'s full-screen cover), as the web's (cell/shell/
+/// computer.js `drawAsked`): its words, why its last answer failed, and
+/// its answers, the first the main one, until the read after one of them
+/// has it no more (`Library.asked`). It has no other way out. A read that
+/// failed says so over it, with Try again (`NoticesRefresh`).
+struct MustAnswerView: View {
+    let library: Library
+    let api: FragmentAPI
+    let notice: Notice
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        GeometryReader { page in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if library.noticesFailed { NoticesRefresh(library: library, api: api).accessibilityIdentifier("mustAnswerRefresh") }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(notice.title).font(.title2.weight(.semibold))
+                        if let text = notice.text { Text(text).foregroundStyle(.secondary) }
+                        if let why = library.failedNotices[notice.id] { Text(why.said).foregroundStyle(.secondary) }
+                        if let detail = notice.detail { Text(detail).font(.caption).foregroundStyle(.tertiary) }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    VStack(spacing: 10) {
+                        ForEach(Array(notice.actions.enumerated()), id: \.offset) { index, action in
+                            answer(action, main: index == 0)
+                        }
+                    }
+                }
+                .frame(maxWidth: 440, alignment: .leading)
+                .padding(24)
+                .frame(maxWidth: .infinity, minHeight: page.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .background(FragmentStyle.background.ignoresSafeArea())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("mustAnswer:\(notice.id)")
+    }
+
+    @ViewBuilder private func answer(_ action: Notice.Action, main: Bool) -> some View {
+        let pressed = library.acting.contains(notice.id)
+        let tap = {
+            if let open = action.open, let url = URL(string: open) { openURL(url) }
+            else { Task { if let outside = await library.act(notice, action, api: api) { openURL(outside) } } }
+        }
+        if main {
+            Button(action: tap) { Text(action.label).foregroundStyle(Color(.systemBackground)).frame(maxWidth: .infinity) }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.large).disabled(pressed)
+        } else {
+            Button(action: tap) { Text(action.label).frame(maxWidth: .infinity) }
+                .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.large).disabled(pressed)
+        }
     }
 }

@@ -87,6 +87,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/launcher-knowledge.test.mjs",
     "cell/shell-tests/limits.test.mjs",
     "cell/shell-tests/making.test.mjs",
+    "cell/shell-tests/move-page.test.mjs",
     "cell/shell-tests/notices-band.test.mjs",
     "cell/shell-tests/onboarding.test.mjs",
     "cell/shell-tests/restart-follow.test.mjs",

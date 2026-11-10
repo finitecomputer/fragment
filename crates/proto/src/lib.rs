@@ -1578,6 +1578,12 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
+    /// A person member's email, as the share sheet shows it (decision
+    /// 48): in `GET members` to the owner and their agent for them, and in
+    /// no other list (add-only: absent from an older platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub email: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -1863,10 +1869,16 @@ pub struct Rotated {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutSecret {
+    /// The value; empty with `fromVault`.
+    #[serde(default)]
     pub value: String,
     /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
     /// (`fragment_core::secrets::secret_host`).
     pub hosts: Vec<String>,
+    /// In place of `value`: a secret of the caller's own Vault (FIN-466),
+    /// moved here: kept here, gone from the Vault. A person's alone.
+    #[serde(default, rename = "fromVault", skip_serializing_if = "Option::is_none")]
+    pub from_vault: Option<String>,
 }
 
 /// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
@@ -2530,6 +2542,7 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod migrations;
 pub mod notice;
 pub mod org;
 #[cfg(feature = "schema")]

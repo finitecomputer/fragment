@@ -98,6 +98,8 @@
       <section class="page" id="apps-page" hidden></section>
       <section class="page" id="history-page" hidden></section>
       <section class="page" id="schedules-page" hidden></section>
+      <!-- a person's old finite.computer agents, and their moves (move-page.js) -->
+      <section class="page" id="move-page" hidden></section>
     </main>
 
     <div class="gutter gutter-col" id="gutter-right" role="separator" aria-orientation="vertical" aria-label="Resize viewer" title="Drag to resize · double-click to reset"></div>
@@ -168,6 +170,9 @@
       <p class="search-status" id="search-status" role="status"></p>
     </div>
   </dialog>
+  <!-- a notice that must be answered (`mustAnswer`), alone over everything,
+       a guest's welcome too, until it is answered (computer.js `drawAsked`) -->
+  <dialog class="must-answer" id="must-answer"></dialog>
   <script type="module" src="/__shell/shell.js"></script>
 </body>
 </html>
