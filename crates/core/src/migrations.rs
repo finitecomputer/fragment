@@ -660,6 +660,14 @@ pub fn tick(m: &Move, now: i64) -> Option<Step> {
     Some(Step { to, effects: vec![] })
 }
 
+/// When the object's alarm next has work: the earliest deadline of any
+/// move (`deadline`), or the cutoff while an unasked move waits for it.
+pub fn next_wake(deadline: Option<i64>, cutoff_ms: Option<i64>, unasked: u64, archiving: usize, now: i64) -> Option<i64> {
+    let _ = (archiving, now);
+    let cutoff = cutoff_ms.filter(|_| unasked > 0);
+    [deadline, cutoff].into_iter().flatten().min()
+}
+
 /// Phase 2, at the cutoff (`cutoff_ms`): a move whose person never said
 /// Yes is staged and retired, unasked, its stage kept `ARCHIVE_KEEP_MS`
 /// past the cutoff. The object takes at most `ARCHIVING_MAX` at once.
@@ -1104,6 +1112,63 @@ mod tests {
         let d = done(&late.to, AGENT, "prj_1.p2.1", &ok(), cut + 11).unwrap().unwrap();
         assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated))));
         assert_eq!(d.effects, vec![Effect::Sweep { prefix: "p2/prj_1/1/".into() }]);
+    }
+
+    /// Phase 2's two retirements are two commands: as archived at the
+    /// cutoff, then as migrated after a late import. A mover that keys its
+    /// work by the id does both, the second not answered from the first's
+    /// receipt.
+    #[test]
+    fn a_late_import_retires_under_a_command_of_its_own() {
+        let cut = T0;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let archived = st.command_id().expect("retired as archived");
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let late = to(yes(&ar, AGENT, cut + 10));
+        let d = to(done(&late, AGENT, "o.p2.1", &ok(), cut + 11));
+        let migrated = d.command_id().expect("retired as migrated");
+        assert_ne!(archived, migrated, "two retirements, two commands");
+        // the archive's receipt again is stale: it changes nothing
+        assert_eq!(report(&d, &Report { command: archived, ..report_on(&d, 1, "retired") }, cut + 12), Err(Refused::Stale));
+    }
+
+    /// A phase 2 stage is the only copy left (its old agent is retired), so
+    /// it is kept until its expiry whatever its import does: a failed
+    /// import keeps it for staff's retry; held past its expiry, it goes,
+    /// and a retry is refused.
+    #[test]
+    fn a_failed_late_import_keeps_its_stage_until_it_expires() {
+        let cut = T0;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let late = to(yes(&ar, AGENT, cut + 10));
+        let failed = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
+        let f = done(&late, AGENT, "o.p2.1", &failed, cut + 11).unwrap().unwrap();
+        assert_eq!((f.to.state, f.to.reason), (MoveState::Held, Some(HeldReason::ImportFailed)));
+        assert_eq!((f.effects.as_slice(), f.to.deadline()), (&[][..], Some(cut + ARCHIVE_KEEP_MS)), "kept, to its expiry");
+        let again = to(retry(&f.to, cut + 12));
+        assert_eq!((again.state, again.stage().as_deref()), (MoveState::Importing, Some("o.p2.1")));
+        let gone = tick(&f.to, cut + ARCHIVE_KEEP_MS).expect("its expiry");
+        assert_eq!(gone.effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+        assert_eq!((gone.to.state, gone.to.deadline()), (MoveState::Held, None));
+        assert!(matches!(retry(&gone.to, cut + ARCHIVE_KEEP_MS + 1), Err(Refused::Unfit(_))), "nothing left to import");
+    }
+
+    /// Past the cutoff, the alarm wakes for it only while there is room to
+    /// archive: with every slot taken, an archiving move's own deadline
+    /// wakes it, not the past cutoff again at once.
+    #[test]
+    fn past_the_cutoff_with_no_room_the_alarm_waits_for_a_deadline() {
+        let (cut, now) = (T0, T0 + 5);
+        assert_eq!(next_wake(Some(cut + 99), Some(cut + 10), 1, 0, cut), Some(cut + 10), "before it: the cutoff");
+        assert_eq!(next_wake(None, Some(cut), 3, ARCHIVING_MAX - 1, now), Some(cut), "past it, with room: at once");
+        assert_eq!(next_wake(Some(now + 60_000), Some(cut), 3, ARCHIVING_MAX, now), Some(now + 60_000), "no room: the next deadline");
+        assert_eq!(next_wake(None, Some(cut), 3, ARCHIVING_MAX, now), None, "no room, no deadline: nothing");
+        assert_eq!(next_wake(None, Some(cut + 10), 0, 0, cut), None, "nothing unasked: no cutoff");
     }
 
     #[test]
