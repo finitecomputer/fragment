@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs::{settle, started};
-use crate::api::{url_enc, Api, Call, Reply};
+use crate::api::{url_enc, Api, Call, Reply, Socket};
 
 use crate::Suite;
 
@@ -591,6 +591,27 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "succeeded" && m(&v, "balanceMicros") < 0 && m(&v, "balanceMicros") > -2 * USD && v["standing"] == json!({ "standing": "agents_stopped", "why": "no_credit" }),
         &v,
     );
+    // what they are told (FIN-458): their ledger's words for it, first, with
+    // a pack to buy where packs are sold (a seat's holder, as they are)
+    let told = |k: &Keys| -> Result<Value> {
+        let r = api.signed(k, "GET", "/api/notices", None)?;
+        anyhow::ensure!(r.status == 200, "their notices: {r}");
+        Ok(r.body["notices"].clone())
+    };
+    let credit = |notices: &Value| notices.as_array().into_iter().flatten().find(|n| n["id"] == "credit").cloned();
+    let sold = !api.signed(&owner, "GET", "/api/seat", None)?.body["offer"].is_null();
+    let buy = if sold { json!([{ "label": "Buy $25 of credit", "post": "/api/billing/packs", "body": {} }]) } else { json!(null) };
+    let notices = told(&owner)?;
+    s.ok(
+        "out of credit, they are told so first, in Settings' words, with a pack to buy where packs are sold",
+        notices[0]["id"] == "credit"
+            && notices[0]["kind"] == "credit"
+            && notices[0]["level"] == "warn"
+            && notices[0]["title"] == "Your agents are stopped"
+            && notices[0]["text"] == "The credit is used up; adding credit starts them again."
+            && (if sold { notices[0]["actions"] == buy } else { notices[0]["actions"].as_array().is_none_or(|a| a.is_empty()) }),
+        json!({ "notices": notices, "sold": sold }),
+    );
     let calls = s.ai.calls().len();
     // the gate heard the owner within the minute, when they had credit: it asks afresh
     forget_gate(api, &owner_id)?;
@@ -645,7 +666,19 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let pinged = s.eventually(wait, || pings() == 1);
     s.ok("before, its cron runs (a mutation, as the fragment), and its scheduled record appends", ran && scheduled.status == 200 && pinged, json!({ "tick": runs("tick"), "scheduled": scheduled.body }));
     let back = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
+    // their pages watch their list: told when the standing changes, and not before
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = Socket::connect(api, &url, Some(&owner), None, None).map(|(w, _)| w).and_then(|mut w| w.expect("hello").map(|_| w));
+    // (what the lane did before, its cron's runs, told first: read until a read waits 5 s for nothing)
+    let quiet = tab.as_mut().map(|w| (0..10).take_while(|_| w.next().is_ok()).count() < 10).unwrap_or(false);
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
+    let lifted = tab.as_mut().map(|w| w.next().unwrap_or_else(|e| json!(format!("{e:#}")))).unwrap_or_else(|e| json!(format!("{e:#}")));
+    let notices = told(&owner)?;
+    s.ok(
+        "credit back above zero: their pages, quiet before, are told it changed, and they are told of credit no more",
+        quiet && lifted == json!({ "type": "changed" }) && credit(&notices).is_none(),
+        json!({ "quiet": quiet, "lifted": lifted, "notices": notices }),
+    );
     let v = ledger(api, &owner);
     let n = tokens_costing(GLM, 10, m(&v, "balanceMicros") + 3 * USD);
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
@@ -659,6 +692,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         "a charge past the $2 overdraft makes the person's fragments read-only",
         run["status"] == "succeeded" && m(&v, "balanceMicros") <= -2 * USD && v["standing"] == json!({ "standing": "read_only", "why": "overdrawn" }),
         &v,
+    );
+    let notices = told(&owner)?;
+    let said = credit(&notices).unwrap_or_default();
+    s.ok(
+        "past the overdraft, they are told that too, in Settings' words",
+        said["title"] == "Your fragments are read-only, and your agents are stopped" && said["text"] == "The balance reached the overdraft; credit that brings it above zero ends it." && (if sold { said["actions"] == buy } else { true }),
+        &notices,
     );
     // the fragment trusts what it heard of its owner's standing for up to a minute
     lever(api, &name, "forget-standing", json!({}))?;
@@ -707,6 +747,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let w = api.op(&owner, &name, "note", "n-top", json!({ "text": "after the top-up" }))?;
     let v = ledger(api, &owner);
     s.ok("a top-up above zero restores writes", w.status == 200 && v["standing"]["standing"] == "ok", format!("{w} | {v}"));
+    let notices = told(&owner)?;
+    s.ok("and they are told of credit no more", credit(&notices).is_none(), &notices);
     lever(api, &trig, "forget-standing", json!({}))?;
     lever(api, &trig, "cron-now", json!({}))?;
     let cron = s.eventually(wait, || succeeded("tick", "cron") == 2);

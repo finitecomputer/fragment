@@ -393,9 +393,15 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a pack's Checkout")?;
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     s.ok(
-        "a seat's holder opens a pack's Checkout: a payment at the pack's price, for their own ledger",
-        r.status == 200 && f("mode") == "payment" && f("metadata[fragment_person]") == ann_id && f("metadata[fragment_buyer]") == ann_id && f("metadata[fragment_pack]") == "25",
-        format!("{:?}", asked.form),
+        "a seat's holder opens a pack's Checkout: a payment at the pack's price, for their own ledger, its answer naming the page to open (a notice's Buy credit opens it)",
+        r.status == 200
+            && f("mode") == "payment"
+            && f("metadata[fragment_person]") == ann_id
+            && f("metadata[fragment_buyer]") == ann_id
+            && f("metadata[fragment_pack]") == "25"
+            && r.body["url"].is_string()
+            && r.body["open"] == r.body["url"],
+        format!("{:?} | {}", asked.form, r.body),
     );
     s.stripe.complete(&pack1).map_err(anyhow::Error::msg)?;
     let granted = s.eventually(PUSHED, || purchased(&ann) == before + 25_000_000);
