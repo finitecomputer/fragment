@@ -253,14 +253,15 @@ final class FragmentUITests: XCTestCase {
     /// Notices that must be answered (FIN-458) show alone over the whole app,
     /// never in the band, the oldest first: an answer refused keeps it,
     /// saying why in the server's words; answered, the next; the last
-    /// answered, the app as it was. No owner asks one yet: on a test fleet an
-    /// invite to a `must-answer` fragment is one, and the dev stack staged
-    /// two ahead (`FRAGMENT_UITEST_ASKED`, their fragments, oldest first),
-    /// the registry's next invite answer refused (its `DownFor` lever).
+    /// answered, the app as it was. No owner asks one yet: on a local fleet
+    /// an invite to a `must-answer` fragment is one, and the dev stack
+    /// staged two ahead (`FRAGMENT_UITEST_ASKED`, their fragments, oldest
+    /// first); the test refuses its first answer (`refuseNextInviteAnswer`).
     func testNoticesThatMustBeAnsweredShowAloneUntilAnswered() throws {
         let env = ProcessInfo.processInfo.environment
-        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], case let names = (env["FRAGMENT_UITEST_ASKED"] ?? "").split(separator: ",").map(String.init), names.count == 2 else {
-            throw XCTSkip("no dev stack or asked notices named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_ASKED: two fragments)")
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let secret = env["FRAGMENT_UITEST_SECRET"],
+              case let names = (env["FRAGMENT_UITEST_ASKED"] ?? "").split(separator: ",").map(String.init), names.count == 2 else {
+            throw XCTSkip("no dev stack or asked notices named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_SECRET, FRAGMENT_UITEST_ASKED: two fragments)")
         }
         XCUIDevice.shared.appearance = .light
         let app = XCUIApplication()
@@ -273,6 +274,7 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(asked(first).buttons["Accept"].exists && asked(first).buttons["Decline"].exists, "its words and its answers")
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "notice:invite:\(first)").firstMatch.exists, "never in the band")
         screenshot(app, "Must answer, light")
+        refuseNextInviteAnswer(server, secret: secret)
         asked(first).buttons["Accept"].tap()
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "try again shortly")).firstMatch.waitForExistence(timeout: 20), "refused: why, in the server's words")
         XCTAssertTrue(asked(first).exists, "and it stays")
@@ -284,6 +286,22 @@ final class FragmentUITests: XCTestCase {
         asked(next).buttons["Decline"].tap()
         XCTAssertTrue(asked(next).waitForNonExistence(timeout: 30), "the last answered: the app as it was")
         XCUIDevice.shared.appearance = .light
+    }
+
+    /// The registry's next answer to an invite refused, in its words (its
+    /// `DownFor` lever, with the dev stack's test secret): set just before
+    /// the tap, as the registry keeps it in memory, which it loses idle.
+    private func refuseNextInviteAnswer(_ server: String, secret: String) {
+        var request = URLRequest(url: URL(string: server)!.appending(path: "api/test/registry"))
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"{"downFor":{"path":"/invites/answer","times":1}}"#.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue(secret, forHTTPHeaderField: "x-fragment-test-secret")
+        let set = expectation(description: "the registry's next invite answer refused")
+        URLSession.shared.dataTask(with: request) { _, response, _ in
+            if (response as? HTTPURLResponse)?.statusCode == 200 { set.fulfill() }
+        }.resume()
+        wait(for: [set], timeout: 10)
     }
 }
 
