@@ -377,6 +377,70 @@ fn base64_spellings(value: &[u8]) -> Vec<String> {
     forms
 }
 
+/// Each value's own bytes named as its secret (`{{name}}`) in a body read
+/// a piece at a time, as it streams: an answer too long to read whole, an
+/// event stream, or bytes that are not text (`redact` names every
+/// spelling of a text read whole). A value split across two pieces is
+/// named too: the last bytes of each piece that could begin one wait for
+/// the next.
+pub struct Streamed {
+    /// Each value's bytes and what names it.
+    needles: Vec<(Vec<u8>, Vec<u8>)>,
+    /// What came and is not out yet: at most a value's length less one.
+    held: Vec<u8>,
+}
+
+impl Streamed {
+    /// For `values`, each a secret's name and a value it filled.
+    pub fn new(values: &[(String, String)]) -> Streamed {
+        let needles: Vec<(Vec<u8>, Vec<u8>)> = values.iter().filter(|(_, v)| !v.is_empty()).map(|(n, v)| (v.as_bytes().to_vec(), format!("{{{{{n}}}}}").into_bytes())).collect();
+        Streamed { needles, held: vec![] }
+    }
+
+    /// The next piece, as much of it as may go out now.
+    pub fn push(&mut self, piece: &[u8]) -> Vec<u8> {
+        self.held.extend_from_slice(piece);
+        let (mut out, rest) = self.named(false);
+        self.held = rest;
+        out.shrink_to_fit();
+        out
+    }
+
+    /// The body has ended: what is still held, named.
+    pub fn finish(mut self) -> Vec<u8> {
+        self.named(true).0
+    }
+
+    /// The held bytes, each value in them named: what may go out, and what
+    /// must wait (unless `last`): the held bytes from the first place that
+    /// begins a value without holding all of it. Only those wait, so an
+    /// event that could not begin one goes out at once, the stream still
+    /// open; and a value that begins a longer one waits for the longer.
+    fn named(&mut self, last: bool) -> (Vec<u8>, Vec<u8>) {
+        let held = std::mem::take(&mut self.held);
+        let mut out = Vec::with_capacity(held.len());
+        let (mut at, mut i) = (0, 0);
+        // bounded: each pass moves `i` past a byte or a value, or stops
+        while i < held.len() {
+            let rest = &held[i..];
+            if !last && self.needles.iter().any(|(v, _)| v.len() > rest.len() && v.starts_with(rest)) {
+                break;
+            }
+            match self.needles.iter().filter(|(v, _)| rest.starts_with(v)).max_by_key(|(v, _)| v.len()) {
+                Some((v, name)) => {
+                    out.extend_from_slice(&held[at..i]);
+                    out.extend_from_slice(name);
+                    i += v.len();
+                    at = i;
+                }
+                None => i += 1,
+            }
+        }
+        out.extend_from_slice(&held[at..i]);
+        (out, held[i..].to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,5 +767,97 @@ mod tests {
         assert_eq!(redact("location: /bot123:a/b c/x".to_string(), &opened), "location: /bot{{TOKEN}}/x");
         assert_eq!(redact("nothing here".to_string(), &opened), "nothing here");
         assert_eq!(redact("123:a/b c".to_string(), &std::collections::BTreeMap::new()), "123:a/b c", "nothing opened, nothing named");
+    }
+
+    /// Valid: a value is named in a body that streams, also split across
+    /// pieces, and nothing else changes; invalid input (none filled) goes
+    /// as it came.
+    #[test]
+    fn a_streamed_body_names_each_value_even_split_across_pieces() {
+        let values = vec![("bot".to_string(), "123456:secret-token".to_string()), ("basic".to_string(), "dXNlcjpwYXNz".to_string())];
+        let body = b"data: {\"token\":\"123456:secret-token\"}\n\nAuthorization: Basic dXNlcjpwYXNz\n";
+        for size in [1, 3, 7, 64] {
+            let mut s = Streamed::new(&values);
+            let mut out = vec![];
+            for piece in body.chunks(size) {
+                out.extend(s.push(piece));
+            }
+            out.extend(s.finish());
+            let text = String::from_utf8(out).expect("text");
+            assert_eq!(text, "data: {\"token\":\"{{bot}}\"}\n\nAuthorization: Basic {{basic}}\n", "pieces of {size}");
+        }
+        // bytes that are not text, the value among them
+        let mut s = Streamed::new(&values);
+        let mut out = s.push(&[0xff, 0xfe]);
+        out.extend(s.push(b"123456:secret-token"));
+        out.extend(s.push(&[0x00]));
+        out.extend(s.finish());
+        assert_eq!(out, [&[0xff, 0xfe][..], b"{{bot}}", &[0x00]].concat());
+        let mut none = Streamed::new(&[]);
+        assert_eq!([none.push(b"as it came"), none.finish()].concat(), b"as it came");
+    }
+
+    /// A test token, 32 bytes, as long as many an API key.
+    const TOKEN: &str = "tok_0123456789abcdefghijklmnopqr";
+
+    /// Goal: an event stream left open gets each event as it comes. Valid:
+    /// a whole event, and heartbeats after it, go out at once with a long
+    /// value in play (32 bytes, then 4 KiB); nothing waits for the end.
+    #[test]
+    fn an_open_event_stream_gets_each_event_at_once() {
+        assert_eq!(TOKEN.len(), 32);
+        let long = "k".repeat(4096);
+        for value in [TOKEN.to_string(), long] {
+            let mut s = Streamed::new(&[("key".to_string(), value)]);
+            assert_eq!(s.push(b"data: ok\n\n"), b"data: ok\n\n");
+            for _ in 0..3 {
+                assert_eq!(s.push(b": ping\n\n"), b": ping\n\n");
+            }
+            assert_eq!(s.finish(), b"");
+        }
+    }
+
+    /// Valid: a value split in two at every offset, or one byte at a time,
+    /// is still named, after a false start that begins it; nothing else
+    /// changes, and the value never goes out whole or in part.
+    #[test]
+    fn a_value_split_at_every_offset_is_named() {
+        let values = [("key".to_string(), TOKEN.to_string())];
+        let body = format!("data: tok_01 then {TOKEN}\n\n");
+        let want = "data: tok_01 then {{key}}\n\n";
+        for cut in 0..=body.len() {
+            let (a, b) = body.as_bytes().split_at(cut);
+            let mut s = Streamed::new(&values);
+            let first = s.push(a);
+            let out = [first.clone(), s.push(b), s.finish()].concat();
+            assert_eq!(String::from_utf8(out).expect("text"), want, "cut at {cut}");
+            // what went out before the value was whole holds none of it past its false start
+            assert!(!String::from_utf8(first).expect("text").contains("tok_012"), "cut at {cut}");
+        }
+        let mut s = Streamed::new(&values);
+        let mut out: Vec<u8> = body.bytes().flat_map(|b| s.push(&[b])).collect();
+        out.extend(s.finish());
+        assert_eq!(String::from_utf8(out).expect("text"), want);
+    }
+
+    /// Valid: a tail that begins a value waits, and goes out as it was once
+    /// the next piece shows it is not one; a value that begins a longer one
+    /// waits too, so the longer is named whole. Replay: the body's end
+    /// lets a held tail go.
+    #[test]
+    fn a_tail_that_may_begin_a_value_waits_until_it_cannot() {
+        let mut s = Streamed::new(&[("key".to_string(), TOKEN.to_string())]);
+        assert_eq!(s.push(b"data: tok_01"), b"data: ");
+        assert_eq!(s.push(b"x\n\n"), b"tok_01x\n\n");
+        assert_eq!(s.push(b"tok_"), b"");
+        assert_eq!(s.finish(), b"tok_");
+        let values = [("short".to_string(), "abc".to_string()), ("long".to_string(), "abcdef".to_string())];
+        let mut s = Streamed::new(&values);
+        assert_eq!(s.push(b"abc"), b"");
+        assert_eq!(s.push(b"def!"), b"{{long}}!");
+        assert_eq!(s.push(b"abc"), b"");
+        assert_eq!(s.push(b"x"), b"{{short}}x");
+        assert_eq!(s.push(b"abcd"), b"");
+        assert_eq!(s.finish(), b"{{short}}d");
     }
 }
