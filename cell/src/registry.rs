@@ -192,6 +192,10 @@ impl DurableObject for RegistryCell {
             console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
             self.sync_later().await.map_err(|e| Error::RustError(e.message))?;
         }
+        if let Err(e) = self.comps_alarm().await {
+            console_error!("the registry's comps' ends failed ({:?}): {}", e.code, e.message);
+            self.sync_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
         if let Err(e) = self.claims_alarm().await {
             console_error!("the registry's kept invite claims failed ({:?}): {}", e.code, e.message);
             self.claims_later().await.map_err(|e| Error::RustError(e.message))?;

@@ -5,7 +5,7 @@
 //! connected before, reauthorized), and what Pipes' answer to an import
 //! means. Pure: the cell asks Pipes, and this decides.
 
-use fragment_proto::computer::ProviderState;
+use fragment_proto::computer::{ConnectionAccess, ProviderState};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -224,21 +224,28 @@ pub enum Intent {
 }
 
 impl Intent {
-    /// The body of `POST …/authorize`: nothing (or `{}`), `{add: true}`,
-    /// or `{account: "<id>"}`, never both.
-    pub fn asked(body: &Value) -> Result<Intent, String> {
-        let Some(o) = body.as_object() else { return if body.is_null() { Ok(Intent::Connect) } else { Err("a connect's body is an object".into()) } };
-        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "add" | "account")) {
-            return Err(format!("a connect names `add` or `account`, not {k:?}"));
+    /// The body of `POST …/authorize`: the access the person picked
+    /// (`{access: "read" | "write"}`), and beside it `add: true` or
+    /// `account: "<id>"`, never both.
+    pub fn asked(body: &Value) -> Result<(Intent, ConnectionAccess), String> {
+        let Some(o) = body.as_object() else { return Err("a connect's body is an object naming its access: {\"access\": \"read\"} or {\"access\": \"write\"}".into()) };
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "access" | "add" | "account")) {
+            return Err(format!("a connect names `access`, and `add` or `account`, not {k:?}"));
         }
-        match (o.get("add"), o.get("account")) {
-            (None, None) => Ok(Intent::Connect),
-            (Some(Value::Bool(true)), None) => Ok(Intent::Add),
-            (None, Some(Value::String(id))) if valid_account_id(id) => Ok(Intent::Reconnect(id.clone())),
-            (None, Some(_)) => Err("an account is its id, as GET /api/connections lists it".into()),
-            (Some(_), None) => Err("`add` is true, or absent".into()),
-            (Some(_), Some(_)) => Err("a connect adds an account or connects one again, not both".into()),
+        let access = match o.get("access") {
+            Some(Value::String(a)) => ConnectionAccess::of_word(a),
+            _ => None,
         }
+        .ok_or("a connect names the access its person picked: `read` (read only) or `write` (read and write)")?;
+        let intent = match (o.get("add"), o.get("account")) {
+            (None, None) => Intent::Connect,
+            (Some(Value::Bool(true)), None) => Intent::Add,
+            (None, Some(Value::String(id))) if valid_account_id(id) => Intent::Reconnect(id.clone()),
+            (None, Some(_)) => return Err("an account is its id, as GET /api/connections lists it".into()),
+            (Some(_), None) => return Err("`add` is true, or absent".into()),
+            (Some(_), Some(_)) => return Err("a connect adds an account or connects one again, not both".into()),
+        };
+        Ok((intent, access))
     }
 
     /// Its pending row's columns: `intent` and `account`.
@@ -562,11 +569,20 @@ mod tests {
 
     #[test]
     fn a_connect_asks_for_an_account_another_or_one_again_and_its_row_keeps_it() {
-        assert_eq!(Intent::asked(&Value::Null), Ok(Intent::Connect));
-        assert_eq!(Intent::asked(&json!({})), Ok(Intent::Connect));
-        assert_eq!(Intent::asked(&json!({ "add": true })), Ok(Intent::Add));
-        assert_eq!(Intent::asked(&json!({ "account": "data_installation_1" })), Ok(Intent::Reconnect("data_installation_1".into())));
-        for bad in [json!({ "add": false }), json!({ "add": "yes" }), json!({ "account": "a b" }), json!({ "account": 7 }), json!({ "add": true, "account": "data_installation_1" }), json!({ "other": 1 }), json!([])] {
+        use ConnectionAccess::{Read, Write};
+        assert_eq!(Intent::asked(&json!({ "access": "read" })), Ok((Intent::Connect, Read)));
+        assert_eq!(Intent::asked(&json!({ "access": "write" })), Ok((Intent::Connect, Write)));
+        assert_eq!(Intent::asked(&json!({ "access": "read", "add": true })), Ok((Intent::Add, Read)));
+        assert_eq!(Intent::asked(&json!({ "access": "write", "account": "data_installation_1" })), Ok((Intent::Reconnect("data_installation_1".into()), Write)));
+        let picked = |mut v: Value| {
+            v["access"] = "write".into();
+            v
+        };
+        for bad in [json!({ "add": false }), json!({ "add": "yes" }), json!({ "account": "a b" }), json!({ "account": 7 }), json!({ "add": true, "account": "data_installation_1" }), json!({ "other": 1 })].map(picked) {
+            assert!(Intent::asked(&bad).is_err(), "{bad}");
+        }
+        // the access is the person's to pick: never assumed
+        for bad in [Value::Null, json!({}), json!([]), json!({ "add": true }), json!({ "access": "admin" }), json!({ "access": "Read" }), json!({ "access": null }), json!({ "access": ["read"] })] {
             assert!(Intent::asked(&bad).is_err(), "{bad}");
         }
         for intent in [Intent::Connect, Intent::Add, Intent::Reconnect("data_installation_1".into())] {

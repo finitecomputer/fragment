@@ -190,6 +190,10 @@ pub struct CompSeat {
     pub kind: SeatKind,
     #[serde(default)]
     pub org: Option<String>,
+    /// When a new comp ends by itself, ms since the epoch (none: it lasts
+    /// until ended). A comp held already keeps its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<i64>,
 }
 
 /// `PATCH /api/admin/seats/<id>`: a comped seat's new kind.

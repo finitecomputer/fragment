@@ -702,7 +702,8 @@ mod tests {
     /// Dev's connection is one a deployment's catalog takes as it is.
     #[test]
     fn dev_providers_is_a_valid_catalog() {
-        let oauth = serde_json::json!({ "authorize": "http://127.0.0.1:8794/test-oauth/authorize", "exchange": "http://127.0.0.1:8794/test-oauth/token", "client_id": "mock-connection-client", "scopes": ["openid", "email"], "revoke": "http://127.0.0.1:8794/test-oauth/revoke" });
+        let access = serde_json::json!({ "read": { "scopes": ["mail.read", "openid"] }, "write": { "scopes": ["mail.read", "mail.send", "openid"] } });
+        let oauth = serde_json::json!({ "authorize": "http://127.0.0.1:8794/test-oauth/authorize", "exchange": "http://127.0.0.1:8794/test-oauth/token", "client_id": "mock-connection-client", "access": access, "revoke": "http://127.0.0.1:8794/test-oauth/revoke" });
         let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(Some(oauth))).expect("rows");
         let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog");
         assert!(catalog.get(super::DEV_CONNECTION).is_some_and(|p| p.connection_oauth.is_some()));

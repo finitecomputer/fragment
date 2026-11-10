@@ -119,6 +119,9 @@ pub enum Resolution {
     Same,
     /// Write main's into the profile (the profile did not change it).
     Pull,
+    /// Push the profile's (main's is what both agreed on: its commit moved,
+    /// as after this profile's own push, its content did not).
+    Push,
     /// Both changed it: main's wins, the profile's is kept beside it.
     Conflict,
 }
@@ -128,6 +131,7 @@ pub fn resolve(known: Option<&Known>, local: Option<&Local>, main_hash: &str) ->
         (_, None) => Resolution::Pull,
         (_, Some(l)) if l.hash == main_hash => Resolution::Same,
         (Some(k), Some(l)) if l.hash == k.hash => Resolution::Pull,
+        (Some(k), Some(_)) if k.hash == main_hash => Resolution::Push,
         _ => Resolution::Conflict,
     }
 }
@@ -278,6 +282,11 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
                         write(profile, &target, &bytes, own).map_err(wrote)?;
                         done.pulled += 1;
                     }
+                    Resolution::Push => {
+                        if let Some(change) = change_of(profile, &p, &mut pushed) {
+                            push.push(change);
+                        }
+                    }
                     Resolution::Conflict => {
                         let keep = target.with_file_name(format!("{}.local-{}", target.file_name().and_then(|n| n.to_str()).unwrap_or("file"), fragment_bridge::log::now_ms()));
                         std::fs::rename(&target, &keep).map_err(wrote)?;
@@ -289,13 +298,9 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
                 known.insert(p.clone(), Known { commit: main_commit[&p].clone(), hash: h });
             }
             Action::Push(p) => {
-                let Ok(bytes) = std::fs::read(profile.join(&p)) else { continue };
-                let change = match String::from_utf8(bytes.clone()) {
-                    Ok(text) => FileChange::Text { path: p.clone(), text },
-                    Err(_) => FileChange::Base64 { path: p.clone(), base64: base64::engine::general_purpose::STANDARD.encode(&bytes) },
-                };
-                push.push(change);
-                pushed.push((p, Some(hash(&bytes))));
+                if let Some(change) = change_of(profile, &p, &mut pushed) {
+                    push.push(change);
+                }
             }
             Action::PushDelete(p) => {
                 push.push(FileChange::Delete { path: p.clone(), delete: true });
@@ -335,6 +340,17 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
         ev!("sync.unsaved", { "agent": agent.fragment, "error": e.to_string() });
     }
     Ok(done)
+}
+
+/// The profile's file `p` as a change to push, noting its hash in `pushed`;
+/// None when it can't be read now (the next round sees it again).
+fn change_of(profile: &Path, p: &str, pushed: &mut Vec<(String, Option<String>)>) -> Option<FileChange> {
+    let bytes = std::fs::read(profile.join(p)).ok()?;
+    pushed.push((p.to_string(), Some(hash(&bytes))));
+    Some(match String::from_utf8(bytes) {
+        Ok(text) => FileChange::Text { path: p.to_string(), text },
+        Err(e) => FileChange::Base64 { path: p.to_string(), base64: base64::engine::general_purpose::STANDARD.encode(e.as_bytes()) },
+    })
 }
 
 /// One commit of the profile's changes; its key is its content's hash, so
@@ -450,6 +466,8 @@ mod tests {
         assert_eq!(resolve(None, Some(&l("SOUL.md", "default")), "agents"), Resolution::Conflict);
         // a file the bridge pushed comes back with main's new commit: the same
         assert_eq!(resolve(Some(&k("", "h5")), Some(&l("x", "h5")), "h5"), Resolution::Same);
+        // and changed here since: main holds what both agreed, so the profile's goes up
+        assert_eq!(resolve(Some(&k("", "h5")), Some(&l("x", "h6")), "h5"), Resolution::Push);
     }
 
     /// A files route as the platform's (`GET files`, `GET file?path=`,
@@ -603,6 +621,27 @@ mod tests {
         write(&profile, &profile.join("skills/research/pesto/references/a.md"), b"b", &own).unwrap();
         assert_eq!(*owned.lock().unwrap(), ["skills/research/pesto/references/a.md"]);
         let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// Hermes writes a file, a round pushes it, and Hermes writes it again
+    /// before the next round: main holds the copy this profile pushed, so
+    /// the new write is pushed, never set aside as a conflict (a real
+    /// agent's memory was, 2026-11-10: main's new commit read as an edit).
+    #[tokio::test]
+    async fn a_write_after_its_own_push_is_pushed() {
+        let w = World::new("twice", &[("memories/MEMORY.md", "Paul likes tomatoes.")]).await;
+        w.round().await.unwrap();
+        w.write("memories/MEMORY.md", b"Paul likes tomatoes.\n\xc2\xa7\nAnd basil.");
+        assert_eq!(w.round().await.unwrap().pushed, 1);
+        w.write("memories/MEMORY.md", b"Paul likes tomatoes.\n\xc2\xa7\nAnd basil.\n\xc2\xa7\nAnd pesto.");
+        let d = w.round().await.unwrap();
+        assert_eq!((d.pushed, d.conflicts, d.pulled), (1, 0, 0));
+        assert_eq!(w.main("memories/MEMORY.md").as_deref(), Some(&b"Paul likes tomatoes.\n\xc2\xa7\nAnd basil.\n\xc2\xa7\nAnd pesto."[..]));
+        assert_eq!(w.here("memories/MEMORY.md").as_deref(), Some(&b"Paul likes tomatoes.\n\xc2\xa7\nAnd basil.\n\xc2\xa7\nAnd pesto."[..]));
+        let kept = std::fs::read_dir(w.profile.join("memories")).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().contains(".local-")).count();
+        assert_eq!(kept, 0, "nothing set aside");
+        // replay: settled
+        assert_eq!(w.round().await.unwrap(), Done::default());
     }
 
     /// A profile and its agent's repo behind the fake files route.

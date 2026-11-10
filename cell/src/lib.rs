@@ -1235,7 +1235,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings, `/apps` the person's apps, `/history`
         // every chat they have had, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["history"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["history"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
@@ -1273,7 +1273,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             json_answer(&share::access(env, &url, &who).await?)
         }
         // what the signer is told now, each owner's in its own words (notices.rs)
-        (Method::Get, ["api", "notices"]) => notices::route(&req, env, &url).await,
+        (Method::Get, ["api", "notices"]) => notices::route(&req, env, cfg, &url).await,
         // the invites waiting on the signer's emails, theirs to answer (share.rs)
         (_, ["api", "invites", rest @ ..]) => {
             let rest = rest.to_vec();
