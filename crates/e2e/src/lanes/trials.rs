@@ -91,6 +91,27 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
             && items == vec![("fragment_seat_always_on_month".to_string(), 1)],
         json!({ "seat": mine, "items": format!("{items:?}") }),
     );
+    // what they are told of their seat (FIN-458): a trial in its last three
+    // days alone, in words true with a card or without, with Payment and
+    // invoices for whoever pays for it (they do: their own org's)
+    let told = |k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/notices", None).map(|r| r.body["notices"].clone()).unwrap_or(Value::Null);
+    let of = |notices: &Value, id: &str| notices.as_array().into_iter().flatten().find(|n| n["id"] == id).cloned();
+    let early = told(&kim);
+    let end = crate::api::now_s() + 2 * 86_400;
+    s.stripe.set_trial_end(&sub, end).map_err(anyhow::Error::msg)?;
+    let near = s.eventually(PUSHED, || seat(api, &kim)["seat"]["trialEnds"] == json!(end));
+    let notices = told(&kim);
+    let ending = of(&notices, "seat-ends").unwrap_or_default();
+    s.ok(
+        "a trial is told in its last three days alone: \"Your trial ends on …\", true with a card or without, with Payment and invoices (Stripe's portal) for whoever pays",
+        of(&early, "seat-ends").is_none()
+            && near
+            && ending["title"] == format!("Your trial ends on {}", fragment_core::notice::date(end * 1000))
+            && ending["text"] == "Your seat continues with a card on file; without one it lapses then. Nothing of yours is deleted."
+            && ending["level"] == "info"
+            && ending["actions"] == json!([{ "label": "Payment and invoices", "post": "/api/billing/portal", "body": {} }]),
+        json!({ "early": early, "notices": notices }),
+    );
 
     // ---- its places: one bought, one held by an open Checkout, then none
     let lee = api.person()?;
@@ -151,6 +172,19 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
         lapsed && twice.status == 409 && hundred.status == 400 && hundred.message().contains("not sold") && paid.status == 200,
         json!([seat(api, &kim), twice.status, twice.message(), hundred.status, paid.status]),
     );
+    let notices = told(&kim);
+    let gone = of(&notices, "seat").unwrap_or_default();
+    s.ok(
+        "lapsed, they are told so in Settings' words, with Pay again (their org's admin, seats sold), whose answer names its Checkout to open; its trial is told as ending no more",
+        gone["title"] == "Your seat lapsed"
+            && gone["text"] == "Your agents are stopped. Nothing of yours is gone."
+            && gone["level"] == "warn"
+            && gone["actions"] == json!([{ "label": "Pay again", "post": "/api/billing/checkout", "body": {} }])
+            && of(&notices, "seat-ends").is_none()
+            && paid.body["url"].is_string()
+            && paid.body["open"] == paid.body["url"],
+        json!({ "notices": notices, "paid": paid.body }),
+    );
     // ---- they pay again (Billing's Pay again), a card now, and keep the org they trialed in
     let org = mine["seat"]["org"]["id"].clone();
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("Pay again's Checkout")?;
@@ -169,6 +203,8 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
             && back["seat"]["trialEnds"].is_null(),
         json!({ "seat": back, "form": format!("{:?}", asked.form) }),
     );
+    let notices = told(&kim);
+    s.ok("paid again, they are told nothing of their seat", of(&notices, "seat").is_none() && of(&notices, "seat-ends").is_none(), &notices);
 
     // ---- codes that refuse
     let r = admin("POST", "/trials", Some(&json!({ "name": "Typed", "days": 30, "capacity": 5, "code": "fragment-launch" })))?;
