@@ -66,7 +66,7 @@ A signer's list of the fragments they hold a role on, and their own view of each
 
 #### `fragments.watch`
 
-`GET /api/fragments/watch`: A socket that says when the signer's list, or the invites waiting on them, change.
+`GET /api/fragments/watch`: A socket that says when the signer's list, or what they are told, changes.
 
 - Credentials: NIP-98, the shell's session
 - A WebSocket; receives: [`ListWatchFrame`](#listwatchframe)
@@ -162,6 +162,35 @@ A fragment's live socket: records as they are appended, presence, drafts and que
 - A WebSocket; sends: [`LiveIn`](#livein)
 - A WebSocket; receives: [`LiveOut`](#liveout)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
+### vault
+
+A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
+
+#### `vault.list`
+
+`GET /api/vault`: The signer's secrets, by name, each with its hosts, place and agents: never a value.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretList`](#secretlist)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.put`
+
+`PUT /api/vault/{secret}`: Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`PutSecret`](#putsecret)
+- Answer: [`Secret`](#secret)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.remove`
+
+`DELETE /api/vault/{secret}`: Removes a secret: its agents' next use of it is refused.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretRemoved`](#secretremoved)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
 
 ## Shapes
 
@@ -314,13 +343,13 @@ Values: `person`, `agent`.
 
 ### `ListWatchFrame`
 
-out, open. A frame of `GET /api/fragments/watch`, the socket that follows a signer's list. Frames name nothing: on `changed` or `invited` the page reads its list, or its invites, again with its own credential. The cell writes these as constant text (cell/src/principal.rs). Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does not know (the shell's list, the iOS app).
+out, open. A frame of `GET /api/fragments/watch`, the socket that follows a signer's list. Frames name nothing: on `changed` the page reads its list, and what it is told (`GET /api/notices`), again with its own credential. The cell writes these as constant text (cell/src/principal.rs). Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does not know (the shell's list, the iOS app).
 
 `type: "hello"`. First, as the socket opens.
 
 `type: "changed"`. Their list changed: a row added, gone, or changed.
 
-`type: "invited"`. The invites waiting on their emails changed: one made, renewed or taken back.
+`type: "invited"`. The invites waiting on their emails changed. Sent no more since FIN-458 (an invite is a notice: `changed`); kept for the readers that know it.
 
 ### `ListedFragment`
 
@@ -518,7 +547,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 
 ### `NoticeAction`
 
-out. What a person may do about a notice: `post` its `body` to a platform route with their own credential, then read their notices again; or `open` a page. One of the two.
+out. What a person may do about a notice: `post` its `body` to a platform route with their own credential, then read their notices again; or `open` a page. One of the two. A post's answer may name a page to open (`open`, as `InviteAccepted` does), opened once that read has it; a post refused shows the server's own words for it (`ErrorBody.message`).
 
 | field | type | | |
 | --- | --- | --- | --- |
@@ -604,6 +633,18 @@ out. Where its refs point (`PINNED_REFS`).
 | `live` | `string` or `null` | required | The commit installed as `live`; none before the first deploy. |
 | `main` | `string` or `null` | required | The commit `main` points at; none before its first. |
 
+### `Place`
+
+both, closed. Where a secret goes on a request: one of a header in a format (`{"header": "authorization", "format": "Bearer {}"}`), a query parameter (`{"query": "key"}`), a half of basic auth (`{"basic": "password"}`), or a NIP-98 signature over the request (`{"sign": "nip98"}`: the Vault signs, its key never leaves it). None of them, `Authorization: Bearer {}`.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `basic` | `string` or `null` | optional | `user` or `password`: which half of basic auth it is. |
+| `format` | `string` or `null` | optional | The header's value, `{}` the secret; with `header` alone, `{}`. |
+| `header` | `string` or `null` | optional |  |
+| `query` | `string` or `null` | optional |  |
+| `sign` | `string` or `null` | optional | `nip98`: a NIP-98 signature over the request (kind 27235, its URL, method and body), in `Authorization: Nostr …`. |
+
 ### `PostRecord`
 
 in, closed. `POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a record the platform appends as the poster. `id` is the poster's own (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the record it appended and appends nothing; with another body it is 409.
@@ -641,6 +682,17 @@ in. `PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post there: a r
 | `text` | `string` or `null` | optional | At most `limits::RECORD_BODY_MAX_BYTES`. |
 | `turn` | `string` | required |  |
 
+### `PutSecret`
+
+in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Its hosts, place and agents are set only with its value, so no one who cannot read a value sends it anywhere its setter did not mean. Its `Debug` shows the value, as the wire's checker needs: never print one.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
+| `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
+| `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
+| `value` | `string` | required | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. |
+
 ### `Reason`
 
 out, open. A refusal's cause, for the people who read it: billing's, seats', orgs' and reach's. Open: a reason a reader does not know reads as none.
@@ -661,6 +713,35 @@ out. `GET /api/search?q=` (any signer): the signer's fragments whose title or na
 | --- | --- | --- | --- |
 | `fragments` | `array` of [`ListedFragment`](#listedfragment) | required |  |
 | `messages` | `array` of [`MessageHit`](#messagehit) | required |  |
+
+### `Secret`
+
+out. A secret as its person reads it: everything but its value.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of `string` | required |  |
+| `hosts` | `array` of `string` | required |  |
+| `name` | `string` | required |  |
+| `place` | [`Place`](#place) | required |  |
+| `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
+
+### `SecretList`
+
+out. `GET /api/vault`: the person's secrets, by name.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `secrets` | `array` of [`Secret`](#secret) | required |  |
+
+### `SecretRemoved`
+
+out. `DELETE /api/vault/{secret}`: whether there was one to remove.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `name` | `string` | required |  |
+| `removed` | `boolean` | required |  |
 
 ### `Seen`
 

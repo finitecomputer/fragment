@@ -4,7 +4,7 @@ import { PHASE } from "./computer.js";
 
 export function createOnboarding({ api, ui, account, fragments, computer, navigation, reads, load, skillsFragment, rosterChanged }) {
   const { $, el, notice } = ui;
-  const { person, isGuest, setGuest, hasInvites } = account;
+  const { person, isGuest, setGuest, told } = account;
   const { allFragments, chats, own, labelOf, titleOf, primaryAgent, agentsOwnChat, freeLabel, slug, seg } = fragments;
   const { computerView, computerFailed, agents, computerOf, computerIs } = computer;
   const { start, openChat, atHome, hasFrame, page, welcomePath: WELCOME } = navigation;
@@ -197,9 +197,9 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const trial = q.get("trial");
     const foot = el("div", "welcome-foot");
     foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME, "text"));
-    // someone shared something with them first, or invited them: it is still
-    // theirs to open, or to answer
-    if (allFragments().length || hasInvites()) {
+    // someone shared something with them first, or they are told something
+    // (an invite): it is still theirs to open, or to answer
+    if (allFragments().length || told()) {
       const home = el("a", "text", "Not now");
       home.href = "/";
       foot.append(home);

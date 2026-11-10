@@ -360,24 +360,28 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     s.ok("one someone else shares with them is told, and their list then has it", r.status == 200 && shared == changed && listed, json!([r.status, shared, list.body]));
 
     // an invite to their email waits for their yes (decision 63): it is
-    // told as `invited`, naming nothing, to every tab, and the shell reads
-    // the invites then; their yes, the shell's with its session, is a share
-    // like any, told as a change of their list
+    // told as `changed`, naming nothing, to every tab (an invite is one of
+    // their notices: FIN-458), and the shell reads what it is told then;
+    // their yes, the shell's with its session, is a share like any, told as
+    // a change of their list
     let me = shell(api, session, "GET", "/api/identities/me", None, &[])?;
     let email = me.body["email"].as_str().unwrap_or("").to_string();
     // (the second tab was told of the share above too: its frame read here)
     let shared_too = told(&mut second);
     let asks = s.named(api, &other, "asks")?;
     let r = api.create(&other, &asks)?;
-    let invited = json!({ "type": "invited" });
+    // the registry tells the one frame for its notices (`invited` before FIN-458)
+    let invited = json!({ "type": "changed" });
     let r2 = api.signed(&other, "POST", &format!("/api/f/{asks}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
     let (one, two) = (told(&mut tab), told(&mut second));
     let seen = shell(api, session, "GET", "/api/invites", None, &[])?;
     let waits = seen.body["invites"].as_array().is_some_and(|l| l.iter().any(|i| i["fragment"] == asks.as_str() && i["email"] == email.as_str()));
+    let told_them = shell(api, session, "GET", "/api/notices", None, &[])?;
+    let noticed = told_them.body["notices"].as_array().is_some_and(|l| l.iter().any(|n| n["id"] == format!("invite:{asks}").as_str() && n["actions"][0]["post"] == format!("/api/invites/{asks}/accept").as_str()));
     s.ok(
-        "an invite to their email is told to every tab as `invited`, naming nothing, and the shell then reads it with its session (GET /api/invites)",
-        shared_too == changed && r.status == 200 && r2.status == 200 && !r2.body["invited"].is_null() && one == invited && two == invited && waits,
-        json!([shared_too, r2.body, one, two, seen.body]),
+        "an invite to their email is told to every tab as `changed`, naming nothing, and the shell then reads it with its session: a notice of theirs (GET /api/notices), with its Accept",
+        shared_too == changed && r.status == 200 && r2.status == 200 && !r2.body["invited"].is_null() && one == invited && two == invited && waits && noticed,
+        json!([shared_too, r2.body, one, two, seen.body, told_them.body]),
     );
     let yes = shell(api, session, "POST", &format!("/api/invites/{asks}/accept"), Some(&json!({})), &[])?;
     let (one, two) = (told(&mut tab), told(&mut second));
@@ -385,7 +389,7 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
     let listed = list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == asks.as_str() && f["role"] == "viewer"));
     s.ok(
-        "their yes, the shell's with its session, is a share like any: told as a change of their list, which has it; and as `invited`, so another tab's sidebar drops it",
+        "their yes, the shell's with its session, is a share like any: told as a change of their list, which has it; and again as their notices changed, so another tab drops it",
         yes.status == 200 && one == changed && two == changed && one_more == invited && two_more == invited && listed,
         json!([yes.body, one, two, one_more, two_more]),
     );
@@ -399,7 +403,7 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let seen = shell(api, session, "GET", "/api/invites", None, &[])?;
     let gone = seen.body["invites"].as_array().is_some_and(|l| !l.iter().any(|i| i["fragment"] == declined.as_str()));
     s.ok(
-        "their no, in one tab, is told to every tab as `invited` at once, and the invite waits no more",
+        "their no, in one tab, is told to every tab as `changed` at once, and the invite waits no more",
         r.status == 200 && r2.status == 200 && no.status == 200 && one == invited && two == invited && gone,
         json!([no.body, one, two, seen.body]),
     );
@@ -411,7 +415,7 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let seen = shell(api, session, "GET", "/api/invites", None, &[])?;
     let gone = seen.body["invites"].as_array().is_some_and(|l| !l.iter().any(|i| i["fragment"] == declined.as_str()));
     s.ok(
-        "an invite to a fragment its owner deletes is told to every tab as `invited`, and waits no more",
+        "an invite to a fragment its owner deletes is told to every tab as `changed`, and waits no more",
         r2.status == 200 && deleted.status == 200 && one == invited && two == invited && gone,
         json!([deleted.body, one, two, seen.body]),
     );
@@ -1701,6 +1705,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
+    older_release_ui(s, api, &mut b, &session)?;
     // a guest, in this browser, who then signs in to this seat
     guest_ui(s, api, &mut b, &email, &shots)?;
     println!("      (screenshots: {})", shots.display());
@@ -2209,6 +2214,32 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     anyhow::ensure!(reload_shell(b, page)?, "the first account's shell again, at home: {}", b.eval(page, "location.pathname")?);
     let unshared = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{other_id}"), None, &[])?;
     anyhow::ensure!(unshared.status == 200, "the other account out of the first chat again: {unshared}");
+    Ok(())
+}
+
+/// A shell that reads an older release (a deploy going out, rolled back, a
+/// reload the release watcher put off), one from before notices (FIN-458):
+/// its `/api/notices` is no route (404). Nothing is told, and that is no
+/// failure: no "Couldn't refresh" line, the page as ever.
+fn older_release_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open_with_script(
+        &format!("{}/", api.base),
+        r#"{ const fetch = window.fetch.bind(window);
+             window.fetch = (url, options) => String(url).endsWith('/api/notices')
+               ? Promise.resolve(new Response(JSON.stringify({ error: 'not_found', message: 'no route GET /api/notices' }), { status: 404, headers: { 'content-type': 'application/json' } }))
+               : fetch(url, options); }"#,
+    )?;
+    let drawn = b.until(&page, "!!document.querySelector('#sidebar .row')", wait);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let band = b.eval(&page, "({ hidden: document.getElementById('computer-notices').hidden, rows: [...document.querySelectorAll('#computer-notices .computer-notice')].map((r) => r.dataset.kind) })")?;
+    s.ok(
+        "a release from before notices answers none (404): nothing told, and no \"Couldn't refresh\" line, the page as ever",
+        drawn && band["rows"].as_array().is_some_and(|r| !r.iter().any(|k| k == "refresh")),
+        &band,
+    );
+    b.close(page)?;
     Ok(())
 }
 

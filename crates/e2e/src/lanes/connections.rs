@@ -72,6 +72,15 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let signed = api.signed(&key, "POST", &format!("/api/connections/{PROVIDER}/authorize"), None)?;
     let disabled = begin(api, &a, "google")?;
     s.ok("keys and unconfigured connections cannot use the old Pipes authorize bypass", signed.status == 403 && disabled.status >= 400 && s.workos.connection_counts() == before, format!("key {}, unconfigured {}", signed.status, disabled.status));
+    // each provider named for people by the server, the one source of every
+    // client's words for it (FIN-458: no copy in the shell)
+    let listed_all = shell(api, &a, "GET", "/api/connections")?;
+    let rows = listed_all.body["providers"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "each provider listed is named for people by the platform: its name, the one source every client says",
+        listed_all.status == 200 && !rows.is_empty() && rows.iter().all(|p| p["name"].as_str().is_some_and(|n| !n.is_empty() && *n == fragment_core::notice::provider_name(p["provider"].as_str().unwrap_or_default()))),
+        json!(rows.iter().map(|p| json!({ "provider": p["provider"], "name": p["name"] })).collect::<Vec<_>>()),
+    );
 
     let (url, cookie, _) = pending(api, &a, "provider-account-a")?;
     for (label, session, held, why) in [

@@ -1477,24 +1477,29 @@ fn click_aims(s: &mut Suite, chrome: &mut crate::browser::Browser, page: &crate:
     s.ok("a link that takes the page to another document: the click is done, the page there", landed, json!({ "from": path }));
 
     // armed, then left for another document and come back to from the
-    // back/forward cache (a page of the platform's with no socket, so it
-    // may be cached): the outgoing document dropped its aim (`pagehide`).
-    // Left by the harness's navigation, answered once the new document is
-    // there: a click on the page's own link could race its web font
-    // (`font-display: swap`), whose late swap moves the link, between a
-    // press and its release too, and that click goes to the paragraph
-    // (run 42438054022); `#away` above is the link click
+    // back/forward cache (a page of the platform's with no script and no
+    // socket, so it may be cached): the outgoing document dropped its aim
+    // (`pagehide`). Left once loaded: one left still parsing is not cached,
+    // and one left with its fonts and background still coming is cached,
+    // then finishes that load once restored, its first `pageshow` (not
+    // persisted) after the restore's (FIN-460, run 42675327752). The
+    // browser says how it came back (`back`), and the document that came is
+    // the one marked before it left. Left by the harness's navigation,
+    // answered once the new document is there: a click on the page's own
+    // link could race its web font (`font-display: swap`), whose late swap
+    // moves the link, between a press and its release too, and that click
+    // goes to the paragraph (run 42438054022); `#away` above is the link click
     let legal = chrome.open(&format!("{base}/about"))?;
-    let armed = chrome.eval(&legal, "(addEventListener('pageshow', (e) => { window.__restored = e.persisted; }), window.__clickGuard.arm('body', 1), window.__clickGuard.armed())")?;
+    let loaded = chrome.until(&legal, "document.readyState === 'complete'", Duration::from_secs(15));
+    let armed = chrome.eval(&legal, "(window.__left = true, window.__clickGuard.arm('body', 1), window.__clickGuard.armed())")?;
     chrome.navigate(&legal, &format!("{base}/terms"))?;
     let left = chrome.eval(&legal, "location.pathname === '/terms'")? == true;
-    chrome.back(&legal)?;
-    let back = chrome.until(&legal, "location.pathname === '/about' && document.readyState === 'complete' && window.__restored !== undefined", Duration::from_secs(15));
-    let came = chrome.eval(&legal, "({ restored: window.__restored ?? null, armed: window.__clickGuard.armed() })")?;
+    let came = chrome.back(&legal)?;
+    let back = chrome.eval(&legal, "({ at: location.pathname, marked: window.__left === true, armed: window.__clickGuard.armed() })")?;
     s.ok(
         "a document armed, left, and come back to from the back/forward cache holds no aim",
-        armed == true && left && back && came == json!({ "restored": true, "armed": false }),
-        json!({ "armed": armed, "left": left, "back": back, "came": came }),
+        loaded && armed == true && left && came == crate::browser::Came::Restored && back == json!({ "at": "/about", "marked": true, "armed": false }),
+        json!({ "loaded": loaded, "armed": armed, "left": left, "came": came.to_string(), "back": back }),
     );
     chrome.close(legal)?;
     Ok(())

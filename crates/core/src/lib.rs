@@ -83,3 +83,4 @@ pub mod wipe;
 pub mod swap;
 pub mod transcribe;
 pub mod tree;
+pub mod vault;
