@@ -733,11 +733,14 @@ pub(crate) struct ConnectionFences {
 }
 
 /// The providers fenced whole, and each account fenced alone, at most
-/// `connection_signin::ACCOUNT_FENCES_MAX` a provider.
+/// `connection_signin::ACCOUNT_FENCES_MAX` a provider; and beside them the
+/// access the person picked at each row whose platform keeps it
+/// (`ConnectionOAuth::kept`), read with them in the one question.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct FencedProviders {
     pub providers: Vec<String>,
     pub accounts: Vec<FencedAccount>,
+    pub access: BTreeMap<String, fragment_proto::computer::ConnectionAccess>,
 }
 
 /// One account a disconnect fenced: its provider, and its identifier.

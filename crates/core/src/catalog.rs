@@ -213,6 +213,23 @@ impl Access {
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub scopes: Vec<String>,
+    /// Read only's alone, where the provider has no read-only scope
+    /// (Salesforce's `api` is all its user may do): the HTTP methods a
+    /// read-only account's calls may use, some of `GET` and `HEAD`. Its
+    /// scopes may then be read and write's. The platform keeps the access
+    /// its person picked, and the swap sends a read-only account's token
+    /// on those methods alone (docs/pipes-browser-binding.md, Access the
+    /// platform keeps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<String>>,
+}
+
+impl ConnectionOAuth {
+    /// Whether the platform keeps the access its person picked, its read
+    /// only enforced by the swap (`Grant::methods`), not by the provider.
+    pub fn kept(&self) -> bool {
+        self.access.read.methods.is_some()
+    }
 }
 
 /// A model a person may pick for an agent: its id as the provider names it,
@@ -632,6 +649,9 @@ impl Catalog {
                 if p.kind != Kind::Connection || p.connection_oauth.is_none() {
                     return Err(CatalogError::Accounts { provider, why: "only a connection with connection_oauth connects several accounts: they are imported by its callback".into() });
                 }
+                if n > 1 && p.connection_oauth.as_ref().is_some_and(ConnectionOAuth::kept) {
+                    return Err(CatalogError::Accounts { provider, why: "a connection whose read only the platform keeps (its read access names methods) connects one account".into() });
+                }
             }
         }
         Ok(Catalog { providers: rows })
@@ -885,6 +905,14 @@ mod tests {
         let mut g = google();
         g["connection_oauth"] = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "scopes": ["mail.read"] });
         assert!(matches!(parse(json!([g])), Err(CatalogError::Shape(_))), "one list of scopes for both is a row of before: refused, never read as either");
+        // a provider with no read-only scope: read only names its methods,
+        // and the platform keeps the access picked, of one account alone
+        let kept = json!({ "read": { "scopes": ["api"], "methods": ["GET", "HEAD"] }, "write": { "scopes": ["api"] } });
+        assert!(oauth(kept.clone()).unwrap().get("google").unwrap().connection_oauth.as_ref().unwrap().kept());
+        let mut several = google();
+        several["connection_oauth"] = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "access": kept });
+        several["accounts_max"] = json!(2);
+        assert!(matches!(parse(json!([several])), Err(CatalogError::Accounts { .. })), "its access is kept a provider, not an account");
     }
 
     /// Several accounts: a connection whose callback imports them (its

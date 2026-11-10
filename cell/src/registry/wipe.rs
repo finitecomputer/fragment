@@ -315,6 +315,7 @@ impl RegistryCell {
         self.exec("DELETE FROM connection_fences WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
         self.exec("DELETE FROM connection_account_fences WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
         self.exec("DELETE FROM connection_disconnects WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
+        self.exec("DELETE FROM connection_access WHERE (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE identity = ?)", vec![identity.into()])?;
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM invite_mails WHERE sharer = ?", vec![identity.into()])?;

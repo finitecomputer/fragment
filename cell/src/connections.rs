@@ -135,6 +135,12 @@ pub async fn connection_states(
             (Some(u), _) => Some(crate::keys::pipes_state(env, api, provider, u).await?).filter(|a| a.state != ProviderState::NotConnected).into_iter().collect(),
         };
         states.insert(provider.to_string(), accounts::state_of(&held));
+        // where the platform keeps the access picked: the registry's, read
+        // with the fences (none kept: read only)
+        let held: Vec<PipesAccount> = match p.connection_oauth.as_ref().is_some_and(|o| o.kept()) {
+            true => held.into_iter().map(|a| PipesAccount { kept: fenced.access.get(provider).copied(), ..a }).collect(),
+            false => held,
+        };
         if let Some(accounts) = accounts.as_deref_mut() {
             accounts.insert(provider.to_string(), held);
         }
@@ -147,6 +153,22 @@ pub async fn connection_states(
 /// several, in order (computer.rs `connection_token`).
 pub fn held_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BTreeMap<String, Vec<Held>> {
     listed.iter().filter(|(p, _)| cfg.providers.get(p).is_some_and(|p| p.several())).map(|(p, l)| (p.clone(), accounts::held(l))).gathered()
+}
+
+/// What a person's computer holds of their access at each connection whose
+/// platform keeps it (`ConnectionOAuth::kept`: one account a person), to
+/// hold a read-only account's calls to its methods (computer.rs
+/// `connection_token`): read only where none is kept, or none is listed.
+pub fn kept_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BTreeMap<String, ConnectionAccess> {
+    cfg.providers
+        .providers()
+        .iter()
+        .filter_map(|p| p.connection_oauth.as_ref().filter(|o| o.kept()).map(|o| (p, o)))
+        .filter_map(|(p, o)| {
+            let account = listed.get(&p.name).and_then(|l| l.first());
+            fragment_core::connection_signin::access_held(o, None, account.and_then(|a| a.kept)).map(|a| (p.name.clone(), a))
+        })
+        .collect()
 }
 
 /// `provider`'s accounts of the person signed in as `who`, as their list
@@ -216,7 +238,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
-            let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
+            let told = json!({ "connections": states, "accounts": held_of(cfg, &listed), "access": kept_of(cfg, &listed) });
             /// `computer/own-keys`' answer: the providers it holds a key of its own for.
             #[derive(serde::Deserialize)]
             struct OwnKeys {
@@ -403,7 +425,7 @@ fn reachable(cfg: &Config, url: &str) -> CellResult<()> {
 /// What `account`'s grant lets its agents do (`connection_signin::access_of`;
 /// none said where Pipes names no scopes, or the row has no authorization).
 fn access(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<ConnectionAccess> {
-    o.zip(account.scopes.as_deref()).map(|(o, granted)| fragment_core::connection_signin::access_of(o, granted))
+    o.and_then(|o| fragment_core::connection_signin::access_held(o, account.scopes.as_deref(), account.kept))
 }
 
 /// What `account`'s access asks for that the person did not allow it (none
@@ -463,7 +485,7 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
 async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) -> CellResult<BTreeMap<String, ProviderState>> {
     let mut listed = BTreeMap::new();
     let states = connection_states(env, cfg, std::future::ready(Ok(user)), Some(&mut listed)).await?;
-    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states, "accounts": held_of(cfg, &listed) })).await {
+    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states, "accounts": held_of(cfg, &listed), "access": kept_of(cfg, &listed) })).await {
         Ok(_) => Ok(states),
         Err(e) if e.code == ErrorCode::NotFound => Ok(states),
         Err(e) => {

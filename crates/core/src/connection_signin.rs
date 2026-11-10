@@ -86,11 +86,53 @@ pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
     if !token(&o.client_id, 256) || !bounded(&o.access.read) || !bounded(&o.access.write) {
         return Err("a connection needs a client id, and 1–32 bounded OAuth scopes for each access (read, write)".into());
     }
-    if writes(o).next().is_none() {
-        return Err("its write access asks for a scope its read access does not: that scope is how a grant of read and write is told from one of read only".into());
+    if o.access.write.methods.is_some() {
+        return Err("only its read access names methods: read and write's calls take any".into());
+    }
+    if let Some(m) = &o.access.read.methods {
+        let mut seen = std::collections::BTreeSet::new();
+        if m.is_empty() || m.iter().any(|x| !READ_METHODS.contains(&x.as_str()) || !seen.insert(x)) {
+            return Err(format!("its read access's methods are some of {}, each once", READ_METHODS.join(", ")));
+        }
+    }
+    if !o.kept() && writes(o).next().is_none() {
+        return Err("its write access asks for a scope its read access does not: that scope is how a grant of read and write is told from one of read only (where the provider has no read-only scope, its read access names the methods it may use)".into());
     }
     Ok(())
 }
+
+/// The HTTP methods a read-only account's calls may be held to
+/// (`Grant::methods`): those that only read.
+pub const READ_METHODS: [&str; 2] = ["GET", "HEAD"];
+
+/// What an account lets its agents do: where the platform keeps it (its
+/// row's `kept`), the access its person picked (`kept`), and read only
+/// where it keeps none (a connect not known to have imported); else as
+/// its grant holds it (`access_of`), none said where Pipes names no scopes.
+pub fn access_held(o: &ConnectionOAuth, granted: Option<&[String]>, kept: Option<ConnectionAccess>) -> Option<ConnectionAccess> {
+    match o.kept() {
+        true => Some(kept.unwrap_or(ConnectionAccess::Read)),
+        false => granted.map(|g| access_of(o, g)),
+    }
+}
+
+/// Whether an account of `access` may make a call of `method` with its
+/// token: any, unless it is read only and its row holds read only to some
+/// methods (`Grant::methods`).
+pub fn method_allowed(o: &ConnectionOAuth, access: ConnectionAccess, method: &str) -> bool {
+    match (access, &o.access.read.methods) {
+        (ConnectionAccess::Read, Some(methods)) => methods.iter().any(|m| m == method),
+        _ => true,
+    }
+}
+
+/// A connect known to have imported, at a row whose access the platform
+/// keeps: the access its person picked (issuer, subject, provider, access,
+/// when), the newest connect's.
+pub const KEEP_ACCESS: &str = "INSERT INTO connection_access (issuer, subject, provider, access, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider) DO UPDATE SET access = excluded.access, at = excluded.at";
+/// The access a person picked at each row that keeps it: (issuer, subject)
+/// → (provider, access).
+pub const KEPT_ACCESS: &str = "SELECT provider, access FROM connection_access WHERE issuer = ? AND subject = ?";
 
 /// The scopes read and write asks for that read only does not, never a
 /// sign-in one: a grant holding any of them is read and write.
@@ -368,7 +410,7 @@ mod tests {
     use super::*;
 
     fn config() -> ConnectionOAuth {
-        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect(), methods: None };
         let access = catalog::Access { read: grant(&["mail.read", "files.read"]), write: grant(&["mail.read", "mail.send", "files.read"]) };
         ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, revoke: None }
     }
@@ -749,6 +791,40 @@ mod tests {
         let mut signs_in = config();
         signs_in.access.write.scopes.push("openid".into());
         assert_eq!(access_of(&signs_in, &["openid".to_string(), "mail.read".to_string()]), ConnectionAccess::Read);
+    }
+
+    /// A provider with no read-only scope (Salesforce): its read access
+    /// names the methods it may use, its scopes then read and write's, and
+    /// the platform keeps the access picked: read only where none is kept,
+    /// and a read-only account's token goes on those methods alone.
+    #[test]
+    fn read_only_the_platform_keeps_holds_its_calls_to_the_methods_that_read() {
+        let mut o = config();
+        o.access.read = o.access.write.clone();
+        assert!(check(&o).is_err(), "the same scopes, with nothing to tell them apart");
+        o.access.read.methods = Some(vec!["GET".into(), "HEAD".into()]);
+        assert!(check(&o).is_ok() && o.kept());
+        for bad in [vec![], vec!["POST".to_string()], vec!["GET".to_string(), "GET".to_string()], vec!["get".to_string()], vec!["OPTIONS".to_string()]] {
+            let mut bad_o = o.clone();
+            bad_o.access.read.methods = Some(bad.clone());
+            assert!(check(&bad_o).is_err(), "{bad:?}");
+        }
+        let mut write_named = o.clone();
+        write_named.access.write.methods = Some(vec!["GET".into()]);
+        assert!(check(&write_named).is_err(), "read and write's calls are never held to methods");
+        use ConnectionAccess::{Read, Write};
+        let all: Vec<String> = o.access.write.scopes.clone();
+        assert_eq!(access_held(&o, Some(&all), Some(Write)), Some(Write), "the access picked, whatever its grant holds");
+        assert_eq!(access_held(&o, Some(&all), Some(Read)), Some(Read));
+        assert_eq!(access_held(&o, None, None), Some(Read), "none kept is read only, Pipes' scopes or none");
+        assert_eq!(access_held(&config(), Some(&all), Some(Read)), Some(Write), "a row that keeps none says its grant's");
+        assert_eq!(access_held(&config(), None, Some(Write)), None);
+        assert!(method_allowed(&o, Read, "GET") && method_allowed(&o, Read, "HEAD"));
+        for m in ["POST", "PATCH", "PUT", "DELETE", "OPTIONS", "get"] {
+            assert!(!method_allowed(&o, Read, m), "{m}");
+            assert!(method_allowed(&o, Write, m), "read and write: {m}");
+            assert!(method_allowed(&config(), Read, m), "the provider holds a read-only grant of a row with scopes of its own: {m}");
+        }
     }
 
     /// Google's row asks it to show its account chooser, then its consent,

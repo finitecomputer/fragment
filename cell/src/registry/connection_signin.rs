@@ -195,6 +195,12 @@ impl RegistryCell {
         // the provider goes, and of several, that account's
         let row = || -> Vec<SqlStorageValue> { vec![pending.issuer.as_str().into(), pending.subject.as_str().into(), b.provider.as_str().into()] };
         self.exec(connection_signin::UNFENCE, row())?;
+        // where the platform keeps the access (no read-only scope at the
+        // provider), the one picked, in the same turn: a connect whose
+        // import is not known to have landed keeps none, read only
+        if o.kept() {
+            self.exec(connection_signin::KEEP_ACCESS, [row(), vec![access.word().into(), SqlStorageValue::Integer(js::now_ms())]].concat())?;
+        }
         if let (Some(_), Some(identifier)) = (&import, &identifier) {
             self.exec(connection_signin::UNFENCE_ACCOUNT, [row(), vec![identifier.as_str().into()]].concat())?;
         }
@@ -280,7 +286,17 @@ impl RegistryCell {
             provider: String,
         }
         let rows = self.rows::<Row>(connection_signin::FENCED, vec![b.issuer.as_str().into(), b.subject.as_str().into()])?;
-        let accounts = self.rows::<FencedAccount>(connection_signin::FENCED_ACCOUNTS, vec![b.issuer.into(), b.subject.into()])?;
-        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect(), accounts })
+        let accounts = self.rows::<FencedAccount>(connection_signin::FENCED_ACCOUNTS, vec![b.issuer.as_str().into(), b.subject.as_str().into()])?;
+        #[derive(Deserialize)]
+        struct Kept {
+            provider: String,
+            access: String,
+        }
+        // a word this code does not know keeps nothing: read only
+        let access = self.rows::<Kept>(connection_signin::KEPT_ACCESS, vec![b.issuer.into(), b.subject.into()])?
+            .into_iter()
+            .filter_map(|k| fragment_proto::computer::ConnectionAccess::of_word(&k.access).map(|a| (k.provider, a)))
+            .collect();
+        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect(), accounts, access })
     }
 }

@@ -431,6 +431,15 @@ impl WorkOs {
         json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
 
+    /// The stand-in provider's connection as a provider with no read-only
+    /// scope has it (Salesforce's): read only asks for read and write's
+    /// scopes, and the platform holds its calls to GET and HEAD.
+    pub fn kept_connection_oauth(&self) -> Value {
+        let mut o = self.connection_oauth();
+        o["access"]["read"] = json!({ "scopes": CONNECTION_WRITE_SCOPES, "methods": ["GET", "HEAD"] });
+        o
+    }
+
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
     pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
 

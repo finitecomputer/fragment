@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::ledger::{charged, entries, forget_gate, usage};
 use crate::api::Api;
-use crate::{Suite, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
+use crate::{Suite, KEPT_CONNECTION, KEPT_CONNECTION_HOST, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
 
 /// Who the swap's checks act as, and on what.
 pub(super) struct Swapping<'a> {
@@ -79,6 +79,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
     "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
+    "a connection whose read only the platform keeps (its provider has no read-only scope, as Salesforce's), connected with no access kept: read only, a GET goes with Pipes' token, and a POST is refused (403) before any token is minted, reaching no one",
+    "connected read and write through its callback, its access is kept: its owner's list says so, and a POST goes with Pipes' token",
+    "connected read only again through its callback, its access is kept so: its owner's list says read only, and a POST is refused again, reaching no one",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -120,7 +123,7 @@ const XAI_CHAT: &str = r#"{"model":"grok-4.3","messages":[{"role":"user","conten
 /// `provider`: a local run holds the node's host secret, so it makes one
 /// as the platform does (a forgery needs the secret; a guest has none).
 pub(super) fn placeholder(s: &Suite, id: &str, agent: &str, provider: &str) -> String {
-    let kind = if [SWAP_CONNECTION, SEVERAL].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
+    let kind = if [SWAP_CONNECTION, SEVERAL, KEPT_CONNECTION].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
     let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(id, agent, provider);
     fragment_core::swap::Placeholder::new(kind, provider, &tag).text()
 }
@@ -251,6 +254,43 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let cleared = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": null })))?;
     let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}"), None)?;
     anyhow::ensure!(cleared.status == 200 && gone.status == 200, "the several accounts' checks cleared: {cleared}; {gone}");
+
+    // a connection whose read only the platform keeps (its provider has no
+    // read-only scope): GET and HEAD alone while read only, refused before
+    // Pipes is asked for a token; the access picked kept as its callback
+    // imports, the owner's read telling the computer
+    s.workos.connect(&email, KEPT_CONNECTION, true);
+    let access_of = |r: &crate::api::Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == KEPT_CONNECTION)).map(|x| x["access"].clone()).unwrap_or(Value::Null);
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    anyhow::ensure!(state_of(&r, KEPT_CONNECTION) == "connected", "the kept connection connected: {r}");
+    let fetch = |s: &Suite, posting: bool| format!("fetch http://{KEPT_CONNECTION_HOST}/v1/records with {}{}", placeholder(s, w.id, w.agent, KEPT_CONNECTION), if posting { r#" posting {"name":"a record"}"# } else { "" });
+    let swapped = |s: &Suite| s.workos.tokens(KEPT_CONNECTION).last().is_some_and(|t| s.upstream.seen().last().is_some_and(|seen| seen["host"] == KEPT_CONNECTION_HOST && seen["auth"]["authorization"] == format!("Bearer {t}")));
+    let unsent = |s: &Suite| (s.upstream.seen().len(), s.workos.tokens(KEPT_CONNECTION).len());
+    let read = say(s, 171, &fetch(s, false))?;
+    let read_swapped = swapped(s);
+    let before = unsent(s);
+    let wrote = say(s, 172, &fetch(s, true))?;
+    s.ok(
+        SWAP_CHECKS[46],
+        access_of(&r) == "read" && read.starts_with("fetched 200") && read_swapped && wrote.starts_with("fetched 403") && wrote.contains("connected read only") && unsent(s) == before,
+        json!({ "access": access_of(&r), "read": read, "wrote": wrote }),
+    );
+    let session = api.sign_in(&email)?;
+    let back = connected_through_callback(api, &session, KEPT_CONNECTION, "write")?;
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let wrote = say(s, 173, &fetch(s, true))?;
+    s.ok(SWAP_CHECKS[47], back.status == 200 && access_of(&r) == "write" && wrote.starts_with("fetched 200") && swapped(s), json!({ "back": back.status, "access": access_of(&r), "wrote": wrote }));
+    let back = connected_through_callback(api, &session, KEPT_CONNECTION, "read")?;
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let before = unsent(s);
+    let wrote = say(s, 174, &fetch(s, true))?;
+    s.ok(
+        SWAP_CHECKS[48],
+        back.status == 200 && access_of(&r) == "read" && wrote.starts_with("fetched 403") && wrote.contains("connected read only") && unsent(s) == before,
+        json!({ "back": back.status, "access": access_of(&r), "wrote": wrote }),
+    );
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{KEPT_CONNECTION}"), None)?;
+    anyhow::ensure!(gone.status == 200, "the kept connection's checks cleared: {gone}");
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
@@ -638,6 +678,28 @@ fn path_of(url: &str) -> String {
 pub(super) fn sent_back(api: &Api, page: &str) -> Result<String> {
     let r = api.external(page)?;
     Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+}
+
+/// A connect of `provider` through its callback, as Settings makes one: the
+/// person's session begins it picking `access`, the stand-in provider's
+/// consent grants all it asks for, and their browser comes back to the
+/// callback, whose answer this is.
+fn connected_through_callback(api: &Api, session: &str, provider: &str, access: &str) -> Result<crate::api::Reply> {
+    let shell_headers = || vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())];
+    let r = api.call(crate::api::Call {
+        method: "POST",
+        url: format!("{}/api/connections/{provider}/authorize", api.base),
+        body: Some(json!({ "access": access }).to_string().into_bytes()),
+        content_type: Some("application/json"),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: shell_headers(),
+        ..crate::api::Call::default()
+    })?;
+    anyhow::ensure!(r.status == 200, "begin {provider} as {access}: {r}");
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).ok_or_else(|| anyhow::anyhow!("no connection cookie: {r}"))?;
+    let consent = api.external(r.body["url"].as_str().unwrap_or_default())?;
+    anyhow::ensure!(consent.status == 302, "the stand-in provider's consent: {consent}");
+    api.call(crate::api::Call { method: "GET", url: consent.header("location"), cookie: Some(format!("fragment_session={session}; {bound}")), ..crate::api::Call::default() })
 }
 
 /// Settings' Connect, as the shell sends it (its session, from the

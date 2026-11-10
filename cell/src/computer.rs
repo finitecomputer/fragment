@@ -59,7 +59,7 @@ use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ConnectionAccess, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -435,6 +435,11 @@ pub struct ComputerCell {
     /// takes several (its row's `accounts_max`), in their list's order,
     /// which a swap chooses its agent's from (`connection_accounts::chosen`).
     accounts: RefCell<BTreeMap<String, Vec<Held>>>,
+    /// Believed with them: the access the owner picked at each connection
+    /// whose platform keeps it (`ConnectionOAuth::kept`), which holds a
+    /// read-only account's swaps to its methods (`connection_token`); one
+    /// not named here is read only.
+    access: RefCell<BTreeMap<String, ConnectionAccess>>,
     /// How many times the owner's reads (and disconnects) told it their
     /// states (`computer/own-keys`): a read of its own begun before one
     /// answers older states, and does not draw over them.
@@ -475,6 +480,7 @@ impl DurableObject for ComputerCell {
             taking_over: futures_util::lock::Mutex::new(()),
             states: RefCell::default(),
             accounts: RefCell::default(),
+            access: RefCell::default(),
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
@@ -593,6 +599,9 @@ fn may_use(narrowed: &Option<Vec<String>>, provider: &str) -> bool {
 #[derive(Deserialize)]
 struct CredentialsAsk {
     host: String,
+    /// The request's method: a read-only account's token goes on its row's
+    /// read methods alone, where the platform keeps its access.
+    method: String,
     placeholders: Vec<Asked>,
 }
 
@@ -648,6 +657,10 @@ struct OwnKeysAsk {
     /// With them, the accounts at each connection that takes several.
     #[serde(default)]
     accounts: Option<BTreeMap<String, Vec<Held>>>,
+    /// With them, the access picked at each connection whose platform
+    /// keeps it (`connections::kept_of`).
+    #[serde(default)]
+    access: Option<BTreeMap<String, ConnectionAccess>>,
 }
 
 /// `computer/joined`'s body: the agent `identity` was added to `fragment`,
@@ -2131,6 +2144,7 @@ impl ComputerCell {
         }
         *self.states.borrow_mut() = Some((states.clone(), until));
         *self.accounts.borrow_mut() = crate::connections::held_of(self.cfg, &listed);
+        *self.access.borrow_mut() = crate::connections::kept_of(self.cfg, &listed);
         states
     }
 
@@ -2752,6 +2766,7 @@ impl ComputerCell {
                 if let Some(states) = b.connections {
                     *self.states.borrow_mut() = Some((states, js::now_ms() + STATES_TTL_MS));
                     *self.accounts.borrow_mut() = b.accounts.unwrap_or_default();
+                    *self.access.borrow_mut() = b.access.unwrap_or_default();
                     self.states_told.set(self.states_told.get() + 1);
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
@@ -3181,7 +3196,7 @@ impl ComputerCell {
                 ));
             }
             let secret = match provider.kind {
-                Kind::Connection => self.connection_token(&owner, &provider.name, agent).await?,
+                Kind::Connection => self.connection_token(&owner, &provider.name, agent, &b.method).await?,
                 // its call is held to its owner's cap on the key here, gated on
                 // their standing and charged after (`egress_swap`)
                 Kind::Operator => {
@@ -3226,7 +3241,7 @@ impl ComputerCell {
     /// several accounts there, it is the token of the one `agent` uses: its
     /// pick, else the default (`connection_accounts::chosen`), named to
     /// Pipes by its id; only an account the owner's list named is ever named.
-    async fn connection_token(&self, owner: &str, provider: &str, agent: &str) -> CellResult<String> {
+    async fn connection_token(&self, owner: &str, provider: &str, agent: &str, method: &str) -> CellResult<String> {
         // only one its states say is connected, as the guest's view lists
         // them: one its owner disconnected stays refused, whatever Pipes
         // may hold for it since (an import landed late: registry/
@@ -3235,6 +3250,16 @@ impl ComputerCell {
             Some(ProviderState::Connected) => {}
             Some(ProviderState::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: its account needs authorizing again"))),
             _ => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
+        }
+        // read only, where the platform keeps it (the provider has no
+        // read-only scope): a call of another method is refused before any
+        // token is minted, as its states say (none kept: read only)
+        if let Some(o) = self.cfg.providers.get(provider).and_then(|p| p.connection_oauth.as_ref()).filter(|o| o.kept()) {
+            let access = self.access.borrow().get(provider).copied().unwrap_or(ConnectionAccess::Read);
+            if !fragment_core::connection_signin::method_allowed(o, access, method) {
+                let methods = o.access.read.methods.as_deref().unwrap_or_default().join(", ");
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{provider} is connected read only: its owner lets agents read with it ({methods}), not {method}. They can allow changes in Settings, under Connections")));
+            }
         }
         let account = match self.cfg.providers.get(provider).is_some_and(|p| p.several()) {
             true => {
@@ -3916,7 +3941,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let mut payer: Option<(String, String, String)> = None;
     if !found.is_empty() {
         let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
-        let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
+        let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "method": method.as_ref(), "placeholders": asked })).await?;
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
             answered.push((provider.to_string(), tag.to_string(), secret.to_string()));

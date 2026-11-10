@@ -47,12 +47,16 @@ pub struct PipesAccount {
     pub scopes: Option<Vec<String>>,
     pub created_at: String,
     pub fenced: bool,
+    /// The access its person picked, where its row's platform keeps it
+    /// (`ConnectionOAuth::kept`), as the registry keeps it: none read
+    /// from Pipes (`described`); the person's states fill it in.
+    pub kept: Option<ConnectionAccess>,
 }
 
 impl PipesAccount {
     /// No account: not connected, naming nothing.
     pub fn none() -> PipesAccount {
-        PipesAccount { id: None, identifier: None, label: None, state: ProviderState::NotConnected, scopes: None, created_at: String::new(), fenced: false }
+        PipesAccount { id: None, identifier: None, label: None, state: ProviderState::NotConnected, scopes: None, created_at: String::new(), fenced: false, kept: None }
     }
 }
 
@@ -74,6 +78,7 @@ pub fn described(account: &Value) -> PipesAccount {
         scopes: held.then(|| pipes_scopes(account)).flatten(),
         created_at: account["created_at"].as_str().filter(|t| t.len() <= 64).unwrap_or_default().to_string(),
         fenced: false,
+        kept: None,
     }
 }
 

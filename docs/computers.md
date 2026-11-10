@@ -622,7 +622,9 @@ provider's own hosts.
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
   its person allowed: read only or read and write, as they picked, and
-  of those what they left ticked.
+  of those what they left ticked. Where the provider has no read-only
+  scope, the swap holds a read-only account's calls to the methods its
+  row names (docs/pipes-browser-binding.md, Access the platform keeps).
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key, its tag a MAC of (computer, agent
   fragment, provider) under a key only the platform holds (`swap`). It

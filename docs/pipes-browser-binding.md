@@ -53,6 +53,34 @@ as read only: a provider that keeps what was granted before (Google's
 `include_granted_scopes`) would keep the write scopes through a
 reconnect, and the account would still say read and write.
 
+## Access the platform keeps
+
+Some providers have no read-only scope: Salesforce's `api` is everything
+its user may do through the API. Such a row's read access names the HTTP
+methods it may use (`read.methods`, some of `GET` and `HEAD`), and its
+scopes may then be read and write's (the catalog refuses identical scopes
+otherwise, and methods on write). The platform enforces it, not the
+provider:
+
+- The registry keeps the access picked (`connection_access`), written in
+  the turn a connect is known to have imported, as its fence is lifted:
+  the newest such connect's, so a reconnect as read only is read only. A
+  connect whose import is not known to have landed keeps nothing, and
+  none kept is read only (`connection_signin::access_held`). A wipe takes
+  it.
+- The person's states carry it to their computer (`computer/own-keys`'
+  `access`, read with the fences in one question), and the egress tells
+  the computer each request's method (`computer/credentials`' `method`).
+  A read-only account's call of another method is refused (403, saying
+  so) before Pipes is asked for a token, so nothing is minted and nothing
+  is sent (`connection_signin::method_allowed`).
+- Such a row connects one account (`accounts_max` 1): its access is kept a
+  provider, not an account.
+
+A provider's own resources may still change something on a GET (an org's
+custom Apex REST endpoint, say): the methods hold a token to reading as
+HTTP means it, and no further.
+
 ## Partial grants
 
 A person may untick permissions on the provider's consent screen. A
