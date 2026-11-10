@@ -307,8 +307,11 @@ fragment operator include <old>             back in
 - **Include** takes back staff's withdrawal, and only that: the move is
   offered again, `open` for a person here, else `listed`. One withdrawn
   ahead of any roster is forgotten (its row deleted). One the roster
-  dropped stays withdrawn, the roster's, until a roster lists it. On any
-  other move it changes nothing.
+  dropped stays withdrawn, the roster's, until a roster lists it. One
+  whose move began (its person said Yes, or the cutoff took it) is
+  refused (409): its old agent may be stopped or retired, and a phase 2
+  stage is the only copy left, so it is brought over by hand. On any other
+  move it changes nothing.
 - **Its limit:** it stops the automated move alone. Someone can still
   move their own agent by hand with the phase 0 guides
   (move.finite.place): that is their own data.

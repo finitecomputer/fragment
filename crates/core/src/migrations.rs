@@ -271,6 +271,9 @@ pub enum Refused {
     Unfit(&'static str),
     /// A withdrawal's why, empty or over `WHY_MAX_BYTES` (400).
     Why,
+    /// Its old agent may be stopped or retired: a person's Yes, or the
+    /// cutoff, began its move (409).
+    Begun,
 }
 
 impl Refused {
@@ -282,6 +285,7 @@ impl Refused {
             Refused::NoStage => "no such stage: another attempt's, or none".into(),
             Refused::Unfit(why) => (*why).into(),
             Refused::Why => format!("a withdrawal says why, in 1 to {WHY_MAX_BYTES} bytes"),
+            Refused::Begun => "its move began (its person said Yes, or the cutoff took it): its old agent may be stopped or retired, so it is not offered again; bring it over by hand".into(),
         }
     }
 }
@@ -873,9 +877,15 @@ pub fn withdraw(m: &Move, why: &str, now: i64) -> Outcome {
 /// (`bound`), else `listed`. A row withdrawn ahead of any roster is
 /// forgotten; one a roster dropped stays withdrawn, the roster's, until a
 /// roster lists it. Anything else is not staff's to take back: nothing.
+/// One whose move began (a Yes binds its agent; the cutoff makes it phase
+/// 2) is refused: its old agent may be stopped or retired, and a phase 2
+/// stage is the only copy left, which an offer's Yes would stage afresh.
 pub fn include(m: &Move, bound: bool, now: i64) -> Outcome {
     if m.state != MoveState::Withdrawn || !m.by_staff {
         return Ok(None);
+    }
+    if m.agent.is_some() || m.phase == Phase::P2 {
+        return Err(Refused::Begun);
     }
     if !m.rostered() {
         return Ok(Some(Step { to: m.clone(), effects: vec![Effect::Forget] }));
@@ -1309,10 +1319,11 @@ mod tests {
         let ahead = to(withdraw(&Move::unlisted("prj_9", T0), WHY, T0));
         let gone = include(&restarted(&ahead), false, T0 + 1).expect("taken").expect("a change");
         assert_eq!(gone.effects, vec![Effect::Forget]);
-        // listed, open, said Never, held: back to open for a person here, else listed
-        let held = tick(&to(yes(&open_move(), AGENT, T0)), T0 + STOP_MS).unwrap().to;
+        // listed, open, said Never, its old agent given back: open for a person here, else listed
         let never_m = to(never(&open_move(), T0));
-        for from in [Move::listed("prj_1", "user_1", false, T0), open_move(), never_m, held] {
+        let restarting = restart_old(&staging(), T0).unwrap().unwrap().to;
+        let given_back = to(report(&restarting, &report_on(&restarting, 1, "restarted"), T0));
+        for from in [Move::listed("prj_1", "user_1", false, T0), open_move(), never_m, given_back] {
             let w = to(withdraw(&from, WHY, T0 + 1));
             for (bound, state) in [(true, MoveState::Open), (false, MoveState::Listed)] {
                 let back = to(include(&restarted(&w), bound, T0 + 2));
@@ -1467,6 +1478,29 @@ mod tests {
         let withdrawn = withdraw(&held, WHY, cut + 12).unwrap().unwrap();
         assert_eq!((withdrawn.effects.as_slice(), withdrawn.to.deadline()), (&[][..], Some(expiry)), "kept after staff's withdrawal");
         assert_eq!(tick(&withdrawn.to, expiry).expect("its expiry").effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+        // and staff's include leaves it so: its old agent is retired, its
+        // stage the only copy (an offer's Yes would stage it afresh)
+        assert_eq!(include(&restarted(&withdrawn.to), true, cut + 13), Err(Refused::Begun));
+    }
+
+    /// A move withdrawn after its person said Yes (held), or once the cutoff
+    /// took it, is not offered again by `include`: its old agent may be
+    /// stopped or retired, and a Yes would stage it afresh.
+    #[test]
+    fn include_refuses_a_move_whose_old_agent_was_stopped() {
+        let held = tick(&to(yes(&open_move(), AGENT, T0)), T0 + STOP_MS).unwrap().to;
+        let w = to(withdraw(&held, WHY, T0 + 1));
+        assert_eq!(include(&restarted(&w), true, T0 + 2), Err(Refused::Begun));
+        let cut = T0 + 10;
+        let archiving = cutoff(&open_move(), cut, cut).unwrap().to;
+        // never stopped, attempt after attempt: held, archive_failed
+        let mut held_archive = archiving;
+        while held_archive.state != MoveState::Held {
+            held_archive = tick(&held_archive, held_archive.deadline().unwrap()).unwrap().to;
+        }
+        let at = held_archive.since_ms;
+        let w = to(withdraw(&held_archive, WHY, at + 1));
+        assert_eq!(include(&w, false, at + 2), Err(Refused::Begun));
     }
 
     /// Each routine a stage's imports send has a key of its own: the once

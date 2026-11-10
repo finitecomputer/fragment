@@ -511,7 +511,7 @@ fn text_ok(what: &str, s: &str) -> CellResult<()> {
 /// A refusal of the machine's, as the route answers it.
 fn refused(r: Refused) -> CellError {
     let code = match r {
-        Refused::NotNow(_) | Refused::Stale => ErrorCode::Conflict,
+        Refused::NotNow(_) | Refused::Stale | Refused::Begun => ErrorCode::Conflict,
         Refused::NotYours => ErrorCode::Forbidden,
         Refused::NoStage => ErrorCode::NotFound,
         Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
