@@ -2285,6 +2285,11 @@ fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shot
     std::thread::sleep(std::time::Duration::from_millis(300));
     let keys = b.eval(&page, "({ search: document.getElementById('search-dialog').open, cover: document.getElementById('must-answer').open })")?;
     s.ok("the page's own keys take nothing while it shows: Ctrl/Cmd+K opens no launcher over it", keys == json!({ "search": false, "cover": true }), &keys);
+    // a dialog the page opens over it (a frame's ask, an answer's
+    // continuation) waits under it: the cover is shown again on top
+    b.eval(&page, "(document.getElementById('search-dialog').showModal(), true)")?;
+    let raised = b.until(&page, "document.getElementById('search-dialog').open && (() => { const d = document.getElementById('must-answer'); return d.open && d.contains(document.elementFromPoint(innerWidth / 2, innerHeight / 2)); })()", wait);
+    s.ok("a dialog the page opens while it shows waits under it: the cover on top, the other open beneath", raised, b.eval(&page, MUST_ANSWER_SEEN)?);
     // its Accept refused once, by the registry (its lever)
     let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/invites/answer", "times": 1 } })))?;
     anyhow::ensure!(down.status == 200, "the registry's next answer to an invite refused: {down}");
@@ -2298,6 +2303,10 @@ fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shot
     s.ok("answered, and read again without it: the next shows, as alone", shown && seen["covers"] == json!(true) && !in_band(&seen), &seen);
     answer_must(b, &page, "Decline")?;
     let gone = b.until(&page, "!document.getElementById('must-answer').open", wait);
+    // the dialog that waited under it is the page's now
+    let waited = b.eval(&page, "document.getElementById('search-dialog').open")?;
+    s.ok("the last answered, the dialog that waited under it is the page's", gone && waited == json!(true), &waited);
+    b.eval(&page, "(document.getElementById('search-dialog').close(), true)")?;
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
     let usable = b.eval(&page, "document.getElementById('sidebar').contains(document.elementFromPoint(40, 120))")?;
     s.ok("the last answered: no cover, the page as it was, theirs to use", gone && !in_band(&seen) && usable == json!(true), json!({ "seen": seen, "usable": usable }));
