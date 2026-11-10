@@ -312,7 +312,7 @@ out. One thing to do to one old agent, flat: its `kind`, and the fields that kin
 | --- | --- | --- | --- |
 | `as` | [`Mark`](#mark) or `null` | optional | `retire`: how the old agent is marked moved. |
 | `attempt` | `integer` | required |  |
-| `id` | `string` | required | `command_id`: `<old>:<attempt>:<kind>`. |
+| `id` | `string` | required | `command_id`: `<old>:<attempt>:<step>`. |
 | `kind` | [`CommandKind`](#commandkind) | required |  |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) or `null` | optional | `stop_and_stage`: its phase. |

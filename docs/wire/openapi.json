@@ -167,7 +167,7 @@
             "type": "integer"
           },
           "id": {
-            "description": "`command_id`: `<old>:<attempt>:<kind>`.",
+            "description": "`command_id`: `<old>:<attempt>:<step>`.",
             "type": "string"
           },
           "kind": {
