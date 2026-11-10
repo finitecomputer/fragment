@@ -751,6 +751,30 @@ mod tests {
         assert_eq!(known.expires_at(now), crate::export::rfc3339(now + 3_600_000));
     }
 
+    /// Salesforce's row (deploy/example.jsonc) and its token endpoint's
+    /// answer as Salesforce documents it (help.salesforce.com,
+    /// remoteaccess_oauth_web_server_flow, read 2026-11-10): no
+    /// `expires_in`, the scopes granted space-separated, its org's
+    /// `instance_url`, and an ID token for this client. It connects: Pipes
+    /// gets it expired (to refresh first) and keeps its org's host, its
+    /// label the ID token's verified email, and nothing it asked for missing.
+    #[test]
+    fn salesforces_answer_connects_expired_keeping_its_orgs_host() {
+        let requested: Vec<String> = ["api", "refresh_token", "openid", "email"].map(String::from).to_vec();
+        let a = catalog::AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let mut answer = id_token(json!({ "aud": "client", "sub": "https://login.salesforce.com/id/00D000000000001EAA/005000000000001AAA", "email": "ada@acme.com", "email_verified": true }));
+        for (k, v) in [("access_token", json!("00D000000000001!AQ0AQ")), ("refresh_token", json!("5Aep861.refresh")), ("signature", json!("c2lnbmF0dXJl")), ("scope", json!("refresh_token openid api email")),
+                       ("instance_url", json!("https://acme.my.salesforce.com")), ("id", json!("https://login.salesforce.com/id/00D000000000001EAA/005000000000001AAA")), ("token_type", json!("Bearer")), ("issued_at", json!("1793000000000"))] {
+            answer[k] = v;
+        }
+        let granted = tokens(&answer, &requested).expect("Salesforce's documented answer");
+        assert_eq!(granted.expires_in, None);
+        assert_eq!(granted.expires_at(1_793_000_000_000), crate::export::rfc3339(1_793_000_000_000), "expired as it lands");
+        assert!(missing(&requested, &pipes_scopes(&json!({ "scopes": granted.import_body("x", None)["scopes"] })).unwrap()).is_empty());
+        assert_eq!(import_metadata(&answer, &a), Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert_eq!(account_label(&answer, "client").as_deref(), Some("ada@acme.com"));
+    }
+
     #[test]
     fn a_grant_of_signing_in_alone_is_refused_as_no_scopes() {
         let requested = requested();

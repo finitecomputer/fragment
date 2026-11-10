@@ -1981,7 +1981,10 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // the example offers Salesforce; the hosted e2e's preview, not yet
+            let orgs: &[&str] = if file == "deploy/example.jsonc" { &["salesforce"] } else { &[] };
+            let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs"].into_iter().chain(orgs.iter().copied()).chain(["openrouter"]).collect();
+            assert_eq!(names, expected, "{file}");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
@@ -1991,6 +1994,31 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// The example's Salesforce row, its commented connect uncommented (a
+    /// consumer key and the secret's store name filled in), loads: its
+    /// scopes, its revocation, its account host, and its client secret
+    /// bound as the cell's.
+    #[test]
+    fn the_example_salesforce_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "salesforce""#).expect("the example's salesforce row");
+        let row = &example[start..start + example[start..].find(r#""env": ["SALESFORCE_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-salesforce-oauth-secret").replace("<the app's consumer key>", "salesforce-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/salesforce-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("salesforce").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        assert_eq!((o.client_id.as_str(), o.scopes.join(" "), o.revoke.as_deref()), ("salesforce-client", "api refresh_token openid email".to_string(), Some("https://login.salesforce.com/services/oauth2/revoke")));
+        assert_eq!(p.account_host.as_ref().map(|a| (a.metadata.as_str(), a.under.as_str())), Some(("instance_url", "my.salesforce.com")));
+        assert!(catalog.intercepts().contains(&"*.my.salesforce.com".to_string()));
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_SALESFORCE".into(), "fragment-salesforce-oauth-secret")));
     }
 
     /// A provider's note: the example's (its google row's, commented out)

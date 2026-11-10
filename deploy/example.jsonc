@@ -333,6 +333,24 @@
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
       "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" },
+    // The person's Salesforce org (a production org; a sandbox is Pipes'
+    // `salesforce-test`, a row of its own), as Google is: Pipes'
+    // `salesforce` provider, connected through the browser once its External
+    // Client App's secret is in the store (the app Pipes' Salesforce
+    // integration uses, with the platform's callback beside Pipes', PKCE on).
+    // Its token goes to login.salesforce.com (the identity a helper learns
+    // its org's host from) and to the org's own host, as Pipes' metadata
+    // names it (`account_host`). Salesforce's answer names no `expires_in`:
+    // its grant lands expired, and Pipes refreshes it first.
+    { "name": "salesforce", "kind": "connection",
+      "hosts": ["login.salesforce.com"],
+      "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent",
+      //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
+      //   "client_id": "<the app's consumer key>", "scopes": ["api", "refresh_token", "openid", "email"] },
+      "env": ["SALESFORCE_ACCESS_TOKEN"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key
     // pasted), and paid by their OpenRouter credit, never metered here. An
