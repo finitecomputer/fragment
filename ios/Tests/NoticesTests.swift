@@ -105,6 +105,20 @@ struct NoticesTests {
         #expect(library.answered == nil)
     }
 
+    /// One that must be answered (FIN-458): read as said (none said: not),
+    /// asked alone, the first of them first, and never in the band.
+    @MainActor @Test func oneThatMustBeAnsweredIsAskedAloneTheFirstFirst() throws {
+        let told = try read(#"{"notices":[{"id":"key","kind":"key_paused","level":"warn","title":"Calls paused"},{"id":"asked:move","kind":"asked","level":"info","title":"Move to finite.chat?","mustAnswer":true,"actions":[{"label":"Yes","post":"/api/notices/asked/move","body":{"answer":"Yes"}}]},{"id":"asked:terms","kind":"asked","level":"info","title":"New terms","mustAnswer":true}]}"#)
+        #expect(told.map(\.mustAnswer) == [false, true, true])
+        let library = Library()
+        library.notices = told
+        #expect(library.asked?.id == "asked:move")
+        library.notices = [told[0], told[2]]
+        #expect(library.asked?.id == "asked:terms")
+        library.notices = [told[0]]
+        #expect(library.asked == nil)
+    }
+
     /// The read after an answer decides its page as it takes its list, and
     /// nothing after (Codex on #1162): that read not listing it, a newer one
     /// that lists it while the first still reads the rest opens nothing.
@@ -205,6 +219,22 @@ struct NoticesTests {
         await other.load(api)
         #expect(other.fragments.contains { $0.name == "garden--k3x9" })
         #expect(other.answered == nil, "nor after a failed one")
+    }
+
+    /// An answer's page waits while a notice must be answered (Codex on the
+    /// must-answer cover): answering A opens a page, B must be answered
+    /// next; the page is taken once nothing is asked, never lost.
+    @MainActor @Test func anAnswersPageWaitsWhileANoticeMustBeAnswered() throws {
+        let told = try read(#"{"notices":[{"id":"asked:terms","kind":"asked","level":"info","title":"New terms","mustAnswer":true}]}"#)
+        let library = Library()
+        library.fragments = [try JSONDecoder().decode(FragmentSummary.self, from: Data(#"{"name":"garden--k3x9","kind":"app","role":"editor","title":"Garden plans"}"#.utf8))]
+        library.answered = library.fragments.first
+        library.notices = told
+        #expect(library.takeAnswered() == nil, "not while B must be answered")
+        #expect(library.answered?.name == "garden--k3x9", "kept, not lost")
+        library.notices = []
+        #expect(library.takeAnswered()?.name == "garden--k3x9", "taken once nothing is asked")
+        #expect(library.takeAnswered() == nil, "and once")
     }
 
     /// A stub where an invite is told until its Accept is refused, 404 in
