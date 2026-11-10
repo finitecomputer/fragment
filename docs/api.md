@@ -1979,8 +1979,10 @@ for its admin where seats are sold) or a Stripe trial in its last three
 days ("Your trial ends on November 16", Payment and invoices for whoever
 pays; the date on UTC's calendar), and each invite waiting on an email of
 theirs (Invites by email). A seat's lapse and return are told their pages
-by their ledger, whose standing follows the seat. The ledger tells their pages when their standing changes, a
-change by the clock alone (a month's credit) at its next call or sweep. An owner that does not answer fails the read. `kind` is for tests
+by their ledger, whose standing follows the seat. The ledger tells their
+pages when what it says changes (its standing, or a seat's Buy credit),
+a change by the clock alone (a month's credit) at its next call or sweep.
+An owner that does not answer fails the read. `kind` is for tests
 and logs; a client draws every notice the same way and never reads it.
 An action `post`s its `body` (none: `{}`) to a platform route with the
 person's own credential, the route its owner's, then the client reads its
