@@ -47,6 +47,12 @@
 //!   a rename. Its first start makes the profile with the agent's label,
 //!   which the core always takes: `--create-bot-display-name` names no
 //!   profile it already has, which is why a rename asks.
+//! - **An owner's old SimpleX conversation** (FIN-463, `stage`): set aside
+//!   as the move's routine names its stage; adopted only by its owner's
+//!   ticket (`adopt`), from their Settings: read once in maintenance mode
+//!   (`maintenance_read`: nothing subscribed, so nothing new arrives before
+//!   what the chat held is marked delivered), its door's key registered,
+//!   then the link bound to their contact (`link::Input::Adopt`).
 //! - **What the agent says in that chat** comes back here once posted
 //!   (`Handle::reply`), whatever started its turn, and goes to the owner's
 //!   app: the chat is their phone while linked (`Engine::mirror`).
@@ -64,8 +70,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::door::{self, Key, Ticket};
-use super::link::{Action, Inbound, Input, Link, Notice, Phase};
-use super::wire::{self, Cmd, FileId, Kind, Resp};
+use super::link::{Action, Inbound, Input, Leftover, Link, Notice, Phase};
+use super::stage::{self, Staged};
+use super::wire::{self, Cmd, ContactId, FileId, Kind, Resp};
 use crate::api::{self, Api, ApiError};
 use crate::records;
 use crate::runtime::{Agent, LocalFile};
@@ -146,6 +153,13 @@ const SENDING_MAX: usize = crate::limits::ATTACHMENTS_MAX;
 const SEND_WAIT_MS: u64 = 5 * 60 * 1000;
 /// Entries of a link's `OUT_DIR` one sweep reads, at most.
 const OUT_SWEEP_MAX: usize = 1024;
+/// A maintenance read of an identity to adopt ends within this, or the
+/// adoption is refused (the lab: under a second).
+const MAINT_MS_MAX: u64 = 20_000;
+/// A set-aside of a stage's identity is tried this often, this far apart,
+/// while the platform does not answer; then again at the bridge's next start.
+const SET_ASIDE_TRIES: u32 = 3;
+const SET_ASIDE_RETRY_MS: u64 = 10_000;
 /// Where a link's copies of the files it sends wait, in its directory: a
 /// folder each (`<life>-<n>`), so its receiver sees the file's own name.
 pub const OUT_DIR: &str = "out";
@@ -172,8 +186,13 @@ pub struct Config {
 pub struct View {
     pub agent: String,
     /// `off`, `asking` (an invitation is being made), `inviting` (shown,
-    /// unused), `linked`.
+    /// unused), `adopting` (its owner's old SimpleX chat being kept),
+    /// `linked`.
     pub phase: &'static str,
+    /// Off, with its owner's old SimpleX conversation set aside from its
+    /// move's stage: its owner may keep it (`POST /simplex/adopt`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
     /// The one-time invitation, while inviting: the full link every
     /// SimpleX app reads, and the short one when the server made it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,8 +235,23 @@ pub enum Msg {
     Computer { computer: Box<api::Computer>, agents: Vec<Agent> },
     /// What `agent`'s page is told: its invitation only for `session`.
     View { agent: String, session: Option<String>, reply: oneshot::Sender<Option<View>> },
-    /// A link's ticket, checked and taken (`door::check`, once).
-    Ticket { agent: String, ticket: Box<Ticket>, reply: Answer },
+    /// A link's or an adoption's ticket (`act`), checked and taken
+    /// (`door::check`, once).
+    Ticket { agent: String, act: &'static str, ticket: Box<Ticket>, reply: Answer },
+    /// The move's routine named `agent`'s stage: its SimpleX identity, if
+    /// it holds one, set aside.
+    Staged { agent: String, stage: String },
+    /// A set-aside's end.
+    SetAside { agent: String, stage: String, result: Result<Staged, stage::Refusal> },
+    /// Its owner keeps their old SimpleX chat (an adoption's ticket taken,
+    /// `nonce`): its staged identity read in maintenance mode.
+    Adopt { agent: String, nonce: String, reply: Answer },
+    /// That adoption's door key, registered at the platform: the link bound,
+    /// its name as its title was read just before (none: not read), so
+    /// their app's first word of the move names it.
+    Adopted { agent: String, nonce: String, key: Box<Key>, title: Option<Option<String>>, reply: Answer },
+    /// That adoption's door key, refused by the platform: let go.
+    AdoptFailed { agent: String, nonce: String },
     /// Its owner's link, its door's key registered: an invitation, shown
     /// to `session`.
     Want { agent: String, key: Box<Key>, session: String, reply: Answer },
@@ -285,7 +319,7 @@ impl Handle {
     /// page: checked and taken, its door's key made and registered at the
     /// platform with it, then an invitation, shown to that page alone.
     pub async fn link(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
-        self.answered(|reply| Msg::Ticket { agent: agent.to_string(), ticket: Box::new(ticket.clone()), reply }).await?;
+        self.answered(|reply| Msg::Ticket { agent: agent.to_string(), act: "link", ticket: Box::new(ticket.clone()), reply }).await?;
         let key = Key::generate().map_err(|e| Refused::new(500, format!("SimpleX could not make its key: {e}")))?;
         if let Err(e) = self.api.door(agent, door::DOOR, &ticket.nonce, &key.public_hex()).await {
             crate::ev!("simplex.door_refused", { "agent": agent, "error": e.to_string() });
@@ -294,6 +328,46 @@ impl Handle {
         }
         crate::ev!("simplex.door_opened", { "agent": agent, "key": key.public_hex() });
         self.answered(|reply| Msg::Want { agent: agent.to_string(), key: Box::new(key), session: ticket.nonce.clone(), reply }).await
+    }
+
+    /// Its owner keeps their SimpleX chat with their old agent (FIN-463), by
+    /// the ticket their Settings handed its page: checked and taken; its
+    /// staged identity read (its owner's contact there, what that chat
+    /// held); its door's key made and registered at the platform with the
+    /// ticket; then the link bound to their contact, which their app keeps
+    /// talking to, with no code to scan.
+    pub async fn adopt(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
+        self.answered(|reply| Msg::Ticket { agent: agent.to_string(), act: "adopt", ticket: Box::new(ticket.clone()), reply }).await?;
+        self.answered(|reply| Msg::Adopt { agent: agent.to_string(), nonce: ticket.nonce.clone(), reply }).await?;
+        let failed = |status: u16, why: String| {
+            let tx = self.tx.clone();
+            let (agent, nonce) = (agent.to_string(), ticket.nonce.clone());
+            async move {
+                let _ = tx.send(Msg::AdoptFailed { agent, nonce }).await;
+                Err(Refused::new(status, why))
+            }
+        };
+        let key = match Key::generate() {
+            Ok(k) => k,
+            Err(e) => return failed(500, format!("SimpleX could not make its key: {e}")).await,
+        };
+        if let Err(e) = self.api.door(agent, door::DOOR, &ticket.nonce, &key.public_hex()).await {
+            crate::ev!("simplex.door_refused", { "agent": agent, "error": e.to_string() });
+            let status = if e.status() == Some(403) { 403 } else { 502 };
+            return failed(status, "the platform did not take this: start again from your Settings".into()).await;
+        }
+        crate::ev!("simplex.door_opened", { "agent": agent, "key": key.public_hex() });
+        // its core has not run in this life, so its name was never read
+        let title = self.api.title(agent, agent).await.ok();
+        self.answered(|reply| Msg::Adopted { agent: agent.to_string(), nonce: ticket.nonce.clone(), key: Box::new(key), title, reply }).await
+    }
+
+    /// The move's routine for `agent` named `stage` (driver.rs, from the
+    /// engine): its SimpleX identity, if the stage holds one, set aside.
+    pub fn staged(&self, agent: &str, stage: &str) {
+        if self.tx.try_send(Msg::Staged { agent: agent.to_string(), stage: stage.to_string() }).is_err() {
+            crate::ev!("simplex.busy", { "dropped": "staged", "agent": agent });
+        }
     }
 
     /// Its owner unlinks `agent`, by the ticket their Settings handed its
@@ -588,8 +662,8 @@ pub fn dir_name_ok(fragment: &str) -> bool {
 /// preview computer, 2026-10-25: each SMP preset reset there, and the same
 /// servers answering on 5223). XFTP's servers are on 443 alone, so a file
 /// arrives only through the relay (docs/bridge.md, "SimpleX").
-fn core_args(cfg: &Config, dir: &Path, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
-    let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), dir.join("sx").into(), "-p".into(), "0".into()];
+fn core_args(cfg: &Config, db: &Path, dir: &Path, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), db.into(), "-p".into(), "0".into()];
     args.extend(["--files-folder".into(), dir.join("files").into(), "--temp-folder".into(), dir.join("tmp").into()]);
     for a in ["-y", "--mute", "--create-bot-display-name", name, "--create-bot-allow-files", "--smp-web-port-servers", "off"] {
         args.push(a.into());
@@ -604,6 +678,34 @@ fn core_args(cfg: &Config, dir: &Path, name: &str, socks: Option<u16>) -> Vec<st
         args.extend(["--xftp-server".into(), xftp.into()]);
     }
     args
+}
+
+/// A core's process, in `dir`, its output its stderr alone: it dies with the
+/// bridge, however the bridge dies (a SIGKILL runs no handler of ours), so
+/// no core outlives it to run beside the next one's.
+fn core_command(bin: &Path, dir: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(bin);
+    let parent = std::process::id();
+    // SAFETY: only async-signal-safe calls, in the child before its exec
+    unsafe {
+        cmd.pre_exec(move || {
+            // Linux's alone, as the image is. Elsewhere (a reviewer's Mac,
+            // for the tests) there is no parent-death signal: a core
+            // outlives a SIGKILLed bridge there, and `kill_strays`, which
+            // reads `/proc`, finds none of them.
+            #[cfg(target_os = "linux")]
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // the bridge died before the line above took: so does this
+            if libc::getppid() as u32 != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+    cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    cmd
 }
 
 /// The name an agent's SimpleX profile shows: its title, else (it has none,
@@ -622,6 +724,12 @@ pub fn display_name(title: Option<&str>, label: &str) -> String {
 /// What the owner's SimpleX app is told as the link is made.
 fn greeting(name: &str) -> String {
     format!("Hi, it's {name}. You're linked: write to me here any time, as you would in our chat.")
+}
+
+/// What the owner's SimpleX app is told as their old conversation is kept:
+/// the same contact, its new home.
+fn moved(name: &str) -> String {
+    format!("Hi, it's {name}. I've moved to my new home: write to me here, as before.")
 }
 
 /// What it is told when its message cannot be carried: this link has no
@@ -803,6 +911,28 @@ struct Slot {
     /// The link ticket taken last, its registration at the platform under
     /// way: only it installs its key (`want`).
     linking: Option<String>,
+    /// Its owner's old SimpleX conversation, set aside from its move's
+    /// stage (`stage::ready`), until it is adopted or let go.
+    staged: Option<Staged>,
+    /// A set-aside under way.
+    staging: bool,
+    /// Adopted, and its owner not yet told it moved: told as its core comes
+    /// up (it does not run as the link is bound), after its new name.
+    moved: bool,
+    /// The adoption ticket taken last, and once read, what its read found:
+    /// only it binds the link (`adopted`).
+    adopting: Option<(String, Option<Adoption>)>,
+}
+
+/// What a staged identity's maintenance read found: its owner's contact
+/// there and their name, the newest item of their chat, and what else it
+/// holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adoption {
+    pub owner: ContactId,
+    pub name: String,
+    pub newest: i64,
+    pub leftovers: Vec<Leftover>,
 }
 
 impl Slot {
@@ -815,6 +945,7 @@ impl Slot {
     fn view(&self, always_on: bool, session: Option<&str>) -> View {
         let shown = session.is_some() && session == self.session.as_deref();
         let (phase, link, short, name, hidden) = match &self.saved.link.phase {
+            Phase::Off if self.adopting.is_some() => ("adopting", None, None, None, false),
             Phase::Off => ("off", None, None, None, false),
             Phase::Asking => ("asking", None, None, None, false),
             Phase::Inviting { link, short, .. } if shown => ("inviting", Some(link.clone()), short.clone(), None, false),
@@ -826,7 +957,8 @@ impl Slot {
         } else {
             self.broken.clone().or_else(|| self.note.clone())
         };
-        View { agent: self.agent.fragment.clone(), phase, link, short, name, hidden, always_on, running: self.core.is_some() && self.up, why }
+        let staged = self.staged.is_some() && self.saved.link.phase == Phase::Off;
+        View { agent: self.agent.fragment.clone(), phase, staged, link, short, name, hidden, always_on, running: self.core.is_some() && self.up, why }
     }
 }
 
@@ -911,8 +1043,25 @@ impl Manager {
             Msg::View { agent, session, reply } => {
                 let _ = reply.send(self.view(&agent, session.as_deref()));
             }
-            Msg::Ticket { agent, ticket, reply } => {
-                let _ = reply.send(self.take(&agent, &ticket, "link").map(|()| self.view(&agent, None).expect("its slot")));
+            Msg::Ticket { agent, act, ticket, reply } => {
+                let _ = reply.send(self.take(&agent, &ticket, act).map(|()| self.view(&agent, None).expect("its slot")));
+            }
+            Msg::Staged { agent, stage } => self.set_aside(&agent, &stage),
+            Msg::SetAside { agent, stage, result } => self.set_aside_ended(&agent, &stage, result),
+            Msg::Adopt { agent, nonce, reply } => {
+                let _ = reply.send(self.adopt_read(&agent, &nonce).await);
+            }
+            Msg::Adopted { agent, nonce, key, title, reply } => {
+                if let (Some(title), Some(s)) = (title, self.slots.get_mut(&agent)) {
+                    s.name = Some(display_name(title.as_deref(), &s.agent.name));
+                }
+                let _ = reply.send(self.adopted(&agent, &nonce, *key).await);
+            }
+            Msg::AdoptFailed { agent, nonce } => {
+                if let Some(s) = self.slots.get_mut(&agent).filter(|s| s.adopting.as_ref().is_some_and(|(n, _)| *n == nonce)) {
+                    s.adopting = None;
+                    s.note = Some("The platform did not take that: start again from your Settings.".into());
+                }
             }
             Msg::Want { agent, key, session, reply } => {
                 let _ = reply.send(self.want(&agent, *key, session).await);
@@ -974,6 +1123,20 @@ impl Manager {
         if act == "link" && matches!(s.saved.link.phase, Phase::Linked { .. }) {
             return Err(Refused::new(409, "it is linked already: unlink it first"));
         }
+        if act == "link" && s.adopting.is_some() {
+            return Err(Refused::new(409, "your old SimpleX chat is being kept: wait a moment"));
+        }
+        if act == "adopt" {
+            if s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || s.adopting.is_some() {
+                return Err(Refused::new(409, "it is linked, or being linked, already: unlink it first"));
+            }
+            if s.staged.is_none() {
+                return Err(Refused::new(404, "there is no SimpleX chat from your old agent to keep: link SimpleX instead"));
+            }
+            if !self.computer.as_ref().is_some_and(|c| c.always_on) {
+                return Err(Refused::new(409, "SimpleX works while your computer stays on, which the always-on plan does."));
+            }
+        }
         // bounded, and never by forgetting a ticket that still holds
         if s.saved.used.len() >= USED_MAX {
             return Err(Refused::new(503, "too many links were started in the last ten minutes: wait a little, then start again"));
@@ -985,9 +1148,10 @@ impl Manager {
             crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
             return Err(Refused::new(500, format!("SimpleX could not keep that ticket as used: {e}")));
         }
-        // a link's registration is this ticket's alone from here (`want`);
-        // an unlink calls any under way off
+        // a link's registration is this ticket's alone from here (`want`), an
+        // adoption's likewise (`adopted`); an unlink calls either off
         s.linking = (act == "link").then(|| t.nonce.clone());
+        s.adopting = (act == "adopt").then(|| (t.nonce.clone(), None));
         crate::ev!("simplex.ticket", { "agent": agent, "act": act });
         Ok(())
     }
@@ -1022,6 +1186,145 @@ impl Manager {
         Ok(self.view(agent, Some(&session)).expect("its slot"))
     }
 
+    /// The move's routine named `f`'s stage: its SimpleX identity, if the
+    /// stage holds one, set aside (`stage::take_aside`), off this loop,
+    /// with nothing run. Not while its link is bound or being bound, nor a
+    /// stage set aside already or under way.
+    fn set_aside(&mut self, f: &str, stage_id: &str) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let have = s.staged.as_ref().is_some_and(|st| st.stage == stage_id);
+        if s.staging || have || s.saved.link.phase != Phase::Off || s.adopting.is_some() || !stage::stage_ok(stage_id) {
+            return;
+        }
+        if let Err(e) = stage::begin(&s.dir, stage_id) {
+            crate::ev!("simplex.stage_unkept", { "agent": f, "error": e.to_string() });
+            return;
+        }
+        s.staged = None;
+        s.staging = true;
+        crate::ev!("simplex.staging", { "agent": f, "stage": stage_id });
+        let (api, tx, dir, agent, stage_id) = (self.api.clone(), self.tx.clone(), s.dir.clone(), s.agent.fragment.clone(), stage_id.to_string());
+        let mut stop = self.stop.clone();
+        tokio::spawn(async move {
+            let mut tries = 0;
+            // bounded: SET_ASIDE_TRIES, then the bridge's next start
+            let result = loop {
+                tries += 1;
+                match stage::take_aside(&api, &agent, &stage_id, &dir).await {
+                    Err(stage::Refusal::Transient(why)) if tries < SET_ASIDE_TRIES => {
+                        crate::ev!("simplex.stage_retry", { "agent": agent, "try": tries, "why": wire::cut(&why, 200) });
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(SET_ASIDE_RETRY_MS)) => {}
+                            _ = crate::net::stopped(&mut stop) => return,
+                        }
+                    }
+                    other => break other,
+                }
+            };
+            let _ = tx.send(Msg::SetAside { agent, stage: stage_id, result }).await;
+        });
+    }
+
+    /// A set-aside's end: kept whole, or (no identity in it, or one not
+    /// whole, or the stage gone) let go; one the platform did not answer
+    /// is tried again at the bridge's next start (`stage::pending`).
+    fn set_aside_ended(&mut self, f: &str, stage_id: &str, result: Result<Staged, stage::Refusal>) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        s.staging = false;
+        match result {
+            Ok(staged) if s.saved.link.phase == Phase::Off => {
+                crate::ev!("simplex.staged", { "agent": f, "stage": stage_id });
+                s.staged = Some(staged);
+            }
+            // a link made meanwhile: nothing of it to keep
+            Ok(_) => stage::forget(&s.dir),
+            Err(stage::Refusal::Transient(why)) => crate::ev!("simplex.stage_unread", { "agent": f, "stage": stage_id, "why": wire::cut(&why, 200) }),
+            Err(why) => {
+                crate::ev!("simplex.stage_let_go", { "agent": f, "stage": stage_id, "why": wire::cut(&why.to_string(), 300) });
+                stage::forget(&s.dir);
+            }
+        }
+    }
+
+    /// An adoption's ticket taken (`nonce`): its staged identity read in
+    /// maintenance mode, within `MAINT_MS_MAX`, while no core of its runs.
+    /// One not whole, or not its owner's, is let go, its owner told; one
+    /// whose core did not run stays, to be tried again.
+    async fn adopt_read(&mut self, f: &str, nonce: &str) -> Result<View, Refused> {
+        let s = self.slots.get(f).ok_or_else(|| Refused::new(404, format!("no agent {f} runs on this computer")))?;
+        if s.adopting.as_ref().is_none_or(|(n, read)| n != nonce || read.is_some()) {
+            return Err(Refused::new(409, "another link or an unlink was started meanwhile: start again from your Settings"));
+        }
+        let staged = s.staged.clone().ok_or_else(|| Refused::new(404, "there is no SimpleX chat from your old agent to keep: link SimpleX instead"))?;
+        // no core of its own runs on what it is about to replace, nor under a hold
+        if self.hold.exists() {
+            self.slots.get_mut(f).expect("its slot").adopting = None;
+            return Err(Refused::new(503, "this computer is saving: try again in a moment"));
+        }
+        self.stop_core(f).await;
+        let s = self.slots.get(f).expect("its slot");
+        let (dir, name) = (s.dir.clone(), display_name(None, &s.agent.name));
+        self.quiet.store(false, Ordering::SeqCst);
+        let read = tokio::time::timeout(Duration::from_millis(MAINT_MS_MAX), maintenance_read(&self.cfg, &dir, &name, staged.owner)).await.unwrap_or_else(|_| Err(Read::Failed(format!("no answer in {MAINT_MS_MAX} ms"))));
+        kill_cores_of(&stage::core_prefix(&dir));
+        self.quiet.store(self.running() == 0, Ordering::SeqCst);
+        let s = self.slots.get_mut(f).expect("its slot");
+        match read {
+            Ok(a) => {
+                crate::ev!("simplex.adopt_read", { "agent": f, "stage": staged.stage, "newest": a.newest, "leftovers": a.leftovers.len() });
+                s.adopting = Some((nonce.to_string(), Some(a)));
+                Ok(s.view(true, None))
+            }
+            Err(Read::Invalid(why)) => {
+                crate::ev!("simplex.adopt_refused", { "agent": f, "stage": staged.stage, "why": wire::cut(&why, 300) });
+                s.adopting = None;
+                s.staged = None;
+                stage::forget(&s.dir);
+                s.note = Some("Your old SimpleX chat could not be kept. Link SimpleX to start a new one.".into());
+                Err(Refused::new(422, "your old SimpleX chat could not be kept: link SimpleX instead"))
+            }
+            Err(Read::Failed(why)) => {
+                crate::ev!("simplex.adopt_failed", { "agent": f, "stage": staged.stage, "why": wire::cut(&why, 300) });
+                s.adopting = None;
+                Err(Refused::new(502, "SimpleX could not read your old chat just now: try again from your Settings"))
+            }
+        }
+    }
+
+    /// An adoption's door key, registered: kept, the staged identity placed
+    /// as the core's databases, its link bound to the owner's contact (its
+    /// start this computer's, so no rollback is read into it), the staged
+    /// copy let go, and its core started.
+    async fn adopted(&mut self, f: &str, nonce: &str, key: Key) -> Result<View, Refused> {
+        let generation = self.computer.as_ref().map_or(0, |c| c.generation);
+        let s = self.slots.get_mut(f).ok_or_else(|| Refused::new(404, format!("no agent {f} runs on this computer")))?;
+        // only the adoption under way, once read, binds; any other leaves it be
+        if !matches!(&s.adopting, Some((n, Some(_))) if n == nonce) || s.saved.link.phase != Phase::Off {
+            return Err(Refused::new(409, "another link or an unlink was started meanwhile: start again from your Settings"));
+        }
+        let Some((_, Some(a))) = s.adopting.take() else { unreachable!("checked above") };
+        if let Err(e) = key.store(&s.dir).and_then(|()| stage::place(&s.dir)) {
+            crate::ev!("simplex.adopt_unplaced", { "agent": f, "error": e.to_string() });
+            Key::forget(&s.dir);
+            return Err(Refused::new(500, format!("SimpleX could not keep your old chat: {e}")));
+        }
+        s.door = Some(key);
+        s.broken = None;
+        s.exits.clear();
+        s.retry_at = None;
+        s.note = None;
+        s.saved.generation = s.saved.generation.max(generation);
+        self.apply(f, Input::Adopt { owner: a.owner, name: &a.name, newest: a.newest, leftovers: &a.leftovers });
+        let s = self.slots.get_mut(f).expect("its slot");
+        if s.saved.link.contact() == Some(a.owner) {
+            s.staged = None;
+            stage::forget(&s.dir);
+        }
+        crate::ev!("simplex.adopted", { "agent": f, "newest": a.newest, "leftovers": a.leftovers.len() });
+        self.tick().await;
+        Ok(self.view(f, None).expect("its slot"))
+    }
+
     /// The computer as read: a slot for each agent it runs (its link read
     /// from its file), none for one that left (its core stopped; its
     /// state stays, as the agent's other files do).
@@ -1047,6 +1350,8 @@ impl Manager {
             let dir = self.cfg.dir.join(&a.fragment);
             let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None });
             let door = Key::load(&dir);
+            let staged = stage::ready(&dir);
+            let resume = stage::pending(&dir);
             // before any send of this life: what the last one left unnamed goes,
             // and what it sent waits again from now
             sweep_out(&dir, &saved);
@@ -1081,7 +1386,15 @@ impl Manager {
                 door,
                 session: None,
                 linking: None,
+                staged,
+                staging: false,
+                moved: false,
+                adopting: None,
             });
+            // a set-aside a bridge before this one began and did not finish
+            if let Some(stage) = resume {
+                self.set_aside(&a.fragment, &stage);
+            }
         }
         self.computer = Some(computer);
         self.reconcile().await;
@@ -1383,7 +1696,7 @@ impl Manager {
         for f in names {
             let s = &self.slots[&f];
             // linked, or with an unlink's let-go still to do
-            let want = !self.held && always_on && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some()) && s.broken.is_none();
+            let want = !self.held && always_on && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || !s.saved.link.leftovers.is_empty()) && s.broken.is_none();
             match (want, s.core.is_some()) {
                 (true, false) if s.retry_at.is_none_or(|t| now >= t) => self.start_core(&f),
                 (false, true) => {
@@ -1423,30 +1736,8 @@ impl Manager {
         // label, which the core always takes (it makes none of a name it
         // refuses, and would not start), and named once it is up (`profile`)
         let name = display_name(None, &s.agent.name);
-        let mut cmd = tokio::process::Command::new(&cfg.bin);
-        // it dies with the bridge, however the bridge dies (a SIGKILL runs no
-        // handler of ours): no core outlives it to run beside the next one's
-        let parent = std::process::id();
-        // SAFETY: only async-signal-safe calls, in the child before its exec
-        unsafe {
-            cmd.pre_exec(move || {
-                // Linux's alone, as the image is. Elsewhere (a reviewer's Mac,
-                // for the tests) there is no parent-death signal: a core
-                // outlives a SIGKILLed bridge there, and `kill_strays`, which
-                // reads `/proc`, finds none of them.
-                #[cfg(target_os = "linux")]
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // the bridge died before the line above took: so does this
-                if libc::getppid() as u32 != parent {
-                    libc::_exit(1);
-                }
-                Ok(())
-            });
-        }
-        cmd.args(core_args(&cfg, &s.dir, &name, socks));
-        cmd.current_dir(&s.dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        let mut cmd = core_command(&cfg.bin, &s.dir);
+        cmd.args(core_args(&cfg, &s.dir.join("sx"), &s.dir, &name, socks));
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1608,6 +1899,14 @@ impl Manager {
         // its name first, so an invitation this start makes is the new name's
         self.profile(f);
         self.apply(f, Input::Started { rollback });
+        // an adoption's first start: told once, by that name, that it moved
+        let told = self.slots.get_mut(f).filter(|s| s.moved).map(|s| {
+            s.moved = false;
+            s.shown_name()
+        });
+        if let Some(name) = told {
+            self.apply(f, Input::Reply(&moved(&name)));
+        }
     }
 
     fn frame(&mut self, f: &str, epoch: u64, text: &str) {
@@ -1944,7 +2243,7 @@ impl Manager {
             }
             Action::Tell(n) => {
                 match &n {
-                    Notice::Linked { .. } => s.note = None,
+                    Notice::Linked { .. } | Notice::Adopted { .. } => s.note = None,
                     Notice::Refused => crate::ev!("simplex.refused_contact", { "agent": f }),
                     Notice::MaybeLost | Notice::Resynced => {}
                     Notice::Unlinked { by_them } => {
@@ -1953,9 +2252,17 @@ impl Manager {
                     Notice::Failed { what } => s.note = Some(format!("SimpleX said: {what}")),
                 }
                 crate::ev!("simplex.told", { "agent": f, "notice": format!("{n:?}") });
-                if let Notice::Linked { .. } = n {
-                    let name = s.shown_name();
-                    self.apply(f, Input::Reply(&greeting(&name)));
+                match n {
+                    // a link made instead: its old conversation is no one's to keep
+                    Notice::Linked { .. } => {
+                        if s.staged.take().is_some() {
+                            stage::forget(&s.dir);
+                        }
+                        let name = s.shown_name();
+                        self.apply(f, Input::Reply(&greeting(&name)));
+                    }
+                    Notice::Adopted { .. } => s.moved = true,
+                    _ => {}
                 }
             }
             Action::Save => {
@@ -1963,6 +2270,108 @@ impl Manager {
                 self.pulse_until = Some(Instant::now() + Duration::from_millis(PULSE_MS));
                 crate::ev!("simplex.save_asked", { "agent": f });
             }
+        }
+    }
+}
+
+/// Why a staged identity's maintenance read found nothing to adopt.
+#[derive(Debug)]
+enum Read {
+    /// It is not one to adopt (it would not open, or its owner is no
+    /// contact of it): let go.
+    Invalid(String),
+    /// Its core did not run or answer: tried again at its owner's word.
+    Failed(String),
+}
+
+/// A staged identity, read by its own core (`-m`, maintenance: started
+/// with nothing subscribed, so no message arrives while it is read): its
+/// owner's contact there and their name, the newest item of their chat
+/// (what is delivered already), and its other contacts and groups (with
+/// its address, let go after). Then its core stopped. The caller bounds it.
+async fn maintenance_read(cfg: &Config, dir: &Path, name: &str, owner: ContactId) -> Result<Adoption, Read> {
+    let staged = dir.join(stage::STAGED_DIR);
+    for sub in ["files", "tmp"] {
+        std::fs::create_dir_all(staged.join(sub)).map_err(|e| Read::Failed(format!("its folder: {e}")))?;
+    }
+    let mut cmd = core_command(&cfg.bin, &staged);
+    cmd.args(core_args(cfg, &stage::core_prefix(dir), &staged, name, None)).arg("-m");
+    let mut child = cmd.spawn().map_err(|e| Read::Failed(format!("its core: {e}")))?;
+    let pid = child.id().ok_or_else(|| Read::Failed("its core ended at once".into()))?;
+    CORES.lock().expect("not poisoned").insert(pid);
+    let read = async {
+        // bounded by the caller's MAINT_MS_MAX
+        let ws = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                // a database that will not open ends its core at once
+                return Err(Read::Invalid(format!("its core ended: {status}")));
+            }
+            if let Some(port) = listening_port(pid) {
+                if let Ok((ws, _)) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}")).await {
+                    break ws;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let (mut sink, mut stream) = ws.split();
+        let mut corr = 0u64;
+        let mut ask = async |cmd: Cmd| -> Result<Resp, Read> {
+            corr += 1;
+            sink.send(Message::text(cmd.frame(corr))).await.map_err(|e| Read::Failed(e.to_string()))?;
+            // bounded by the caller: events (none subscribed) are passed over
+            loop {
+                match stream.next().await {
+                    Some(Ok(Message::Text(t))) => {
+                        let frame = wire::parse(&t).map_err(|e| Read::Failed(e.to_string()))?;
+                        if frame.corr == Some(corr) {
+                            return Ok(frame.resp);
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    _ => return Err(Read::Failed("its bot API closed".into())),
+                }
+            }
+        };
+        let Resp::User { id: user } = ask(Cmd::User).await? else { return Err(Read::Invalid("it has no user".into())) };
+        match ask(Cmd::StartQuiet).await? {
+            Resp::Error { what } => return Err(Read::Failed(format!("its start: {what}"))),
+            _ => {}
+        }
+        let Resp::Contacts(contacts) = ask(Cmd::Contacts { user }).await? else { return Err(Read::Failed("its contacts did not read".into())) };
+        let Some((_, owner_name)) = contacts.iter().find(|(c, _)| *c == owner).cloned() else { return Err(Read::Invalid(format!("its owner, contact {owner}, is not one of its contacts"))) };
+        let Resp::Groups(groups) = ask(Cmd::Groups { user }).await? else { return Err(Read::Failed("its groups did not read".into())) };
+        let newest = match ask(Cmd::Chat { contact: owner, count: 1, before: None }).await? {
+            Resp::Page(items) => items.iter().map(|i| i.id).max().unwrap_or(0),
+            other => return Err(Read::Failed(format!("its owner's chat did not read: {other:?}"))),
+        };
+        let mut leftovers: Vec<Leftover> = contacts.iter().filter(|(c, _)| *c != owner).map(|(c, _)| Leftover::Contact(*c)).collect();
+        leftovers.extend(groups.into_iter().map(Leftover::Group));
+        leftovers.push(Leftover::Address);
+        Ok(Adoption { owner, name: owner_name, newest, leftovers })
+    };
+    let result = read.await;
+    // its end, whole (SIGTERM; the lab: no journal left), within STOP_MS_MAX
+    // SAFETY: a signal to the core this read spawned, by its pid
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if tokio::time::timeout(Duration::from_millis(STOP_MS_MAX), child.wait()).await.is_err() {
+        let _ = child.kill().await;
+    }
+    CORES.lock().expect("not poisoned").remove(&pid);
+    result
+}
+
+/// Any core still running on the databases at `prefix` (a maintenance read
+/// cut off by its bound), killed: none outlives its read.
+fn kill_cores_of(prefix: &Path) {
+    let me = std::process::id();
+    let prefix = prefix.to_string_lossy().to_string();
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()).filter(|p| *p != me) else { continue };
+        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let args: Vec<String> = raw.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).to_string()).collect();
+        if args.windows(2).any(|w| w[0] == "-d" && w[1] == prefix) {
+            // SAFETY: SIGKILL to a core on this agent's staged databases
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
     }
 }
@@ -2200,6 +2609,13 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::SendFile { .. } => "send_file",
         Cmd::CancelSend { .. } => "cancel_send",
         Cmd::Profile { .. } => "profile",
+        Cmd::User => "user",
+        Cmd::StartQuiet => "start_quiet",
+        Cmd::Contacts { .. } => "contacts",
+        Cmd::Groups { .. } => "groups",
+        Cmd::LeaveGroup { .. } => "leave_group",
+        Cmd::DeleteGroup { .. } => "delete_group",
+        Cmd::DeleteAddress => "delete_address",
     }
 }
 
@@ -3029,7 +3445,7 @@ mod tests {
     /// server), with the presets or a test's servers alike.
     #[test]
     fn a_core_reaches_smp_servers_off_443() {
-        let words = |cfg: &Config| core_args(cfg, Path::new("/data/simplex/a"), "Juniper", Some(40123)).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        let words = |cfg: &Config| core_args(cfg, &Path::new("/data/simplex/a").join("sx"), Path::new("/data/simplex/a"), "Juniper", Some(40123)).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
         let presets = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/data/simplex"), smp: None, xftp: None };
         let lab = Config { smp: Some("smp://fp@smp.lab".into()), xftp: Some("xftp://fp@xftp.lab".into()), ..presets.clone() };
         for args in [words(&presets), words(&lab)] {
@@ -3040,7 +3456,7 @@ mod tests {
         for args in [words(&presets), words(&lab)] {
             assert!(args.windows(2).any(|w| w == ["--socks-proxy", "127.0.0.1:40123"]) && args.windows(2).any(|w| w == ["--host-mode", "public"]), "through the bridge's proxy, by name: {args:?}");
         }
-        let unproxied = core_args(&presets, Path::new("/d"), "J", None).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        let unproxied = core_args(&presets, &Path::new("/d").join("sx"), Path::new("/d"), "J", None).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
         assert!(!unproxied.iter().any(|a| a.starts_with("--socks") || a == "--host-mode"), "no proxy bound: straight out");
         assert!(words(&lab).windows(2).any(|w| w == ["-s", "smp://fp@smp.lab"]));
     }
@@ -3168,6 +3584,10 @@ mod tests {
             door: None,
             session: None,
             linking: None,
+            staged: None,
+            staging: false,
+            moved: false,
+            adopting: None,
         }
     }
 
@@ -3228,6 +3648,52 @@ mod tests {
         assert_eq!(digest, t.digest(), "the same digest as door.rs");
         t.sig = k256::schnorr::SigningKey::from_bytes(&[7u8; 32]).expect("a key").sign_raw(&digest, &[0u8; 32]).map(|s| crate::records::hex(&s.to_bytes())).expect("signed");
         t
+    }
+
+    /// Goal (FIN-463): an adoption is taken only by its owner's adoption
+    /// ticket, once, only while its link is off with an identity staged
+    /// and the computer always on; while one is under way no link is
+    /// taken, and an unlink calls it off; the view says what is staged.
+    #[tokio::test]
+    async fn an_adoption_is_its_owners_once_and_only_from_a_stage() {
+        let root = std::env::temp_dir().join(format!("simplex-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let key = agent_key(&root.join("keys"));
+        let mut m = manager(&root, &key, Phase::Off);
+        let f = "juniper--k3x9";
+        let t = signed("adopt", &"11".repeat(16));
+        assert_eq!(m.take(f, &t, "adopt").map_err(|r| r.status), Err(404), "nothing staged");
+        let staged = Staged { stage: "old1.p1.1".into(), owner: 3 };
+        m.slots.get_mut(f).expect("its slot").staged = Some(staged.clone());
+        assert!(m.view(f, None).expect("its view").staged, "its view says so");
+        assert_eq!(m.take(f, &signed("link", &"12".repeat(16)), "adopt").map_err(|r| r.status), Err(403), "a link's ticket adopts nothing");
+        m.computer = Some(computer(false, 1, None));
+        assert_eq!(m.take(f, &signed("adopt", &"13".repeat(16)), "adopt").map_err(|r| r.status), Err(409), "only while always on");
+        m.computer = Some(computer(true, 1, None));
+        assert_eq!(m.take(f, &t, "adopt"), Ok(()));
+        assert_eq!(m.view(f, None).expect("its view").phase, "adopting");
+        assert_eq!(m.take(f, &t, "adopt").map_err(|r| r.status), Err(403), "the same ticket twice");
+        assert_eq!(m.take(f, &signed("adopt", &"14".repeat(16)), "adopt").map_err(|r| r.status), Err(409), "one under way");
+        assert_eq!(m.take(f, &signed("link", &"15".repeat(16)), "link").map_err(|r| r.status), Err(409), "no link while it adopts");
+        // a door key registered for a ticket that is not the one under way binds nothing
+        let stale = m.adopted(f, &"99".repeat(16), Key::generate().expect("a key")).await;
+        assert_eq!(stale.map_err(|r| r.status), Err(409));
+        // nor before its read found anything
+        assert_eq!(m.adopted(f, &t.nonce, Key::generate().expect("a key")).await.map_err(|r| r.status), Err(409));
+        assert_eq!(m.slots[f].saved.link.phase, Phase::Off, "nothing bound");
+        assert_eq!(m.slots[f].adopting, Some((t.nonce.clone(), None)), "the adoption under way, untouched");
+        // an unlink calls it off
+        let mut m = manager(&root.join("again"), &key, Phase::Off);
+        m.slots.get_mut(f).expect("its slot").staged = Some(staged);
+        m.take(f, &signed("adopt", &"16".repeat(16)), "adopt").expect("taken");
+        m.take(f, &signed("unlink", &"17".repeat(16)), "unlink").expect("taken");
+        assert_eq!(m.slots[f].adopting, None);
+        // linked: no adoption, and a link bound by its invitation lets the staged identity go
+        let mut linked = manager(&root.join("linked"), &key, Phase::Linked { contact: 3, name: "paul".into() });
+        linked.slots.get_mut(f).expect("its slot").staged = Some(Staged { stage: "old1.p1.1".into(), owner: 3 });
+        assert_eq!(linked.take(f, &signed("adopt", &"18".repeat(16)), "adopt").map_err(|r| r.status), Err(409));
+        assert!(!linked.view(f, None).expect("its view").staged, "nothing to keep while linked");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Goal (the signed link start): a link or an unlink is taken only by a
@@ -3387,6 +3853,10 @@ mod tests {
             door: None,
             session: None,
             linking: None,
+            staged: None,
+            staging: false,
+            moved: false,
+            adopting: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
@@ -3512,6 +3982,10 @@ mod tests {
             door: None,
             session: None,
             linking: None,
+            staged: None,
+            staging: false,
+            moved: false,
+            adopting: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };

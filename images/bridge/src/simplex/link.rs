@@ -47,12 +47,20 @@
 //!   ticks (`Resync`) read `/_info` before retrying: a forced sync replaces
 //!   its private keys even during negotiation, breaking the keys already
 //!   queued on SMP when the peer is away (the offline-phone lab).
+//! - **An adopted identity** (FIN-463: the owner's SimpleX conversation with
+//!   their old finite.computer agent, carried over): its databases become
+//!   the core's, and `Input::Adopt` binds the link to the owner's contact
+//!   there, marks what that chat already held as delivered (its newest
+//!   item, read before anything new could arrive), so no old message is
+//!   carried as new, and keeps what else the old agent had (other
+//!   contacts, groups, its contact address) as `leftovers`, let go at each
+//!   start until the core says each is gone.
 
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use super::wire::{self, Cmd, ConnId, ContactId, Content, FileRef, Resp, SyncStatus};
+use super::wire::{self, Cmd, ConnId, ContactId, Content, FileRef, GroupId, Resp, SyncStatus};
 
 /// The newest items a start reads back, to forward what a killed core
 /// committed but never announced.
@@ -62,6 +70,9 @@ pub const SCAN_MAX: usize = 8 * CATCHUP_ITEMS as usize;
 /// Parts of replies held while the ratchet synchronizes, at most; past it
 /// the oldest go (and are counted).
 pub const OUTBOX_MAX: usize = 32;
+/// What an adoption lets go, at most (`Link::leftovers`): past it, another
+/// contact is still let go the moment it writes or connects.
+pub const LEFTOVERS_MAX: usize = 256;
 
 /// Where the link is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +124,43 @@ pub struct Link {
     /// is finished when it next does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<Cleanup>,
+    /// What an adopted identity held besides its owner, still to let go
+    /// (`Input::Adopt`): asked at each start until the core says each is
+    /// gone, or refuses it for good. At most `LEFTOVERS_MAX`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leftovers: Vec<Leftover>,
+}
+
+/// What an adopted identity held besides its owner's contact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Leftover {
+    /// Another contact: deleted, told so.
+    Contact(ContactId),
+    /// A group: left (its members told), then deleted here.
+    Group(GroupId),
+    /// A group left, still to delete here.
+    LeftGroup(GroupId),
+    /// Its contact address: deleted, so no one connects through it again.
+    Address,
+}
+
+impl Leftover {
+    fn cmd(self) -> Cmd {
+        match self {
+            Leftover::Contact(contact) => Cmd::Delete { contact, notify: true },
+            Leftover::Group(group) => Cmd::LeaveGroup { group },
+            Leftover::LeftGroup(group) => Cmd::DeleteGroup { group },
+            Leftover::Address => Cmd::DeleteAddress,
+        }
+    }
+}
+
+/// Whether a refusal may pass (its agent or its database failed): then it
+/// is asked again at the next start. Any other (the store has no such
+/// thing, the chat will not) is for good.
+fn transient(what: &str) -> bool {
+    what.starts_with("errorAgent") || what.starts_with("errorDatabase")
 }
 
 /// What an unlink has the core let go.
@@ -175,6 +223,12 @@ pub enum Input<'a> {
     Delivered(i64),
     /// A sync still waits for `ok`: read the core's state before retrying.
     Resync,
+    /// Its owner kept their SimpleX chat with their old agent: its
+    /// identity is the core's now, and `owner` their contact there, by
+    /// `name`; `newest` the newest item that chat held as it was read,
+    /// before anything new could arrive (a core that subscribed nothing);
+    /// `leftovers` what else it held. Taken only while off.
+    Adopt { owner: ContactId, name: &'a str, newest: i64, leftovers: &'a [Leftover] },
 }
 
 /// What the link asks for.
@@ -216,6 +270,9 @@ pub struct Inbound {
 pub enum Notice {
     /// The link is bound to their SimpleX contact, by its name.
     Linked { name: String },
+    /// The link is bound to their contact of an adopted identity: the
+    /// conversation they had with their old agent goes on.
+    Adopted { name: String },
     /// Another contact connected or wrote, and was deleted.
     Refused,
     /// The link went back in time, or found its encryption out of step: a
@@ -254,9 +311,25 @@ impl Link {
                 // its answer, when it comes, is an invitation no one wants
                 Phase::Asking | Phase::Off => {}
             },
+            Input::Adopt { owner, name, newest, leftovers } => {
+                if self.phase == Phase::Off && self.cleanup.is_none() {
+                    self.let_go();
+                    self.phase = Phase::Linked { contact: owner, name: wire::cut(name, wire::NAME_MAX_BYTES).to_string() };
+                    self.delivered = newest.max(0);
+                    self.leftovers.clear();
+                    for l in leftovers.iter().filter(|l| **l != Leftover::Contact(owner)).take(LEFTOVERS_MAX) {
+                        if !self.leftovers.contains(l) {
+                            self.leftovers.push(*l);
+                        }
+                    }
+                    out.extend([Action::Tell(Notice::Adopted { name: wire::cut(name, wire::NAME_MAX_BYTES).to_string() }), Action::Save]);
+                }
+            }
             Input::Started { rollback } => {
                 // an unlink the last life could not finish, first
                 out.extend(self.cleanup.map(|c| Action::Ask(c.cmd())));
+                // then what an adoption still lets go
+                out.extend(self.leftovers.iter().map(|l| Action::Ask(l.cmd())));
                 match &self.phase {
                     Phase::Off => {}
                     // the answer died with the last life
@@ -300,6 +373,29 @@ impl Link {
                     // gone already, or not the core's to let go: not asked again
                     Cmd::Delete { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => self.cleanup = None,
                     Cmd::DeleteConn { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => self.cleanup = None,
+                    // an adoption's leftover: asked again at the next start
+                    // while the refusal may pass; a leave refused for good
+                    // goes on to the group's delete; anything else, settled
+                    Cmd::Delete { contact, .. } if self.leftovers.contains(&Leftover::Contact(*contact)) => {
+                        if !transient(&what) {
+                            self.settle(Leftover::Contact(*contact), None, &mut out);
+                        }
+                    }
+                    Cmd::LeaveGroup { group } if self.leftovers.contains(&Leftover::Group(*group)) => {
+                        if !transient(&what) {
+                            self.settle(Leftover::Group(*group), Some(Leftover::LeftGroup(*group)), &mut out);
+                        }
+                    }
+                    Cmd::DeleteGroup { group } if self.leftovers.contains(&Leftover::LeftGroup(*group)) => {
+                        if !transient(&what) {
+                            self.settle(Leftover::LeftGroup(*group), None, &mut out);
+                        }
+                    }
+                    Cmd::DeleteAddress if self.leftovers.contains(&Leftover::Address) => {
+                        if !transient(&what) {
+                            self.settle(Leftover::Address, None, &mut out);
+                        }
+                    }
                     // not sent now (a ratchet mid-sync refuses sends): it
                     // waits, and what comes after it, until the ratchet is
                     // ok or the next start
@@ -400,10 +496,24 @@ impl Link {
                 self.cleanup = None;
                 out.push(Action::Save);
             }
+            // an adoption's leftovers, let go
+            Resp::Deleted { contact, .. } if self.leftovers.contains(&Leftover::Contact(*contact)) => self.settle(Leftover::Contact(*contact), None, out),
+            Resp::GroupLeft { group } if self.leftovers.contains(&Leftover::Group(*group)) => self.settle(Leftover::Group(*group), Some(Leftover::LeftGroup(*group)), out),
+            Resp::GroupDeleted { group } => {
+                for l in [Leftover::Group(*group), Leftover::LeftGroup(*group)] {
+                    if self.leftovers.contains(&l) {
+                        self.settle(l, None, out);
+                    }
+                }
+            }
+            Resp::AddressDeleted if self.leftovers.contains(&Leftover::Address) => self.settle(Leftover::Address, None, out),
             // a file's own events are the bridge's to act on (it receives the
             // file a forwarded message carries), never the link's, as is the
             // agent's profile (its name)
             Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::ContactInfo { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            // an adopted identity's read (the bridge's, before it adopts), and
+            // what is not one of its leftovers
+            Resp::User { .. } | Resp::Contacts(_) | Resp::Groups(_) | Resp::GroupLeft { .. } | Resp::AddressDeleted => {}
         }
     }
 
@@ -471,6 +581,17 @@ impl Link {
         }
     }
 
+    /// A leftover gone (or refused for good), and what comes after it
+    /// (a group left: its delete), asked at once.
+    fn settle(&mut self, done: Leftover, then: Option<Leftover>, out: &mut Vec<Action>) {
+        self.leftovers.retain(|l| *l != done);
+        if let Some(next) = then.filter(|n| !self.leftovers.contains(n)) {
+            self.leftovers.push(next);
+            out.push(Action::Ask(next.cmd()));
+        }
+        out.push(Action::Save);
+    }
+
     /// A part held until the ratchet is in step; past `OUTBOX_MAX` the
     /// oldest goes, counted.
     fn hold(&mut self, part: String) {
@@ -533,6 +654,8 @@ impl Link {
         assert!(linked || (!self.syncing && self.outbox.is_empty()), "only a bound link syncs or holds replies");
         assert!(self.syncing || !self.forced, "a forced sync is one under way");
         assert!(self.outbox.len() <= OUTBOX_MAX, "the outbox is bounded");
+        assert!(self.leftovers.len() <= LEFTOVERS_MAX, "an adoption's leftovers are bounded");
+        assert!(self.contact().is_none_or(|c| !self.leftovers.contains(&Leftover::Contact(c))), "the bound contact is never let go as a leftover");
     }
 
     /// The link as written beside the core's database.
@@ -546,7 +669,8 @@ impl Link {
     pub fn from_json(text: &str) -> Result<Link, String> {
         let link: Link = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let linked = matches!(link.phase, Phase::Linked { .. });
-        if !(linked || (!link.syncing && link.outbox.is_empty())) || link.outbox.len() > OUTBOX_MAX || (link.forced && !link.syncing) {
+        let owner_left = link.contact().is_some_and(|c| link.leftovers.contains(&Leftover::Contact(c)));
+        if !(linked || (!link.syncing && link.outbox.is_empty())) || link.outbox.len() > OUTBOX_MAX || (link.forced && !link.syncing) || link.leftovers.len() > LEFTOVERS_MAX || owner_left {
             return Err("a link that contradicts itself".into());
         }
         Ok(link)
@@ -934,6 +1058,91 @@ mod tests {
         assert_eq!(Link::from_json(r#"{"phase":"off"}"#), Ok(Link::default()));
         assert_eq!(linked().to_json(), r#"{"phase":"linked","contact":3,"name":"paul","syncing":false,"forced":false,"outbox":[],"dropped":0}"#);
         assert!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","forced":true}"#).is_err(), "forced, but no sync under way");
+    }
+
+    /// An adoption as the bridge makes it: the owner is contact 3, its chat
+    /// held items up to 40, and the old agent had a friend (4), a group (1)
+    /// and an address.
+    fn adopted() -> Link {
+        let mut link = Link::default();
+        let leftovers = [Leftover::Contact(4), Leftover::Contact(3), Leftover::Group(1), Leftover::Address, Leftover::Contact(4)];
+        let a = link.apply(Input::Adopt { owner: 3, name: "phone", newest: 40, leftovers: &leftovers });
+        assert_eq!(a, vec![Action::Tell(Notice::Adopted { name: "phone".into() }), Action::Save]);
+        link
+    }
+
+    /// Goal (FIN-463, valid): an adopted identity binds its owner's contact,
+    /// what that chat already held is delivered (no old message carried as
+    /// new), what arrived after it is carried, and the rest it held is let
+    /// go at the start: the friend told, the group left then deleted, the
+    /// address deleted. Never the owner.
+    #[test]
+    fn an_adoption_binds_the_owner_and_carries_only_whats_new() {
+        let mut link = adopted();
+        assert_eq!((link.contact(), link.delivered), (Some(3), 40));
+        assert_eq!(link.leftovers, vec![Leftover::Contact(4), Leftover::Group(1), Leftover::Address], "the owner never, each once");
+        let started = link.apply(Input::Started { rollback: false });
+        assert_eq!(
+            started,
+            vec![
+                Action::Ask(Cmd::Delete { contact: 4, notify: true }),
+                Action::Ask(Cmd::LeaveGroup { group: 1 }),
+                Action::Ask(Cmd::DeleteAddress),
+                Action::Ask(Cmd::ContactInfo { contact: 3 }),
+                Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None }),
+            ]
+        );
+        // its catch-up: 9..=40 is the old conversation, 41 and 42 came while it moved
+        let item = |id: i64| Item { id, shared: Some(format!("m{id}")), ..msg(3, None, &format!("text {id}")) };
+        let page = Resp::Page((11..=42).map(item).collect());
+        let got = link.apply(Input::Said(&page));
+        assert_eq!(forwards(&got), vec![("m41".into(), "text 41".into()), ("m42".into(), "text 42".into())], "only what came after the read");
+        // the leftovers go as the core answers
+        assert_eq!(link.apply(Input::Said(&Resp::Deleted { contact: 4, by_them: false })), vec![Action::Save]);
+        assert_eq!(link.apply(Input::Said(&Resp::GroupLeft { group: 1 })), vec![Action::Ask(Cmd::DeleteGroup { group: 1 }), Action::Save]);
+        assert_eq!(link.apply(Input::Said(&Resp::GroupDeleted { group: 1 })), vec![Action::Save]);
+        assert_eq!(link.apply(Input::Said(&Resp::AddressDeleted)), vec![Action::Save]);
+        assert!(link.leftovers.is_empty());
+        assert_eq!(link.contact(), Some(3), "the owner stays bound");
+        assert!(!link.apply(Input::Started { rollback: false }).iter().any(|a| matches!(a, Action::Ask(Cmd::Delete { .. } | Cmd::LeaveGroup { .. } | Cmd::DeleteAddress))), "nothing left to let go");
+    }
+
+    /// Goal (replay, restart): an adoption is taken once and only while
+    /// off; its leftovers survive a restart and are asked again while the
+    /// core's refusal may pass; one refused for good is settled; a leave
+    /// refused for good goes on to the group's delete.
+    #[test]
+    fn an_adoption_is_once_and_its_leftovers_outlive_restarts() {
+        let mut link = adopted();
+        assert!(link.apply(Input::Adopt { owner: 9, name: "eve", newest: 1, leftovers: &[] }).is_empty(), "bound already: a second adoption does nothing");
+        assert_eq!(link.contact(), Some(3));
+        for busy in [linked(), { let mut l = Link::default(); invited(&mut l); l }, { let mut l = linked(); l.apply(Input::Unlink); l }] {
+            let mut busy = busy;
+            let before = busy.clone();
+            assert!(busy.apply(Input::Adopt { owner: 9, name: "eve", newest: 1, leftovers: &[] }).is_empty(), "only while off, with nothing left to finish");
+            assert_eq!(busy, before);
+        }
+        link.apply(Input::Started { rollback: false });
+        let flaky = link.apply(Input::Failed { cmd: &Cmd::Delete { contact: 4, notify: true }, what: "errorAgent BROKER TIMEOUT" });
+        assert!(flaky.is_empty() && link.leftovers.contains(&Leftover::Contact(4)), "a refusal that may pass waits for the next start");
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(link.leftovers.len(), 3);
+        let again = link.apply(Input::Started { rollback: false });
+        assert_eq!(again.iter().filter(|a| matches!(a, Action::Ask(Cmd::Delete { contact: 4, .. }))).count(), 1, "asked again at the next start");
+        link.apply(Input::Failed { cmd: &Cmd::Delete { contact: 4, notify: true }, what: "errorStore contactNotFound" });
+        let left = link.apply(Input::Failed { cmd: &Cmd::LeaveGroup { group: 1 }, what: "errorChat groupMemberUserRemoved" });
+        assert_eq!(left, vec![Action::Ask(Cmd::DeleteGroup { group: 1 }), Action::Save], "a leave refused for good: the group deleted");
+        link.apply(Input::Failed { cmd: &Cmd::DeleteGroup { group: 1 }, what: "errorStore groupNotFound" });
+        link.apply(Input::Failed { cmd: &Cmd::DeleteAddress, what: "errorStore userContactLinkNotFound" });
+        assert!(link.leftovers.is_empty());
+        // an unlink after an adoption is any unlink; a file naming the owner as a leftover is refused
+        assert!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","leftovers":[{"contact":3}]}"#).is_err());
+        assert_eq!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","leftovers":[{"contact":4},{"group":1},"address"]}"#).map(|l| l.leftovers), Ok(vec![Leftover::Contact(4), Leftover::Group(1), Leftover::Address]));
+        // bounded
+        let many: Vec<Leftover> = (10..10 + LEFTOVERS_MAX as i64 + 9).map(Leftover::Contact).collect();
+        let mut big = Link::default();
+        big.apply(Input::Adopt { owner: 3, name: "p", newest: 0, leftovers: &many });
+        assert_eq!(big.leftovers.len(), LEFTOVERS_MAX);
     }
 
     /// Goal: whatever arrives in whatever order, the link never contradicts

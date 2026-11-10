@@ -444,6 +444,11 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                         let _ = inbox.send(Msg::Input(Input::CutRead { turn, waited })).await;
                     });
                 }
+                Effect::Staged { agent, stage } => {
+                    if let Some(h) = &simplex {
+                        h.staged(&agent, &stage);
+                    }
+                }
                 Effect::Discover { agent, joined } => {
                     if let Some(fragment) = joined {
                         shared.joined(&fragment);

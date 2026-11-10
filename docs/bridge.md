@@ -430,6 +430,25 @@ never reaches another agent's core.
   (v7.0.3's force makes new keys each time, which an offline phone cannot
   follow). A connection repeated forces already damaged may stay stuck.
   Restarts and recovery send the owner nothing.
+- **An owner's old SimpleX conversation can be kept** (FIN-463,
+  `simplex/stage.rs`; docs/migrations.md, "SimpleX in a stage"). As the
+  move's routine names its stage, the bridge reads the stage's SimpleX
+  files by ranges, as the agent, checks each whole (its CRC, a SQLite
+  database, the contract's three files and no other), and keeps them in
+  the agent's SimpleX directory (`staged/`), running nothing. Its link
+  page's view says `staged`. Its owner's adoption ticket (`POST
+  /simplex/adopt`) then reads the identity once with its core in
+  maintenance mode (`-m`, started with nothing subscribed): their contact
+  there and their name, and their chat's newest item, which is marked
+  delivered, so nothing the old agent already had is carried as new. The
+  door's key is registered, the files become the core's databases, and the
+  link is bound to that contact, at this start's generation (no rollback).
+  Its core then starts: what arrived while it moved is carried, the old
+  agent's other contacts are deleted (told), its groups left and deleted,
+  and its address deleted, each asked at every start until the core says
+  it is gone. Their app is told its new name, and once that it moved. A
+  stage that is not whole, or names no contact of that identity as its
+  owner, is let go, and Link SimpleX works as before.
 - **The agent is kept out**: the core and `BRIDGE_SIMPLEX_DIR` are root's,
   0700, and on no agent's PATH. The agent's passwordless sudo still
   reaches root, and a core's bot API listens on loopback (the debt

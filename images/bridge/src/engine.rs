@@ -587,6 +587,10 @@ pub enum Effect {
     /// List the agent's fragments again (it joined one: `joined`, whose
     /// members changed, so every view of it read before is stale).
     Discover { agent: String, joined: Option<String> },
+    /// The move's routine, posted by the agent's own fragment, names its
+    /// stage (FIN-463): its SimpleX identity, if the stage holds one, is
+    /// set aside (simplex/stage.rs), before the import ends the stage.
+    Staged { agent: String, stage: String },
     /// Read whether a cut turn another life ran waited on its person
     /// (`note::waited`), from its chat's `work`, and answer
     /// `Input::CutRead`: in a task of its own, never a lane's, bounded by
@@ -1232,6 +1236,15 @@ impl Engine {
     }
 
     fn task(&mut self, agent: &Agent, record: &Record) {
+        // the move's own routine is its fragment's (the platform appends it
+        // as the agent), its words naming its stage, whichever chat it is
+        // run in, or none
+        let routine = record.body.get("kind").and_then(Value::as_str) == Some("routine");
+        if let (true, true, Some(text)) = (routine, record.principal == agent.identity, record.body.get("text").and_then(Value::as_str)) {
+            if let Some(stage) = crate::simplex::stage::of_routine(text) {
+                self.out.push(Effect::Staged { agent: agent.fragment.clone(), stage });
+            }
+        }
         match records::task(&record.body) {
             Task::Routine { text, chat } => {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
