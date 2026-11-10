@@ -337,16 +337,16 @@ impl Move {
     }
 
     /// When its stage goes, whatever else it waits for: a phase 1 one
-    /// `KEEP_MS` after it was written, done or not; a held phase 2 one at
-    /// its expiry (it is the only copy left: its old agent was retired, so
-    /// a failed import keeps it for staff's retry until then). An archived
-    /// one goes as it expires (`tick`).
+    /// `KEEP_MS` after it was written, done or not; a phase 2 one at its
+    /// expiry, however its move ended (it is the only copy left: its old
+    /// agent was retired as archived). An archived one goes as it expires
+    /// (`tick`), and one being imported is read until its import ends.
     fn stage_expires(&self) -> Option<i64> {
         let at = self.staged_ms?;
         match (self.phase, self.state) {
             (Phase::P1, _) => Some(at + KEEP_MS),
-            (Phase::P2, MoveState::Held) => self.expires_ms,
-            _ => None,
+            (Phase::P2, MoveState::Archived | MoveState::Importing) => None,
+            (Phase::P2, _) => self.expires_ms,
         }
     }
 
@@ -361,8 +361,18 @@ impl Move {
         Move { state: MoveState::Held, reason: Some(reason), held_from: Some(self.state), command: None, seq: 0, since_ms: now, ..self.clone() }
     }
 
-    /// Its current stage, swept: the effect, and the move without it.
-    fn swept(mut self, effects: &mut Vec<Effect>) -> Move {
+    /// Its current stage, swept: the effect, and the move without it. A
+    /// written phase 2 stage is kept: it goes at its expiry alone
+    /// (`expired`).
+    fn swept(self, effects: &mut Vec<Effect>) -> Move {
+        match self.phase == Phase::P2 && self.staged_ms.is_some() {
+            true => self,
+            false => self.expired(effects),
+        }
+    }
+
+    /// Its current stage, swept whatever its phase: past its keep.
+    fn expired(mut self, effects: &mut Vec<Effect>) -> Move {
         if self.attempt >= 1 {
             effects.push(Effect::Sweep { prefix: self.prefix() });
         }
@@ -612,19 +622,15 @@ pub fn open(m: &Move, agent: &str, stage: &str) -> Outcome {
 }
 
 /// The agent says its import ended: well, the old agent is retired as
-/// migrated (a phase 2 one is marked again); not, staff take it. The stage
-/// is swept either way, but a phase 2 one a failed import keeps (to its
-/// expiry). The same answer again changes nothing.
+/// migrated (a phase 2 one is marked again); not, staff take it. Its reads
+/// end either way; a phase 1 stage is swept, a phase 2 one kept to its
+/// expiry (`swept`). The same answer again changes nothing.
 pub fn done(m: &Move, agent: &str, stage: &str, d: &StageDone, now: i64) -> Outcome {
     its_stage(m, agent, stage)?;
     match (m.state, d.ok) {
         (MoveState::Importing, ok) => {
             let mut effects = vec![];
-            let from = match (ok, m.phase) {
-                // phase 2's stage is the only copy: kept for staff's retry
-                (false, Phase::P2) => m.clone(),
-                _ => m.clone().swept(&mut effects),
-            };
+            let from = m.clone().swept(&mut effects);
             let to = match ok {
                 true => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..from.moved(MoveState::Retiring, now) },
                 false => from.held(HeldReason::ImportFailed, now),
@@ -649,7 +655,7 @@ pub fn tick(m: &Move, now: i64) -> Option<Step> {
     // a stage past its keep goes first, whatever the state
     if m.stage_expires().is_some_and(|at| at <= now) {
         let mut effects = vec![];
-        let to = m.clone().swept(&mut effects);
+        let to = m.clone().expired(&mut effects);
         // what else is due is looked at again at the next pass
         return Some(Step { to, effects });
     }
@@ -671,7 +677,7 @@ pub fn tick(m: &Move, now: i64) -> Option<Step> {
         },
         MoveState::Archived => {
             let mut effects = vec![];
-            let to = m.clone().swept(&mut effects).moved(MoveState::Expired, now);
+            let to = m.clone().expired(&mut effects).moved(MoveState::Expired, now);
             return Some(Step { to, effects });
         }
         _ => return None,
@@ -1138,7 +1144,7 @@ mod tests {
         assert_eq!(late.effects, vec![Effect::Routine { agent: AGENT.into(), stage: "prj_1.p2.1".into() }]);
         let d = done(&late.to, AGENT, "prj_1.p2.1", &ok(), cut + 11).unwrap().unwrap();
         assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated))));
-        assert_eq!(d.effects, vec![Effect::Sweep { prefix: "p2/prj_1/1/".into() }]);
+        assert_eq!(d.effects, vec![], "kept to its expiry");
     }
 
     /// Phase 2's two retirements are two commands: as archived at the
@@ -1188,6 +1194,36 @@ mod tests {
     /// Past the cutoff, the alarm wakes for it only while there is room to
     /// archive: with every slot taken, an archiving move's own deadline
     /// wakes it, not the past cutoff again at once.
+    /// A phase 2 stage goes at its expiry alone, however its move ends: a
+    /// good import, or staff's retire or withdrawal after a failed one.
+    #[test]
+    fn a_phase_two_stage_is_kept_to_its_expiry_however_its_move_ends() {
+        let cut = T0;
+        let expiry = cut + ARCHIVE_KEEP_MS;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let late = to(yes(&ar, AGENT, cut + 10));
+        // done well: retired as migrated, its stage kept
+        let d = done(&late, AGENT, "o.p2.1", &ok(), cut + 11).unwrap().unwrap();
+        assert_eq!((d.effects.as_slice(), d.to.staged_ms), (&[][..], Some(cut + 2)), "kept after a good import");
+        let m = to(report(&d.to, &report_on(&d.to, 1, "retired"), cut + 12));
+        assert_eq!((m.state, m.deadline()), (MoveState::Moved, Some(expiry)), "moved, its stage kept to its expiry");
+        assert_eq!(tick(&m, expiry - 1), None);
+        let gone = tick(&m, expiry).expect("its expiry");
+        assert_eq!(gone.effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+        assert_eq!((gone.to.state, gone.to.deadline()), (MoveState::Moved, None));
+        // a failed import held: staff's retire or withdrawal keeps it too
+        let failed = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
+        let held = to(done(&late, AGENT, "o.p2.1", &failed, cut + 11));
+        let retired = retire(&held, cut + 12).unwrap().unwrap();
+        assert_eq!((retired.effects.as_slice(), retired.to.staged_ms), (&[][..], Some(cut + 2)), "kept after staff's retire");
+        let withdrawn = withdraw(&held, cut + 12).unwrap().unwrap();
+        assert_eq!((withdrawn.effects.as_slice(), withdrawn.to.deadline()), (&[][..], Some(expiry)), "kept after staff's withdrawal");
+        assert_eq!(tick(&withdrawn.to, expiry).expect("its expiry").effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+    }
+
     #[test]
     fn past_the_cutoff_with_no_room_the_alarm_waits_for_a_deadline() {
         let (cut, now) = (T0, T0 + 5);
