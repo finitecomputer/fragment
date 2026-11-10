@@ -1705,6 +1705,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
+    older_release_ui(s, api, &mut b, &session)?;
     // a guest, in this browser, who then signs in to this seat
     guest_ui(s, api, &mut b, &email, &shots)?;
     println!("      (screenshots: {})", shots.display());
@@ -2213,6 +2214,32 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     anyhow::ensure!(reload_shell(b, page)?, "the first account's shell again, at home: {}", b.eval(page, "location.pathname")?);
     let unshared = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{other_id}"), None, &[])?;
     anyhow::ensure!(unshared.status == 200, "the other account out of the first chat again: {unshared}");
+    Ok(())
+}
+
+/// A shell that reads an older release (a deploy going out, rolled back, a
+/// reload the release watcher put off), one from before notices (FIN-458):
+/// its `/api/notices` is no route (404). Nothing is told, and that is no
+/// failure: no "Couldn't refresh" line, the page as ever.
+fn older_release_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = b.open_with_script(
+        &format!("{}/", api.base),
+        r#"{ const fetch = window.fetch.bind(window);
+             window.fetch = (url, options) => String(url).endsWith('/api/notices')
+               ? Promise.resolve(new Response(JSON.stringify({ error: 'not_found', message: 'no route GET /api/notices' }), { status: 404, headers: { 'content-type': 'application/json' } }))
+               : fetch(url, options); }"#,
+    )?;
+    let drawn = b.until(&page, "!!document.querySelector('#sidebar .row')", wait);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let band = b.eval(&page, "({ hidden: document.getElementById('computer-notices').hidden, rows: [...document.querySelectorAll('#computer-notices .computer-notice')].map((r) => r.dataset.kind) })")?;
+    s.ok(
+        "a release from before notices answers none (404): nothing told, and no \"Couldn't refresh\" line, the page as ever",
+        drawn && band["rows"].as_array().is_some_and(|r| !r.iter().any(|k| k == "refresh")),
+        &band,
+    );
+    b.close(page)?;
     Ok(())
 }
 
