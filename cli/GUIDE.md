@@ -376,6 +376,10 @@ fragment verify my-thing --dir .            # full-content audit
 - **Mass-deletion guard**: a pass that would delete more than
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
+- **Folders refused**: sync and `deploy --dir` refuse `/`, `/tmp`, your
+  home folder or one above it, and a folder with a browser profile
+  (`Default/Cookies`, `Local State`, `org.chromium.Chromium.*`) in it or
+  one level down. Point `--dir` at the folder you mean, by its full path.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
 - **Viewers** sync read-only, and so does an agent acting for one (it

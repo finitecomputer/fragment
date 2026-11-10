@@ -1829,6 +1829,7 @@ fn run(cli: Cli) -> Result<()> {
             if j && watch {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
+            sync::refuse_dir(&dir, dirs::home_dir().as_deref()).map_err(|e| usage(e.to_string()))?;
             let opts = SyncOptions {
                 mode: match mode.as_deref() {
                     _ if live => Mode::Pull,
@@ -2684,6 +2685,7 @@ enum Deployed {
 fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>) -> Result<Deployed> {
     let synced = match dir {
         Some(dir) => {
+            sync::refuse_dir(dir, dirs::home_dir().as_deref()).map_err(|e| usage(e.to_string()))?;
             let report = sync::sync_once(c, name, dir, &SyncOptions { writer_id: writer_id(c), ..Default::default() }).map_err(cs_anyhow)?;
             if report.mass_delete_guard.is_some() {
                 return Ok(Deployed::Guarded(report));
