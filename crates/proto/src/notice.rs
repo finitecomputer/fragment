@@ -75,7 +75,9 @@ pub struct Until {
 
 /// What a person may do about a notice: `post` its `body` to a platform
 /// route with their own credential, then read their notices again; or
-/// `open` a page. One of the two.
+/// `open` a page. One of the two. A post's answer may name a page to open
+/// (`open`, as `InviteAccepted` does), opened once that read has it; a
+/// post refused shows the server's own words for it (`ErrorBody.message`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NoticeAction {
