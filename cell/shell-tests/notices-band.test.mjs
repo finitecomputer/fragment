@@ -260,3 +260,63 @@ test("an action's answer that names a page opens it, once the read after it has 
   await settle();
   assert.deepEqual(q.opened, []);
 });
+
+// An invite, as the registry tells it, for the tests below.
+const invited = () => ({
+  id: "invite:garden--k3x9", kind: "invite", level: "info", title: "Garden plans", text: "ada@example.com invited you to edit it.",
+  actions: [{ label: "Accept", post: "/api/invites/garden--k3x9/accept", body: {} }, { label: "Decline", post: "/api/invites/garden--k3x9/decline", body: {} }],
+});
+const gone = "No invite to garden--k3x9 waits on you: it was taken back, answered, or ran out.";
+
+test("a refusal outlives its notice: the read after it no longer has it (an invite taken back), and its words stay, a line of their own, until dismissed", async (t) => {
+  const p = page(t, [invited()]);
+  p.tap("invite:garden--k3x9", "Accept");
+  p.calls[0].fail(Object.assign(new Error(gone), { status: 404 }));
+  await settle();
+  p.calls[1].ok({ notices: [] });
+  await settle();
+  assert.deepEqual(p.shown(), [{ id: "invite:garden--k3x9", words: ["Garden plans", gone], actions: [{ label: "OK", enabled: true }] }], "its title and the server's words");
+  assert.deepEqual(p.opened, [], "nothing opened");
+  // another read meanwhile changes nothing of it
+  p.load();
+  p.calls[2].ok({ notices: [] });
+  await settle();
+  assert.deepEqual(p.shown().map((r) => r.words), [["Garden plans", gone]]);
+  p.tap("invite:garden--k3x9", "OK");
+  assert.deepEqual(p.shown(), [], "dismissed, it goes");
+  assert.equal(p.calls.length, 3, "and dismissing asks nothing");
+});
+
+test("a refusal whose read fails: the notice as last read, with the server's words under it, to tap again", async (t) => {
+  const p = page(t, [invited()]);
+  p.tap("invite:garden--k3x9", "Decline");
+  p.calls[0].fail(Object.assign(new Error(gone), { status: 404 }));
+  await settle();
+  p.calls[1].fail(new TypeError("Failed to fetch"));
+  await settle();
+  assert.deepEqual(p.shown(), [{ id: "invite:garden--k3x9", words: ["Garden plans", "ada@example.com invited you to edit it.", gone], actions: [{ label: "Accept", enabled: true }, { label: "Decline", enabled: true }] }]);
+});
+
+for (const [first, second] of [["Accept", "Decline"], ["Decline", "Accept"]]) {
+  test(`a notice's actions are one answer: ${first} pending, every action of it is off, through redraws, and ${second} asks nothing, until its read`, async (t) => {
+    const p = page(t, [invited()]);
+    p.tap("invite:garden--k3x9", first);
+    const off = [{ label: "Accept", enabled: false }, { label: "Decline", enabled: false }];
+    assert.deepEqual(p.shown()[0].actions, off, "both off at once");
+    // the page's watch reads meanwhile: drawn again, still both off
+    p.load();
+    p.calls[1].ok({ notices: [invited()] });
+    await settle();
+    assert.deepEqual(p.shown()[0].actions, off, "through a redraw");
+    p.tap("invite:garden--k3x9", second);
+    assert.equal(p.calls.filter((c) => c.method === "POST").length, 1, `${second} posts nothing while ${first} is out`);
+    // its answer, slow, comes; the read after it decides
+    p.calls[0].ok(first === "Accept" ? { fragment: "garden--k3x9", role: "editor" } : { ok: true, declined: "garden--k3x9" });
+    await settle();
+    p.calls[2].ok({ notices: [] });
+    await settle();
+    assert.deepEqual(p.shown(), [], "answered once");
+    assert.deepEqual(p.calls.filter((c) => c.method === "POST").map((c) => c.path), [`/api/invites/garden--k3x9/${first.toLowerCase()}`]);
+  });
+}
+
