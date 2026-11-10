@@ -161,8 +161,10 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
         Some(Body::Json(request)) => {
             op["requestBody"] = json!({ "required": true, "content": { "application/json": { "schema": (request.schema)(inn).to_value() } } });
         }
+        // raw bytes: an empty media type object (OpenAPI 3.1, "Considerations
+        // for File Uploads"), no `type: string`, which a reader would decode
         Some(Body::Bytes { media }) => {
-            op["requestBody"] = json!({ "required": true, "content": { media: { "schema": { "type": "string", "contentMediaType": media } } } });
+            op["requestBody"] = json!({ "required": true, "content": { media: {} } });
             op["x-fragment-takes"] = json!(media);
         }
         None => {}
@@ -178,7 +180,7 @@ fn operation(route: &Route, out: &mut SchemaGenerator, inn: &mut SchemaGenerator
             op["x-fragment-socket"] = json!({ "sends": sends, "receives": (receives.schema)(out).to_value() });
         }
         Answer::Bytes { media } => {
-            let content = json!({ media: { "schema": { "type": "string", "contentMediaType": media } } });
+            let content = json!({ media: {} });
             responses.insert("200".into(), json!({ "description": "OK: the bytes, whole.", "content": content }));
             responses.insert("206".into(), json!({ "description": "Partial Content: the range a `Range` header asked for.", "content": content }));
             op["x-fragment-bytes"] = json!(media);

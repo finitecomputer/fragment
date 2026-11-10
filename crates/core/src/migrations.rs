@@ -712,7 +712,8 @@ pub fn cutoff(m: &Move, cutoff_ms: i64, now: i64) -> Option<Step> {
 // ---- operators
 
 /// Asked again, from where it was held: a new attempt at its stage, or its
-/// retirement again, or its import's routine again (phase 2's kept stage).
+/// retirement again (an archive's, its stage kept), or its import's
+/// routine again (phase 2's kept stage).
 pub fn retry(m: &Move, now: i64) -> Outcome {
     if m.state != MoveState::Held {
         return Err(Refused::NotNow(m.state));
@@ -720,6 +721,10 @@ pub fn retry(m: &Move, now: i64) -> Outcome {
     let mut effects = vec![];
     let to = match (m.held_from, m.phase) {
         (Some(MoveState::Retiring), _) => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..m.moved(MoveState::Retiring, now) },
+        // an archive staged whose retirement's word never came: its
+        // retirement again, its stage kept (the mover may have retired the
+        // old agent and lost its receipt: the stage is the only copy then)
+        (Some(MoveState::Archiving), _) if m.staged_ms.is_some() => Move { command: Some(Act::Retire(Mark::Archived)), seq: 0, progress_ms: Some(now), ..m.moved(MoveState::Archiving, now) },
         (Some(MoveState::Archiving), _) => m.clone().swept(&mut effects).attempt_again(MoveState::Archiving, Phase::P2, now),
         (Some(MoveState::Importing), Phase::P2) => {
             let agent = m.agent.clone().ok_or(Refused::Unfit("a held import has its agent"))?;
@@ -1199,6 +1204,27 @@ mod tests {
         assert_eq!(next_wake(Some(now + 60_000), Some(cut), 3, ARCHIVING_MAX, now), Some(now + 60_000), "no room: the next deadline");
         assert_eq!(next_wake(None, Some(cut), 3, ARCHIVING_MAX, now), None, "no room, no deadline: nothing");
         assert_eq!(next_wake(None, Some(cut + 10), 0, 0, cut), None, "nothing unasked: no cutoff");
+    }
+
+    /// An archive staged, whose retirement's word never came, is held; staff's
+    /// retry asks for the retirement again, its stage kept (the mover may
+    /// have retired the old agent and lost its receipt: the stage is the
+    /// only copy then), not a new stage of an old agent that may be gone.
+    #[test]
+    fn a_held_archive_retirement_is_retried_with_its_stage_kept() {
+        let cut = T0;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let held = tick(&st, st.deadline().unwrap()).expect("its retirement's day").to;
+        assert_eq!((held.state, held.reason, held.staged_ms), (MoveState::Held, Some(HeldReason::ArchiveFailed), Some(cut + 2)));
+        let r = retry(&held, cut + 10).unwrap().unwrap();
+        assert_eq!(r.effects, vec![], "its stage is kept");
+        assert_eq!((r.to.state, r.to.attempt, r.to.command, r.to.staged_ms), (MoveState::Archiving, 1, Some(Act::Retire(Mark::Archived)), Some(cut + 2)));
+        assert_eq!(r.to.deadline(), Some(cut + 10 + RETIRE_MS), "a day for its word, from the retry");
+        // the mover's receipt, again or late, archives it
+        let ar = to(report(&r.to, &report_on(&r.to, 1, "retired"), cut + 11));
+        assert_eq!(ar.state, MoveState::Archived);
     }
 
     #[test]

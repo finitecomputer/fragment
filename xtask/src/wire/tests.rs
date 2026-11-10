@@ -181,6 +181,32 @@ fn bytes_a_route_takes_or_answers_hold() {
     }
 }
 
+/// Bytes a route takes or answers are raw bytes in the OpenAPI document:
+/// an empty media type object, no schema, for a part's upload and for the
+/// 200 and 206 of a zip alike. A `type: string` there would tell a reader
+/// to decode text, which a zip's bytes are not.
+#[test]
+fn bytes_are_raw_in_the_document() {
+    let doc = super::openapi::document().expect("the document");
+    let mut seen = 0;
+    for (path, ops) in doc["paths"].as_object().expect("paths") {
+        for (method, op) in ops.as_object().expect("operations") {
+            let mut bodies = vec![];
+            if let Some(media) = op["x-fragment-takes"].as_str() {
+                bodies.push(&op["requestBody"]["content"][media]);
+            }
+            if let Some(media) = op["x-fragment-bytes"].as_str() {
+                bodies.extend(["200", "206"].map(|s| &op["responses"][s]["content"][media]));
+            }
+            for body in bodies {
+                assert_eq!(body, &serde_json::json!({}), "{method} {path}: raw bytes, no text schema");
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 3, "the part's upload, and the zip's 200 and 206");
+}
+
 #[test]
 fn what_an_older_client_feels_fails_naming_the_fact() {
     // a new required field, and optional → required, where a client writes it
