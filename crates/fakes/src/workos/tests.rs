@@ -111,6 +111,35 @@ fn a_persons_accounts_at_a_provider_are_each_named_by_id() {
     assert!(!p.fake.holds("a@e2e.test", "mail"));
 }
 
+/// Goal: Pipes keeps an import's metadata as WorkOS documents it: a create
+/// takes it, an update that names it is refused (422) and one that does
+/// not leaves it; a credential's vend answers it beside the token, a
+/// token's vend never. The stand-in provider names its account's host.
+#[test]
+fn an_imports_metadata_is_a_creates_and_the_credential_answers_it() {
+    let p = Pipes::start();
+    let user = p.fake.user("a@e2e.test").id;
+    let path = format!("/user_management/users/{user}/connected_accounts/mail");
+    let kept = json!({ "instance_url": format!("https://first.{ACCOUNT_HOSTS_UNDER}") });
+    let mut create = p.grant("first");
+    create["metadata"] = kept.clone();
+    assert_eq!(p.call("POST", &path, Some(create.clone())).0, 201);
+    assert_eq!(p.fake.metadata("a@e2e.test", "mail"), Some(kept.clone()));
+    assert_eq!(p.call("PUT", &path, Some(create)).0, 422, "not accepted on update");
+    assert_eq!(p.call("PUT", &path, Some(p.grant("again"))).0, 200);
+    assert_eq!(p.fake.metadata("a@e2e.test", "mail"), Some(kept.clone()), "an update without it leaves it");
+    let (status, vended) = p.call("POST", "/data-integrations/mail/credentials", Some(json!({ "user_id": user })));
+    let value = vended["credential"]["value"].as_str().unwrap_or_default().to_string();
+    assert_eq!((status, &vended["credential"]["metadata"], p.fake.token_account(&value).is_some()), (200, &kept, true), "{vended}");
+    let (_, token) = p.call("POST", "/data-integrations/mail/token", Some(json!({ "user_id": user })));
+    assert!(token["access_token"].get("metadata").is_none() && token.get("credential").is_none(), "{token}");
+    p.fake.keep_metadata("a@e2e.test", "mail", json!({ "instance_url": "https://moved.my.oauth.test" }));
+    let (_, vended) = p.call("POST", "/data-integrations/mail/credentials", Some(json!({ "user_id": user })));
+    assert_eq!(vended["credential"]["metadata"]["instance_url"], "https://moved.my.oauth.test", "as a refresh would keep it");
+    let (_, none) = p.call("POST", "/data-integrations/mail/credentials", Some(json!({ "user_id": p.fake.user("b@e2e.test").id })));
+    assert_eq!((none["active"].as_bool(), none["error"].as_str()), (Some(false), Some("not_installed")));
+}
+
 /// Goal: a fake started again over the file its users were kept in hands no
 /// email another's subject, as a dev stack's registry (which signs a person
 /// in by subject) needs across its restarts. Method: one fake makes a user

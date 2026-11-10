@@ -54,6 +54,17 @@ never taken for a connection. Google's revocation ends the Google
 account's whole grant to the client, so it also ends another person's
 connection of that same account.
 
+## An account's own host
+
+Where a row names an `account_host`, the import that makes an account
+also hands Pipes the token answer's field the row names (`metadata`,
+Salesforce's `instance_url`), when it is an https URL of a host under the
+row's suffix; an update never does (WorkOS refuses it there, and keeps it
+from the provider's refreshes). The swap reads it back from Pipes'
+credential (`/data-integrations/{slug}/credentials`) for each request to a
+host under the suffix, and sends the token there only when the hosts are
+the same (docs/computers.md, "An account's own host").
+
 ## Several accounts
 
 Where a row's `accounts_max` is above 1, a person connects several

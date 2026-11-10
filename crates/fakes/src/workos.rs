@@ -145,7 +145,9 @@ const ACCOUNTS_LIMIT: usize = 25;
 /// A connected account at Pipes: the compatibility connection, or a
 /// standard one an `add` made; whether it is still authorized, its label
 /// (`account_display_name`), scopes and identifier as imported, and the
-/// stand-in provider's account its grant is (none: a test's lever made it).
+/// stand-in provider's account its grant is (none: a test's lever made it),
+/// and what Pipes keeps of its provider's token answers (`metadata`: an
+/// import's that made it, or a test's lever).
 #[derive(Clone, Debug)]
 struct Account {
     id: String,
@@ -156,6 +158,7 @@ struct Account {
     identifier: Option<String>,
     created_at: String,
     grant: Option<String>,
+    metadata: Value,
 }
 
 /// A connected account as a test reads it, with no token.
@@ -185,7 +188,7 @@ enum Target {
 /// An import as it lands: (user id, provider), its label as sent (absent:
 /// an update keeps the one there), the scopes it names (none: none kept),
 /// its identifier (absent: an update keeps it), the account it lands on,
-/// and the provider's account its grant is.
+/// the provider's account its grant is, and its metadata (a create's alone).
 struct Import {
     user: String,
     provider: String,
@@ -194,6 +197,7 @@ struct Import {
     identifier: Option<String>,
     target: Target,
     account: String,
+    metadata: Option<Value>,
 }
 
 impl Account {
@@ -224,7 +228,7 @@ impl State {
         let id = self.next("data_installation");
         let created_at = crate::codestorage::iso(crate::codestorage::now_ms());
         let list = self.accounts.entry((user.to_string(), provider.to_string())).or_default();
-        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None });
+        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None, metadata: json!({}) });
         list.last_mut().expect("just made")
     }
 
@@ -270,6 +274,9 @@ impl State {
             a.identifier = Some(identifier);
         }
         a.grant = Some(i.account.clone());
+        if let Some(m) = i.metadata {
+            a.metadata = m;
+        }
         let answer = a.json(&i.user, &i.provider);
         self.imports.push((i.user, i.provider, i.account));
         Some(answer)
@@ -422,6 +429,11 @@ fn now_s() -> i64 {
 /// What the stand-in provider's connection asks for (`connection_oauth`).
 pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
 
+/// The suffix the stand-in provider's accounts' own hosts are under: its
+/// token answer names `https://<account>.<this>` (`instance_url`), as
+/// Salesforce's names its org's.
+pub const ACCOUNT_HOSTS_UNDER: &str = "my.oauth.test";
+
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
         json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": CONNECTION_SCOPES, "revoke": format!("{}/test-oauth/revoke", self.url) })
@@ -429,6 +441,21 @@ impl WorkOs {
 
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
     pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
+
+    /// What Pipes keeps of `email`'s account at `provider` (its compatibility
+    /// connection, made if there is none), as a refresh of it would.
+    pub fn keep_metadata(&self, email: &str, provider: &str, metadata: Value) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email).expect("the fake keeps its users");
+        s.compatibility(&user.id, provider).metadata = metadata;
+    }
+
+    /// What Pipes keeps of `email`'s compatibility connection at `provider`.
+    pub fn metadata(&self, email: &str, provider: &str) -> Option<Value> {
+        let s = self.state.lock().expect("workos state");
+        let user = s.users.iter().find(|u| u.email.eq_ignore_ascii_case(email))?.id.clone();
+        s.named(&user, provider, None).map(|a| a.metadata.clone())
+    }
 
     /// The next import is answered 504, as one whose outcome its caller
     /// cannot know, and lands only at `land_deferred_import`.
@@ -587,7 +614,8 @@ impl WorkOs {
                     }
                     let access = s.next("mock_access");
                     let refresh = s.next("mock_refresh");
-                    let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes });
+                    // its account's own host, as Salesforce's answer names its org's (`instance_url`)
+                    let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes, "instance_url": format!("https://{account}.{ACCOUNT_HOSTS_UNDER}") });
                     // OpenID Connect's ID token beside the grant when `openid` was asked
                     // for, unsigned as the fake's AuthKit tokens are: its account's
                     // email, for this client
@@ -641,7 +669,10 @@ impl WorkOs {
                     if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
                     let scopes = serde_json::from_value::<Vec<String>>(body["scopes"].clone()).ok();
                     let identifier = body["account_identifier"].as_str().map(str::to_string);
-                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account };
+                    // WorkOS: metadata is "not accepted on update"
+                    if body.get("metadata").is_some() && req.method == "PUT" { return pipes_problem(422, "invalid_request", "metadata is not accepted on update"); }
+                    let metadata = body.get("metadata").cloned();
+                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account, metadata };
                     if std::mem::take(&mut s.defer_import) {
                         s.deferred = Some(import);
                         return problem(504, "gateway_timeout", "test import deferred: it lands later");
@@ -813,11 +844,14 @@ impl WorkOs {
                     s.deleted.push(key);
                     Response::bytes(204, "text/plain", vec![])
                 }
-                ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/token") => {
+                // a token (`/token`), or a credential with what Pipes keeps of
+                // the account's provider answers (`/credentials`)
+                ("POST", p) if p.starts_with("/data-integrations/") && (p.ends_with("/token") || p.ends_with("/credentials")) => {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
                     }
-                    let provider = p["/data-integrations/".len()..p.len() - "/token".len()].to_string();
+                    let credential = p.ends_with("/credentials");
+                    let provider = p["/data-integrations/".len()..p.rfind('/').expect("a vend's path")].to_string();
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
                     let Some(user) = body["user_id"].as_str().filter(|u| s.users.iter().any(|x| x.id == *u)).map(str::to_string) else {
                         return problem(404, "not_found", "no such user");
@@ -845,10 +879,11 @@ impl WorkOs {
                             let missing: Vec<&str> = if scopes.is_empty() { vec![] } else { CONNECTION_SCOPES.into_iter().filter(|c| !scopes.iter().any(|s| s == c)).collect() };
                             s.tokens.entry(provider).or_default().push(token.clone());
                             let expires = crate::codestorage::iso(crate::codestorage::now_ms() + 3_600_000);
-                            Response::json(
-                                200,
-                                &json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing } }),
-                            )
+                            let answer = match credential {
+                                true => json!({ "active": true, "credential": { "object": "credential", "auth_method": "oauth", "value": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing, "metadata": account.metadata, "config": {} } }),
+                                false => json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing } }),
+                            };
+                            Response::json(200, &answer)
                         }
                     }
                 }

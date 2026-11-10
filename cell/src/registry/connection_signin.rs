@@ -177,7 +177,8 @@ impl RegistryCell {
         if let Some(t) = &turn {
             t.uncertain.set(Some(js::now_ms() + accounts::UNCERTAIN_HOLD_MS));
         }
-        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
+        let metadata = self.cfg.providers.get(&b.provider).and_then(|p| p.account_host.as_ref()).and_then(|a| connection_signin::import_metadata(&answer, a));
+        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens.keeping(metadata), label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
         if let Some(t) = turn.as_ref().filter(|_| imported != Imported::Failed) {
             t.uncertain.set(None);
         }

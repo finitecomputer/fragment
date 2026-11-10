@@ -283,7 +283,12 @@
   // (`fragment_core::own_signin`); its `models` are what their agents may
   // run on, paid by their account at the provider. Any row may carry a
   // `note`, which settings' Connections shows under its name, connected or
-  // not: plain text, one line, at most 280 characters (google's, below).
+  // not: plain text, one line, at most 280 characters (google's, below). A
+  // connection whose accounts each live at a host of their own (Salesforce's
+  // orgs) names `"account_host": {"metadata": "instance_url", "under":
+  // "my.salesforce.com"}`: its token also goes to a host under `under`, but
+  // only the one its account's Pipes metadata names (docs/computers.md,
+  // "An account's own host").
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],

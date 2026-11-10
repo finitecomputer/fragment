@@ -131,6 +131,9 @@ pub struct Tokens {
     refresh: String,
     pub expires_in: u32,
     scopes: Vec<String>,
+    /// What Pipes keeps of the grant's answer, on an import that makes an
+    /// account (`import_metadata`, `kept`).
+    metadata: Option<Value>,
 }
 
 /// Why a token endpoint's answer is not imported.
@@ -162,7 +165,7 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
     if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
         return Err(Refused::NoScopes);
     }
-    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
+    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes, metadata: None })
 }
 
 /// What a connection's row asks for that its grant lacks, in the row's
@@ -182,6 +185,18 @@ pub fn pipes_scopes(account: &Value) -> Option<Vec<String>> {
 }
 
 impl Tokens {
+    /// These tokens, with what Pipes is to keep of their answer
+    /// (`import_metadata`) when an import makes their account.
+    pub fn keeping(self, metadata: Option<Value>) -> Tokens {
+        Tokens { metadata, ..self }
+    }
+
+    /// What Pipes is to keep of their answer, on an import that makes an
+    /// account (WorkOS takes `metadata` on create alone).
+    pub fn metadata(&self) -> Option<&Value> {
+        self.metadata.as_ref()
+    }
+
     /// WorkOS's documented connected-account import/update body. `account`
     /// is its label (`account_label`); `null` clears an earlier account's
     /// on an update.
@@ -323,6 +338,18 @@ pub fn account_label(answer: &Value, client_id: &str) -> Option<String> {
 /// it (`connection_accounts::import_of`). None: no ID token, or no `sub`.
 pub fn account_identifier(answer: &Value, client_id: &str) -> Option<String> {
     id_claims(answer, client_id)?["sub"].as_str().filter(|s| crate::connection_accounts::identifier_ok(s)).map(str::to_string)
+}
+
+/// What Pipes keeps of a grant's answer for a connection's account host
+/// (WorkOS' import `metadata`): the field its row names (Salesforce's
+/// `instance_url`), when it names a host under the row's suffix
+/// (`AccountHost::of_metadata`). None: it names none such, and the account
+/// gets its host from Pipes' next refresh, if any.
+pub fn import_metadata(answer: &Value, a: &catalog::AccountHost) -> Option<Value> {
+    a.of_metadata(answer)?;
+    let mut m = serde_json::Map::new();
+    m.insert(a.metadata.clone(), answer[&a.metadata].clone());
+    Some(Value::Object(m))
 }
 
 /// The claims of the ID token beside a grant, when it names this client
@@ -659,6 +686,31 @@ mod tests {
         let mut omitted = good;
         omitted.as_object_mut().unwrap().remove("scope");
         assert_eq!(tokens(&omitted, &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone()), Ok(json!(requested)), "RFC 6749: an omitted scope is the one requested");
+    }
+
+    /// A connection's account host: the field of the grant's answer its
+    /// row names (Salesforce's `instance_url`) is what Pipes keeps, when it
+    /// names a host under the suffix; anything else of the answer, and a
+    /// field naming another host, is never sent. Tokens carry it unchanged.
+    #[test]
+    fn what_pipes_keeps_of_a_grant_is_its_account_host_alone() {
+        let a = catalog::AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let mut answer = granting("api refresh_token");
+        answer["instance_url"] = json!("https://acme.my.salesforce.com");
+        answer["id"] = json!("https://login.salesforce.com/id/00D000000000001/005000000000001");
+        answer["signature"] = json!("c2lnbmF0dXJl");
+        assert_eq!(import_metadata(&answer, &a), Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        for elsewhere in [json!("https://evil.test"), json!("http://acme.my.salesforce.com"), json!(7)] {
+            answer["instance_url"] = elsewhere.clone();
+            assert_eq!(import_metadata(&answer, &a), None, "{elsewhere}");
+        }
+        answer.as_object_mut().unwrap().remove("instance_url");
+        assert_eq!(import_metadata(&answer, &a), None, "none named");
+        let requested = vec!["api".to_string(), "refresh_token".to_string()];
+        let kept = tokens(&granting("api refresh_token"), &requested).unwrap().keeping(Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert_eq!(kept.metadata(), Some(&json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert!(kept.import_body("2026-11-10T00:00:00Z", None).get("metadata").is_none(), "the body an update sends too names none");
+        assert_eq!(tokens(&granting("api"), &requested).unwrap().metadata(), None);
     }
 
     #[test]

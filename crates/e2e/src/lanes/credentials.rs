@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::ledger::{charged, entries, forget_gate, usage};
 use crate::api::Api;
-use crate::{Suite, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
+use crate::{Suite, ORG_CONNECTION, ORG_CONNECTION_HOST, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
 
 /// Who the swap's checks act as, and on what.
 pub(super) struct Swapping<'a> {
@@ -79,6 +79,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
     "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
+    "a connection whose accounts live at hosts of their own (Salesforce's orgs): a call to its account's own host, as Pipes' metadata names it, is swapped the account's credential, and one to its named host Pipes' token",
+    "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
+    "an account whose Pipes metadata names no host under the suffix, or another host, has its calls there refused, reaching no one",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -120,7 +123,7 @@ const XAI_CHAT: &str = r#"{"model":"grok-4.3","messages":[{"role":"user","conten
 /// `provider`: a local run holds the node's host secret, so it makes one
 /// as the platform does (a forgery needs the secret; a guest has none).
 pub(super) fn placeholder(s: &Suite, id: &str, agent: &str, provider: &str) -> String {
-    let kind = if [SWAP_CONNECTION, SEVERAL].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
+    let kind = if [SWAP_CONNECTION, SEVERAL, ORG_CONNECTION].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
     let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(id, agent, provider);
     fragment_core::swap::Placeholder::new(kind, provider, &tag).text()
 }
@@ -251,6 +254,34 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let cleared = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": null })))?;
     let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}"), None)?;
     anyhow::ensure!(cleared.status == 200 && gone.status == 200, "the several accounts' checks cleared: {cleared}; {gone}");
+
+    // a connection whose accounts live at hosts of their own (its row's
+    // account_host): its named host takes Pipes' token, and a host under
+    // its suffix the account's credential, at the account's own host alone
+    let under = fragment_fakes::workos::ACCOUNT_HOSTS_UNDER;
+    let own = format!("acme.{under}");
+    s.workos.connect(&email, ORG_CONNECTION, true);
+    s.workos.keep_metadata(&email, ORG_CONNECTION, json!({ "instance_url": format!("https://{own}") }));
+    let fetch = |s: &Suite, host: &str| format!("fetch http://{host}/services/data/v62.0/sobjects with {}", placeholder(s, w.id, w.agent, ORG_CONNECTION));
+    let swapped_at = |s: &Suite, host: &str| s.workos.tokens(ORG_CONNECTION).last().is_some_and(|t| s.upstream.seen().last().is_some_and(|seen| seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {t}")));
+    let at_own = say(s, 164, &fetch(s, &own))?;
+    let own_swapped = swapped_at(s, &own);
+    let at_login = say(s, 165, &fetch(s, ORG_CONNECTION_HOST))?;
+    s.ok(SWAP_CHECKS[46], at_own.starts_with("fetched 200") && own_swapped && at_login.starts_with("fetched 200") && swapped_at(s, ORG_CONNECTION_HOST), json!({ "own": at_own, "login": at_login }));
+    let seen_before = s.upstream.seen().len();
+    let another = say(s, 166, &fetch(s, &format!("rival.{under}")))?;
+    s.ok(SWAP_CHECKS[47], another.starts_with("fetched 403") && another.contains(&format!("is at {own}")) && s.upstream.seen().len() == seen_before, &another);
+    s.workos.keep_metadata(&email, ORG_CONNECTION, json!({}));
+    let unnamed = say(s, 167, &fetch(s, &own))?;
+    s.workos.keep_metadata(&email, ORG_CONNECTION, json!({ "instance_url": "https://acme.org.test" }));
+    let elsewhere = say(s, 168, &fetch(s, &own))?;
+    s.ok(
+        SWAP_CHECKS[48],
+        [&unnamed, &elsewhere].iter().all(|said| said.starts_with("fetched 5") && said.contains(&format!("names no host under {under}"))) && s.upstream.seen().len() == seen_before,
+        json!({ "unnamed": unnamed, "elsewhere": elsewhere }),
+    );
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{ORG_CONNECTION}"), None)?;
+    anyhow::ensure!(gone.status == 200, "the account host's checks cleared: {gone}");
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
