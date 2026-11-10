@@ -532,29 +532,23 @@ unfinished design, not debt.
 - **Delete when:** the release's build rebuilds a change to one of its
   files in seconds, and dev builds the release's again.
 
-## The cell's Wasm budget raised to 6.6 MB
+## The cell's Wasm budget raised to 7.5 MB
 
-- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
-  6.5 MB to 6.6 MB (Paul, 2026-11-03) so the fixes that let every
-  computer restart could land: a folder that will not fit set aside, its
-  owner getting it back or dropping it, it in their export, and the
-  disk read and told as it fills (about 66 KB together, on a cell that
-  had reached 6.454 MB).
+- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) is 7.5 MB
+  (Paul, 2026-11-10). It went 6.0 → 6.5 MB for launch week (10-14),
+  6.6 MB for the restart fixes (11-03), and 7.5 MB for the
+  finite.computer move (FIN-463: its Migrations object, about 143 KB)
+  and the Vault (FIN-466, about 98 KB). The untangle pass (M6, M7) had
+  just brought the cell back to 6.31 MB.
 - **Risk:** slower isolate starts and less memory for every object, and
-  an easier next raise.
-- **Delete when:** the cell is back under 6.5 MB and the budget is set
-  back to 6.5 MB. Candidates: the export's archive builder in a Worker of
-  its own (the launch entry's), and the Computer DO's routes, whose big
-  async functions grow with each await point a feature adds.
-
-## The cell's Wasm budget was raised for launch
-
-- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
-  6.0 MB to 6.5 MB so launch week's features could land.
-- **Risk:** slower starts, less memory, an easier next raise.
-- **Delete when:** the cell is back under 6.0 MB (first candidate: the
-  export's archive builder in a Worker of its own) and the budget is
-  set back to 6.0 MB.
+  an easier next raise. Every fragment's isolate carries machinery it
+  never uses.
+- **Delete when:** the cell is split into Workers of their own, so a
+  fragment carries only its own machinery (Paul, 11-10: "eventually we
+  should refactor so these are multiple workers not a monolith… why
+  should every fragment need all this machinery"), and the move's code
+  is removed (FIN-463's debt entry). First candidates: the Migrations
+  object, the export's archive builder, the Computer DO's routes.
 
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
