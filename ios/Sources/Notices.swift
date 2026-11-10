@@ -101,15 +101,8 @@ struct NoticesBand: View {
     }
 
     private var refresh: some View {
-        card(warns: false) {
-            HStack {
-                Text("Couldn't refresh your computer").font(.subheadline.weight(.semibold))
-                Spacer()
-                Button { Task { await library.load(api) } } label: { Text("Try again").foregroundStyle(Color(.systemBackground)) }
-                    .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
-            }
-        }
-        .accessibilityIdentifier("noticesRefresh")
+        card(warns: false) { NoticesRefresh(library: library, api: api) }
+            .accessibilityIdentifier("noticesRefresh")
     }
 
     private func row(_ notice: Notice, now: Int64) -> some View {
@@ -163,11 +156,30 @@ struct NoticesBand: View {
     }
 }
 
+/// The line a failed read of the notices leaves (`Library.noticesFailed`):
+/// what the last read said stays, and Try again reads again, posting no
+/// answer. The band's, and the cover's too, as the band can't be reached
+/// under it.
+struct NoticesRefresh: View {
+    let library: Library
+    let api: FragmentAPI
+
+    var body: some View {
+        HStack {
+            Text("Couldn't refresh your computer").font(.subheadline.weight(.semibold))
+            Spacer()
+            Button { Task { await library.load(api) } } label: { Text("Try again").foregroundStyle(Color(.systemBackground)) }
+                .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small)
+        }
+    }
+}
+
 /// A notice that must be answered (`mustAnswer`), alone over the whole app
 /// (`FragmentRoot`'s full-screen cover), as the web's (cell/shell/
 /// computer.js `drawAsked`): its words, why its last answer failed, and
 /// its answers, the first the main one, until the read after one of them
-/// has it no more (`Library.asked`). It has no other way out.
+/// has it no more (`Library.asked`). It has no other way out. A read that
+/// failed says so over it, with Try again (`NoticesRefresh`).
 struct MustAnswerView: View {
     let library: Library
     let api: FragmentAPI
@@ -178,6 +190,7 @@ struct MustAnswerView: View {
         GeometryReader { page in
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    if library.noticesFailed { NoticesRefresh(library: library, api: api).accessibilityIdentifier("mustAnswerRefresh") }
                     VStack(alignment: .leading, spacing: 8) {
                         Text(notice.title).font(.title2.weight(.semibold))
                         if let text = notice.text { Text(text).foregroundStyle(.secondary) }

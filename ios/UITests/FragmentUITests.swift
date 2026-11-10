@@ -256,7 +256,8 @@ final class FragmentUITests: XCTestCase {
     /// answered, the app as it was. No owner asks one yet: on a local fleet
     /// an invite to a `must-answer` fragment is one, and the dev stack
     /// staged two ahead (`FRAGMENT_UITEST_ASKED`, their fragments, oldest
-    /// first); the test refuses its first answer (`refuseNextInviteAnswer`).
+    /// first); the test refuses its first answer, and the reads after its
+    /// second (`downFor`).
     func testNoticesThatMustBeAnsweredShowAloneUntilAnswered() throws {
         let env = ProcessInfo.processInfo.environment
         guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let secret = env["FRAGMENT_UITEST_SECRET"],
@@ -274,12 +275,19 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(asked(first).buttons["Accept"].exists && asked(first).buttons["Decline"].exists, "its words and its answers")
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "notice:invite:\(first)").firstMatch.exists, "never in the band")
         screenshot(app, "Must answer, light")
-        refuseNextInviteAnswer(server, secret: secret)
+        downFor(server, secret: secret, path: "/invites/answer", times: 1)
         asked(first).buttons["Accept"].tap()
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "try again shortly")).firstMatch.waitForExistence(timeout: 20), "refused: why, in the server's words")
         XCTAssertTrue(asked(first).exists, "and it stays")
+        // Decline goes through, and every read after it fails: the cover
+        // says so, with Try again, which reads again and posts nothing
+        downFor(server, secret: secret, path: "/invites/notices", times: 100)
         asked(first).buttons["Decline"].tap()
-        XCTAssertTrue(asked(next).waitForExistence(timeout: 30), "answered, and read again without it: the next")
+        XCTAssertTrue(asked(first).staticTexts["Couldn't refresh your computer"].waitForExistence(timeout: 20), "the read's failure, in the cover")
+        XCTAssertTrue(asked(first).buttons["Decline"].exists, "the notice as last read, under it")
+        downFor(server, secret: secret, path: "/invites/notices", times: 0)
+        asked(first).buttons["Try again"].tap()
+        XCTAssertTrue(asked(next).waitForExistence(timeout: 30), "read again, without it: the next")
         XCUIDevice.shared.appearance = .dark
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "dark, drawn")], timeout: 2)
         screenshot(app, "Must answer, dark")
@@ -288,16 +296,17 @@ final class FragmentUITests: XCTestCase {
         XCUIDevice.shared.appearance = .light
     }
 
-    /// The registry's next answer to an invite refused, in its words (its
-    /// `DownFor` lever, with the dev stack's test secret): set just before
-    /// the tap, as the registry keeps it in memory, which it loses idle.
-    private func refuseNextInviteAnswer(_ server: String, secret: String) {
+    /// The registry's next `times` calls to `path` refused, in its words
+    /// (its `DownFor` lever, with the dev stack's test secret; 0 answers them
+    /// again): set just before the tap, as the registry keeps it in memory,
+    /// which it loses idle.
+    private func downFor(_ server: String, secret: String, path: String, times: Int) {
         var request = URLRequest(url: URL(string: server)!.appending(path: "api/test/registry"))
         request.httpMethod = "POST"
-        request.httpBody = Data(#"{"downFor":{"path":"/invites/answer","times":1}}"#.utf8)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["downFor": ["path": path, "times": times]])
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(secret, forHTTPHeaderField: "x-fragment-test-secret")
-        let set = expectation(description: "the registry's next invite answer refused")
+        let set = expectation(description: "the registry's next \(times) calls to \(path) refused")
         URLSession.shared.dataTask(with: request) { _, response, _ in
             if (response as? HTTPURLResponse)?.statusCode == 200 { set.fulfill() }
         }.resume()
