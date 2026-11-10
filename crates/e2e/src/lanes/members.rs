@@ -907,16 +907,19 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
         "telegram-e2e/../../delete/nostr-e2e",
         "nostr-e2e/x",
     ];
+    let before = vault(&owner, "GET", "/api/vault", None)?;
     let mut refused = escapes.iter().map(|from| put(&owner, "PATH_E2E", json!({ "fromVault": from, "hosts": ["api.telegram.org"] }))).collect::<Result<Vec<_>>>()?;
     let body = json!({ "fromVault": "../delete/nostr-e2e", "hosts": ["api.telegram.org"] }).to_string().into_bytes();
     refused.push(api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/PATH_E2E"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?);
     let held = vault(&owner, "GET", "/api/vault", None)?;
     let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash; from the API or its page) is refused (400) before any Vault route: the Vault keeps its token and its key that signs, and the fragment is given nothing",
+        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash; from the API or its page) is refused (400) before any Vault route: the Vault keeps its token and its key that signs, each as it was (hosts, place, agents, when set), and the fragment is given nothing",
         refused.iter().all(|r| r.status == 400 && r.text.contains("is not one"))
             && held.text.contains("\"telegram-e2e\"")
             && held.text.contains("\"nostr-e2e\"")
+            && held.status == 200
+            && held.body == before.body
             && listed.status == 200
             && !listed.text.contains("PATH_E2E"),
         json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "first": refused.first().map(|r| r.text.clone()), "vault": held.text, "listed": listed.text }),
