@@ -43,7 +43,7 @@ admin route is.
 | `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is. A person already known here (their WorkOS id among the registry's subjects) is bound at once. Pushed every 10 minutes. |
 | `GET /api/migrations/mover/mailbox` | → `Mailbox` | Each command stays until a report on it is taken, so reading again is the retry. Polled every 10 seconds. |
 | `POST /api/migrations/mover/agents/{old}/report` | `Report` → `Reported` | Taken only for the old agent's current command. Any other command id is 409 `conflict`, changing nothing. `seq` grows per command: a `seq` taken already is a 200 with `taken: false`. |
-| `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>` | the part's bytes → `StagePart {n, bytes, sha256, etag}` | One part of the zip (1 to `PARTS_MAX`, at most `PART_MAX_BYTES`, each but the last at least `PART_MIN_BYTES`), streamed unread into the stage's multipart upload in `STAGE` and held to its SHA-256 as it arrives (400 otherwise, nothing kept). The same part again replaces it. |
+| `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>` | the part's bytes → `StagePart {n, bytes, sha256, etag}` | One part of the zip (1 to `PARTS_MAX`, at most `PART_MAX_BYTES`, each but the last at least `PART_MIN_BYTES`), streamed unread straight into the stage's multipart upload in `STAGE`. Its SHA-256, which the signed URL names, is kept with it for the mover's resume; the zip's own SHA-256 in the manifest is what the importer checks. The same part again replaces it. |
 | `GET /api/migrations/mover/stages/{stage}/parts` | → `StageParts {parts}` | The parts taken so far: their numbers, sizes, hashes and etags, never their bytes. What a resumed upload sends next. |
 | `POST /api/migrations/mover/stages/{stage}/complete` | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` | The zip made whole from parts 1 to n (none missing, `zip_bytes` theirs in all), then `manifest.json` written, last. Then the mover reports `staged` with that SHA-256. The same complete again answers the same. |
 
@@ -59,10 +59,13 @@ The mover keys its work by the id, and each step is idempotent on its
 side: a stop of a stopped runtime does nothing, and a stage writes the
 same keys again.
 
-| Command (`do.kind`) | The mover | Reports |
+A command is flat: its `kind`, and that kind's fields. So is a report:
+its `event`, and that event's fields.
+
+| Command (`kind`) | The mover | Reports (`event`) |
 |---|---|---|
-| `stop_and_stage {phase, stage, secrets}` | Stops the old agent, then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. `secrets` is empty until the vault (FIN-466). | `stopped`, `progress`, then `staged {manifest_sha256, bytes, files}`, or `failed {step, why}` |
-| `retire {as: migrated \| archived}` | Retires it (a verified backup first) and marks it moved | `retired {receipt}` |
+| `stop_and_stage`, `phase`, `stage`, `secrets` | Stops the old agent, then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. `secrets` is empty until the vault (FIN-466). | `stopped`; `progress` with `bytes`, `files`; then `staged` with `manifest_sha256`, `bytes`, `files`; or `failed` with `step`, `why` |
+| `retire`, `as` (`migrated` or `archived`) | Retires it (a verified backup first) and marks it moved | `retired` with `receipt` |
 | `restart` | Starts it again (staff gave it back) | `restarted` |
 
 The secrets hand-off (`POST …/agents/{old}/secrets`, `Handoff`) waits

@@ -113,7 +113,7 @@ pub const HAND_WRITTEN: [(&str, &str); 11] = [
 /// know, and where each reader does: a claim of the clients, not of serde,
 /// so each is listed. A new one fails generation until it is.
 pub const OPEN: [(&str, &str); 7] = [
-    ("Act", "left in the mailbox by the mover, done by no one, until the move's deadline holds it (docs/migrations.md)"),
+    ("CommandKind", "left in the mailbox by the mover, done by no one, until the move's deadline holds it (docs/migrations.md)"),
     ("ErrorCode", "read by its HTTP status (the CLI's `Resp::refusal`)"),
     ("FragmentKind", "read as `Other` (`#[serde(other)]`, a lock fact)"),
     ("LiveOut", "skipped (the CLI's `channel --follow`, cell/client.mjs, the iOS app)"),

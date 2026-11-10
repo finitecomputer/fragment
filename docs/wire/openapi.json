@@ -1,71 +1,6 @@
 {
   "components": {
     "schemas": {
-      "Act": {
-        "description": "What a command asks.\n\nOpen (`x-fragment-open`, docs/wire): the mover leaves a command it\ndoes not know in the mailbox, done by no one, and the move is held\nwhen its deadline passes.",
-        "oneOf": [
-          {
-            "description": "Stop the old agent, then upload its zip as `stage` (`stage_id`), in\nparts, and complete it (the manifest last); and hand on the secrets\nnamed (none until the vault: FIN-466).",
-            "properties": {
-              "kind": {
-                "const": "stop_and_stage",
-                "type": "string"
-              },
-              "phase": {
-                "$ref": "#/components/schemas/Phase"
-              },
-              "secrets": {
-                "default": [],
-                "items": {
-                  "$ref": "#/components/schemas/SecretKind"
-                },
-                "type": "array"
-              },
-              "stage": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "phase",
-              "stage"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Retire it (a verified backup first) and mark it moved, as `mark`.",
-            "properties": {
-              "as": {
-                "$ref": "#/components/schemas/Mark"
-              },
-              "kind": {
-                "const": "retire",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "as"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Start it again: staff gave it back (`restart-old`).",
-            "properties": {
-              "kind": {
-                "const": "restart",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          }
-        ],
-        "x-fragment-direction": "out",
-        "x-fragment-open": true
-      },
       "Archived": {
         "description": "Its answer: the fragment, and whether it is archived now.",
         "properties": {
@@ -212,32 +147,94 @@
         "x-fragment-direction": "out"
       },
       "Command": {
-        "description": "One thing to do to one old agent. Every step is idempotent on the\nmover's side: a stop of a stopped runtime does nothing, and a stage\nwrites the same keys again.",
+        "description": "One thing to do to one old agent, flat: its `kind`, and the fields\nthat kind has. Every step is idempotent on the mover's side: a stop of\na stopped runtime does nothing, and a stage uploads the same parts again.",
         "properties": {
+          "as": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Mark"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`retire`: how the old agent is marked moved."
+          },
           "attempt": {
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "do": {
-            "$ref": "#/components/schemas/Act"
-          },
           "id": {
             "description": "`command_id`: `<old>:<attempt>:<kind>`.",
             "type": "string"
           },
+          "kind": {
+            "$ref": "#/components/schemas/CommandKind"
+          },
           "old": {
             "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Phase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`stop_and_stage`: its phase."
+          },
+          "secrets": {
+            "default": [],
+            "description": "`stop_and_stage`: the secrets to hand on (none until the vault: FIN-466).",
+            "items": {
+              "$ref": "#/components/schemas/SecretKind"
+            },
+            "type": "array"
+          },
+          "stage": {
+            "default": null,
+            "description": "`stop_and_stage`: the stage to upload (`stage_id`).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "id",
           "old",
           "attempt",
-          "do"
+          "kind"
         ],
         "type": "object",
         "x-fragment-direction": "out"
+      },
+      "CommandKind": {
+        "description": "What a command asks.\n\nOpen (`x-fragment-open`, docs/wire): the mover leaves a command it\ndoes not know in the mailbox, done by no one, and the move is held\nwhen its deadline passes.",
+        "oneOf": [
+          {
+            "const": "stop_and_stage",
+            "description": "Stop the old agent, then upload its zip as `stage`, in parts, and\ncomplete it (the manifest last).",
+            "type": "string"
+          },
+          {
+            "const": "retire",
+            "description": "Retire it (a verified backup first) and mark it moved, `as`.",
+            "type": "string"
+          },
+          {
+            "const": "restart",
+            "description": "Start it again: staff gave it back (`restart-old`).",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out",
+        "x-fragment-open": true
       },
       "Counts": {
         "properties": {
@@ -453,125 +450,38 @@
         "x-fragment-direction": "out",
         "x-fragment-open": true
       },
-      "Event": {
+      "EventKind": {
+        "description": "What a report says happened.",
         "oneOf": [
           {
+            "const": "stopped",
             "description": "The old agent is stopped: it is a folder now.",
-            "properties": {
-              "kind": {
-                "const": "stopped",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
+            "type": "string"
           },
           {
-            "description": "Staging goes on: bytes and files written so far.",
-            "properties": {
-              "bytes": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "files": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "kind": {
-                "const": "progress",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "bytes",
-              "files"
-            ],
-            "type": "object"
+            "const": "progress",
+            "description": "Staging goes on.",
+            "type": "string"
           },
           {
-            "description": "The stage is complete (`POST …/complete`); the manifest's SHA-256\n(hex), as that answered, is what the platform checks it reads.",
-            "properties": {
-              "bytes": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "files": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "kind": {
-                "const": "staged",
-                "type": "string"
-              },
-              "manifest_sha256": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "manifest_sha256",
-              "bytes",
-              "files"
-            ],
-            "type": "object"
+            "const": "staged",
+            "description": "The stage is complete (`POST …/complete`).",
+            "type": "string"
           },
           {
-            "description": "A step failed (`TEXT_MAX_BYTES` each); the platform decides whether\nto try again.",
-            "properties": {
-              "kind": {
-                "const": "failed",
-                "type": "string"
-              },
-              "step": {
-                "type": "string"
-              },
-              "why": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "step",
-              "why"
-            ],
-            "type": "object"
+            "const": "failed",
+            "description": "A step failed; the platform decides whether to try again.",
+            "type": "string"
           },
           {
-            "description": "Retired and marked: Core's retirement snapshot's id.",
-            "properties": {
-              "kind": {
-                "const": "retired",
-                "type": "string"
-              },
-              "receipt": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "receipt"
-            ],
-            "type": "object"
+            "const": "retired",
+            "description": "Retired and marked moved.",
+            "type": "string"
           },
           {
+            "const": "restarted",
             "description": "Started again.",
-            "properties": {
-              "kind": {
-                "const": "restarted",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
+            "type": "string"
           }
         ],
         "x-fragment-direction": "in"
@@ -2373,18 +2283,68 @@
         "x-fragment-open": true
       },
       "Report": {
-        "description": "`POST /api/migrations/mover/agents/{old}/report`: what happened on the\ncommand it names. Taken only for that old agent's current command;\nanother (a stale attempt's) is 409, changing nothing. `seq` only grows\nper command: one taken already is a 200 that changes nothing.",
+        "description": "`POST /api/migrations/mover/agents/{old}/report`: what happened on the\ncommand it names. Taken only for that old agent's current command;\nanother (a stale attempt's) is 409, changing nothing. `seq` only grows\nper command: one taken already is a 200 that changes nothing.\n\nFlat: its `event`, and the fields that event has (`progress`: `bytes`,\n`files`; `staged`: `manifest_sha256`, `bytes`, `files`; `failed`:\n`step`, `why`; `retired`: `receipt`). One an event needs and lacks is\n400.",
         "properties": {
+          "bytes": {
+            "default": null,
+            "description": "Bytes and files staged so far (`progress`), or in all (`staged`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "command": {
             "type": "string"
           },
           "event": {
-            "$ref": "#/components/schemas/Event"
+            "$ref": "#/components/schemas/EventKind"
+          },
+          "files": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "manifest_sha256": {
+            "default": null,
+            "description": "`staged`: the manifest's SHA-256 (hex), as `POST …/complete` answered it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receipt": {
+            "default": null,
+            "description": "`retired`: Core's retirement snapshot's id.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "seq": {
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "step": {
+            "default": null,
+            "description": "`failed`: the step, and why (`TEXT_MAX_BYTES` each).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "why": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2841,7 +2801,7 @@
             "type": "integer"
           },
           "sha256": {
-            "description": "Its SHA-256 (hex), as its bytes came.",
+            "description": "Its SHA-256 (hex), as the mover's signed URL named it: kept for the\nmover's resume. The bytes stream to R2 unread; the zip's own SHA-256\nin the manifest is what the importer checks.",
             "type": "string"
           }
         },
@@ -5034,7 +4994,7 @@
             }
           },
           {
-            "description": "The part's SHA-256 (hex): its bytes are held to it as they arrive.",
+            "description": "The part's SHA-256 (hex), as the mover computed it: kept with the part for its resume.",
             "in": "query",
             "name": "sha256",
             "required": true,
@@ -5162,7 +5122,7 @@
             "nip98": []
           }
         ],
-        "summary": "One part of the stage's zip, streamed into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.",
+        "summary": "One part of the stage's zip, streamed unread into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.",
         "tags": [
           "migrations"
         ],

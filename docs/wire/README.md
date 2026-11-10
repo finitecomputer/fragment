@@ -203,10 +203,10 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 #### `migrations.part`
 
-`PUT /api/migrations/mover/stages/{stage}/parts/{n}`: One part of the stage's zip, streamed into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.
+`PUT /api/migrations/mover/stages/{stage}/parts/{n}`: One part of the stage's zip, streamed unread into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.
 
 - Credentials: NIP-98
-- Query `sha256` (`string`, required): The part's SHA-256 (hex): its bytes are held to it as they arrive.
+- Query `sha256` (`string`, required): The part's SHA-256 (hex), as the mover computed it: kept with the part for its resume.
 - Body: bytes (`application/octet-stream`), streamed
 - Answer: [`StagePart`](#stagepart)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
@@ -250,26 +250,6 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 Each says who writes it: the cell (out: a client reads it), a client
 (in: the cell reads it), or both. An open one's readers read past a
 value they do not know; a closed object refuses a field it does not know.
-
-### `Act`
-
-out, open. What a command asks. Open (`x-fragment-open`, docs/wire): the mover leaves a command it does not know in the mailbox, done by no one, and the move is held when its deadline passes.
-
-`kind: "stop_and_stage"`. Stop the old agent, then upload its zip as `stage` (`stage_id`), in parts, and complete it (the manifest last); and hand on the secrets named (none until the vault: FIN-466).
-
-| field | type | | |
-| --- | --- | --- | --- |
-| `phase` | [`Phase`](#phase) | required |  |
-| `secrets` | `array` of [`SecretKind`](#secretkind) | optional |  |
-| `stage` | `string` | required |  |
-
-`kind: "retire"`. Retire it (a verified backup first) and mark it moved, as `mark`.
-
-| field | type | | |
-| --- | --- | --- | --- |
-| `as` | [`Mark`](#mark) | required |  |
-
-`kind: "restart"`. Start it again: staff gave it back (`restart-old`).
 
 ### `Archived`
 
@@ -326,14 +306,24 @@ out. The app code installed from the `live` pin.
 
 ### `Command`
 
-out. One thing to do to one old agent. Every step is idempotent on the mover's side: a stop of a stopped runtime does nothing, and a stage writes the same keys again.
+out. One thing to do to one old agent, flat: its `kind`, and the fields that kind has. Every step is idempotent on the mover's side: a stop of a stopped runtime does nothing, and a stage uploads the same parts again.
 
 | field | type | | |
 | --- | --- | --- | --- |
+| `as` | [`Mark`](#mark) or `null` | optional | `retire`: how the old agent is marked moved. |
 | `attempt` | `integer` | required |  |
-| `do` | [`Act`](#act) | required |  |
 | `id` | `string` | required | `command_id`: `<old>:<attempt>:<kind>`. |
+| `kind` | [`CommandKind`](#commandkind) | required |  |
 | `old` | `string` | required |  |
+| `phase` | [`Phase`](#phase) or `null` | optional | `stop_and_stage`: its phase. |
+| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage`: the secrets to hand on (none until the vault: FIN-466). |
+| `stage` | `string` or `null` | optional | `stop_and_stage`: the stage to upload (`stage_id`). |
+
+### `CommandKind`
+
+out, open. What a command asks. Open (`x-fragment-open`, docs/wire): the mover leaves a command it does not know in the mailbox, done by no one, and the move is held when its deadline passes.
+
+Values: `stop_and_stage`, `retire`, `restart`.
 
 ### `Counts`
 
@@ -379,41 +369,11 @@ out, open. Every refusal the platform answers with, as `{"error": code, "message
 
 Values: `invalid_request`, `unauthenticated`, `forbidden`, `not_found`, `unknown_operation`, `no_code`, `already_exists`, `conflicting_body`, `conflict`, `too_large`, `app_failed`, `rate_limited`, `host_failed`, `upstream_failed`, `registry_unavailable`, `budget_used_up`, `storage_full`, `node_full`, `wont_wake`, `not_connected`, `schema_refused`, `deploying`.
 
-### `Event`
+### `EventKind`
 
-in. 
+in. What a report says happened.
 
-`kind: "stopped"`. The old agent is stopped: it is a folder now.
-
-`kind: "progress"`. Staging goes on: bytes and files written so far.
-
-| field | type | | |
-| --- | --- | --- | --- |
-| `bytes` | `integer` | required |  |
-| `files` | `integer` | required |  |
-
-`kind: "staged"`. The stage is complete (`POST …/complete`); the manifest's SHA-256 (hex), as that answered, is what the platform checks it reads.
-
-| field | type | | |
-| --- | --- | --- | --- |
-| `bytes` | `integer` | required |  |
-| `files` | `integer` | required |  |
-| `manifest_sha256` | `string` | required |  |
-
-`kind: "failed"`. A step failed (`TEXT_MAX_BYTES` each); the platform decides whether to try again.
-
-| field | type | | |
-| --- | --- | --- | --- |
-| `step` | `string` | required |  |
-| `why` | `string` | required |  |
-
-`kind: "retired"`. Retired and marked: Core's retirement snapshot's id.
-
-| field | type | | |
-| --- | --- | --- | --- |
-| `receipt` | `string` | required |  |
-
-`kind: "restarted"`. Started again.
+Values: `stopped`, `progress`, `staged`, `failed`, `retired`, `restarted`.
 
 ### `FragmentKind`
 
@@ -888,13 +848,19 @@ Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_
 
 ### `Report`
 
-in. `POST /api/migrations/mover/agents/{old}/report`: what happened on the command it names. Taken only for that old agent's current command; another (a stale attempt's) is 409, changing nothing. `seq` only grows per command: one taken already is a 200 that changes nothing.
+in. `POST /api/migrations/mover/agents/{old}/report`: what happened on the command it names. Taken only for that old agent's current command; another (a stale attempt's) is 409, changing nothing. `seq` only grows per command: one taken already is a 200 that changes nothing. Flat: its `event`, and the fields that event has (`progress`: `bytes`, `files`; `staged`: `manifest_sha256`, `bytes`, `files`; `failed`: `step`, `why`; `retired`: `receipt`). One an event needs and lacks is 400.
 
 | field | type | | |
 | --- | --- | --- | --- |
+| `bytes` | `integer` or `null` | optional | Bytes and files staged so far (`progress`), or in all (`staged`). |
 | `command` | `string` | required |  |
-| `event` | [`Event`](#event) | required |  |
+| `event` | [`EventKind`](#eventkind) | required |  |
+| `files` | `integer` or `null` | optional |  |
+| `manifest_sha256` | `string` or `null` | optional | `staged`: the manifest's SHA-256 (hex), as `POST …/complete` answered it. |
+| `receipt` | `string` or `null` | optional | `retired`: Core's retirement snapshot's id. |
 | `seq` | `integer` | required |  |
+| `step` | `string` or `null` | optional | `failed`: the step, and why (`TEXT_MAX_BYTES` each). |
+| `why` | `string` or `null` | optional |  |
 
 ### `Reported`
 
@@ -1074,7 +1040,7 @@ out. One part taken (`PUT …/parts/{n}`), and each part `GET …/parts` lists.
 | `bytes` | `integer` | required |  |
 | `etag` | `string` | required | R2's etag for it. |
 | `n` | `integer` | required |  |
-| `sha256` | `string` | required | Its SHA-256 (hex), as its bytes came. |
+| `sha256` | `string` | required | Its SHA-256 (hex), as the mover's signed URL named it: kept for the mover's resume. The bytes stream to R2 unread; the zip's own SHA-256 in the manifest is what the importer checks. |
 
 ### `StageParts`
 

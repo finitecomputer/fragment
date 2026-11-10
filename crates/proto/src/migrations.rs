@@ -90,8 +90,8 @@ pub fn parse_stage(stage: &str) -> Option<(String, Phase, u32)> {
 }
 
 /// A command's id: `<old>:<attempt>:<kind>`, what the mover keys its work by.
-pub fn command_id(old: &str, attempt: u32, act: &Act) -> String {
-    format!("{old}:{attempt}:{}", act.kind())
+pub fn command_id(old: &str, attempt: u32, kind: CommandKind) -> String {
+    format!("{old}:{attempt}:{}", kind.as_str())
 }
 
 /// Which phase a stage is of: one the person asked for (`p1`), or one we
@@ -361,9 +361,9 @@ pub struct Mailbox {
     pub commands: Vec<Command>,
 }
 
-/// One thing to do to one old agent. Every step is idempotent on the
-/// mover's side: a stop of a stopped runtime does nothing, and a stage
-/// writes the same keys again.
+/// One thing to do to one old agent, flat: its `kind`, and the fields
+/// that kind has. Every step is idempotent on the mover's side: a stop of
+/// a stopped runtime does nothing, and a stage uploads the same parts again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Command {
@@ -371,8 +371,23 @@ pub struct Command {
     pub id: String,
     pub old: String,
     pub attempt: u32,
-    #[serde(rename = "do")]
-    pub act: Act,
+    pub kind: CommandKind,
+    /// `stop_and_stage`: its phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub phase: Option<Phase>,
+    /// `stop_and_stage`: the stage to upload (`stage_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub stage: Option<String>,
+    /// `retire`: how the old agent is marked moved.
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub mark: Option<Mark>,
+    /// `stop_and_stage`: the secrets to hand on (none until the vault: FIN-466).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
+    pub secrets: Vec<SecretKind>,
 }
 
 /// What a command asks.
@@ -380,36 +395,26 @@ pub struct Command {
 /// Open (`x-fragment-open`, docs/wire): the mover leaves a command it
 /// does not know in the mailbox, done by no one, and the move is held
 /// when its deadline passes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(extend("x-fragment-open" = true)))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Act {
-    /// Stop the old agent, then upload its zip as `stage` (`stage_id`), in
-    /// parts, and complete it (the manifest last); and hand on the secrets
-    /// named (none until the vault: FIN-466).
-    StopAndStage {
-        phase: Phase,
-        stage: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
-        secrets: Vec<SecretKind>,
-    },
-    /// Retire it (a verified backup first) and mark it moved, as `mark`.
-    Retire {
-        #[serde(rename = "as")]
-        mark: Mark,
-    },
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    /// Stop the old agent, then upload its zip as `stage`, in parts, and
+    /// complete it (the manifest last).
+    StopAndStage,
+    /// Retire it (a verified backup first) and mark it moved, `as`.
+    Retire,
     /// Start it again: staff gave it back (`restart-old`).
     Restart,
 }
 
-impl Act {
-    pub fn kind(&self) -> &'static str {
+impl CommandKind {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Act::StopAndStage { .. } => "stop_and_stage",
-            Act::Retire { .. } => "retire",
-            Act::Restart => "restart",
+            CommandKind::StopAndStage => "stop_and_stage",
+            CommandKind::Retire => "retire",
+            CommandKind::Restart => "restart",
         }
     }
 }
@@ -429,32 +434,65 @@ pub enum Mark {
 /// command it names. Taken only for that old agent's current command;
 /// another (a stale attempt's) is 409, changing nothing. `seq` only grows
 /// per command: one taken already is a 200 that changes nothing.
+///
+/// Flat: its `event`, and the fields that event has (`progress`: `bytes`,
+/// `files`; `staged`: `manifest_sha256`, `bytes`, `files`; `failed`:
+/// `step`, `why`; `retired`: `receipt`). One an event needs and lacks is
+/// 400.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Report {
     pub command: String,
     pub seq: u64,
-    pub event: Event,
+    pub event: EventKind,
+    /// Bytes and files staged so far (`progress`), or in all (`staged`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub files: Option<u64>,
+    /// `staged`: the manifest's SHA-256 (hex), as `POST …/complete` answered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub manifest_sha256: Option<String>,
+    /// `failed`: the step, and why (`TEXT_MAX_BYTES` each).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub why: Option<String>,
+    /// `retired`: Core's retirement snapshot's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub receipt: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// What a report says happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Event {
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
     /// The old agent is stopped: it is a folder now.
     Stopped,
-    /// Staging goes on: bytes and files written so far.
-    Progress { bytes: u64, files: u64 },
-    /// The stage is complete (`POST …/complete`); the manifest's SHA-256
-    /// (hex), as that answered, is what the platform checks it reads.
-    Staged { manifest_sha256: String, bytes: u64, files: u64 },
-    /// A step failed (`TEXT_MAX_BYTES` each); the platform decides whether
-    /// to try again.
-    Failed { step: String, why: String },
-    /// Retired and marked: Core's retirement snapshot's id.
-    Retired { receipt: String },
+    /// Staging goes on.
+    Progress,
+    /// The stage is complete (`POST …/complete`).
+    Staged,
+    /// A step failed; the platform decides whether to try again.
+    Failed,
+    /// Retired and marked moved.
+    Retired,
     /// Started again.
     Restarted,
+}
+
+impl Report {
+    /// A report of `event` alone, its fields to fill.
+    pub fn of(command: &str, seq: u64, event: EventKind) -> Report {
+        Report { command: command.into(), seq, event, bytes: None, files: None, manifest_sha256: None, step: None, why: None, receipt: None }
+    }
 }
 
 /// A report's answer: the move's state after it, its attempt, and
@@ -524,7 +562,9 @@ pub struct HandedOff {
 pub struct StagePart {
     pub n: u32,
     pub bytes: u64,
-    /// Its SHA-256 (hex), as its bytes came.
+    /// Its SHA-256 (hex), as the mover's signed URL named it: kept for the
+    /// mover's resume. The bytes stream to R2 unread; the zip's own SHA-256
+    /// in the manifest is what the importer checks.
     pub sha256: String,
     /// R2's etag for it.
     pub etag: String,
@@ -685,26 +725,26 @@ mod tests {
         assert!(valid_old(&"a".repeat(64)) && !valid_old("a b") && !valid_old("../a"));
     }
 
-    /// The mailbox on the wire: `do` tagged by `kind`, `as` its mark.
+    /// The mailbox on the wire, flat: its kind and that kind's fields, `as`
+    /// a retirement's mark.
     #[test]
     fn a_command_on_the_wire() {
-        let act = Act::StopAndStage { phase: Phase::P1, stage: stage_id(Phase::P1, "o", 1), secrets: vec![] };
-        let c = Command { id: command_id("o", 1, &act), old: "o".into(), attempt: 1, act };
-        assert_eq!(serde_json::to_value(&c).unwrap(), json!({ "id": "o:1:stop_and_stage", "old": "o", "attempt": 1, "do": { "kind": "stop_and_stage", "phase": "p1", "stage": "o.p1.1" } }));
-        let retire = Command { id: "o:1:retire".into(), old: "o".into(), attempt: 1, act: Act::Retire { mark: Mark::Migrated } };
+        let c = Command { id: command_id("o", 1, CommandKind::StopAndStage), old: "o".into(), attempt: 1, kind: CommandKind::StopAndStage, phase: Some(Phase::P1), stage: Some(stage_id(Phase::P1, "o", 1)), mark: None, secrets: vec![] };
+        assert_eq!(serde_json::to_value(&c).unwrap(), json!({ "id": "o:1:stop_and_stage", "old": "o", "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": "o.p1.1" }));
+        let retire = Command { id: "o:1:retire".into(), old: "o".into(), attempt: 1, kind: CommandKind::Retire, phase: None, stage: None, mark: Some(Mark::Migrated), secrets: vec![] };
         let v = serde_json::to_value(&retire).unwrap();
-        assert_eq!(v["do"], json!({ "kind": "retire", "as": "migrated" }));
+        assert_eq!(v, json!({ "id": "o:1:retire", "old": "o", "attempt": 1, "kind": "retire", "as": "migrated" }));
         assert_eq!(serde_json::from_value::<Command>(v).unwrap(), retire);
     }
 
     /// A report's events, as the mover sends them.
     #[test]
     fn a_report_on_the_wire() {
-        let r: Report = serde_json::from_value(json!({ "command": "o:1:stop_and_stage", "seq": 3, "event": { "kind": "staged", "manifest_sha256": "ab", "bytes": 10, "files": 2 } })).unwrap();
-        assert_eq!(r.event, Event::Staged { manifest_sha256: "ab".into(), bytes: 10, files: 2 });
-        let stopped: Report = serde_json::from_value(json!({ "command": "c", "seq": 1, "event": { "kind": "stopped" } })).unwrap();
-        assert_eq!(stopped.event, Event::Stopped);
-        assert!(serde_json::from_value::<Report>(json!({ "command": "c", "seq": 1, "event": { "kind": "exploded" } })).is_err());
+        let r: Report = serde_json::from_value(json!({ "command": "o:1:stop_and_stage", "seq": 3, "event": "staged", "manifest_sha256": "ab", "bytes": 10, "files": 2 })).unwrap();
+        assert_eq!((r.event, r.manifest_sha256.as_deref(), r.bytes, r.files), (EventKind::Staged, Some("ab"), Some(10), Some(2)));
+        let stopped: Report = serde_json::from_value(json!({ "command": "c", "seq": 1, "event": "stopped" })).unwrap();
+        assert_eq!(stopped, Report::of("c", 1, EventKind::Stopped));
+        assert!(serde_json::from_value::<Report>(json!({ "command": "c", "seq": 1, "event": "exploded" })).is_err());
     }
 
     /// A roster row with what it may leave out, and `move` its staged bytes.

@@ -6,22 +6,21 @@
 # client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
 # fact gone on purpose is retired in wire.retired.
 
-bound Act.stop_and_stage.secrets default []
 bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.at range i64
 bound ChannelRecord.seq range i64
+bound Command.as default null
 bound Command.attempt range u32
+bound Command.phase default null
+bound Command.secrets default []
+bound Command.stage default null
 bound Counts.events range u64
 bound Counts.files range u64
 bound Counts.members range u64
 bound ErrorBody.reason default null
 bound ErrorBody.retry_after_ms default null
 bound ErrorBody.retry_after_ms range u64
-bound Event.progress.bytes range u64
-bound Event.progress.files range u64
-bound Event.staged.bytes range u64
-bound Event.staged.files range u64
 bound FragmentList.limits default null
 bound FragmentStatus.agentRole default null
 bound FragmentStatus.blobMinBytes default null
@@ -91,7 +90,15 @@ bound PageError.source default null
 bound PageReport.at range i64
 bound PageReport.dropped range u32
 bound PutDraft.text default null
+bound Report.bytes default null
+bound Report.bytes range u64
+bound Report.files default null
+bound Report.files range u64
+bound Report.manifest_sha256 default null
+bound Report.receipt default null
 bound Report.seq range u64
+bound Report.step default null
+bound Report.why default null
 bound Reported.attempt range u32
 bound Roster.observed_ms range i64
 bound RosterAgent.brains default []
@@ -130,13 +137,6 @@ branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
 extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
-field Act.restart.kind required "restart"
-field Act.retire.as required Mark
-field Act.retire.kind required "retire"
-field Act.stop_and_stage.kind required "stop_and_stage"
-field Act.stop_and_stage.phase required Phase
-field Act.stop_and_stage.secrets optional array<SecretKind>
-field Act.stop_and_stage.stage required string
 field Archived.archived required boolean
 field Archived.name required string
 field ChannelNewest.channel required string
@@ -155,10 +155,14 @@ field CodeStatus.error required string|null
 field CodeStatus.id required string|null
 field CodeStatus.operations required map<OpDecl>
 field CodeStatus.sha required string|null
+field Command.as optional Mark|null
 field Command.attempt required integer
-field Command.do required Act
 field Command.id required string
+field Command.kind required CommandKind
 field Command.old required string
+field Command.phase optional Phase|null
+field Command.secrets optional array<SecretKind>
+field Command.stage optional string|null
 field Counts.events required integer
 field Counts.files required integer
 field Counts.members required integer
@@ -169,20 +173,6 @@ field ErrorBody.error required ErrorCode
 field ErrorBody.message required string
 field ErrorBody.reason optional Reason|null
 field ErrorBody.retry_after_ms optional integer|null
-field Event.failed.kind required "failed"
-field Event.failed.step required string
-field Event.failed.why required string
-field Event.progress.bytes required integer
-field Event.progress.files required integer
-field Event.progress.kind required "progress"
-field Event.restarted.kind required "restarted"
-field Event.retired.kind required "retired"
-field Event.retired.receipt required string
-field Event.staged.bytes required integer
-field Event.staged.files required integer
-field Event.staged.kind required "staged"
-field Event.staged.manifest_sha256 required string
-field Event.stopped.kind required "stopped"
 field FragmentList.fragments required array<ListedFragment>
 field FragmentList.limits optional UploadLimits|null
 field FragmentStatus.agentRole optional string|null
@@ -383,9 +373,15 @@ field Present.id required string
 field Present.principal required string
 field PutDraft.text optional string|null
 field PutDraft.turn required string
+field Report.bytes optional integer|null
 field Report.command required string
-field Report.event required Event
+field Report.event required EventKind
+field Report.files optional integer|null
+field Report.manifest_sha256 optional string|null
+field Report.receipt optional string|null
 field Report.seq required integer
+field Report.step optional string|null
+field Report.why optional string|null
 field Reported.attempt required integer
 field Reported.state required MoveState
 field Reported.taken required boolean
@@ -621,28 +617,19 @@ route search.find accepts session
 route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
-type Act out union(kind) open
-type Act.restart out object
-type Act.retire out object
-type Act.stop_and_stage out object
 type Archived out object
 type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
 type CodeStatus out object
 type Command out object
+type CommandKind out enum open
 type Counts out object
 type Docked out object
 type Done out object
 type ErrorBody out object
 type ErrorCode out enum open
-type Event in union(kind)
-type Event.failed in object
-type Event.progress in object
-type Event.restarted in object
-type Event.retired in object
-type Event.staged in object
-type Event.stopped in object
+type EventKind in enum
 type FragmentKind out enum open
 type FragmentList out object
 type FragmentStatus out object
@@ -801,9 +788,9 @@ type notices.list.path in object
 type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
-value Act restart
-value Act retire
-value Act stop_and_stage
+value CommandKind restart
+value CommandKind retire
+value CommandKind stop_and_stage
 value ErrorCode already_exists
 value ErrorCode app_failed
 value ErrorCode budget_used_up
@@ -826,12 +813,12 @@ value ErrorCode unauthenticated
 value ErrorCode unknown_operation
 value ErrorCode upstream_failed
 value ErrorCode wont_wake
-value Event failed
-value Event progress
-value Event restarted
-value Event retired
-value Event staged
-value Event stopped
+value EventKind failed
+value EventKind progress
+value EventKind restarted
+value EventKind retired
+value EventKind staged
+value EventKind stopped
 value FragmentKind agent
 value FragmentKind app
 value FragmentKind brain

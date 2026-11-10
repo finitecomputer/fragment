@@ -1965,9 +1965,9 @@ machine behind them, are docs/migrations.md. Without the deployment's
 | method & path | who | answer |
 | --- | --- | --- |
 | `PUT /api/migrations/mover/roster` | the mover (NIP-98 by `migrations.mover`'s key; anyone else 403) | `Roster` → `RosterTaken {bound, withdrawn, replay}` |
-| `GET /api/migrations/mover/mailbox` | the mover | → `Mailbox {commands}`, at most `MAILBOX_MAX` |
-| `POST /api/migrations/mover/agents/{old}/report` | the mover | `Report {command, seq, event}` → `Reported {state, attempt, taken}`; another than the current command 409 |
-| `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=` | the mover, for the stage of its current `stop_and_stage` while it stages (another 403, another state 409) | the part's bytes, streamed → `StagePart {n, bytes, sha256, etag}`; past `PART_MAX_BYTES` 413; bytes not its `sha256` 400 |
+| `GET /api/migrations/mover/mailbox` | the mover | → `Mailbox {commands: [{id, old, attempt, kind, phase?, stage?, as?, secrets?}]}`, at most `MAILBOX_MAX` |
+| `POST /api/migrations/mover/agents/{old}/report` | the mover | `Report {command, seq, event, bytes?, files?, manifest_sha256?, step?, why?, receipt?}` → `Reported {state, attempt, taken}`; another than the current command 409 |
+| `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=` | the mover, for the stage of its current `stop_and_stage` while it stages (another 403, another state 409) | the part's bytes, streamed unread → `StagePart {n, bytes, sha256, etag}`; past `PART_MAX_BYTES` 413 |
 | `GET /api/migrations/mover/stages/{stage}/parts` | the same | → `StageParts {parts}`: numbers, sizes, hashes, etags; never bytes |
 | `POST /api/migrations/mover/stages/{stage}/complete` | the same | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` |
 | `POST /api/migrations/stages/{stage}/open` | the agent the move is bound to, while it imports (NIP-98) | → `StageOpened {stage, manifest}` |
