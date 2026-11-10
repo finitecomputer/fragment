@@ -264,7 +264,7 @@ async fn comp(env: &Env, person: &str, subject: &str, until_ms: i64) -> CellResu
     };
     match asked {
         // a seat of theirs already (paid, or another kind): theirs, as it is
-        Err(e) if e.code == ErrorCode::Conflict => console_log!("migrations.comp: {person} holds a seat: {}", e.message),
+        Err(e) if matches!(e.code, ErrorCode::Conflict | ErrorCode::AlreadyExists) => console_log!("migrations.comp: {person} holds a seat: {}", e.message),
         r => {
             r?;
         }
@@ -1014,7 +1014,8 @@ impl MigrationsCell {
         let parts = self.parts();
         parts.exec(
             "UPDATE people SET comp_until_ms = COALESCE(comp_until_ms, ?) WHERE workos_id = ? AND comped_ms IS NULL AND EXISTS (SELECT 1 FROM moves m WHERE m.workos_id = people.workos_id AND m.state <> 'withdrawn')",
-            vec![SqlStorageValue::Integer(self.now()? + machine::COMP_MS), text_value(workos_id)],
+            // real time, as the registry that ends it keeps (not the levers' clock)
+            vec![SqlStorageValue::Integer(js::now_ms() + machine::COMP_MS), text_value(workos_id)],
         )?;
         let rows = parts.rows("SELECT comp_until_ms FROM people WHERE workos_id = ? AND comped_ms IS NULL", vec![text_value(workos_id)])?;
         Ok(rows.first().and_then(|r| r["comp_until_ms"].as_i64()))

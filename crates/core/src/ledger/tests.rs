@@ -1419,3 +1419,25 @@ fn a_refusal_is_named_by_a_string_alone() {
         assert!(e.contains("invalid type: map"), "{object}: {e}");
     }
 }
+
+/// Goal (FIN-458, a reviewer's): what a ledger keeps as told is what it
+/// says, so a seat that ends or comes back is news though the standing
+/// holds (overdrawn): Buy credit goes, or comes back, and the page that
+/// read before the seat's push is told again.
+#[test]
+fn a_seat_that_ends_or_comes_back_is_news_though_its_standing_holds() {
+    let mut w = World::seat();
+    w.ok(seat("seat:1", SeatState::Active, 1));
+    w.spend("b1", 52 * USD);
+    let overdrawn = Standing::ReadOnly { why: Why::Overdrawn };
+    assert_eq!(w.ledger.standing(T0), overdrawn);
+    let with_buy = w.ledger.told_key(T0, true);
+    w.ok(seat("seat:2", SeatState::Canceled, 2));
+    assert_eq!(w.ledger.standing(T0), overdrawn, "its standing holds");
+    let without = w.ledger.told_key(T0, true);
+    assert!(said::news(Some(&with_buy), &without), "the seat gone: Buy credit goes, and that is news");
+    w.ok(seat("seat:3", SeatState::Active, 3));
+    let back = w.ledger.told_key(T0, true);
+    assert!(said::news(Some(&without), &back), "the seat back: Buy credit is back, news too");
+    assert!(!said::news(Some(&with_buy), &back), "the same notices as before: nothing new");
+}

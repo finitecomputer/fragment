@@ -368,12 +368,7 @@ export async function billingSections(helpers, ledger, mine, back) {
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : ""), leave));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
     // a trial asks no card: one added before its end keeps the seat, else it lapses then
-    if (seat.trialEnds && mine.pays) billing.append(el("p", "muted", "To keep your seat after the trial, add a card in Payment and invoices. Without one, your seat lapses when the trial ends; nothing of yours is deleted, and Pay again here brings it back."));
-    if (!seat.good) {
-      billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
-      // paid again at Checkout, where something is sold
-      if (offer) billing.append(seat.admin ? actionLine("Renewal", button("Pay again", () => goCheckout({}), (e) => plainly(e, CHECKOUT, CHECKOUT_FAILED))) : el("p", "muted", "Ask your org's admin to pay for it again."));
-    }
+    if (seat.trialEnds && mine.pays) billing.append(el("p", "muted", "To keep your seat after the trial, add a card in Payment and invoices. Without one, your seat lapses when the trial ends; nothing of yours is deleted, and Pay again brings it back."));
     if (seat.good && seat.kind === "seat_always_on") {
       // a switch: a checkbox drawn as one (shell.css `.settings-switch`), so
       // it is still a checkbox to forms, tests and assistive tech, which

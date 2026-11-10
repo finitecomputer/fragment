@@ -52,13 +52,6 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
   const { getComputer, getAgents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes } = agents;
   // ---- settings: the person's account, credit, computer and agents ----
   const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
-  // what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
-  const STOPPED = { agents_stopped: "Your agents are stopped", read_only: "Your fragments are read-only, and your agents are stopped" };
-  const WHY = {
-    seat_canceled: "the seat was canceled",
-    no_credit: "the credit is used up; adding credit starts them again",
-    overdrawn: "the balance reached the overdraft; credit that brings it above zero ends it",
-  };
   // The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
   // xtask check` holds the two to each other and to the release's assets),
   // and a coding agent's skill, in Claude Code's folder: behind settings'
@@ -338,10 +331,6 @@ export function createSettings({ api, $, seg, asks, account, navigation, notices
       renderSettingsPage(page, [...billing, account, dataSection({ api, el, section, line, actionLine, isOpen: () => isOpen() }), ...releaseLine(null)]);
       settle();
       return tell();
-    }
-    const standing = ledger?.standing?.standing;
-    if (standing && standing !== "ok") {
-      billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
     }
     const c = getComputer();
     const computer = computerSection(c);
