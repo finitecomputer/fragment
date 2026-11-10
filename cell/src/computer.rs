@@ -46,7 +46,7 @@
 //!   a start) fails at its next write.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::key_hour;
@@ -62,7 +62,7 @@ use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, KeyCapAsk, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Reason};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
@@ -452,7 +452,7 @@ pub struct ComputerCell {
     /// (its generation's): a guest's read of its view arms again when its
     /// agents' Vault secrets name a host more. In memory only: a new
     /// isolate arms again at the next read.
-    armed: RefCell<Option<(u64, BTreeSet<String>)>>,
+    armed: RefCell<Option<(u64, Vec<String>)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -593,44 +593,12 @@ fn may_use(narrowed: &Option<Vec<String>>, provider: &str) -> bool {
 struct CredentialsAsk {
     host: String,
     placeholders: Vec<Asked>,
-    /// The request as it goes, for a Vault's signature (`vault::Signable`):
-    /// sent when a placeholder names no catalog provider.
-    #[serde(default)]
-    request: Option<crate::vault::Signable>,
 }
 
 #[derive(Deserialize)]
 struct Asked {
     provider: String,
     tag: String,
-}
-
-/// `computer/credentials`' answer: whose call it is (`agent`, its `owner`
-/// and their `identity`), and each placeholder's secret.
-#[derive(Serialize, Deserialize)]
-struct Credentials {
-    agent: String,
-    owner: String,
-    identity: String,
-    secrets: Vec<Resolved>,
-}
-
-/// One placeholder's secret; a Vault's with its row (`vault`): its hosts,
-/// where it goes, and whether it is a signature made for this request.
-#[derive(Serialize, Deserialize)]
-struct Resolved {
-    provider: String,
-    tag: String,
-    secret: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    vault: Option<VaultRow>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct VaultRow {
-    hosts: Vec<String>,
-    placement: fragment_core::catalog::Placement,
-    signed: bool,
 }
 
 /// `computer/used`'s body: an agent's calls a provider answered, at `at`,
@@ -1344,19 +1312,22 @@ impl ComputerCell {
 
     /// The hosts the swap intercepts: every provider's in the catalog, and
     /// each its agents' Vault secrets go to (`vault_usable`).
-    async fn swap_hosts(&self) -> CellResult<BTreeSet<String>> {
-        let agents = self.agents()?;
-        let usable = self.vault_usable(agents.iter().map(|a| (a.owner.as_str(), a.fragment.as_str()))).await;
-        Ok(self.cfg.providers.hosts().into_iter().chain(usable.into_values().flatten().flat_map(|u| u.hosts)).collect())
+    async fn swap_hosts(&self) -> CellResult<Vec<String>> {
+        let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
+        let usable = self.vault_usable(&fragments).await;
+        let mut hosts = self.cfg.providers.hosts();
+        hosts.extend(usable.into_iter().flat_map(|u| u.2));
+        hosts.sort_unstable();
+        hosts.dedup();
+        Ok(hosts)
     }
 
     /// Sets its running start `generation`'s egress intercepts (entry.mjs
     /// `arm`): the platform's own hosts and `hosts`, kept as armed. False:
     /// that start was superseded.
-    async fn arm(&self, generation: u64, id: &str, hosts: BTreeSet<String>) -> CellResult<bool> {
+    async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
-        let list: Vec<&String> = hosts.iter().collect();
-        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&json!(list)), self.codestorage_through_egress()]).await?;
+        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
         let done = armed.as_bool() == Some(true);
         if done {
             *self.armed.borrow_mut() = Some((generation, hosts));
@@ -1369,15 +1340,18 @@ impl ComputerCell {
     /// started), so a guest that reads a placeholder reaches the swap with
     /// it. Asleep, its next start arms them all. A failure is logged: the
     /// placeholder then goes out uncaught, and fills nothing.
-    async fn arm_more(&self, vault_hosts: BTreeSet<String>) {
+    async fn arm_more(&self, vault_hosts: Vec<String>) {
         let Ok(life) = self.lifecycle() else { return };
         let Some(generation) = life.running() else { return };
         let armed = self.armed.borrow().clone();
-        let have = armed.filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
-        if vault_hosts.is_subset(&have) {
+        let mut hosts = armed.filter(|(g, _)| *g == generation).map(|(_, h)| h).unwrap_or_default();
+        if vault_hosts.iter().all(|h| hosts.contains(h)) {
             return;
         }
-        let hosts: BTreeSet<String> = self.cfg.providers.hosts().into_iter().chain(have).chain(vault_hosts).collect();
+        hosts.extend(self.cfg.providers.hosts());
+        hosts.extend(vault_hosts);
+        hosts.sort_unstable();
+        hosts.dedup();
         let armed = match self.meta(MetaKey::Id) {
             Ok(Some(id)) => self.arm(generation, &id, hosts).await,
             _ => return,
@@ -1387,23 +1361,22 @@ impl ComputerCell {
         }
     }
 
-    /// The Vault secrets each of `agents` (owner, fragment) may use, by
-    /// fragment, as each owner's Vault answers (vault.rs `names`). A Vault
-    /// that does not answer is logged and lends none: the catalog's
-    /// credentials never wait on it.
-    async fn vault_usable<'a>(&self, agents: impl Iterator<Item = (&'a str, &'a str)>) -> BTreeMap<String, Vec<crate::vault::Usable>> {
-        let mut by_owner: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-        for (owner, fragment) in agents {
-            by_owner.entry(owner).or_default().push(fragment.to_string());
-        }
-        let mut usable = BTreeMap::new();
-        for (owner, fragments) in by_owner {
-            match crate::vault::names(&self.env, owner, &fragments).await {
-                Ok(named) => usable.extend(named),
-                Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "names", "error": e.message })),
+    /// The Vault secrets each of its agents (`fragments`) may use, as its
+    /// owner's Vault answers (vault.rs `names`). A Vault that does not
+    /// answer is logged and lends none: the catalog's credentials never
+    /// wait on it.
+    async fn vault_usable(&self, fragments: &[String]) -> Vec<crate::vault::Usable> {
+        let owner = match self.meta(MetaKey::Owner) {
+            Ok(Some(owner)) if !fragments.is_empty() => owner,
+            _ => return vec![],
+        };
+        match crate::vault::names(&self.env, &owner, fragments).await {
+            Ok(usable) => usable,
+            Err(e) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "vault": "names", "error": e.message }));
+                vec![]
             }
         }
-        usable
     }
 
     /// Whether the guest reaches code.storage through its egress
@@ -2081,12 +2054,13 @@ impl ComputerCell {
         let keys = crate::keys::tag_keys(&self.env).await?;
         // each agent's person's Vault's secrets bound to it, as own keys with
         // no variable (FIN-466): their hosts caught before the guest can know one
-        let mut usable = self.vault_usable(view.agents.iter().map(|a| (a.owner.as_str(), a.fragment.as_str()))).await;
-        self.arm_more(usable.values().flatten().flat_map(|u| u.hosts.iter().cloned()).collect()).await;
-        for agent in &mut view.agents {
-            for u in usable.remove(&agent.fragment).unwrap_or_default() {
-                let tag = keys[0].tag(&view.computer, &agent.fragment, &u.name);
-                agent.credentials.push(AgentCredential { provider: u.name.clone(), kind: Kind::Own, env: vec![], placeholder: Placeholder::new(Kind::Own, &u.name, &tag).text(), hosts: u.hosts, model_base: None });
+        let fragments: Vec<String> = view.agents.iter().map(|a| a.fragment.clone()).collect();
+        let usable = self.vault_usable(&fragments).await;
+        self.arm_more(usable.iter().flat_map(|u| u.2.iter().cloned()).collect()).await;
+        for crate::vault::Usable(of, name, hosts) in usable {
+            if let Some(agent) = view.agents.iter_mut().find(|a| a.fragment == of) {
+                let tag = keys[0].tag(&view.computer, &agent.fragment, &name);
+                agent.credentials.push(AgentCredential { provider: name.clone(), kind: Kind::Own, env: vec![], placeholder: Placeholder::new(Kind::Own, &name, &tag).text(), hosts, model_base: None });
             }
         }
         if catalog.is_empty() {
@@ -3150,7 +3124,7 @@ impl ComputerCell {
     /// has unless its owner narrowed it to a list (decision 44: a person's
     /// agents are not fenced from each other, so the list is a role's
     /// specialization, not a wall).
-    async fn credentials(&self, b: CredentialsAsk) -> CellResult<Credentials> {
+    async fn credentials(&self, b: CredentialsAsk) -> CellResult<Value> {
         if b.placeholders.is_empty() || b.placeholders.len() > swap::PLACEHOLDERS_MAX {
             return Err(CellError::invalid(format!("ask for 1 to {} placeholders", swap::PLACEHOLDERS_MAX)));
         }
@@ -3183,16 +3157,8 @@ impl ComputerCell {
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
         let narrowed = stored_connections(row["connections"].as_str().unwrap_or_default(), agent)?;
         let mut secrets = vec![];
-        // the Vault's, in one ask: each bound to this agent, toward this host
-        let vaulted: Vec<&Asked> = b.placeholders.iter().filter(|p| self.cfg.providers.get(&p.provider).is_none()).collect();
-        if !vaulted.is_empty() {
-            let request = b.request.clone().ok_or_else(|| CellError::invalid("a Vault's secret is asked for with its request"))?;
-            let ask = crate::vault::FillAsk { agent: agent.to_string(), host: b.host.clone(), names: vaulted.iter().map(|p| p.provider.clone()).collect(), request };
-            for (p, f) in vaulted.iter().zip(crate::vault::fill(&self.env, &owner, &ask).await?) {
-                assert_eq!(p.provider, f.name, "the Vault answers each name asked, in order");
-                secrets.push(Resolved { provider: f.name, tag: p.tag.clone(), secret: f.secret, vault: Some(VaultRow { hosts: f.hosts, placement: f.placement, signed: f.signed }) });
-            }
-        }
+        // a Vault's secret (a name no catalog row has) is its egress's to ask
+        // the agent's person's Vault for, this agent's now that its tag says so
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.get(&p.provider).is_some()) {
             let provider = self.cfg.providers.get(&p.provider).expect("a catalog's, filtered so");
             if !may_use(&narrowed, &provider.name) {
@@ -3219,9 +3185,9 @@ impl ComputerCell {
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
                 return Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}'s credential is not a printable token", provider.name)));
             }
-            secrets.push(Resolved { provider: provider.name.clone(), tag: p.tag.clone(), secret, vault: None });
+            secrets.push(json!({ "provider": provider.name, "tag": p.tag, "secret": secret }));
         }
-        Ok(Credentials { agent: agent.to_string(), owner, identity, secrets })
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets }))
     }
 
     /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
@@ -3930,7 +3896,8 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
     };
     let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let mut answered: BTreeMap<(String, String), String> = BTreeMap::new();
+    // each placeholder's secret, by its provider and tag
+    let mut answered: Vec<(String, String, String)> = vec![];
     let mut vault_rows = vec![];
     // what a Vault filled (never a signature), by name: named so in the answer
     let mut filled: Vec<(String, String)> = vec![];
@@ -3941,23 +3908,42 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let mut payer: Option<(String, String, String)> = None;
     if !found.is_empty() {
         let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
-        // what a signature covers: the request as it goes, over https
-        let request = vaulted.then(|| json!({ "method": method.as_ref(), "url": format!("https://{host}{}{query}", url.path()), "bodySha256": (!body.is_empty()).then(|| hex::encode(Sha256::digest(&body))) }));
-        let answer: Credentials = crate::routed::ask_object(env, "COMPUTER", computer, "computer/credentials", &json!({ "host": host, "placeholders": asked, "request": request })).await?;
-        for s in answer.secrets {
-            if let Some(v) = s.vault {
-                if matches!(v.placement, fragment_core::catalog::Placement::Basic { .. }) {
-                    basic = Some(s.provider.clone());
-                }
-                vault_rows.push(fragment_core::vault::row(&s.provider, v.hosts, v.placement));
-                match v.signed {
-                    true => signed = true,
-                    false => filled.push((s.provider.clone(), s.secret.clone())),
-                }
-            }
-            answered.insert((s.provider, s.tag), s.secret);
+        let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
+        for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
+            answered.push((provider.to_string(), tag.to_string(), secret.to_string()));
         }
-        payer = Some((answer.agent, answer.owner, answer.identity));
+        let field = |k: &str| answer[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the computer named no {k}")));
+        let (agent, owner, identity) = (field("agent")?, field("owner")?, field("identity")?);
+        // a Vault's secrets, asked of the agent's person's Vault: each bound
+        // to this agent, toward this host; a signature over the request as
+        // it goes, over https
+        let vaulted: Vec<&Placeholder> = found.iter().filter(|p| cfg.providers.get(&p.provider).is_none()).collect();
+        if !vaulted.is_empty() {
+            let ask = crate::vault::FillAsk {
+                agent: agent.clone(),
+                host: host.clone(),
+                names: vaulted.iter().map(|p| p.provider.clone()).collect(),
+                method: method.as_ref().to_string(),
+                url: format!("https://{host}{}{query}", url.path()),
+                body_sha256: (!body.is_empty()).then(|| hex::encode(Sha256::digest(&body))),
+            };
+            for (p, crate::vault::Filled(secret, place, is_signed)) in vaulted.iter().zip(crate::vault::fill(env, &owner, &ask).await?) {
+                let (placing, _) = fragment_core::vault::placing(&place).map_err(|e| CellError::host(format!("a Vault secret's place: {e}")))?;
+                let placement = placing.placement();
+                if matches!(placement, fragment_core::catalog::Placement::Basic { .. }) {
+                    basic = Some(p.provider.clone());
+                }
+                match is_signed {
+                    true => signed = true,
+                    false => filled.push((p.provider.clone(), secret.clone())),
+                }
+                answered.push((p.provider.clone(), p.tag.clone(), secret));
+                // the Vault checked this host is one of its own
+                vault_rows.push(fragment_core::vault::row(&p.provider, vec![host.clone()], placement));
+            }
+        }
+        payer = Some((agent, owner, identity));
     }
     let catalog = cfg.providers.with(vault_rows);
     let plan = Plan::of(&headers_in, url.query(), url.path(), &catalog, &host).map_err(refused)?;
@@ -3966,7 +3952,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     }
     let mut secrets = BTreeMap::new();
     for p in &plan.wanted {
-        if let Some(s) = answered.get(&(p.provider.clone(), p.tag.clone())).filter(|s| !s.is_empty()) {
+        if let Some((_, _, s)) = answered.iter().find(|(provider, tag, s)| *provider == p.provider && *tag == p.tag && !s.is_empty()) {
             secrets.insert(p.clone(), s.clone());
         }
     }

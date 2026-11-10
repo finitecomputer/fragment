@@ -384,7 +384,7 @@ fn base64_spellings(value: &[u8]) -> Vec<String> {
 /// named too: the last bytes of each piece that could begin one wait for
 /// the next.
 pub struct Streamed {
-    /// Each value's bytes and what names it, longest first.
+    /// Each value's bytes and what names it.
     needles: Vec<(Vec<u8>, Vec<u8>)>,
     /// What came and is not out yet: at most a value's length less one.
     held: Vec<u8>,
@@ -393,8 +393,7 @@ pub struct Streamed {
 impl Streamed {
     /// For `values`, each a secret's name and a value it filled.
     pub fn new(values: &[(String, String)]) -> Streamed {
-        let mut needles: Vec<(Vec<u8>, Vec<u8>)> = values.iter().filter(|(_, v)| !v.is_empty()).map(|(n, v)| (v.as_bytes().to_vec(), format!("{{{{{n}}}}}").into_bytes())).collect();
-        needles.sort_by_key(|(v, _)| std::cmp::Reverse(v.len()));
+        let needles: Vec<(Vec<u8>, Vec<u8>)> = values.iter().filter(|(_, v)| !v.is_empty()).map(|(n, v)| (v.as_bytes().to_vec(), format!("{{{{{n}}}}}").into_bytes())).collect();
         Streamed { needles, held: vec![] }
     }
 
@@ -416,12 +415,13 @@ impl Streamed {
     /// must wait (unless `last`) for it may begin a value.
     fn named(&mut self, last: bool) -> (Vec<u8>, Vec<u8>) {
         let held = std::mem::take(&mut self.held);
-        let longest = self.needles.first().map_or(0, |(v, _)| v.len());
+        let longest = self.needles.iter().map(|(v, _)| v.len()).max().unwrap_or(0);
         let mut out = Vec::with_capacity(held.len());
         let mut at = 0;
         // bounded: each pass moves `at` past a value or to the end
         while at < held.len() {
-            let found = (at..held.len()).find_map(|i| self.needles.iter().find(|(v, _)| held[i..].starts_with(v)).map(|(v, name)| (i, v.len(), name)));
+            // at the first place a value begins, the longest one there
+            let found = (at..held.len()).find_map(|i| self.needles.iter().filter(|(v, _)| held[i..].starts_with(v)).max_by_key(|(v, _)| v.len()).map(|(v, name)| (i, v.len(), name)));
             match found {
                 Some((i, len, name)) => {
                     out.extend_from_slice(&held[at..i]);
