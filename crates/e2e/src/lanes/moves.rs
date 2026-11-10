@@ -679,3 +679,82 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      (screenshots: {})", shots.display());
     Ok(())
 }
+
+/// F5, the move's comp: a person on the roster who opens the move is given
+/// a month's seat and $25 of credit, once, ever: opened again, after the
+/// node restarts, nothing more. One who holds a seat keeps theirs, and gets
+/// the credit. A comp with an end (`untilMs`) ends by itself then.
+pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node]) {
+        return Ok(());
+    }
+    let mover = Mover::new(&api.base, s.mover.clone());
+    let run = s.name("mc");
+    let visit = |api: &Api, who: &fragment_nip98::Keys| api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(who) })));
+    let purchased = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/ledger", None).ok().and_then(|r| r.body["purchasedMicros"].as_i64()).unwrap_or(-1);
+    let seat = |api: &Api, k: &fragment_nip98::Keys| api.signed(k, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null);
+    let gina = api.person()?;
+    // a guest, as someone from finite.computer arrives (this fleet's default plan is a seat)
+    let made_guest = api.signed(&s.operator, "POST", &format!("/api/ledger/{}/plan", api.identity(&gina)?), Some(&json!({ "id": format!("{run}-guest"), "plan": "guest" })))?;
+    anyhow::ensure!(made_guest.status == 200, "gina a guest: {made_guest}");
+    let hank = api.person()?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&hank), "kind": "seat_always_on" })))?;
+    anyhow::ensure!(comped.status == 200, "hank's own seat: {comped}");
+    let people = [(&gina, "g1"), (&hank, "h1")].map(|(k, o)| RosterPerson { workos_id: s.workos.user(&Api::email_of(k)).id, email: format!("{run}-{o}@old.test"), agents: vec![agent(&format!("{run}-{o}"))] });
+    anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s1"), observed_ms: 1_800_000_000_000, people: people.to_vec() })?.status == 200, "the roster");
+    let before = (purchased(api, &gina), seat(api, &gina)["guest"].clone());
+    let first = visit(api, &gina)?;
+    let given = s.eventually(crate::lanes::billing::PUSHED, || seat(api, &gina)["guest"] == false);
+    let mine = seat(api, &gina);
+    s.ok(
+        "a guest on the roster who opens the move is given its comp: $25 of credit and a seat (a comped `seat`)",
+        before == (0, json!(true)) && first.status == 200 && first.body["comp"] == true && purchased(api, &gina) == 25_000_000 && given && mine["seat"]["kind"] == "seat" && mine["seat"]["comped"] == true,
+        json!([before, first.body, mine]),
+    );
+    let again = visit(api, &gina)?;
+    s.ok("opened again: nothing more (no comp due, $25 still)", again.status == 200 && again.body["comp"] == false && purchased(api, &gina) == 25_000_000, &again.body);
+    let hanks = visit(api, &hank)?;
+    let kept = seat(api, &hank);
+    s.ok(
+        "one who holds a seat already keeps theirs, and gets the credit",
+        hanks.status == 200 && hanks.body["comp"] == true && purchased(api, &hank) == 25_000_000 && kept["seat"]["kind"] == "seat_always_on" && visit(api, &hank)?.body["comp"] == false,
+        json!([hanks.body, kept]),
+    );
+    // restarted: what was given is remembered
+    s.stop()?;
+    let api = &s.start(false)?;
+    let after = (visit(api, &gina)?, visit(api, &hank)?);
+    s.ok(
+        "the node restarted: opened again, nothing more is given, to either",
+        after.0.status == 200 && after.0.body["comp"] == false && after.1.body["comp"] == false && purchased(api, &gina) == 25_000_000 && purchased(api, &hank) == 25_000_000,
+        json!([after.0.body, after.1.body]),
+    );
+    // a visit cut off after its credit, before its seat: the next asks for
+    // the same end, fixed at the first attempt, never a later one
+    let joy = api.person()?;
+    let joy_people = vec![RosterPerson { workos_id: s.workos.user(&Api::email_of(&joy)).id, email: format!("{run}-j1@old.test"), agents: vec![agent(&format!("{run}-j1"))] }];
+    anyhow::ensure!(mover.push(&Roster { snapshot: format!("{run}-s2"), observed_ms: 1_800_000_000_000, people: [people.to_vec(), joy_people].concat() })?.status == 200, "the roster");
+    let down = api.unsigned("POST", "/api/test/registry", Some(&json!({ "downFor": { "path": "/orgs/comp", "times": 1 } })))?;
+    anyhow::ensure!(down.status == 200, "the registry's next comp refused: {down}");
+    let t0 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let cut = visit(api, &joy)?;
+    let t1 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    std::thread::sleep(Duration::from_secs(2));
+    let retried = visit(api, &joy)?;
+    let until = retried.body["untilMs"].as_i64().unwrap_or(0);
+    const MONTH_MS: i64 = 30 * DAY_MS;
+    s.ok(
+        "a visit cut off after its credit and before its seat is tried again by the next, asking for the same end, fixed at the first attempt (not 30 days from the retry); after it, nothing more",
+        cut.status != 200 && retried.status == 200 && retried.body["comp"] == true && (t0 + MONTH_MS..=t1 + MONTH_MS).contains(&until)
+            && purchased(api, &joy) == 25_000_000 && seat(api, &joy)["seat"]["comped"] == true && visit(api, &joy)?.body["comp"] == false,
+        json!([cut.status, retried.body, t0, t1]),
+    );
+    // a comp with an end ends then, by itself (the registry's alarm)
+    let ivy = api.person()?;
+    let soon = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64 + 3_000;
+    let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&ivy), "kind": "seat", "untilMs": soon })))?;
+    let held = seat(api, &ivy)["seat"]["kind"] == "seat";
+    let ended = s.eventually(Duration::from_secs(30), || seat(api, &ivy)["seat"].is_null());
+    s.ok("a comp with an end holds until then, and then ends by itself", r.status == 200 && held && ended, seat(api, &ivy));
+    Ok(())
+}
