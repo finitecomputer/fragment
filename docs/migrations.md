@@ -53,8 +53,12 @@ The three stage routes take only the stage its old agent's current
 route gives a stage's bytes to the mover. The platform keeps the
 multipart upload's id and each part taken in `Migrations`.
 
-A command's id is `<old>:<attempt>:<kind>` (`command_id`). Each old
-agent has at most one command at a time: a new one replaces the last.
+A command's id is `<old>:<attempt>:<step>` (`command_id`): its step is
+its kind (`stop_and_stage`, `restart`), or a retirement's with its mark
+(`retire_migrated`, `retire_archived`). Phase 2 retires an old agent twice
+in one attempt (as archived, then as migrated after a late import), and
+no two commands share an id. Each old agent has at most one command at a
+time: a new one replaces the last.
 The mover keys its work by the id, and each step is idempotent on its
 side: a stop of a stopped runtime does nothing, and a stage writes the
 same keys again.
@@ -151,7 +155,8 @@ withdrawn: missing from a roster while listed, open, later or never
 
 The pure machine is `fragment_core::migrations`; its deadlines are its
 constants. Migrations' alarm is the one supervisor: it wakes at the
-earliest deadline of any row.
+earliest deadline of any row, and at the cutoff while an unasked row
+waits for it and fewer than 8 archive.
 
 | From → to | Moved by | Deadline | When it passes |
 |---|---|---|---|
@@ -170,7 +175,8 @@ A stage's `failed` report counts as an attempt, as a stall does. A
 retirement's `failed` keeps its command for the mover to try again: the
 moved mark it ends in is what finite.computer redirects by, so only its
 day's deadline holds it for staff. Staff act on a
-held move: `retry` (a new attempt), `restart-old` (the old agent runs
+held move: `retry` (a new attempt; a held phase 2 import, its kept stage
+again, while it is kept), `restart-old` (the old agent runs
 again, the offer is open again), `retire` (the import went well enough
 by hand), and `withdraw` (out of the move).
 
@@ -178,11 +184,11 @@ by hand), and `withdraw` (out of the move).
 
 | When | What |
 |---|---|
-| `done`, either way | that attempt's prefix: its routes refuse at once, its objects go from the alarm, at most 1,000 a pass |
+| `done`, either way in phase 1; done well in phase 2 | that attempt's prefix: its routes refuse at once, its objects go from the alarm, at most 1,000 a pass |
 | 14 days after `staged` (phase 1, done or not) | the same |
 | a superseded attempt | its prefix, and its unfinished upload aborted |
 | Never | nothing: Never only stops the asking |
-| 90 days after the cutoff (phase 2) | the same |
+| 90 days after the cutoff (phase 2), whatever its import did | the same: a phase 2 stage is the only copy left (its old agent was retired as archived), so a failed import keeps it for staff's retry until then |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |
 
 `/data` saves never hold a stage: the importer reads it by ranges into

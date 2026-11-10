@@ -89,9 +89,13 @@ pub fn parse_stage(stage: &str) -> Option<(String, Phase, u32)> {
     valid_old(old).then(|| (old.to_string(), phase, attempt))
 }
 
-/// A command's id: `<old>:<attempt>:<kind>`, what the mover keys its work by.
-pub fn command_id(old: &str, attempt: u32, kind: CommandKind) -> String {
-    format!("{old}:{attempt}:{}", kind.as_str())
+/// A command's id: `<old>:<attempt>:<step>`, what the mover keys its work
+/// by. Its step is its kind (`stop_and_stage`, `restart`), or a
+/// retirement's with its mark (`retire_migrated`, `retire_archived`): phase
+/// 2 retires an old agent twice in one attempt, as archived and then, after
+/// a late import, as migrated, and no two commands share an id.
+pub fn command_id(old: &str, attempt: u32, step: &str) -> String {
+    format!("{old}:{attempt}:{step}")
 }
 
 /// Which phase a stage is of: one the person asked for (`p1`), or one we
@@ -369,7 +373,7 @@ pub struct Mailbox {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Command {
-    /// `command_id`: `<old>:<attempt>:<kind>`.
+    /// `command_id`: `<old>:<attempt>:<step>`.
     pub id: String,
     pub old: String,
     pub attempt: u32,
@@ -725,11 +729,11 @@ mod tests {
     /// a retirement's mark.
     #[test]
     fn a_command_on_the_wire() {
-        let c = Command { id: command_id("o", 1, CommandKind::StopAndStage), old: "o".into(), attempt: 1, kind: CommandKind::StopAndStage, phase: Some(Phase::P1), stage: Some(stage_id(Phase::P1, "o", 1)), mark: None, secrets: vec![] };
+        let c = Command { id: command_id("o", 1, "stop_and_stage"), old: "o".into(), attempt: 1, kind: CommandKind::StopAndStage, phase: Some(Phase::P1), stage: Some(stage_id(Phase::P1, "o", 1)), mark: None, secrets: vec![] };
         assert_eq!(serde_json::to_value(&c).unwrap(), json!({ "id": "o:1:stop_and_stage", "old": "o", "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": "o.p1.1" }));
-        let retire = Command { id: "o:1:retire".into(), old: "o".into(), attempt: 1, kind: CommandKind::Retire, phase: None, stage: None, mark: Some(Mark::Migrated), secrets: vec![] };
+        let retire = Command { id: command_id("o", 1, "retire_migrated"), old: "o".into(), attempt: 1, kind: CommandKind::Retire, phase: None, stage: None, mark: Some(Mark::Migrated), secrets: vec![] };
         let v = serde_json::to_value(&retire).unwrap();
-        assert_eq!(v, json!({ "id": "o:1:retire", "old": "o", "attempt": 1, "kind": "retire", "as": "migrated" }));
+        assert_eq!(v, json!({ "id": "o:1:retire_migrated", "old": "o", "attempt": 1, "kind": "retire", "as": "migrated" }));
         assert_eq!(serde_json::from_value::<Command>(v).unwrap(), retire);
     }
 
