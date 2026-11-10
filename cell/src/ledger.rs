@@ -720,7 +720,7 @@ impl LedgerCell {
         if self.armed.get().is_none_or(|armed| next < armed) {
             self.arm(next).await?;
         }
-        self.told(standing).await;
+        self.told(standing);
         answer.map_err(Failed::Refused)
     }
 
@@ -729,8 +729,9 @@ impl LedgerCell {
     /// for it, `GET /api/notices`). Kept in its meta, so a change by the
     /// clock alone (a month's credit, its sweep) is told too, and told once.
     /// An org's ledger tells no one; a first standing is kept, not told.
-    /// Best effort: a page not told reads it on its next read.
-    async fn told(&self, standing: Standing) {
+    /// Told after the answer (`wait_until`), never on its path: a gate's ask
+    /// waits on no page. Best effort: a page not told reads it next time.
+    fn told(&self, standing: Standing) {
         if self.told.get() == Some(standing) {
             return;
         }
@@ -742,9 +743,12 @@ impl LedgerCell {
         if kept.as_deref() == Some(said.as_str()) || self.set_meta("told", &said).is_err() || kept.is_none() {
             return;
         }
-        if let Err(e) = crate::principal::tell_changed(&self.env, &person).await {
-            console_error!("{}", json!({ "event": "ledger.told-failed", "message": e.message }));
-        }
+        let env = self.env.clone();
+        self.state.wait_until(async move {
+            if let Err(e) = crate::principal::tell_changed(&env, &person).await {
+                console_error!("{}", json!({ "event": "ledger.told-failed", "message": e.message }));
+            }
+        });
     }
 
     /// Sets the alarm for `at` on the ledger's clock.
@@ -764,7 +768,7 @@ impl LedgerCell {
         let (swept, next, standing) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
-        self.told(standing).await;
+        self.told(standing);
         Ok(swept)
     }
 

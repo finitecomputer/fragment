@@ -217,6 +217,7 @@ struct BillingRow {
     customer: Option<String>,
     subscription: Option<String>,
     status: Option<String>,
+    trial_end: Option<i64>,
     event_at: Option<i64>,
 }
 
@@ -227,7 +228,7 @@ fn good(status: Option<&str>) -> bool {
 impl RegistryCell {
     /// An org's billing columns; `None`: no such org (one that ended).
     fn billing_row(&self, org: &str) -> CellResult<Option<BillingRow>> {
-        self.row::<BillingRow>("SELECT customer, subscription, status, event_at FROM orgs WHERE id = ?", vec![org.into()])
+        self.row::<BillingRow>("SELECT customer, subscription, status, trial_end, event_at FROM orgs WHERE id = ?", vec![org.into()])
     }
 
     /// Who pays for `org`: the buyer whose Checkout made the subscription
@@ -429,9 +430,30 @@ impl RegistryCell {
                 self.queue_sync(m.person.as_deref().expect("selected for its person"))?;
             }
         }
+        // what its seats' holders are told of their seat (a trial's end, a
+        // lapse: `notices_of`) changed: their pages read it again (FIN-458)
+        if row.status.as_deref() != Some(status.as_str()) || row.trial_end != s.trial_end {
+            self.tell_holders(org)?;
+        }
         // the seats are the truth: counts Stripe holds otherwise are pushed
         self.queue_quantities_if_drifted(org, s)?;
         Ok(true)
+    }
+
+    /// `org`'s seats' holders told their notices changed, after the answer
+    /// (`wait_until`): bounded, an org holds at most `SEATS_PER_ORG_MAX`.
+    fn tell_holders(&self, org: &str) -> CellResult<()> {
+        let holders = self.rows::<MemberRow>(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.org = ? AND m.seat IS NOT NULL AND m.person IS NOT NULL"), vec![org.into()])?;
+        let people: Vec<String> = holders.into_iter().filter_map(|m| m.person).collect();
+        let env = self.env.clone();
+        self.state.wait_until(async move {
+            for person in people {
+                if let Err(e) = crate::principal::tell_changed(&env, &person).await {
+                    console_error!("{}", serde_json::json!({ "seat-told": person, "failed": e.message }));
+                }
+            }
+        });
+        Ok(())
     }
 
     /// An orphan subscription's cancel, after its grace (`CancelOrphan`).

@@ -968,13 +968,15 @@ impl Ledger {
 
     /// What this ledger tells its person (FIN-458; `said::standing`): its
     /// standing short of `Ok` for want of credit, with a pack to buy when
-    /// packs are `sold` and its seat is active (a pack's buyer holds one).
-    /// An org's ledger tells no one here.
+    /// packs are `sold` and they hold an active seat the registry gave them
+    /// (a pack's buyer holds one: `PackBegin`; a deployment's default plan,
+    /// which no registry pushed, `seat_seq` 0, is none). An org's ledger
+    /// tells no one here.
     pub fn said(&self, now_ms: i64, sold: bool) -> Vec<fragment_proto::notice::Notice> {
         if self.org.is_some() {
             return vec![];
         }
-        let seat = matches!(self.money.plan, Plan::Seat | Plan::SeatAlwaysOn) && self.money.seat == SeatState::Active;
+        let seat = matches!(self.money.plan, Plan::Seat | Plan::SeatAlwaysOn) && self.money.seat == SeatState::Active && self.money.seat_seq > 0;
         said::standing(self.standing(now_ms), sold && seat).into_iter().collect()
     }
 
