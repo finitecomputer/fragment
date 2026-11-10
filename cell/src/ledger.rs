@@ -392,8 +392,8 @@ impl Route for SetFragmentCap {
 
 impl Route for NoticesOf {
     const PATH: &'static str = "/notices";
-    /// A `NoticeList`, passed on as it is (`notices.rs`).
-    type Answer = serde_json::Value;
+    /// Joined as bytes with the other owners' (`notices.rs`): read by no one.
+    type Answer = NoticeList;
 }
 
 impl Route for Status {
@@ -1077,7 +1077,7 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
 /// `ask`'s round trip, one copy for every route (the cell's Wasm is held
 /// to a budget, and a copy per route type costs it): route `path`'s
 /// answer, as bytes, or its refusal.
-async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
+pub(crate) async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
     assert!(Payer::parse(payer).is_some(), "a ledger is a payer's, named as `Payer::name` names it");
     let headers = Headers::new();
     headers.set(PAYER_HEADER, payer)?;

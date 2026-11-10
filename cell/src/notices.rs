@@ -13,6 +13,7 @@ use futures_util::future::join3;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
+use crate::ledger::Route;
 use crate::registry::calls::Call;
 use crate::registry::invites::NoticesOf;
 use fragment_proto::{ErrorCode, IdentityKind};
@@ -25,7 +26,8 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url) -> CellResult<Res
     let person = who.identity.id;
     let asked = serde_json::to_string(&NoticesOf { person: person.clone() }).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
     let (ledger, computer, registry) = join3(
-        crate::ledger::ask(env, &person, &crate::ledger::NoticesOf {}),
+        // its body is `{}` (`NoticesOf {}`): the ledger reads none of it
+        crate::ledger::asked(env, &person, crate::ledger::NoticesOf::PATH, "{}".into()),
         crate::computer::notices_for(env, &person),
         crate::registry_round_trip(env, NoticesOf::PATH, asked),
     )
@@ -36,7 +38,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url) -> CellResult<Res
         return Ok(computer);
     }
     let computer = computer.bytes().await?;
-    let ledger = serde_json::to_vec(&ledger.map_err(CellError::from)?).map_err(|e| CellError::host(format!("the ledger's notices: {e}")))?;
+    let ledger = ledger.map_err(CellError::from)?;
     let joined = fragment_core::notice::joined(&[&ledger, &computer, &registry?]).ok_or_else(|| CellError::host("an owner's notices are not a notice list"))?;
     Ok(Response::builder().with_header("content-type", "application/json")?.fixed(joined))
 }
