@@ -359,9 +359,21 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
-    drawAsked(told.find((n) => n.mustAnswer), own);
+    drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
     countdown();
     paintSettings();
+  }
+  // On the platform's page one of its answers opens (the move's `/move`),
+  // a notice that must be answered is answered there: its cover stands
+  // aside while that page shows, and is back on any other.
+  function answeredHere(n) {
+    const here = globalThis.location;
+    if (!here) return false;
+    return (n.actions ?? []).some((a) => {
+      if (!a.open) return false;
+      const to = new URL(a.open, here.href);
+      return to.origin === here.origin && to.pathname === here.pathname;
+    });
   }
   // One that must be answered (`mustAnswer`) shows alone, over everything,
   // a guest's welcome too (`#must-answer`, a modal dialog: the page behind

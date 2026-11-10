@@ -1930,6 +1930,49 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "Offer": {
+        "description": "One old agent of the person's, and where its move is.",
+        "properties": {
+          "agent": {
+            "default": null,
+            "description": "The new agent it is brought into, after Yes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image": {
+            "default": null,
+            "description": "Its picture, a platform path (`…/offers/{old}/picture`), when the\nroster has one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Its name on finite.computer.",
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          },
+          "said": {
+            "description": "Where it is, in the server's words.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/MoveState"
+          }
+        },
+        "required": [
+          "old",
+          "name",
+          "state",
+          "said"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
       "OfferYes": {
         "description": "`POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a\nnew agent of their own, which the move's stage is imported into.",
         "properties": {
@@ -1943,6 +1986,22 @@
         ],
         "type": "object",
         "x-fragment-direction": "in"
+      },
+      "Offers": {
+        "description": "`GET /api/migrations/offers` (`POST`: the person opens the move, and is\ngiven its comp once): the person's old agents, each where its move is,\nin the server's words. `/move` draws them.",
+        "properties": {
+          "offers": {
+            "items": {
+              "$ref": "#/components/schemas/Offer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "offers"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
       },
       "OldBrain": {
         "properties": {
@@ -5273,6 +5332,181 @@
           "migrations"
         ],
         "x-fragment-takes": "application/octet-stream"
+      }
+    },
+    "/api/migrations/offers": {
+      "get": {
+        "operationId": "migrations.offers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Offers"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`, `registry_unavailable`",
+            "x-fragment-codes": [
+              "deploying",
+              "registry_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The signer's old finite.computer agents, each where its move is, in the server's words.",
+        "tags": [
+          "migrations"
+        ]
+      },
+      "post": {
+        "operationId": "migrations.visit",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Offers"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`, `registry_unavailable`",
+            "x-fragment-codes": [
+              "deploying",
+              "registry_unavailable"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "The signer opens the move: bound to their old agents by the WorkOS user they sign in as, and given its comp once (a month's seat and its credit). Then their old agents, as GET answers them.",
+        "tags": [
+          "migrations"
+        ]
       }
     },
     "/api/migrations/offers/{old}/ask-again": {

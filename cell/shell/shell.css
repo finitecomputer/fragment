@@ -984,6 +984,21 @@ label.settings-line { cursor: pointer; }
 /* an app that reaches their accounts: why its Sharing is theirs alone */
 .apps-archived { margin-top: 24px; }
 .apps-archived summary { padding: 6px 2px; color: var(--text-secondary); font-size: 14px; cursor: pointer; }
+/* the move's page (move-page.js): a row an old agent, its picture, its
+   name with where its move is under it, and what to bring it over as */
+.move-layout { display: flex; flex-direction: column; align-items: flex-start; max-width: 720px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
+.move-layout h1 { margin: 0 0 18px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.move-list { align-self: stretch; display: flex; flex-direction: column; gap: 10px; margin: 0 0 20px; padding: 0; list-style: none; }
+.move-row { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-card); }
+.move-pic { flex: none; width: 44px; height: 44px; border-radius: 50%; object-fit: cover; background: var(--bg-hover); }
+.move-copy { flex: 1; min-width: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.45; }
+.move-copy strong { display: block; margin-bottom: 2px; color: var(--text-primary); font-size: 15px; }
+.move-copy p { margin: 0; }
+.move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 14px; }
+.move-pick input[type="checkbox"] { flex: none; width: 18px; height: 18px; margin: 0; }
+.move-row > button { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/28px var(--font-sans); }
+.move-layout .form-error { margin: 0 0 12px; }
+@media (max-width: 640px) { .move-layout { padding: 18px 16px 60px; } }
 /* the History page (history-page.js): in the work area as the Apps page
    is; a search box, All · Archived · Imported, then a row a chat: its face,
    its title, whom it was with and its first words (or what the search

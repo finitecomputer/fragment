@@ -69,6 +69,33 @@ the alarm's deadlines, staff's acts) tells their open pages
 (`principal::tell_changed`, at most 32 people a call), which read their
 notices again.
 
+## The page (F6)
+
+`/move`, a view of the shell's (cell/shell/move-page.js), reached from
+the offer's Yes, and from Settings while the person has old agents. On
+it, the offer's cover stands aside: it is answered there.
+
+- `GET /api/migrations/offers` (`Offers`): the person's old agents, each
+  where its move is in the server's words (`fragment_core::migrations::said`):
+  on finite.computer, stopping, copying, bringing over, done, paused for
+  staff. The page reads it again every few seconds while a move is under
+  way.
+- The one question: which to bring over. Each new agent takes its old
+  one's name (the import brings who it is; it is renamed as any agent). A
+  Never'd one has Ask again.
+- Bring over: `POST /api/migrations/offers` opens the move (binds them;
+  the comp, once), the page waits for the seat to reach the ledger, then
+  for each, one at a time, a new agent is made as Settings' Add makes one
+  (`addAgent`, its chat made but not opened), and `…/offers/{old}/yes
+  {agent}` posted: the old agent is stopped then. One new agent per old
+  agent: its agent.json keeps the old one it was made for (`from`), and
+  the page hands that agent back to Add (`agent`), which goes on with
+  what it lacks, its chat too; one cut short before its agent.json is
+  found by its name, the old one's each time. A Yes that never arrived, a
+  reload, or a lost answer never makes a second. An agent.json that could
+  not be read (not missing) makes nothing: the page stops, to be tried
+  again. A refusal shows the server's words.
+
 ## The comp (F5)
 
 A person on the roster who opens the move (`/move`, `migrations::visit`)

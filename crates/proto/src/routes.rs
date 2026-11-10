@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
-use crate::migrations::{Mailbox, MoveAt, OfferYes, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
+use crate::migrations::{Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
 use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
@@ -483,6 +483,28 @@ pub const ROUTES: &[Route] = &[
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
     },
     Route {
+        operation: "migrations.offers",
+        method: Method::Get,
+        path: "/api/migrations/offers",
+        summary: "The signer's old finite.computer agents, each where its move is, in the server's words.",
+        auth: SIGNED,
+        params: &[],
+        request: None,
+        answer: Answer::Json(ty::<Offers>()),
+        errors: &[Unauthenticated, Forbidden, RegistryUnavailable],
+    },
+    Route {
+        operation: "migrations.visit",
+        method: Method::Post,
+        path: "/api/migrations/offers",
+        summary: "The signer opens the move: bound to their old agents by the WorkOS user they sign in as, and given its comp once (a month's seat and its credit). Then their old agents, as GET answers them.",
+        auth: SIGNED,
+        params: &[],
+        request: None,
+        answer: Answer::Json(ty::<Offers>()),
+        errors: &[Unauthenticated, Forbidden, Conflict, RegistryUnavailable],
+    },
+    Route {
         operation: "migrations.later",
         method: Method::Post,
         path: "/api/migrations/offers/{old}/later",
@@ -608,7 +630,7 @@ mod tests {
     fn credentials_are_the_dispatchs() {
         for r in ROUTES {
             match r.path {
-                p if p.starts_with("/api/migrations/offers/") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
+                p if p.starts_with("/api/migrations/offers") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
                 p if p.starts_with("/api/migrations/") => assert_eq!(r.auth, SIGNATURE, "{}", r.operation),
                 p if p.starts_with("/api/") => assert_eq!(r.auth, SIGNED, "{}", r.operation),
                 p if p.starts_with("/f/{name}/") => assert_eq!(r.auth, VISITOR, "{}", r.operation),
