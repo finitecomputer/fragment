@@ -38,17 +38,24 @@ fn files() -> Result<Vec<(String, PathBuf)>> {
 }
 
 /// The home as one zip at `to`, as a stage brings it, with `extra` files
-/// (path, bytes) beside its own: a stored entry for each (a stage's are
-/// mostly media, which deflate gains nothing on).
+/// (path, bytes) beside its own.
 pub fn stage(to: &Path, extra: &[(&str, Vec<u8>)]) -> Result<()> {
+    let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+    for (rel, path) in files()? {
+        all.push((rel, std::fs::read(&path)?));
+    }
+    all.extend(extra.iter().map(|(p, b)| (p.to_string(), b.clone())));
+    zip(to, &all)
+}
+
+/// `files` (path, bytes) as a zip at `to`, as a stage writes one: zip64,
+/// each entry stored (a stage's bytes are mostly media, which deflate
+/// gains nothing on).
+pub fn zip(to: &Path, files: &[(String, Vec<u8>)]) -> Result<()> {
     let mut w = zip::ZipWriter::new(std::fs::File::create(to).with_context(|| format!("writing {}", to.display()))?);
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
-    for (rel, path) in files()? {
+    for (rel, bytes) in files {
         w.start_file(rel.as_str(), options)?;
-        w.write_all(&std::fs::read(&path)?)?;
-    }
-    for (rel, bytes) in extra {
-        w.start_file(*rel, options)?;
         w.write_all(bytes)?;
     }
     w.finish()?;

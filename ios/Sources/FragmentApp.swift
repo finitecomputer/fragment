@@ -63,10 +63,21 @@ final class Library {
     func refusals(at now: Int64) -> [(id: String, failure: NoticeFailure)] {
         failedNotices.filter { id, f in f.refused && !notices.contains { $0.id == id && $0.shown(at: now) } }.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
+    /// The notice that must be answered now: the first such in the list,
+    /// its owner's oldest (`MustAnswerView`).
+    var asked: Notice? { notices.first(where: \.mustAnswer) }
     /// A fragment of theirs an action's answer named, for the page to open
     /// (`FragmentRoot`): set by the first read begun after the answer if
-    /// it lists it (`act`).
+    /// it lists it (`act`), taken by `takeAnswered`.
     var answered: FragmentSummary?
+    /// The page an answer named, to open now: none while a notice must be
+    /// answered (it waits, kept, until none is: a cover of the next would
+    /// close it), and once.
+    func takeAnswered() -> FragmentSummary? {
+        guard asked == nil, let fragment = answered else { return nil }
+        answered = nil
+        return fragment
+    }
     @ObservationIgnored private var loadID = UUID()
     /// Reads begun (`load`), and a page an action's answer named with the
     /// number of the first read begun after the answer: the first list
@@ -507,6 +518,10 @@ struct FragmentRoot: View {
     @State private var openedApp: FragmentSummary?
     /// The page's height, of which the notices take at most a share.
     @State private var pageHeight: CGFloat = 800
+    /// A cover of a notice that must be answered is up, or still going: from
+    /// the notice's arrival to the cover's `onDismiss` (an answer's page waits
+    /// for it, so a sheet never meets a cover going away).
+    @State private var covered = false
 
     var body: some View {
         Group {
@@ -587,6 +602,18 @@ struct FragmentRoot: View {
                 }
             }
         }
+        // one that must be answered, alone over everything, until it is
+        // (what the page itself presents closes first: one at a time)
+        // (an answer's page waits for the last of them to go: `takeAnswered`)
+        .fullScreenCover(item: Binding(get: { library.asked }, set: { _ in }), onDismiss: {
+            covered = false
+            openAnswered()
+        }) { notice in
+            MustAnswerView(library: library, api: api, notice: notice).interactiveDismissDisabled()
+        }
+        .onChange(of: library.asked?.id, initial: true) { _, id in
+            if id != nil { covered = true; openedApp = nil; showingConnection = false; sidebar = false }
+        }
         // the library's reads and its watch, for the account as it is now: a
         // library made anew (`resetNavigation`: its identity or approval
         // changed, as a check of the key finds them) reads and watches anew
@@ -597,11 +624,7 @@ struct FragmentRoot: View {
             if case .chat(let name) = left { library.leftChat(name) }
         }
         // a fragment an action's answer named, the read after it listing it
-        .onChange(of: library.answered) { _, fragment in
-            guard let fragment else { return }
-            library.answered = nil
-            open(fragment)
-        }
+        .onChange(of: library.answered) { _, _ in openAnswered() }
         .onChange(of: showingApps) { _, presented in
             if presented { dismissKeyboard() }
         }
@@ -646,6 +669,12 @@ struct FragmentRoot: View {
     private func toggleSidebar() {
         if !sidebar { dismissKeyboard() }
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { sidebar.toggle() }
+    }
+    /// The page an answer named, opened now if nothing must be answered and
+    /// no cover is up or still going (`covered`): else it waits, kept.
+    private func openAnswered() {
+        guard !covered, let fragment = library.takeAnswered() else { return }
+        open(fragment)
     }
     private func open(_ fragment: FragmentSummary) {
         if fragment.kind == "chat" { page = .chat(fragment.name); showingApps = false }

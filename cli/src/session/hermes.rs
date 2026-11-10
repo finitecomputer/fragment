@@ -50,7 +50,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use fragment_core::session::{self, Kind, Message, Session, ToolCall, ARGUMENTS_MAX_CHARS, REASONING_MAX_CHARS, SESSION_MAX_BYTES, TOOL_TEXT_MAX_CHARS};
@@ -454,13 +454,48 @@ pub fn read(path: &Path, spool: &mut Spool, own: Option<&Path>) -> Result<()> {
 /// show each twice. Its Hermes root is `home` (`$HERMES_HOME`), or the
 /// folder holding its `profiles/` when `home` is one of them.
 fn refuse_own(db: &Path, home: &Path) -> Result<()> {
-    let root = match home.parent() {
-        Some(p) if p.file_name().is_some_and(|n| n == "profiles") => p.parent().map(Path::to_path_buf).unwrap_or(home.to_path_buf()),
-        _ => home.to_path_buf(),
-    };
+    let root = hermes_root(home);
     if let (Ok(db), Ok(root)) = (db.canonicalize(), root.canonicalize()) {
         if db.starts_with(&root) {
             bail!(super::usage(format!("{} is one of this computer's own Hermes databases: its conversations are your chats here already. Import another agent's (its state.db, or its export)", db.display())));
+        }
+    }
+    Ok(())
+}
+
+/// A platform computer's Hermes root: `home` (`$HERMES_HOME`), or the
+/// folder holding its `profiles/` when `home` is one of them.
+fn hermes_root(home: &Path) -> PathBuf {
+    match home.parent() {
+        Some(p) if p.file_name().is_some_and(|n| n == "profiles") => p.parent().map(Path::to_path_buf).unwrap_or(home.to_path_buf()),
+        _ => home.to_path_buf(),
+    }
+}
+
+/// Every conversation id a database's `sessions` holds, or `None` when it
+/// holds none to read.
+fn session_ids(db: &Path) -> Option<HashSet<String>> {
+    let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
+    let mut q = c.prepare("SELECT id FROM sessions").ok()?;
+    let ids = q.query_map([], |r| r.get::<_, String>(0)).ok()?.filter_map(|r| r.ok()).collect();
+    Some(ids)
+}
+
+/// A database copied out of a home (a zip of one) that holds a
+/// conversation one of this computer's own Hermes databases holds is that
+/// agent's own, wherever it was copied: refused, as `refuse_own` refuses
+/// one in place. Its place can't say (a zip in the agent's home is as
+/// likely another agent's, brought here), so its conversations do.
+pub fn refuse_shared(db: &Path, home: &Path) -> Result<()> {
+    let root = hermes_root(home);
+    let mut own = vec![root.join("state.db")];
+    if let Ok(profiles) = std::fs::read_dir(root.join("profiles")) {
+        own.extend(profiles.flatten().map(|e| e.path().join("state.db")));
+    }
+    let Some(theirs) = session_ids(db) else { return Ok(()) };
+    for mine in own.iter().filter(|p| p.is_file()).filter_map(|p| session_ids(p)) {
+        if !mine.is_disjoint(&theirs) {
+            bail!(super::usage("this home's Hermes database holds this computer's own conversations: they are your chats here already. Import another agent's".to_string()));
         }
     }
     Ok(())
