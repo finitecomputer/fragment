@@ -77,6 +77,7 @@ pub const LEFTOVERS_MAX: usize = 256;
 /// first, then these, and each one settled asks the next, so its commands
 /// never pass what the core's writer holds (`run::WRITER_MAX`).
 pub const LEFTOVERS_ASKED: usize = 16;
+const _: () = assert!(LEFTOVERS_ASKED + 8 < 64, "a start's asks fit in what the core's writer holds (run::WRITER_MAX)");
 
 /// Where the link is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1137,7 +1138,6 @@ mod tests {
         let started = link.apply(Input::Started { rollback: false });
         assert_eq!(started[..2], [Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
         assert_eq!(started.len(), 2 + LEFTOVERS_ASKED, "a batch, within the writer's room (64)");
-        assert!(2 + LEFTOVERS_ASKED + 2 < 64);
         let mut asked: Vec<i64> = started.iter().filter_map(|a| if let Action::Ask(Cmd::Delete { contact, .. }) = a { Some(*contact) } else { None }).collect();
         let mut pending: std::collections::VecDeque<i64> = asked.iter().copied().collect();
         // bounded: each answer settles one
