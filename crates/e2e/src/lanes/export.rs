@@ -564,8 +564,9 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let again = press(api, &erin)?;
     let made = built(s, api, &erin);
     s.ok("within its limits, the next is made: a fragment past the 2 GiB of before, as an imported agent's files are", again.body["id"] != r.body["id"] && made["state"] == "ready", &made);
-    // past a fragment's part (scaled by 2^20, 16 KiB), it fails saying whose
-    scale(Some(1 << 20))?;
+    // past a fragment's part, within the archive (scaled by 2^18: 64 KiB
+    // and 256 KiB), it fails saying whose
+    scale(Some(1 << 18))?;
     let third = press(api, &erin)?;
     let past = built(s, api, &erin);
     s.ok(
