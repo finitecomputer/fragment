@@ -2271,6 +2271,16 @@ fn must_answer_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str, shot
     std::thread::sleep(std::time::Duration::from_millis(300));
     let kept = b.eval(&page, MUST_ANSWER_SEEN)?;
     s.ok("Escape, pressed twice, leaves it over the page", kept["covers"] == json!(true) && kept["id"] == json!("asked:move"), &kept);
+    // the page's own keys take nothing while it shows: Ctrl/Cmd+K (the
+    // launcher's), from the cover's focus and from the page's body
+    b.eval(
+        &page,
+        "(() => { for (const at of [document.activeElement, document.body]) for (const meta of [false, true]) \
+         at.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: !meta, metaKey: meta, bubbles: true, cancelable: true })); return true; })()",
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let keys = b.eval(&page, "({ search: document.getElementById('search-dialog').open, cover: document.getElementById('must-answer').open })")?;
+    s.ok("the page's own keys take nothing while it shows: Ctrl/Cmd+K opens no launcher over it", keys == json!({ "search": false, "cover": true }), &keys);
     answer_must(b, &page, "Not now")?;
     let refused = b.until(&page, "/answer Yes or Never/.test(document.getElementById('must-answer').innerText)", wait);
     let seen = b.eval(&page, MUST_ANSWER_SEEN)?;
