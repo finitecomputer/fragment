@@ -160,6 +160,8 @@ const MAINT_MS_MAX: u64 = 20_000;
 /// while the platform does not answer; then again at the bridge's next start.
 const SET_ASIDE_TRIES: u32 = 3;
 const SET_ASIDE_RETRY_MS: u64 = 10_000;
+/// An adoption committed and not yet finished is tried again this often.
+const COMMIT_RETRY_MS: u64 = 10_000;
 /// Where a link's copies of the files it sends wait, in its directory: a
 /// folder each (`<life>-<n>`), so its receiver sees the file's own name.
 pub const OUT_DIR: &str = "out";
@@ -337,6 +339,13 @@ impl Handle {
     /// ticket; then the link bound to their contact, which their app keeps
     /// talking to, with no code to scan.
     pub async fn adopt(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
+        // its own task: a page closed midway (its request dropped) never
+        // leaves an adoption half asked, holding off every other link
+        let (h, agent) = (self.clone(), agent.to_string());
+        tokio::spawn(async move { h.adopt_whole(&agent, ticket).await }).await.unwrap_or_else(|_| Err(Refused::new(500, "SimpleX stopped keeping your old chat: start again from your Settings")))
+    }
+
+    async fn adopt_whole(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
         self.answered(|reply| Msg::Ticket { agent: agent.to_string(), act: "adopt", ticket: Box::new(ticket.clone()), reply }).await?;
         self.answered(|reply| Msg::Adopt { agent: agent.to_string(), nonce: ticket.nonce.clone(), reply }).await?;
         let failed = |status: u16, why: String| {
@@ -922,12 +931,19 @@ struct Slot {
     /// The adoption ticket taken last, and once read, what its read found:
     /// only it binds the link (`adopted`).
     adopting: Option<(String, Option<Adoption>)>,
+    /// An adoption committed (`stage::commit`) and not yet finished: its
+    /// databases placed and its link bound and written, retried at each
+    /// start and every `COMMIT_RETRY_MS` until it is (`finish_adoption`).
+    /// No core runs, and nothing else links, meanwhile.
+    committing: Option<Adoption>,
+    commit_at: Option<Instant>,
 }
 
 /// What a staged identity's maintenance read found: its owner's contact
 /// there and their name, the newest item of their chat, and what else it
-/// holds.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// holds. Its adoption's intent once its door is registered
+/// (`stage::commit`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Adoption {
     pub owner: ContactId,
     pub name: String,
@@ -945,7 +961,7 @@ impl Slot {
     fn view(&self, always_on: bool, session: Option<&str>) -> View {
         let shown = session.is_some() && session == self.session.as_deref();
         let (phase, link, short, name, hidden) = match &self.saved.link.phase {
-            Phase::Off if self.adopting.is_some() => ("adopting", None, None, None, false),
+            Phase::Off if self.adopting.is_some() || self.committing.is_some() => ("adopting", None, None, None, false),
             Phase::Off => ("off", None, None, None, false),
             Phase::Asking => ("asking", None, None, None, false),
             Phase::Inviting { link, short, .. } if shown => ("inviting", Some(link.clone()), short.clone(), None, false),
@@ -1123,11 +1139,11 @@ impl Manager {
         if act == "link" && matches!(s.saved.link.phase, Phase::Linked { .. }) {
             return Err(Refused::new(409, "it is linked already: unlink it first"));
         }
-        if act == "link" && s.adopting.is_some() {
+        if act == "link" && (s.adopting.is_some() || s.committing.is_some()) {
             return Err(Refused::new(409, "your old SimpleX chat is being kept: wait a moment"));
         }
         if act == "adopt" {
-            if s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || s.adopting.is_some() {
+            if s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || s.adopting.is_some() || s.committing.is_some() {
                 return Err(Refused::new(409, "it is linked, or being linked, already: unlink it first"));
             }
             if s.staged.is_none() {
@@ -1303,8 +1319,10 @@ impl Manager {
             return Err(Refused::new(409, "another link or an unlink was started meanwhile: start again from your Settings"));
         }
         let Some((_, Some(a))) = s.adopting.take() else { unreachable!("checked above") };
-        if let Err(e) = key.store(&s.dir).and_then(|()| stage::place(&s.dir)) {
-            crate::ev!("simplex.adopt_unplaced", { "agent": f, "error": e.to_string() });
+        // its key, then its intent, each whole, before anything is placed:
+        // from here on it is finished, whatever stops it midway
+        if let Err(e) = key.store(&s.dir).and_then(|()| stage::commit(&s.dir, &a)) {
+            crate::ev!("simplex.adopt_uncommitted", { "agent": f, "error": e.to_string() });
             Key::forget(&s.dir);
             return Err(Refused::new(500, format!("SimpleX could not keep your old chat: {e}")));
         }
@@ -1313,16 +1331,66 @@ impl Manager {
         s.exits.clear();
         s.retry_at = None;
         s.note = None;
-        s.saved.generation = s.saved.generation.max(generation);
-        self.apply(f, Input::Adopt { owner: a.owner, name: &a.name, newest: a.newest, leftovers: &a.leftovers });
-        let s = self.slots.get_mut(f).expect("its slot");
-        if s.saved.link.contact() == Some(a.owner) {
-            s.staged = None;
-            stage::forget(&s.dir);
+        s.committing = Some(a);
+        if let Err(e) = self.finish_adoption(f, generation).await {
+            return Err(Refused::new(500, format!("SimpleX is still keeping your old chat ({e}): it tries again by itself")));
         }
-        crate::ev!("simplex.adopted", { "agent": f, "newest": a.newest, "leftovers": a.leftovers.len() });
         self.tick().await;
         Ok(self.view(f, None).expect("its slot"))
+    }
+
+    /// An adoption committed, finished: its core stopped (none runs on what
+    /// is replaced), the staged databases placed as its own, its link bound
+    /// to the owner's contact at this start's generation and written (an
+    /// error is returned, the intent kept to try again, never a link said
+    /// bound that its file does not hold), and only then the staged copy
+    /// and the intent let go. Each step may run again: a link already bound
+    /// to that contact is only let go of its copy.
+    async fn finish_adoption(&mut self, f: &str, generation: u64) -> Result<(), String> {
+        let Some(a) = self.slots.get(f).and_then(|s| s.committing.clone()) else { return Ok(()) };
+        self.stop_core(f).await;
+        let s = self.slots.get_mut(f).expect("its slot");
+        if s.saved.link.contact() != Some(a.owner) {
+            let failed = |s: &mut Slot, e: String| {
+                crate::ev!("simplex.adopt_unfinished", { "agent": f, "error": wire::cut(&e, 300) });
+                s.commit_at = Some(Instant::now() + Duration::from_millis(COMMIT_RETRY_MS));
+                Err(e)
+            };
+            if s.saved.link.phase != Phase::Off {
+                return failed(s, "its link is bound to another contact".into());
+            }
+            if let Err(e) = stage::place(&s.dir) {
+                return failed(s, format!("its databases: {e}"));
+            }
+            let mut next = s.saved.clone();
+            next.generation = next.generation.max(generation);
+            let actions = next.link.apply(Input::Adopt { owner: a.owner, name: &a.name, newest: a.newest, leftovers: &a.leftovers });
+            if let Err(e) = store(&s.dir, &next) {
+                return failed(s, format!("its link: {e}"));
+            }
+            s.saved = next;
+            for act in actions {
+                self.act(f, act);
+            }
+            self.publish_relaying();
+        }
+        let s = self.slots.get_mut(f).expect("its slot");
+        stage::forget(&s.dir);
+        s.staged = None;
+        s.committing = None;
+        s.commit_at = None;
+        crate::ev!("simplex.adopted", { "agent": f, "newest": a.newest, "leftovers": a.leftovers.len() });
+        Ok(())
+    }
+
+    /// Each adoption committed and not finished, tried again when due.
+    async fn finish_adoptions(&mut self) {
+        let generation = self.computer.as_ref().map_or(0, |c| c.generation);
+        let now = Instant::now();
+        let due: Vec<String> = self.slots.iter().filter(|(_, s)| s.committing.is_some() && s.commit_at.is_none_or(|t| now >= t)).map(|(f, _)| f.clone()).collect();
+        for f in due {
+            let _ = self.finish_adoption(&f, generation).await;
+        }
     }
 
     /// The computer as read: a slot for each agent it runs (its link read
@@ -1352,6 +1420,8 @@ impl Manager {
             let door = Key::load(&dir);
             let staged = stage::ready(&dir);
             let resume = stage::pending(&dir);
+            // an adoption a life before this one committed: finished first
+            let committing = stage::committed::<Adoption>(&dir);
             // before any send of this life: what the last one left unnamed goes,
             // and what it sent waits again from now
             sweep_out(&dir, &saved);
@@ -1390,6 +1460,8 @@ impl Manager {
                 staging: false,
                 moved: false,
                 adopting: None,
+                committing,
+                commit_at: None,
             });
             // a set-aside a bridge before this one began and did not finish
             if let Some(stage) = resume {
@@ -1397,6 +1469,8 @@ impl Manager {
             }
         }
         self.computer = Some(computer);
+        // before any core starts, or anything links
+        self.finish_adoptions().await;
         self.reconcile().await;
     }
 
@@ -1472,6 +1546,7 @@ impl Manager {
             self.held = false;
             crate::ev!("simplex.unhold");
         }
+        self.finish_adoptions().await;
         if self.pulse_until.is_some_and(|t| Instant::now() >= t) {
             self.pulse_until = None;
             let _ = self.pulse.send(false);
@@ -1696,7 +1771,9 @@ impl Manager {
         for f in names {
             let s = &self.slots[&f];
             // linked, or with an unlink's let-go still to do
-            let want = !self.held && always_on && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || !s.saved.link.leftovers.is_empty()) && s.broken.is_none();
+            // none while an adoption replaces its databases
+            let quiet = s.adopting.is_some() || s.committing.is_some();
+            let want = !self.held && always_on && !quiet && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some() || !s.saved.link.leftovers.is_empty()) && s.broken.is_none();
             match (want, s.core.is_some()) {
                 (true, false) if s.retry_at.is_none_or(|t| now >= t) => self.start_core(&f),
                 (false, true) => {
@@ -3587,6 +3664,8 @@ mod tests {
             staging: false,
             moved: false,
             adopting: None,
+            committing: None,
+            commit_at: None,
         }
     }
 
@@ -3647,6 +3726,81 @@ mod tests {
         assert_eq!(digest, t.digest(), "the same digest as door.rs");
         t.sig = k256::schnorr::SigningKey::from_bytes(&[7u8; 32]).expect("a key").sign_raw(&digest, &[0u8; 32]).map(|s| crate::records::hex(&s.to_bytes())).expect("signed");
         t
+    }
+
+    /// A staged identity in `dir` (an agent's SimpleX directory): its two
+    /// databases (each its `seed`'s bytes), its owner contact 3.
+    fn stage_in(dir: &Path, seed: u8) -> Staged {
+        stage::begin(dir, "old1.p1.1").expect("begun");
+        for (i, f) in ["sx_chat.db", "sx_agent.db"].iter().enumerate() {
+            let mut db = b"SQLite format 3\0".to_vec();
+            db.extend(std::iter::repeat_n(seed + i as u8, 4_000));
+            std::fs::write(dir.join(stage::STAGED_DIR).join(f), db).expect("written");
+        }
+        std::fs::write(dir.join(stage::STAGED_DIR).join("ready.json"), r#"{"stage":"old1.p1.1","owner":3}"#).expect("written");
+        stage::ready(dir).expect("ready")
+    }
+
+    fn adoption() -> Adoption {
+        Adoption { owner: 3, name: "phone".into(), newest: 40, leftovers: vec![Leftover::Contact(4), Leftover::Address] }
+    }
+
+    /// Goal (Alex's review of #1207): an adoption is finished whatever
+    /// stops it midway, and never said done before its link's file holds
+    /// it: a failed write of the link keeps the staged copy and the intent,
+    /// says so, refuses any other link meanwhile, and is finished at the
+    /// next start; a placement cut off between the two databases is placed
+    /// whole at the next start, then the link bound.
+    #[tokio::test]
+    async fn an_adoption_is_finished_whatever_stops_it_midway() {
+        let root = std::env::temp_dir().join(format!("simplex-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let key = agent_key(&root.join("keys"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&root, &key, Phase::Off);
+        let dir = m.slots[f].dir.clone();
+        let staged = stage_in(&dir, 1);
+        let chat = std::fs::read(dir.join("staged/sx_chat.db")).expect("staged");
+        let nonce = "21".repeat(16);
+        {
+            let s = m.slots.get_mut(f).expect("its slot");
+            s.staged = Some(staged);
+            s.adopting = Some((nonce.clone(), Some(adoption())));
+        }
+        // its link's file cannot be written (a directory where its temporary is)
+        std::fs::create_dir_all(dir.join(format!("{LINK_FILE}.tmp"))).expect("in the way");
+        let failed = m.adopted(f, &nonce, Key::generate().expect("a key")).await;
+        assert_eq!(failed.as_ref().map_err(|r| r.status), Err(500), "never said done: {failed:?}");
+        assert_eq!(m.slots[f].saved.link.phase, Phase::Off, "not bound in memory either");
+        assert!(load(&dir, &agent()).is_none_or(|s| s.link.phase == Phase::Off), "nor in its file");
+        assert!(stage::ready(&dir).is_some() && stage::committed::<Adoption>(&dir) == Some(adoption()), "its copy and intent kept");
+        assert_eq!(m.view(f, None).expect("its view").phase, "adopting");
+        assert_eq!(m.take(f, &signed("link", &"22".repeat(16)), "link").map_err(|r| r.status), Err(409), "no other link meanwhile");
+        // the way cleared, the bridge started again: finished first
+        std::fs::remove_dir_all(dir.join(format!("{LINK_FILE}.tmp"))).expect("cleared");
+        m.slots.clear();
+        m.computer(computer(true, 2, None), vec![agent()]).await;
+        let back = load(&dir, &agent()).expect("its file");
+        assert_eq!((back.link.contact(), back.link.delivered, back.generation), (Some(3), 40, 2), "bound, what the chat held delivered, at this start");
+        assert_eq!(back.link.leftovers, vec![Leftover::Contact(4), Leftover::Address]);
+        assert_eq!(std::fs::read(dir.join("sx_chat.db")).expect("placed"), chat, "its databases, the staged ones");
+        assert!(stage::ready(&dir).is_none() && m.slots[f].committing.is_none(), "its copy let go only now");
+
+        // cut off between the two databases: placed whole at the next start
+        let root2 = root.join("cut");
+        let mut m = manager(&root2, &key, Phase::Off);
+        let dir = m.slots[f].dir.clone();
+        stage_in(&dir, 7);
+        Key::generate().expect("a key").store(&dir).expect("its key");
+        stage::commit(&dir, &adoption()).expect("its intent");
+        std::fs::copy(dir.join("staged/sx_chat.db"), dir.join("sx_chat.db")).expect("one placed");
+        std::fs::write(dir.join("sx_agent.db"), b"the database of a core before").expect("the other not yet");
+        let agent_db = std::fs::read(dir.join("staged/sx_agent.db")).expect("staged");
+        m.slots.clear();
+        m.computer(computer(true, 3, None), vec![agent()]).await;
+        assert_eq!(std::fs::read(dir.join("sx_agent.db")).expect("placed"), agent_db, "the pair whole");
+        assert_eq!(load(&dir, &agent()).and_then(|s| s.link.contact()), Some(3));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Goal (FIN-463): an adoption is taken only by its owner's adoption
@@ -3856,6 +4010,8 @@ mod tests {
             staging: false,
             moved: false,
             adopting: None,
+            committing: None,
+            commit_at: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
@@ -3985,6 +4141,8 @@ mod tests {
             staging: false,
             moved: false,
             adopting: None,
+            committing: None,
+            commit_at: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };

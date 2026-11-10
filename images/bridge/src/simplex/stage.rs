@@ -148,6 +148,21 @@ pub fn begin(dir: &Path, stage: &str) -> std::io::Result<()> {
     write_whole(&s.join("stage"), stage.as_bytes())
 }
 
+/// An adoption's intent, written whole before anything of it is placed
+/// (`run.rs`, `adopted`): what its maintenance read found. While it is
+/// there, the adoption is finished (the databases placed, the link bound and
+/// written) at every start before anything else, so a crash or a failed
+/// write anywhere in between is finished, never half done.
+pub fn commit<T: Serialize>(dir: &Path, intent: &T) -> std::io::Result<()> {
+    write_whole(&staged(dir).join("commit.json"), serde_json::to_string(intent).expect("it serializes").as_bytes())
+}
+
+/// The adoption's intent `commit` wrote, while its staged copy is there.
+pub fn committed<T: serde::de::DeserializeOwned>(dir: &Path) -> Option<T> {
+    ready(dir)?;
+    serde_json::from_slice(&std::fs::read(staged(dir).join("commit.json")).ok()?).ok()
+}
+
 /// The staged identity let go (adopted, refused, or a link made instead).
 pub fn forget(dir: &Path) {
     let _ = std::fs::remove_dir_all(staged(dir));
