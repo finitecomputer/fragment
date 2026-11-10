@@ -975,6 +975,14 @@ impl FragmentCell {
             self.test_countdown(MetaKey::TestFailSigninVisibility, "its visibility was not read")?;
             return json_response(&crate::auth::SigninVisibility { visibility: self.facts()?.visibility });
         }
+        if let Some(key) = path.strip_prefix("/stage/routine/") {
+            // Only the move's object sets the header (migrations.rs); the router never passes it.
+            if req.headers().get(crate::migrations::ROUTINE_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let text = String::from_utf8(req.bytes().await?).map_err(|_| CellError::invalid("a routine's text is UTF-8"))?;
+            return json_response(&self.move_routine(key, &text).await?);
+        }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {

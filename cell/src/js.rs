@@ -516,14 +516,14 @@ pub struct BlobBody {
 
 /// The request's own `Range` header goes to R2 as it came, which reads it
 /// (workers-rs's `get` takes only a parsed range).
-pub async fn blob_get(env: &Env, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
+pub async fn blob_get(env: &Env, bucket: &str, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
     let options = Object::new();
     if let Some(r) = range {
         let headers = worker_sys::web_sys::Headers::new().map_err(|e| CellError::host(js_message(&e)))?;
         headers.set("range", r).map_err(|e| CellError::host(js_message(&e)))?;
         set(&options, "range", JsValue::from(headers));
     }
-    let object = await_js(call(blobs(env)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
+    let object = await_js(call(env.bucket(bucket)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
     if object.is_null() || object.is_undefined() {
         return Ok(None);
     }
@@ -595,8 +595,8 @@ pub async fn upload_abort(env: &Env, bucket: &str, key: &str, upload: &str) -> C
     }
 }
 
-pub async fn blob_delete(env: &Env, keys: &[String]) -> CellResult<()> {
-    Ok(blobs(env)?.delete_multiple(keys.to_vec()).await?)
+pub async fn blob_delete(env: &Env, bucket: &str, keys: &[String]) -> CellResult<()> {
+    Ok(env.bucket(bucket)?.delete_multiple(keys.to_vec()).await?)
 }
 
 /// The first page of keys under `prefix` in `bucket` (a binding's name),
@@ -606,19 +606,20 @@ pub async fn blob_list(env: &Env, bucket: &str, prefix: &str) -> CellResult<(Vec
     Ok((listed.objects().iter().map(|o| o.key()).collect(), listed.truncated()))
 }
 
-/// Deletes what BLOBS holds under `prefix`, at most `pages` pages (R2's
-/// list, up to 1000 keys each) a call: how many it deleted, and whether
-/// any are left (the caller's to call again). A deleted fragment's blobs
-/// (ended.rs) and a wiped computer's saves (computer.rs) go so.
-pub async fn blob_delete_under(env: &Env, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
+/// Deletes what `bucket` (a binding's name) holds under `prefix`, at most
+/// `pages` pages (R2's list, up to 1000 keys each) a call: how many it
+/// deleted, and whether any are left (the caller's to call again). A
+/// deleted fragment's blobs (ended.rs), a wiped computer's saves
+/// (computer.rs) and a move's stages done with (migrations.rs) go so.
+pub async fn blob_delete_under(env: &Env, bucket: &str, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
     assert!(prefix.ends_with('/') && pages > 0, "a prefix of its own, a bounded number of pages");
     let mut deleted = 0u64;
     for _ in 0..pages {
         // each page listed is deleted, so the next list starts afresh
-        let (keys, more) = blob_list(env, BLOBS, prefix).await?;
+        let (keys, more) = blob_list(env, bucket, prefix).await?;
         assert!(keys.iter().all(|k| k.starts_with(prefix)), "a listing under a prefix answers keys under it");
         if !keys.is_empty() {
-            blob_delete(env, &keys).await?;
+            blob_delete(env, bucket, &keys).await?;
             deleted += keys.len() as u64;
         }
         if !more {
