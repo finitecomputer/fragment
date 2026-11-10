@@ -1565,7 +1565,7 @@ can no longer take its seat seats no one and is canceled.
 | --- | --- | --- |
 | `POST /api/billing/checkout` | a person (holding a good seat, or in an org whose admins give seats: 409) | `{kind?, trialCode?}` → `{url, session}`: Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes. With a trial code (any case, spaces and dashes aside), Stripe's trial of its days, no card asked, no promotion code. A code unknown 404; ended 400; full, or for someone who had a trial or whose org has paid, 409 |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else 404) | → `MySeat`: the Checkout's return (`/welcome?checkout={id}`, `/settings?pack={id}`; `=canceled` when abandoned): a completed one applied at once; again, nothing changes |
-| `POST /api/billing/packs` | a seat's holder; an org's admin for a member holding a seat (`member`; else 403; no seat 400) | `{member?}` → `{url, session}`: a credit pack's Checkout; paid, its credit is granted once by its session (`GrantCredit {id: pack:<session>, by: stripe}`). An org buys none: an operator credits it (Ledger) |
+| `POST /api/billing/packs` | a seat's holder; an org's admin for a member holding a seat (`member`; else 403; no seat 400) | `{member?}` → `{url, session, open}`: a credit pack's Checkout (`open`: `url` again, the page a notice's Buy credit opens); paid, its credit is granted once by its session (`GrantCredit {id: pack:<session>, by: stripe}`). An org buys none: an operator credits it (Ledger) |
 | `POST /api/billing/portal` | who pays for the asker's org (anyone else 403) | → `{url}`: Stripe's portal on the deployment's own configuration |
 | `POST /api/stripe/webhook` | Stripe (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; anything else, or another deployment's, answered and dropped. A failure is 5xx, which Stripe sends again |
 
@@ -1944,9 +1944,13 @@ registration go first.
 What the platform tells a person, each owner's notices in its own words
 (`Notice`, `fragment_proto::notice`), the most pressing first. Each owner
 works them out when asked and the router joins them, keeping none: the
-person's computer's (docs/computers.md, "What its owner is told"), then
-the registry's, an invite waiting on an email of theirs (Invites by
-email). An owner that does not answer fails the read. `kind` is for tests
+person's ledger's (their agents stopped for want of credit, or their
+fragments read-only past the overdraft, in Settings' words, with Buy
+credit where packs are sold and they hold an active seat; docs/ledger.md),
+the person's computer's (docs/computers.md, "What its owner is told"),
+then the registry's, an invite waiting on an email of theirs (Invites by
+email). The ledger tells their pages when their standing changes, a
+change by the clock alone (a month's credit) at its next call or sweep. An owner that does not answer fails the read. `kind` is for tests
 and logs; a client draws every notice the same way and never reads it.
 An action `post`s its `body` (none: `{}`) to a platform route with the
 person's own credential, the route its owner's, then the client reads its
@@ -1961,7 +1965,7 @@ notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites' |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then their invites' |
 
 ## Computers (docs/computers.md)
 

@@ -43,7 +43,8 @@ use std::cell::{Cell, RefCell};
 use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, OrgBudget, OrgLedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
+use fragment_proto::notice::NoticeList;
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,10 @@ thread_local! {
 pub struct LedgerCell {
     state: State,
     raw: JsValue,
+    env: Env,
+    /// The standing its person was last told (`told`), as kept in its meta:
+    /// read once an activation, so a call compares in memory.
+    told: Cell<Option<Standing>>,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
     /// When this activation last set the alarm for (the ledger's clock):
@@ -115,7 +120,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
+        LedgerCell { state, raw, env, told: Cell::new(None), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -217,6 +222,12 @@ pub struct FragmentOpen {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {}
+
+/// What the ledger tells its person (FIN-458; `GET /api/notices`): their
+/// standing short of `Ok` for want of credit, in words (`Ledger::said`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticesOf {}
 
 /// An org's ledger now.
 #[derive(Debug, Serialize, Deserialize)]
@@ -372,6 +383,12 @@ impl Route for SetOverdraft {
 impl Route for SetFragmentCap {
     const PATH: &'static str = "/cap";
     type Answer = Done;
+}
+
+impl Route for NoticesOf {
+    const PATH: &'static str = "/notices";
+    /// A `NoticeList`, passed on as it is (`notices.rs`).
+    type Answer = serde_json::Value;
 }
 
 impl Route for Status {
@@ -682,7 +699,7 @@ impl LedgerCell {
     /// refusal changed nothing but the month it rolled to), and a store
     /// that failed rolls everything back. Answers `op`'s
     /// answer and when the next sweep is due (the ledger's clock).
-    fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
+    fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64, Standing)> {
         let now = js::now_ms() + self.offset_ms()?;
         let (sql, cfg) = (self.sql(), self.cfg);
         js::transaction_sync(&self.raw, move || {
@@ -691,18 +708,43 @@ impl LedgerCell {
             let answer = op(&mut ledger, &mut store, now);
             save(&store, &ledger);
             store.checked()?;
-            Ok((answer, ledger.next_sweep_ms(now)))
+            Ok((answer, ledger.next_sweep_ms(now), ledger.standing(now)))
         })
     }
 
     /// `transact`, then the alarm set for the next sweep when it is due
-    /// sooner than this activation last set it.
+    /// sooner than this activation last set it, and its person told when
+    /// their standing changed (`told`).
     async fn mutate<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
-        let (answer, next) = self.transact(op)?;
+        let (answer, next, standing) = self.transact(op)?;
         if self.armed.get().is_none_or(|armed| next < armed) {
             self.arm(next).await?;
         }
+        self.told(standing).await;
         answer.map_err(Failed::Refused)
+    }
+
+    /// Its person's pages told (`changed`) when their standing is not the
+    /// one last told them (FIN-458: their notices are this ledger's words
+    /// for it, `GET /api/notices`). Kept in its meta, so a change by the
+    /// clock alone (a month's credit, its sweep) is told too, and told once.
+    /// An org's ledger tells no one; a first standing is kept, not told.
+    /// Best effort: a page not told reads it on its next read.
+    async fn told(&self, standing: Standing) {
+        if self.told.get() == Some(standing) {
+            return;
+        }
+        let Ok(Some(payer)) = self.meta("payer") else { return };
+        self.told.set(Some(standing));
+        let Some(Payer::Person(person)) = Payer::parse(&payer) else { return };
+        let said = serde_json::to_string(&standing).expect("a standing serializes");
+        let kept = self.meta("told").ok().flatten();
+        if kept.as_deref() == Some(said.as_str()) || self.set_meta("told", &said).is_err() || kept.is_none() {
+            return;
+        }
+        if let Err(e) = crate::principal::tell_changed(&self.env, &person).await {
+            console_error!("{}", json!({ "event": "ledger.told-failed", "message": e.message }));
+        }
     }
 
     /// Sets the alarm for `at` on the ledger's clock.
@@ -719,9 +761,10 @@ impl LedgerCell {
             // a ledger no one has called has nothing to sweep
             return Ok(core::Swept { forgotten: 0 });
         }
-        let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
+        let (swept, next, standing) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
+        self.told(standing).await;
         Ok(swept)
     }
 
@@ -809,6 +852,11 @@ impl LedgerCell {
                 let Status {} = decode(&body)?;
                 let book = &self.cfg.book;
                 reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
+            }
+            NoticesOf::PATH => {
+                let NoticesOf {} = decode(&body)?;
+                let sold = self.cfg.stripe().is_ok();
+                reply(self.mutate(move |l, _, now| Ok(NoticeList { notices: l.said(now, sold) })).await?)
             }
             OrgStatus::PATH => {
                 let OrgStatus {} = decode(&body)?;

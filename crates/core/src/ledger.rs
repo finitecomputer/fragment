@@ -66,6 +66,7 @@ use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFau
 pub mod gate;
 pub mod org;
 pub mod quote;
+pub mod said;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
@@ -963,6 +964,18 @@ impl Ledger {
         let mut money = self.money;
         money.roll(Month::of(now_ms));
         money
+    }
+
+    /// What this ledger tells its person (FIN-458; `said::standing`): its
+    /// standing short of `Ok` for want of credit, with a pack to buy when
+    /// packs are `sold` and its seat is active (a pack's buyer holds one).
+    /// An org's ledger tells no one here.
+    pub fn said(&self, now_ms: i64, sold: bool) -> Vec<fragment_proto::notice::Notice> {
+        if self.org.is_some() {
+            return vec![];
+        }
+        let seat = matches!(self.money.plan, Plan::Seat | Plan::SeatAlwaysOn) && self.money.seat == SeatState::Active;
+        said::standing(self.standing(now_ms), sold && seat).into_iter().collect()
     }
 
     pub fn standing(&self, now_ms: i64) -> Standing {

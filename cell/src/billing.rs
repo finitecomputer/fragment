@@ -45,6 +45,9 @@ const META_TRIAL: &str = "fragment_trial";
 struct Checkout {
     url: String,
     session: String,
+    /// The page to open, `url` again (FIN-458: an action's answer names
+    /// the page to open, as a notice's Buy credit does; docs/api.md).
+    open: String,
 }
 
 #[derive(Serialize)]
@@ -159,7 +162,7 @@ async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &C
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-checkout-{}-{attempt}", plan.org)).await?;
     let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
-    Ok(Checkout { url, session: session.id })
+    Ok(Checkout { open: url.clone(), url, session: session.id })
 }
 
 /// `POST /api/billing/packs {member?}`: a Checkout for a $25 credit pack
@@ -196,7 +199,7 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-pack-{}-{attempt}", plan.org)).await?;
     let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
-    Ok(Checkout { url, session: session.id })
+    Ok(Checkout { open: url.clone(), url, session: session.id })
 }
 
 /// A paid pack's credit on its person's ledger, once by its Checkout; or
