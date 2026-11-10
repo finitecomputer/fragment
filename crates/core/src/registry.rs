@@ -2,6 +2,8 @@
 //! the cell is `cell/src/registry.rs`). Who may change an identity's keys,
 //! and who may look at it.
 
+pub mod said;
+
 use fragment_proto::IdentityKind;
 
 /// Who manages an identity's keys (rule 4): a person manages their own; an

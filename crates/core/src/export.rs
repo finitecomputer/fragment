@@ -32,30 +32,55 @@ pub const ROOT: &str = "fragment-export";
 /// The limits of an export: each enforced, and each a typed failure its
 /// view shows (`fragment_proto::export::ExportFailure`).
 pub mod limits {
-    /// The whole archive: past it, the export fails `too_large`.
-    pub const ARCHIVE_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+    pub const GIB: u64 = 1024 * 1024 * 1024;
+    /// The files one agent's home import brings at most (`fragment home
+    /// files`, Paul, FIN-463), into one fragment: that fragment's part of
+    /// its person's export holds them with room (`FRAGMENT_MAX_BYTES`), so
+    /// whoever imports an agent can still export everything.
+    pub const HOME_FILES_MAX_BYTES: u64 = 10 * GIB;
+    /// The whole archive: past it, the export fails `too_large`. Four
+    /// fragments at their most, so several imported agents' files: in
+    /// `PART_BYTES` parts, 8,192 of R2's `R2_PARTS_MAX`.
+    pub const ARCHIVE_MAX_BYTES: u64 = 64 * GIB;
     /// One fragment's part of it (its files, database, channels, transcript
-    /// and blobs): past it, `too_large`.
-    pub const FRAGMENT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    /// and blobs): past it, `too_large`. An imported agent's files, and
+    /// room for the rest and every entry's header.
+    pub const FRAGMENT_MAX_BYTES: u64 = 16 * GIB;
+    const _: () = assert!(HOME_FILES_MAX_BYTES + 2 * GIB <= FRAGMENT_MAX_BYTES && 4 * FRAGMENT_MAX_BYTES <= ARCHIVE_MAX_BYTES, "an imported agent's files fit its fragment's part, and several fragments the archive");
+    const _: () = assert!(ARCHIVE_MAX_BYTES.div_ceil(PART_BYTES as u64) <= R2_PARTS_MAX as u64, "an archive at its most is within R2's parts");
+    const _: () = assert!(PART_BYTES as u64 >= R2_PART_MIN_BYTES && PART_BYTES as u64 <= R2_PART_MAX_BYTES, "a part is a size R2 takes");
+    /// R2's multipart upload: at most 10,000 parts, each 5 MiB to 5 GiB
+    /// (all but the last).
+    pub const R2_PARTS_MAX: usize = 10_000;
+    pub const R2_PART_MIN_BYTES: u64 = 5 * 1024 * 1024;
+    pub const R2_PART_MAX_BYTES: u64 = 5 * GIB;
     /// Fragments exported (the person's own and their agents'): past it, `too_many`.
     pub const FRAGMENTS_MAX: usize = 1000;
     /// Fragments named under `sharedWithMe`: past it, `too_many`.
     pub const SHARED_MAX: usize = 2000;
-    /// Files one fragment's main holds: past it, `too_many`.
+    /// Files one fragment's main holds: past it, `too_many`. An imported
+    /// agent's files are as many at most (`fragment home files` takes its
+    /// count from here). Not more: a fragment lists its files whole
+    /// (`GET /api/f/{name}/files`), in its object's memory and the build's.
     pub const FILES_MAX: usize = 20_000;
     /// Blobs one fragment's records attach: past it, `too_many`.
     pub const BLOBS_MAX: usize = 10_000;
     /// Tables in one app's database: past it, `too_many`.
     pub const TABLES_MAX: usize = 256;
-    /// Entries in the archive (`tar`): past it, `too_many`.
-    pub const ENTRIES_MAX: u32 = 200_000;
+    /// Entries in the archive (`tar`): past it, `too_many`. A computer's
+    /// 16 agents, each with an imported agent's files (`FILES_MAX`), and
+    /// room for the rest.
+    pub const ENTRIES_MAX: u32 = 500_000;
+    const _: () = assert!(16 * FILES_MAX + 100_000 <= ENTRIES_MAX as usize, "a computer's agents' files fit the archive's entries");
     /// Exports a person starts in any 24 hours: one more is 429.
     pub const PER_DAY: usize = 3;
     pub const DAY_MS: i64 = 24 * 3600 * 1000;
     /// How long a ready archive is kept, then deleted.
     pub const KEPT_MS: i64 = 7 * DAY_MS;
-    /// How long a build may take: past it, `timed_out`.
-    pub const BUILD_MAX_MS: i64 = 6 * 3600 * 1000;
+    /// How long a build may take: past it, `timed_out`. An archive at its
+    /// most at 1 MB/s, and its entries at about 6 a second; well within the
+    /// 7 days R2 keeps an upload unfinished.
+    pub const BUILD_MAX_MS: i64 = 24 * 3600 * 1000;
     /// The archive's parts (R2's multipart upload: at least 5 MiB, all but
     /// the last the same size): what the build holds of it at most.
     pub const PART_BYTES: usize = 8 * 1024 * 1024;
@@ -182,8 +207,9 @@ pub const BLOCK: usize = 512;
 /// The archive's end: two empty blocks.
 pub const END: [u8; 2 * BLOCK] = [0; 2 * BLOCK];
 
-/// The largest entry a ustar header's size field holds (11 octal digits):
-/// past every limit here.
+/// The largest entry a ustar header's size field holds (11 octal digits,
+/// 8 GiB less a byte); a larger one (a computer's save may be) is named by
+/// a pax `size` record.
 const USTAR_SIZE_MAX: u64 = 0o777_7777_7777;
 
 /// The zeros after an entry's `size` bytes, to its block's end.
@@ -192,16 +218,22 @@ pub fn padding(size: u64) -> usize {
 }
 
 /// An entry's header: one ustar block, or, for a path ustar cannot hold
-/// (past its 100 + 155 bytes, or not ASCII), a pax header naming it first.
-/// A regular file, `0644`, modified at `mtime_s`.
+/// (past its 100 + 155 bytes, or not ASCII) or a size past its field's, a
+/// pax header naming them first. A regular file, `0644`, modified at
+/// `mtime_s`.
 pub fn header(path: &str, size: u64, mtime_s: u64) -> Vec<u8> {
     assert!(!path.is_empty() && !path.starts_with('/') && !path.split('/').any(|s| s.is_empty() || s == "." || s == ".."), "an entry's path is relative, with no empty, . or .. segment: {path:?}");
-    assert!(size <= USTAR_SIZE_MAX, "an entry fits a ustar header's size");
-    if let Some((prefix, name)) = ustar_split(path) {
+    let fits = size <= USTAR_SIZE_MAX;
+    if let (Some((prefix, name)), true) = (ustar_split(path), fits) {
         return ustar(name, prefix, size, mtime_s, b'0').to_vec();
     }
-    // a pax header: its one record names the path in UTF-8
-    let record = pax_record("path", path);
+    // a pax header: its records name the path in UTF-8 and, past ustar's
+    // field, the size (the entry's own header then says 0)
+    let record = match fits {
+        true => pax_record("path", path),
+        false => pax_record("path", path) + &pax_record("size", &size.to_string()),
+    };
+    let size = if fits { size } else { 0 };
     let mut out = ustar(&format!("{ROOT}/PaxHeader"), "", record.len() as u64, mtime_s, b'x').to_vec();
     out.extend_from_slice(record.as_bytes());
     out.resize(out.len() + padding(record.len() as u64), 0);
@@ -801,6 +833,23 @@ mod tests {
         assert_eq!(pax.len(), 3 * BLOCK, "a pax header, its record, then the entry's header");
         assert_eq!(pax[156], b'x');
         assert_eq!(pax[2 * BLOCK + 156], b'0');
+    }
+
+    /// Goal: an entry past ustar's size field (8 GiB less a byte: a
+    /// computer's save may be) is named by a pax `size` record, which a
+    /// reader takes over the header's; one within it is plain ustar.
+    #[test]
+    fn an_entry_past_ustar_size() {
+        let big = USTAR_SIZE_MAX + 1 + 12345;
+        for path in [save_path(&format!("computer:{}", "ab".repeat(12)), "/data"), file_path(NAME, "caf\u{e9}.bin")] {
+            let h = header(&path, big, 7);
+            assert_eq!(h.len() % BLOCK, 0, "a header is whole blocks");
+            let mut archive = tar::Archive::new(std::io::Cursor::new(h));
+            let mut entries = archive.entries().unwrap();
+            let entry = entries.next().expect("one entry").unwrap();
+            assert_eq!((entry.path().unwrap().to_string_lossy().to_string(), entry.size()), (path.clone(), big), "the pax record's path and size are the entry's");
+        }
+        assert_eq!(header(&readme_path(), USTAR_SIZE_MAX, 0).len(), BLOCK, "at ustar's most, one block");
     }
 
     /// Goal: a header's checksum is ustar's, and a path that is no relative

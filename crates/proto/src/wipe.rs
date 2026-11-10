@@ -73,6 +73,9 @@ pub struct Found {
     pub computer: Option<ComputerFound>,
     /// Whether their ledger holds anything.
     pub ledger: bool,
+    /// Whether their Vault holds a secret (the ledger's step empties it).
+    #[serde(default)]
+    pub vault: bool,
     /// The rows their and their agents' lists hold (each a fragment's,
     /// with a role or the one they left).
     pub lists: u64,

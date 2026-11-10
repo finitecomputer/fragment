@@ -76,6 +76,7 @@ mod schema;
 mod search;
 mod searchable;
 mod search_index;
+mod vault;
 mod runs_on;
 mod serve;
 mod share;
@@ -1405,17 +1406,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let provider = provider.to_string();
             connections::callback(&req, env, &url, &provider).await
         }
-        (method, ["api", "connections", rest @ ..]) => {
+        // a signer's own connections, computers and Vault (vault.rs: theirs
+        // alone, never an agent's): one body read and one signature checked
+        // for the three, each its module's to answer
+        (method, ["api", area @ ("connections" | "computers" | "vault"), rest @ ..]) => {
+            let area = *area;
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
-            connections::route(&req, env, &url, &who, method, &rest, &body).await
-        }
-        (method, ["api", "computers", rest @ ..]) => {
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let who = signer(env, &req, &url, &body).await?;
-            let rest = rest.to_vec();
-            computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
+            match area {
+                "connections" => connections::route(&req, env, &url, &who, method, &rest, &body).await,
+                "computers" => computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await,
+                _ => vault::route(env, &who, method, &rest, &body).await,
+            }
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

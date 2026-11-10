@@ -122,7 +122,7 @@ pub const OPEN: [(&str, &str); 5] = [
 
 /// The modules the wire's types live in, at their top level alone, each
 /// reached from `lib.rs` by a plain `mod` line.
-pub const WIRE_MODULES: [&str; 4] = ["crate", "crate::live", "crate::notice", "crate::routes"];
+pub const WIRE_MODULES: [&str; 5] = ["crate", "crate::live", "crate::notice", "crate::routes", "crate::vault"];
 
 /// The modules declared under `#[cfg(feature = "schema")]` (the one
 /// spelling allowed on a `mod`, beside `#[cfg(test)]`): the routes' table

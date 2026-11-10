@@ -643,11 +643,13 @@ member). Any other agent is 403; a person naming `for` 400:
 | method & path | body → answer |
 | --- | --- |
 | `GET /api/invites` | → `InvitesWaiting {invites: [{fragment, role, title, from, email, expiresAt}]}`: those waiting on their emails, soonest to run out first; `title` the fragment's as sent, `from` the sharer's email (an agent's: its owner's; null when no one signs in as them now) |
-| `POST /api/invites/{fragment}/accept` | `{}` or none (else 400) → `InviteAccepted {fragment, role}`, the fragment in their list before it answers. None waiting: 404 (`reason: gone`); the fragment's refusal keeps it |
+| `POST /api/invites/{fragment}/accept` | `{}` or none (else 400) → `InviteAccepted {fragment, role, open}`, the fragment in their list before it answers, `open` its page (Notices). None waiting: 404 (`reason: gone`); the fragment's refusal keeps it |
 | `POST /api/invites/{fragment}/decline` | the same → `{ok, declined}`; none waiting: 404 (`reason: gone`) |
 
-Their pages are told when the invites waiting on them change: `{type:
-"invited"}` on `GET /api/fragments/watch`.
+Each waiting invite is also a notice of theirs (Notices), with Accept and
+Decline. Their pages are told when the invites waiting on them change:
+`{type: "changed"}` on `GET /api/fragments/watch`, as for any notice
+(`invited`, sent before FIN-458, no more).
 
 ### Who has access to what
 
@@ -1861,12 +1863,25 @@ authorization is browser-bound (docs/pipes-browser-binding.md).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/connections` | a person | → `Providers {providers: [{provider, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, note?, accounts?, accountsMax?, charged?}]}`, in catalog order. `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its row asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
+| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, note?, accounts?, accountsMax?, charged?}]}`, in catalog order. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its row asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
 | `POST /api/connections/{provider}/authorize` | the shell's session (a signed key 403) | `{}`, or on a row of several accounts `{add: true}` (400 at `accounts_max`) or `{account: "<id>"}` (not theirs 404) → `{provider, url}` and a host-only state cookie. A connection's state, its session binding and S256 verifier are kept ten minutes; an own key's sign-in uses its computer (404 without one), `fragment_own_key` and PKCE. No `connection_oauth`: `not_connected`, no vendor call. Not offered 404; a provider with no sign-in 400 |
 | `GET /api/connections/{provider}/callback?code=&state=` | the browser that began it, on the platform host, with its state cookie and the **same live session** | → HTML with no credentials: the code exchanged once and the grant imported into the person's Pipes account with exactly the scopes it holds (an own key's sealed by their computer); of several accounts, a grant of one already connected (its ID token's `sub`) reauthorizes it. A failure is 303 to `?refused=<word>`: `elsewhere`, `signed-out`, `declined`, `not-under-way`, `code-refused`, `no-scopes`, `one-account`, `account-limit`, `finishing`, `no-key`. Another host 404 |
 | `DELETE /api/connections/{provider}[?account=<id>]` | a person | → `{provider, account?, state, revoked}`: a connection disconnected (of several, the one named; none named with several 400; `account` on a row of one 400; an id not theirs 404). The account is fenced first, so no connect begun before lands after (while one is importing: 429, asked again); its grant revoked at the row's `revoke` endpoint (RFC 7009) when it names one, then deleted at Pipes; the computer told. `revoked`: the provider answered 200. Another kind 400 |
 | `PUT /api/connections/{provider}/key` | a person | `{key}` (1 to 4096 printable characters, no space) → `{provider, state: "set"}`: an own key, sealed by their computer (404 without one); another kind 400 |
 | `DELETE /api/connections/{provider}/key` | a person | → `{provider, state: "not_set"}` |
+
+## A person's Vault (FIN-466)
+
+A person's secrets, which their agents use without holding them
+(docs/secrets.md, "A person's Vault"): one `Vault` object a person. Every
+route is the person's own, signed or from the shell; an agent's, theirs
+included, is 403. No answer names a value.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/vault` | a person | → `SecretList {secrets: [{name, hosts, place, agents, setAt}]}`, by name |
+| `PUT /api/vault/{secret}` | a person | `PutSecret {value, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog provider's. `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets (400 past it); anything else wrong 400, nothing written |
+| `DELETE /api/vault/{secret}` | a person | → `SecretRemoved {name, removed}` |
 
 ## The shell
 
@@ -1941,19 +1956,25 @@ registration go first.
 
 What the platform tells a person, each owner's notices in its own words
 (`Notice`, `fragment_proto::notice`), the most pressing first. Each owner
-works them out when asked and the router joins them, keeping none: today
-the person's computer's (docs/computers.md, "What its owner is told").
-`kind` is for tests and logs; a client draws every notice the same way
-and never reads it. An action `post`s its `body` (none: `{}`) to a
-platform route with the person's own credential, the route its owner's
-(below), then the client reads its notices again; or it `open`s an
-`https:` page or a `mailto:` address. `until`: when what a notice tells
-ends by the clock alone; a client counts down to it and drops the notice
-then. Their pages are told when notices change (`watch`'s `changed`).
+works them out when asked and the router joins them, keeping none: the
+person's computer's (docs/computers.md, "What its owner is told"), then
+the registry's, an invite waiting on an email of theirs (Invites by
+email). An owner that does not answer fails the read. `kind` is for tests
+and logs; a client draws every notice the same way and never reads it.
+An action `post`s its `body` (none: `{}`) to a platform route with the
+person's own credential, the route its owner's, then the client reads its
+notices again; or it `open`s an `https:` page or a `mailto:` address.
+A post's answer may name a page to open (`open`: an invite's fragment,
+say), which the client opens once that read has it: one of the person's
+fragments in place, any other address as a page. A post refused shows the
+server's own words for it (its `message`) on the notice, with its button
+back. `until`: when what a notice tells ends by the clock alone; a client
+counts down to it and drops the notice then. Their pages are told when
+notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`; none while they have no computer |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites' |
 
 ## Computers (docs/computers.md)
 

@@ -91,7 +91,9 @@
       // A person's usage ledger: one object per person (ledger.rs).
       { "name": "LEDGER", "class_name": "Ledger" },
       // A fragment life's search index: one object per life (search_index.rs).
-      { "name": "SEARCH_INDEX", "class_name": "SearchIndex" }
+      { "name": "SEARCH_INDEX", "class_name": "SearchIndex" },
+      // A person's Vault: one object per person (vault.rs).
+      { "name": "VAULT", "class_name": "Vault" }
     ]
   },
   // Restarted at the move to Cloudflare: nothing on celld migrates
@@ -101,6 +103,7 @@
   // only too (xtask/src/rollout.rs).
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] },
-    { "tag": "v2", "new_sqlite_classes": ["SearchIndex"] }
+    { "tag": "v2", "new_sqlite_classes": ["SearchIndex"] },
+    { "tag": "v3", "new_sqlite_classes": ["Vault"] }
   ]
 }
