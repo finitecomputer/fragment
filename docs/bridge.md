@@ -431,9 +431,10 @@ never reaches another agent's core.
   follow). A connection repeated forces already damaged may stay stuck.
   Restarts and recovery send the owner nothing.
 - **An owner's old SimpleX conversation can be kept** (FIN-463,
-  `simplex/stage.rs`; docs/migrations.md, "SimpleX in a stage"). As the
-  move's routine names its stage, the bridge reads the stage's SimpleX
-  files by ranges, as the agent, checks each whole (its CRC, a SQLite
+  `simplex/stage.rs`; docs/migrations.md, "SimpleX in a stage"). Before the
+  move's routine reaches the agent (`driver.rs` `feed` holds it, within
+  ten minutes), the bridge reads the stage's SimpleX files by ranges, as
+  the agent, checks each whole (its CRC, a SQLite
   database, the contract's three files and no other), and keeps them in
   the agent's SimpleX directory (`staged/`), running nothing. Its link
   page's view says `staged`. Its owner's adoption ticket (`POST
