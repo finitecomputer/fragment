@@ -66,7 +66,7 @@ A signer's list of the fragments they hold a role on, and their own view of each
 
 #### `fragments.watch`
 
-`GET /api/fragments/watch`: A socket that says when the signer's list, or the invites waiting on them, change.
+`GET /api/fragments/watch`: A socket that says when the signer's list, or what they are told, changes.
 
 - Credentials: NIP-98, the shell's session
 - A WebSocket; receives: [`ListWatchFrame`](#listwatchframe)
@@ -314,13 +314,13 @@ Values: `person`, `agent`.
 
 ### `ListWatchFrame`
 
-out, open. A frame of `GET /api/fragments/watch`, the socket that follows a signer's list. Frames name nothing: on `changed` or `invited` the page reads its list, or its invites, again with its own credential. The cell writes these as constant text (cell/src/principal.rs). Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does not know (the shell's list, the iOS app).
+out, open. A frame of `GET /api/fragments/watch`, the socket that follows a signer's list. Frames name nothing: on `changed` the page reads its list, and what it is told (`GET /api/notices`), again with its own credential. The cell writes these as constant text (cell/src/principal.rs). Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does not know (the shell's list, the iOS app).
 
 `type: "hello"`. First, as the socket opens.
 
 `type: "changed"`. Their list changed: a row added, gone, or changed.
 
-`type: "invited"`. The invites waiting on their emails changed: one made, renewed or taken back.
+`type: "invited"`. The invites waiting on their emails changed. Sent no more since FIN-458 (an invite is a notice: `changed`); kept for the readers that know it.
 
 ### `ListedFragment`
 
@@ -517,7 +517,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 
 ### `NoticeAction`
 
-out. What a person may do about a notice: `post` its `body` to a platform route with their own credential, then read their notices again; or `open` a page. One of the two.
+out. What a person may do about a notice: `post` its `body` to a platform route with their own credential, then read their notices again; or `open` a page. One of the two. A post's answer may name a page to open (`open`, as `InviteAccepted` does), opened once that read has it; a post refused shows the server's own words for it (`ErrorBody.message`).
 
 | field | type | | |
 | --- | --- | --- | --- |
