@@ -696,7 +696,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/f/{name}/visibility` | the same | `{visibility}` → `{ok, visibility}`. Leaving `members` makes a new share link |
 | `POST /api/f/{name}/rotate` | the same | `{scopes?: [inbox, view]}` → `Rotated {inboxToken, viewToken, rotated}`; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/cap` | the owner (never an agent) | Ledger |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | `PutSecret {value, hosts}` (at most `SECRET_MAX_BYTES`; 1 to `SECRET_HOSTS_MAX` hosts, each a bare host name: no scheme, port, path or wildcard) → `{ok, name, hosts}`, sealed per Durable Object (docs/secrets.md). `job.fetch` fills it only toward one of its hosts, over https, in a request that sets no `Host`, `Forwarded` or `X-Forwarded-Host` (`fragment_core::secrets::may_fill`). Hosts change only with the value. No event or refused fetch names a host. `{fromVault, hosts}` in place of `value`: a secret of the caller's own Vault moved here (FIN-466), by a Vault name's form alone (400 otherwise, before any Vault route), a person's alone (an agent 403), never a Nostr key's (400); claimed for this `{KEY}` as it is read, kept here, then removed from the Vault (none there: 404; claimed by a move elsewhere: 409, until that move is made again or the secret is set again) |
 | `GET /api/f/{name}/secrets` | editor | → `SecretList {secrets: [{name, hosts}]}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/door` | its owner | → `{bound: {door, agent} \| null}`: whose door this connector is (An agent's doors) |
@@ -1572,10 +1572,10 @@ can no longer take its seat seats no one and is canceled.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (holding a good seat, or in an org whose admins give seats: 409) | `{kind?, trialCode?}` → `{url, session}`: Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes. With a trial code (any case, spaces and dashes aside), Stripe's trial of its days, no card asked, no promotion code. A code unknown 404; ended 400; full, or for someone who had a trial or whose org has paid, 409 |
+| `POST /api/billing/checkout` | a person (holding a good seat, or in an org whose admins give seats: 409) | `{kind?, trialCode?}` → `{url, session, open}` (`open`: `url` again, the page a notice's Pay again opens): Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes. With a trial code (any case, spaces and dashes aside), Stripe's trial of its days, no card asked, no promotion code. A code unknown 404; ended 400; full, or for someone who had a trial or whose org has paid, 409 |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else 404) | → `MySeat`: the Checkout's return (`/welcome?checkout={id}`, `/settings?pack={id}`; `=canceled` when abandoned): a completed one applied at once; again, nothing changes |
-| `POST /api/billing/packs` | a seat's holder; an org's admin for a member holding a seat (`member`; else 403; no seat 400) | `{member?}` → `{url, session}`: a credit pack's Checkout; paid, its credit is granted once by its session (`GrantCredit {id: pack:<session>, by: stripe}`). An org buys none: an operator credits it (Ledger) |
-| `POST /api/billing/portal` | who pays for the asker's org (anyone else 403) | → `{url}`: Stripe's portal on the deployment's own configuration |
+| `POST /api/billing/packs` | a seat's holder; an org's admin for a member holding a seat (`member`; else 403; no seat 400) | `{member?}` → `{url, session, open}`: a credit pack's Checkout (`open`: `url` again, the page a notice's Buy credit opens); paid, its credit is granted once by its session (`GrantCredit {id: pack:<session>, by: stripe}`). An org buys none: an operator credits it (Ledger) |
+| `POST /api/billing/portal` | who pays for the asker's org (anyone else 403) | → `{url, open}` (`open`: `url` again, the page a notice's Payment and invoices opens): Stripe's portal on the deployment's own configuration |
 | `POST /api/stripe/webhook` | Stripe (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; anything else, or another deployment's, answered and dropped. A failure is 5xx, which Stripe sends again |
 
 ### Jobs and triggers
@@ -1970,9 +1970,19 @@ registration go first.
 What the platform tells a person, each owner's notices in its own words
 (`Notice`, `fragment_proto::notice`), the most pressing first. Each owner
 works them out when asked and the router joins them, keeping none: the
-person's computer's (docs/computers.md, "What its owner is told"), then
-the registry's, an invite waiting on an email of theirs (Invites by
-email). An owner that does not answer fails the read. `kind` is for tests
+person's ledger's (their agents stopped for want of credit, or their
+fragments read-only past the overdraft, in Settings' words, with Buy
+credit where packs are sold and they hold an active seat; docs/ledger.md),
+the person's computer's (docs/computers.md, "What its owner is told"),
+then the registry's: their seat, lapsed ("Your seat lapsed", Pay again
+for its admin where seats are sold) or a Stripe trial in its last three
+days ("Your trial ends on November 16", Payment and invoices for whoever
+pays; the date on UTC's calendar), and each invite waiting on an email of
+theirs (Invites by email). A seat's lapse and return are told their pages
+by their ledger, whose standing follows the seat. The ledger tells their
+pages when what it says changes (its standing, or a seat's Buy credit),
+a change by the clock alone (a month's credit) at its next call or sweep.
+An owner that does not answer fails the read. `kind` is for tests
 and logs; a client draws every notice the same way and never reads it.
 An action `post`s its `body` (none: `{}`) to a platform route with the
 person's own credential, the route its owner's, then the client reads its
@@ -1993,7 +2003,7 @@ label has `must-answer` in it is one, the proof of the clients' cover. Their pag
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their computer's (none while they have none), then their invites' |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites) |
 
 ## The finite.computer move (docs/migrations.md)
 
