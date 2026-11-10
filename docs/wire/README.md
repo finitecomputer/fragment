@@ -163,6 +163,88 @@ A fragment's live socket: records as they are appended, presence, drafts and que
 - A WebSocket; receives: [`LiveOut`](#liveout)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
 
+### migrations
+
+The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move.
+
+#### `migrations.complete`
+
+`POST /api/migrations/mover/stages/{stage}/complete`: The stage's zip made whole from its parts, then its manifest written, last.
+
+- Credentials: NIP-98
+- Body: [`StageComplete`](#stagecomplete)
+- Answer: [`StageCompleted`](#stagecompleted)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.done`
+
+`POST /api/migrations/stages/{stage}/done`: The new agent says its import ended, well or not: its stage's reads end, and the old agent is retired once it went well. A phase 1 stage is deleted; a phase 2 stage is kept until it expires.
+
+- Credentials: NIP-98
+- Body: [`StageDone`](#stagedone)
+- Answer: [`MoveAt`](#moveat)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.mailbox`
+
+`GET /api/migrations/mover/mailbox`: What the mover is told to do, oldest first: each command stays until a report on it is taken.
+
+- Credentials: NIP-98
+- Answer: [`Mailbox`](#mailbox)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.open`
+
+`POST /api/migrations/stages/{stage}/open`: The new agent bound to the move opens its stage: its manifest.
+
+- Credentials: NIP-98
+- Answer: [`StageOpened`](#stageopened)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.part`
+
+`PUT /api/migrations/mover/stages/{stage}/parts/{n}`: One part of the stage's zip, streamed unread into the platform's bucket: only for the stage of the old agent's current stop_and_stage, while it stages.
+
+- Credentials: NIP-98
+- Query `sha256` (`string`, required): The part's SHA-256 (hex), as the mover computed it: kept with the part for its resume.
+- Body: bytes (`application/octet-stream`), streamed
+- Answer: [`StagePart`](#stagepart)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.parts`
+
+`GET /api/migrations/mover/stages/{stage}/parts`: The stage's parts taken so far, to resume an upload: their numbers, sizes, hashes and etags, never their bytes.
+
+- Credentials: NIP-98
+- Answer: [`StageParts`](#stageparts)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.report`
+
+`POST /api/migrations/mover/agents/{old}/report`: What happened on an old agent's current command: a stale command's report is 409 and changes nothing.
+
+- Credentials: NIP-98
+- Body: [`Report`](#report)
+- Answer: [`Reported`](#reported)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.roster`
+
+`PUT /api/migrations/mover/roster`: The mover's roster, whole: every live old agent and its owner. Rows not yet asked that it leaves out are withdrawn.
+
+- Credentials: NIP-98
+- Body: [`Roster`](#roster)
+- Answer: [`RosterTaken`](#rostertaken)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
+
+#### `migrations.zip`
+
+`GET /api/migrations/stages/{stage}/zip`: The stage's zip, for the new agent bound to the move while it imports, by ranges (`Range: bytes=…`).
+
+- Credentials: NIP-98
+- Answer: bytes (`application/zip`); a `Range` asked is answered 206, that range alone
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
 ### vault
 
 A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
@@ -251,6 +333,27 @@ out. The app code installed from the `live` pin.
 | `operations` | `map` of [`OpDecl`](#opdecl) | required |  |
 | `sha` | `string` or `null` | required | The live commit the code was installed from; `None` without app code. |
 
+### `Command`
+
+out. One thing to do to one old agent, flat: its `kind`, and the fields that kind has. Every step is idempotent on the mover's side: a stop of a stopped runtime does nothing, and a stage uploads the same parts again.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `as` | [`Mark`](#mark) or `null` | optional | `retire`: how the old agent is marked moved. |
+| `attempt` | `integer` | required |  |
+| `id` | `string` | required | `command_id`: `<old>:<attempt>:<step>`. |
+| `kind` | [`CommandKind`](#commandkind) | required |  |
+| `old` | `string` | required |  |
+| `phase` | [`Phase`](#phase) or `null` | optional | `stop_and_stage`: its phase. |
+| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage`: the secrets to hand on (none until the vault: FIN-466). |
+| `stage` | `string` or `null` | optional | `stop_and_stage`: the stage to upload (`stage_id`). |
+
+### `CommandKind`
+
+out, open. What a command asks. Open (`x-fragment-open`, docs/wire): the mover leaves a command it does not know in the mailbox, done by no one, and the move is held when its deadline passes.
+
+Values: `stop_and_stage`, `retire`, `restart`.
+
 ### `Counts`
 
 out. 
@@ -335,11 +438,31 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `viewToken` | `string` or `null` | required | The share link's token: its owner's alone (and their agent's, sharing for them, but on a connector), as the share sheet shows it. A member does not share by link: they ask its owner. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
 
+### `Has`
+
+in. Which secrets it holds (never their values).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `nostr` | `boolean` | required |  |
+| `openrouter` | `boolean` | required |  |
+| `telegram` | `boolean` | required |  |
+
 ### `IdentityKind`
 
 out. What an identity is (docs/cloudflare-v1.md, R15). A fragment's own key stays the fragment's and is not registered. An agent has a designated owner, a person.
 
 Values: `person`, `agent`.
+
+### `LeftBehind`
+
+both. 
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `path` | `string` | required |  |
+| `why` | `string` | required | `cache`, `runtime`, `secret`, … (the classifier's class). |
 
 ### `ListWatchFrame`
 
@@ -496,6 +619,38 @@ Exactly one of these holds:
 
 `type: "pong"`. 
 
+### `Mailbox`
+
+out. `GET /api/migrations/mover/mailbox`: what the mover is told to do, oldest first, at most `MAILBOX_MAX`. A command stays until a report on it is taken, so reading again is the retry.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `commands` | `array` of [`Command`](#command) | required |  |
+
+### `Manifest`
+
+both. `manifest.json`, as the mover writes it beside the zip (last).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `attempt` | `integer` | required |  |
+| `bytes` | `integer` | required | The files inside it, uncompressed. |
+| `files` | `integer` | required |  |
+| `format` | `string` | required | `STAGE_FORMAT`. |
+| `layout` | `string` | required | How the folder is laid out, for the importer: `finite-computer`. |
+| `left` | `array` of [`LeftBehind`](#leftbehind) | optional | What stayed behind, and why (`MANIFEST_LEFT_MAX` of them). |
+| `left_more` | `integer` or `null` | optional | Paths left behind past the list, if any. |
+| `old` | `string` | required |  |
+| `phase` | [`Phase`](#phase) | required |  |
+| `zip_bytes` | `integer` | required | The zip's size and SHA-256 (hex). |
+| `zip_sha256` | `string` | required |  |
+
+### `Mark`
+
+out. How a retired old agent is marked on the old platform.
+
+Values: `migrated`, `archived`.
+
 ### `Member`
 
 out. 
@@ -528,6 +683,20 @@ out. One record whose text matched: where it is, when it was written, and a snip
 | `fragment` | `string` | required |  |
 | `seq` | `integer` | required | The record's place in its channel. |
 | `snippet` | `string` | required |  |
+
+### `MoveAt`
+
+out. The move's state, after a call that may have changed it.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `state` | [`MoveState`](#movestate) | required |  |
+
+### `MoveState`
+
+out, open. Where one old agent's move is (docs/migrations.md, "The state machine"). Open (`x-fragment-open`, docs/wire): a reader (the mover) takes a state it does not know as one it does not act on.
+
+Values: `listed`, `open`, `later`, `never`, `asked`, `staging`, `importing`, `retiring`, `moved`, `held`, `archiving`, `archived`, `expired`, `withdrawn`.
 
 ### `Notice`
 
@@ -569,6 +738,25 @@ out. `GET /api/notices`: the signer's notices, the most pressing first.
 | field | type | | |
 | --- | --- | --- | --- |
 | `notices` | `array` of [`Notice`](#notice) | required |  |
+
+### `OldBrain`
+
+in. 
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `id` | `string` | required |  |
+| `title` | `string` | required |  |
+
+### `OldSite`
+
+in. 
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `name` | `string` | required |  |
+| `public` | `boolean` | required |  |
 
 ### `OpDecl`
 
@@ -614,6 +802,12 @@ out. The errors a page reported as the platform loaded it for its preview card, 
 | `dropped` | `integer` | required | How many more it reported past those. |
 | `errors` | `array` of [`PageError`](#pageerror) | required | The first it reported, in order (at most `fragment_core::card::ERRORS_MAX`). |
 | `live` | `string` | required | The live commit the shot loaded. |
+
+### `Phase`
+
+both. Which phase a stage is of: one the person asked for (`p1`), or one we made at the cutoff for someone who never answered (`p2`).
+
+Values: `p1`, `p2`.
 
 ### `Pinned`
 
@@ -699,11 +893,82 @@ out, open. A refusal's cause, for the people who read it: billing's, seats', org
 
 Values: `trial_unknown`, `trial_ended`, `trial_used`, `trial_taken`, `trial_not_here`, `not_sold`, `stripe_refused`, `holds_seat`, `org_pays`, `no_seat`, `not_payer`, `pays`, `last_admin`, `step_down_first`, `payer_only`, `gone`, `org_not_paying`, `not_admin`, `not_an_email`, `already_offered`, `org_full`, `admins_full`, `too_many_offers`, `offers_per_day`, `last_paid_seat`, `private_while_reaching`, `unshare_first`, `key_paused`.
 
+### `Report`
+
+in. `POST /api/migrations/mover/agents/{old}/report`: what happened on the command it names. Taken only for that old agent's current command; another (a stale attempt's) is 409, changing nothing. `seq` only grows per command: one taken already is a 200 that changes nothing. Flat, one shape for every kind, read as plain fields: its `kind`, and the fields that kind has. `stopped` (the old agent is a folder now); `progress`, `bytes` and `files` so far; `staged` (`POST …/complete` done), `manifest_sha256`, `bytes` and `files` in all; `failed` (the platform decides whether to try again), `step` and `why`; `retired` (and marked moved), `receipt`; `restarted`. Another kind, or a field a kind needs and lacks, is 400.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` or `null` | optional | Bytes and files staged so far (`progress`), or in all (`staged`). |
+| `command` | `string` | required |  |
+| `files` | `integer` or `null` | optional |  |
+| `kind` | `string` | required |  |
+| `manifest_sha256` | `string` or `null` | optional | `staged`: the manifest's SHA-256 (hex), as `POST …/complete` answered it. |
+| `receipt` | `string` or `null` | optional | `retired`: Core's retirement snapshot's id. |
+| `seq` | `integer` | required |  |
+| `step` | `string` or `null` | optional | `failed`: the step, and why (`TEXT_MAX_BYTES` each). |
+| `why` | `string` or `null` | optional |  |
+
+### `Reported`
+
+out. A report's answer: the move's state after it, its attempt, and whether this report changed anything (false: its `seq` was taken).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `attempt` | `integer` | required |  |
+| `state` | [`MoveState`](#movestate) | required |  |
+| `taken` | `boolean` | required |  |
+
 ### `Role`
 
 out. A member's role in a fragment. `Public` is the floor anyone who can see the fragment holds; the others are granted. Ordered weakest first.
 
 Values: `public`, `viewer`, `editor`, `owner`.
+
+### `Roster`
+
+in. `PUT /api/migrations/mover/roster`: every live old agent and its owner, whole. A snapshot replaces the last: a row the person has not answered Yes to that is missing from it is withdrawn, and a row in flight is left as it is. The same `snapshot` again changes nothing.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `observed_ms` | `integer` | required | When the mover read the old platform, ms since the epoch. |
+| `people` | `array` of [`RosterPerson`](#rosterperson) | required | At most `ROSTER_PEOPLE_MAX`, each WorkOS id once. |
+| `snapshot` | `string` | required | The mover's id for this snapshot (`TEXT_MAX_BYTES`). |
+
+### `RosterAgent`
+
+in. An old agent as the roster lists it: what the person is asked about.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `brains` | `array` of [`OldBrain`](#oldbrain) | optional | Brains its person owns (`ROSTER_LIST_MAX`). |
+| `has` | [`Has`](#has) | required |  |
+| `last_active_ms` | `integer` or `null` | optional | When it was last used, ms since the epoch. |
+| `name` | `string` | required |  |
+| `old` | `string` | required | Its id (`valid_old`). |
+| `picture_url` | `string` or `null` | optional |  |
+| `sites` | `array` of [`OldSite`](#oldsite) | optional | Sites it owns (`ROSTER_LIST_MAX`). |
+| `sizes` | [`Sizes`](#sizes) | required |  |
+
+### `RosterPerson`
+
+in. A person on the roster: their WorkOS user (the one both platforms sign them in as) and their live old agents.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agents` | `array` of [`RosterAgent`](#rosteragent) | required | At most `ROSTER_AGENTS_MAX`, each old id once in the roster. |
+| `email` | `string` | required | Their email on the old platform: where phase 2's mail goes. |
+| `workos_id` | `string` | required |  |
+
+### `RosterTaken`
+
+out. The roster's answer: the rows it offered at once (new rows of a person bound here already: a person is bound when they open the move), the rows it withdrew, and whether it was the last snapshot again (then nothing changed).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bound` | `integer` | required |  |
+| `replay` | `boolean` | required |  |
+| `withdrawn` | `integer` | required |  |
 
 ### `SearchAnswer`
 
@@ -725,6 +990,12 @@ out. A secret as its person reads it: everything but its value.
 | `name` | `string` | required |  |
 | `place` | [`Place`](#place) | required |  |
 | `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
+
+### `SecretKind`
+
+out. A secret an old agent holds that its person may bring (FIN-466's vault; not handed on yet).
+
+Values: `telegram_bot_token`, `openrouter_key`, `nostr_nsec`.
 
 ### `SecretList`
 
@@ -787,6 +1058,73 @@ out. A fragment's sharing, in its owner's list (the platform's page): who may op
 | `members` | `integer` | required |  |
 | `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
+
+### `Sizes`
+
+in. An old agent's bytes by class, as the one classifier counts them (the staged class is `move`).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `cache` | `integer` | required |  |
+| `history` | `integer` | required |  |
+| `move` | `integer` | required | What is staged: history, work, owned brains and sites. |
+| `total` | `integer` | required |  |
+| `work` | `integer` | required |  |
+
+### `StageComplete`
+
+in. `POST …/complete`: the stage's manifest, for its zip made whole from the parts taken (their bytes in all its `zip_bytes`; R2 refuses a part but the last under `PART_MIN_BYTES`), the manifest written last. The same complete again answers the same; one cut off between the zip and its manifest is not made again (its attempt stalls, and the next stages afresh).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `manifest` | [`Manifest`](#manifest) | required |  |
+
+### `StageCompleted`
+
+out. The manifest as written, by its SHA-256 (hex): what the mover's `staged` report names.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `manifest_sha256` | `string` | required |  |
+| `zip_bytes` | `integer` | required |  |
+
+### `StageDone`
+
+in. `POST /api/migrations/stages/{stage}/done`: the import ended, well or not. The same `ok` again changes nothing.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | required |  |
+| `report_sha256` | `string` or `null` | optional | The SHA-256 (hex) of the report the agent wrote its owner. |
+| `why` | `string` or `null` | optional | Why it failed (`TEXT_MAX_BYTES`). |
+
+### `StageOpened`
+
+out. `POST /api/migrations/stages/{stage}/open`: the stage's manifest. Then `GET …/zip` reads the zip by ranges.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `manifest` | [`Manifest`](#manifest) | required |  |
+| `stage` | `string` | required |  |
+
+### `StagePart`
+
+out. One part taken (`PUT …/parts/{n}`), and each part `GET …/parts` lists.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `bytes` | `integer` | required |  |
+| `etag` | `string` | required | R2's etag for it. |
+| `n` | `integer` | required |  |
+| `sha256` | `string` | required | Its SHA-256 (hex), as the mover's signed URL named it: kept for the mover's resume. The bytes stream to R2 unread; the zip's own SHA-256 in the manifest is what the importer checks. |
+
+### `StageParts`
+
+out. `GET …/parts`: the parts taken so far, by number.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `parts` | `array` of [`StagePart`](#stagepart) | required |  |
 
 ### `Until`
 

@@ -160,6 +160,53 @@ fn what_an_older_client_does_not_feel_passes() {
     passes(&[], &["field a.get.query.q optional string"]);
 }
 
+/// Bytes a route takes or answers (the finite.computer move's part upload
+/// and stage zip: `route <op> takes|bytes <media>`) hold as any shape: a
+/// route that stops taking or answering them, or takes or answers another
+/// media type, or starts to, breaks an older client (FIN-469).
+#[test]
+fn bytes_a_route_takes_or_answers_hold() {
+    for slot in ["takes", "bytes"] {
+        let fact = format!("route a.get {slot} application/zip");
+        let base: String = format!("{BASE}{fact}\n");
+        let head = |edit: Option<&str>| -> String { base.lines().filter(|l| *l != fact).chain(edit).collect::<Vec<_>>().join("\n") };
+        let found = |head: &str| -> Vec<String> { breaches(&parse(&base).unwrap(), &parse(head).unwrap(), &BTreeSet::new()).into_iter().map(|b| b.fact).collect() };
+        assert!(found(&base).is_empty(), "{slot}: the same is no breach");
+        assert_eq!(found(&head(None)), std::slice::from_ref(&fact), "{slot}: gone");
+        let other = format!("route a.get {slot} application/octet-stream");
+        assert_eq!(found(&head(Some(&other))), std::slice::from_ref(&fact), "{slot}: another media type");
+        // and one master's route did not have
+        let added = breaches(&parse(BASE).unwrap(), &parse(&base).unwrap(), &BTreeSet::new());
+        assert_eq!(added.into_iter().map(|b| b.fact).collect::<Vec<_>>(), [fact], "{slot}: new");
+    }
+}
+
+/// Bytes a route takes or answers are raw bytes in the OpenAPI document:
+/// an empty media type object, no schema, for a part's upload and for the
+/// 200 and 206 of a zip alike. A `type: string` there would tell a reader
+/// to decode text, which a zip's bytes are not.
+#[test]
+fn bytes_are_raw_in_the_document() {
+    let doc = super::openapi::document().expect("the document");
+    let mut seen = 0;
+    for (path, ops) in doc["paths"].as_object().expect("paths") {
+        for (method, op) in ops.as_object().expect("operations") {
+            let mut bodies = vec![];
+            if let Some(media) = op["x-fragment-takes"].as_str() {
+                bodies.push(&op["requestBody"]["content"][media]);
+            }
+            if let Some(media) = op["x-fragment-bytes"].as_str() {
+                bodies.extend(["200", "206"].map(|s| &op["responses"][s]["content"][media]));
+            }
+            for body in bodies {
+                assert_eq!(body, &serde_json::json!({}), "{method} {path}: raw bytes, no text schema");
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 3, "the part's upload, and the zip's 200 and 206");
+}
+
 #[test]
 fn what_an_older_client_feels_fails_naming_the_fact() {
     // a new required field, and optional → required, where a client writes it

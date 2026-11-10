@@ -649,6 +649,49 @@ unfinished design, not debt.
   claims and the `role IS NULL` clauses go, and `invite_claims` with
   them (a step that drops it).
 
+## The finite.computer move (FIN-463)
+
+- **Shortcut:** fragment carries, for the move of finite.computer's
+  agents (docs/migrations.md): a `Migrations` Durable Object (one, with
+  its schema steps), its routes (`/api/migrations/*`, on the wire, and
+  `/api/admin/migrations`), `fragment_proto::migrations` and
+  `fragment_core::migrations`, the `STAGE` R2 bucket and its lifecycle
+  rules in `xtask deploy`, the stage's reads (one zip by ranges; no
+  mount), the mover's npub in the config (`migrations.mover`; it signs
+  with its own key, so fragment holds no secret for it), the e2e lane `move` and the fake mover;
+  and, from its other PRs, the page `/move`, the welcome's slot, the
+  notices owner, the sign-in call (`signin.rs`), `Source::Stage` and
+  `fragment stage` in the CLI, the `finite-computer` layout and profile
+  of the `import-agent-home` skill, and the vault's `nostr_nsec`
+  purpose. finite-mono carries `finite-mover`, `finite-mover-host`,
+  their keys, its database role, Core's `moved` column and two CLI
+  subcommands.
+- **Risk:** Wasm while it lives; one more global object asked by
+  `GET /api/notices` (with F4); the mover's key can upload a stage for
+  an old agent it was told to stage, into a consenting person's new
+  agent. It holds no bucket credential and reads no stage.
+- **Delete when:** every roster agent is `moved`, `withdrawn` or
+  `expired`, phase 2's 90 days have passed, and no move is `held`. Then,
+  in order:
+  1. Turn the mover off; remove `migrations` from the config.
+  2. Delete the class with a `deleted_classes` tag (xtask learns to
+     retire a class's steps from `schema.lock`).
+  3. Retire its wire facts in `wire.retired`.
+  4. Remove `/move`, the welcome's slot, the notices owner and the
+     sign-in call.
+  5. Remove `Source::Stage`, `fragment stage`, and the `finite-computer`
+     layout and profile.
+  6. Remove `finite-chat-archive/1` once phase 0 ends.
+  7. Remove the vault's `nostr_nsec` purpose and what it holds.
+  8. Delete the `STAGE` bucket (Paul).
+  9. Remove the SPECIAL-CASE-INVENTORY row and this entry.
+  10. In finite-mono: the mover, the host reader, the database role and
+      the ssh account.
+
+  What stays: `fragment home`, the `import-agent-home` skill and its
+  `hermes` layout, must-answer notices, the comp's `until`, the vault,
+  and the wire's bytes answer.
+
 ## The registry is one Durable Object for the fleet
 
 - **Shortcut:** every signed request resolves its key or session live in
