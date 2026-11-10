@@ -1978,11 +1978,13 @@ then the registry's: their seat, lapsed ("Your seat lapsed", Pay again
 for its admin where seats are sold) or a Stripe trial in its last three
 days ("Your trial ends on November 16", Payment and invoices for whoever
 pays; the date on UTC's calendar), and each invite waiting on an email of
-theirs (Invites by email). A seat's lapse and return are told their pages
-by their ledger, whose standing follows the seat. The ledger tells their
-pages when what it says changes (its standing, or a seat's Buy credit),
-a change by the clock alone (a month's credit) at its next call or sweep.
-An owner that does not answer fails the read. `kind` is for tests
+theirs (Invites by email), then the move's, an offer to bring an old
+agent over (docs/migrations.md, "The offer"). A seat's lapse and return
+are told their pages by their ledger, whose standing follows the seat.
+The ledger tells their pages when what it says changes (its standing, or
+a seat's Buy credit), a change by the clock alone (a month's credit) at
+its next call or sweep. An owner that does not answer fails the read.
+`kind` is for tests
 and logs; a client draws every notice the same way and never reads it.
 An action `post`s its `body` (none: `{}`) to a platform route with the
 person's own credential, the route its owner's, then the client reads its
@@ -1996,14 +1998,17 @@ counts down to it and drops the notice then. `mustAnswer`: it must be
 answered; a client shows it alone over everything (a guest's welcome
 too), never in the band, until the read after one of its actions has it
 no more, the first such in the list first (each owner lists its own
-oldest first). A client from before it shows it as any other. No owner
-asks one yet; on a local fleet with test levers alone (dev's, the e2e's:
+oldest first). A client from before it shows it as any other. The move's
+offer is one; on a local fleet with test levers alone (dev's, the e2e's:
 never a branch deployment, nor production), an invite to a fragment whose
-label has `must-answer` in it is one, the proof of the clients' cover. Their pages are told when notices change (`watch`'s `changed`).
+label has `must-answer` in it is one too, the proof of the clients' cover.
+`image`: a picture beside its words (an old agent's), a platform path
+read with the person's credential; an `open` of a platform page opens
+in place. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites) |
+| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites), then the move's offers |
 
 ## The finite.computer move (docs/migrations.md)
 
@@ -2014,6 +2019,11 @@ machine behind them, are docs/migrations.md. Without the deployment's
 
 | method & path | who | answer |
 | --- | --- | --- |
+| `GET /api/migrations/offers` | a person (an agent 403) | → `Offers {offers: [{old, name, image?, state, said, agent?}]}`: their old agents, each where its move is, in the server's words |
+| `POST /api/migrations/offers` | a person | opens the move: binds them, and gives its comp once (docs/migrations.md, "The comp") → `Offers` |
+| `POST /api/migrations/offers/{old}/later`, `…/never`, `…/ask-again` | the old agent's person (another's 404, an agent 403) | → `MoveAt {state}`; an answer its state does not take 409 |
+| `POST /api/migrations/offers/{old}/yes` | its person | `OfferYes {agent}`, an agent of their own (another's 403) → `MoveAt {state}` |
+| `GET /api/migrations/offers/{old}/picture` | its person | → the roster's picture of it, a PNG, JPEG, WebP or GIF of at most 1 MiB; none 404 |
 | `PUT /api/migrations/mover/roster` | the mover (NIP-98 by `migrations.mover`'s key; anyone else 403) | `Roster` → `RosterTaken {bound, withdrawn, replay}` |
 | `GET /api/migrations/mover/mailbox` | the mover | → `Mailbox {commands: [{id, old, attempt, kind, phase?, stage?, as?, secrets?}]}`, at most `MAILBOX_MAX` |
 | `POST /api/migrations/mover/agents/{old}/report` | the mover | `Report {command, seq, kind, bytes?, files?, manifest_sha256?, step?, why?, receipt?}` → `Reported {state, attempt, taken}`; another than the current command 409 |

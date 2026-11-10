@@ -14,6 +14,7 @@
 //! Removable with the move (docs/technical-debt-ledger.md).
 
 use fragment_proto::migrations::{command_id, stage_id, stage_prefix, Command, CommandKind, HeldReason, Mark, MoveState, Phase, Report, StageDone, ATTEMPTS_MAX};
+use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::Value;
 
 const MINUTE_MS: i64 = 60 * 1000;
@@ -46,6 +47,18 @@ pub const KEEP_MS: i64 = 14 * DAY_MS;
 pub const ARCHIVE_KEEP_MS: i64 = 90 * DAY_MS;
 /// Phase 2 moves in flight at once: the rest wait their turn.
 pub const ARCHIVING_MAX: usize = 8;
+/// A person on the roster's comp (F5), given once as they open the move:
+/// a seat for this long...
+pub const COMP_MS: i64 = 30 * DAY_MS;
+/// ...and this much credit, granted on their ledger once, by its id
+/// (`comp_grant_id`).
+pub const COMP_GRANT_MICROS: i64 = 25 * crate::price::USD;
+
+/// The comp's grant's id on `person`'s ledger: one a person, ever (a
+/// ledger answers the same id again as it did, granting nothing).
+pub fn comp_grant_id(person: &str) -> String {
+    format!("move:{person}")
+}
 
 /// The routine that starts a stage's import, on its new agent's own
 /// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;
@@ -808,6 +821,54 @@ pub fn withdraw(m: &Move, now: i64) -> Outcome {
     }
 }
 
+// ---- what its person is told (F4)
+
+/// An open move, as its person is asked (`GET /api/notices`): a notice that
+/// must be answered, in the server's words. Yes opens `page` (the
+/// platform's `/move`, which asks what the import needs and says Yes);
+/// Not now and Never post to the person's own routes. `picture`: the
+/// roster has one, which the platform reads for them.
+pub fn offer(old: &str, name: &str, picture: bool, page: &str) -> Notice {
+    let post = |label: &str, verb: &str| NoticeAction { label: label.into(), post: Some(format!("/api/migrations/offers/{old}/{verb}")), body: None, open: None };
+    let name = match name.trim() {
+        "" => "your agent",
+        n => n,
+    };
+    Notice {
+        id: format!("move:{old}"),
+        kind: "move_offer".into(),
+        level: NoticeLevel::Info,
+        title: format!("Bring {name} over from finite.computer?"),
+        text: Some("You'll get a month free.".into()),
+        detail: None,
+        until: None,
+        actions: vec![NoticeAction::open("Yes", page), post("Not now", "later"), post("Never", "never")],
+        must_answer: true,
+        image: picture.then(|| format!("/api/migrations/offers/{old}/picture")),
+    }
+}
+
+/// Where `m` is, as `/move` tells its person (`Offer.said`), `name` its
+/// old agent's: plain, and only what its state says.
+pub fn said(m: &Move, name: &str) -> String {
+    let name = match name.trim() {
+        "" => "your agent",
+        n => n,
+    };
+    match m.state {
+        MoveState::Listed | MoveState::Open | MoveState::Later => format!("{name} is on finite.computer."),
+        MoveState::Never => "You said never.".into(),
+        MoveState::Asked => format!("Stopping {name} on finite.computer…"),
+        MoveState::Staging | MoveState::Archiving => format!("Copying {name}…"),
+        MoveState::Importing => format!("Bringing {name} over…"),
+        MoveState::Retiring | MoveState::Moved => "Done.".into(),
+        MoveState::Held => "Paused: someone from Finite will look at it and be in touch.".into(),
+        MoveState::Archived => format!("{name} is archived. You can still bring it over."),
+        MoveState::Expired => "Its archive was deleted.".into(),
+        MoveState::Withdrawn => "No longer offered.".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Each transition: valid (it moves), invalid (refused, nothing
@@ -1381,5 +1442,41 @@ mod tests {
         assert_eq!(uploadable(&a, "o.p2.1"), Err(Refused::NotNow(MoveState::Archiving)));
         let st = to(report(&a, &report_on(&a, 1, "stopped"), T0 + 1));
         assert_eq!(uploadable(&st, "o.p2.1"), Ok(()));
+    }
+
+    /// Goal: an open move asks its person in the server's words, alone over
+    /// everything (must-answer), with its three answers: Yes opens the page,
+    /// Not now and Never post to the person's own routes; its picture is
+    /// read through the platform, and a nameless agent is still asked.
+    #[test]
+    fn an_offer_asks_in_words_with_its_answers() {
+        let n = offer("prj_1", " Ada ", true, "https://chat.test/move");
+        assert_eq!((n.id.as_str(), n.kind.as_str(), n.level, n.must_answer), ("move:prj_1", "move_offer", NoticeLevel::Info, true));
+        assert_eq!((n.title.as_str(), n.text.as_deref()), ("Bring Ada over from finite.computer?", Some("You'll get a month free.")));
+        let acts: Vec<(&str, Option<&str>, Option<&str>)> = n.actions.iter().map(|a| (a.label.as_str(), a.open.as_deref(), a.post.as_deref())).collect();
+        assert_eq!(
+            acts,
+            vec![("Yes", Some("https://chat.test/move"), None), ("Not now", None, Some("/api/migrations/offers/prj_1/later")), ("Never", None, Some("/api/migrations/offers/prj_1/never"))]
+        );
+        assert!(n.actions.iter().all(|a| a.body.is_none()), "each posts {{}}");
+        assert_eq!(n.image.as_deref(), Some("/api/migrations/offers/prj_1/picture"));
+        let bare = offer("prj_2", "  ", false, "https://chat.test/move");
+        assert_eq!((bare.title.as_str(), bare.image), ("Bring your agent over from finite.computer?", None));
+    }
+
+    /// Goal: `/move` says where each move is in plain words, from its state
+    /// alone: asked, stopping, copying, importing, done, or paused for staff.
+    #[test]
+    fn where_a_move_is_in_words() {
+        let open = open_move();
+        assert_eq!(said(&open, "Ada"), "Ada is on finite.computer.");
+        assert_eq!(said(&to(never(&open, T0)), "Ada"), "You said never.");
+        let asked = to(yes(&open, AGENT, T0));
+        assert_eq!(said(&asked, "Ada"), "Stopping Ada on finite.computer…");
+        assert_eq!(said(&staging(), "Ada"), "Copying Ada…");
+        assert_eq!(said(&importing(), " "), "Bringing your agent over…");
+        let held = tick(&asked, T0 + STOP_MS).expect("held").to;
+        assert_eq!((held.state, said(&held, "Ada").as_str()), (MoveState::Held, "Paused: someone from Finite will look at it and be in touch."));
+        assert_eq!(said(&restarted(&held), "Ada"), said(&held, "Ada"), "restart");
     }
 }

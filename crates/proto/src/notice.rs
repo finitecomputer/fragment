@@ -53,6 +53,11 @@ pub struct Notice {
     #[serde(default, rename = "mustAnswer", skip_serializing_if = "crate::is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub must_answer: bool,
+    /// A picture beside its words (an agent's): a platform path, read with
+    /// the person's own credential. A client from before it shows none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub image: Option<String>,
 }
 
 /// How a notice is shown.
@@ -133,6 +138,7 @@ mod tests {
             until: Some(Until { at: 60_000, said: "Calls resume".into() }),
             actions: vec![NoticeAction::post("Allow", "/api/computers/computer:aa/key-caps/elevenlabs", serde_json::json!({ "from": 5 })), NoticeAction::open("Get help", "mailto:help@example.com")],
             must_answer: false,
+            image: None,
         };
         let v = serde_json::to_value(&n).unwrap();
         assert_eq!(

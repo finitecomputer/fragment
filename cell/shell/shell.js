@@ -16,6 +16,7 @@ import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
+import { createMovePage } from "./move-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -986,6 +987,7 @@ function openChat(name, push = true, path = null) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveHistory();
+  leaveMove();
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
@@ -1487,6 +1489,7 @@ function showMaking(identity, name, by) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveHistory();
+  leaveMove();
   $("frames").hidden = false;
   for (const frame of state.frames.values()) {
     frame.hidden = true;
@@ -1540,11 +1543,12 @@ function stepMaking(event) {
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
 function restoreView({ page, current }) {
-  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY }[page] ?? "/";
+  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY, Move: MOVE }[page] ?? "/";
   if (location.pathname !== path) history.replaceState(null, "", path);
   if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (page === "Apps") openApps(false);
   else if (page === "History") openHistory(false);
+  else if (page === "Move") openMove(false);
   else if (byName(current)) openChat(current, false);
   else {
     renderHeading();
@@ -1782,6 +1786,7 @@ const SETTINGS = "/settings";
 const APPS = "/apps";
 const HISTORY = "/history";
 const WELCOME = "/welcome";
+const MOVE = "/move";
 function at(path) {
   if (location.pathname !== path) history.pushState(null, "", path);
 }
@@ -1790,6 +1795,7 @@ addEventListener("popstate", () => {
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
   else if (shown && location.pathname === HISTORY) openHistory(false);
+  else if (shown && location.pathname === MOVE) openMove(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else startOrWait();
 });
@@ -1822,6 +1828,7 @@ function openApps(push = true) {
   $("frames").hidden = true;
   $("settings-page").hidden = true;
   leaveHistory();
+  leaveMove();
   $("apps-page").hidden = false;
   renderHeading();
   renderChats();
@@ -1854,6 +1861,7 @@ function openHistory(push = true) {
   $("frames").hidden = true;
   $("settings-page").hidden = true;
   leaveApps();
+  leaveMove();
   $("history-page").hidden = false;
   renderHeading();
   renderChats();
@@ -1866,6 +1874,41 @@ function leaveHistory() {
   historyPage.close();
 }
 $("history-link").onclick = () => openHistory();
+
+// ---- the move's page (move-page.js, FIN-463): a person's old
+// finite.computer agents, which to bring over, and where each move is, in
+// the work area as the Apps page is; reached from its offer's Yes ----
+const movePage = createMovePage($("move-page"), {
+  api, el, setGuest, reload: () => load(),
+  addAgent: (spec) => onboarding.addAgent(spec),
+  ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
+  identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
+});
+function openMove(push = true) {
+  if (push) at(MOVE);
+  if (state.page !== "Move") newView();
+  hideNotice();
+  state.page = "Move";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  leaveApps();
+  leaveHistory();
+  $("move-page").hidden = false;
+  renderComputer();
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  movePage.open().catch((e) => notice("This page did not open", e.message));
+}
+// another view in its place: an offer that must be answered, which this
+// page answers, covers the page again (computer.js `answeredHere`)
+function leaveMove() {
+  if ($("move-page").hidden) return;
+  $("move-page").hidden = true;
+  movePage.close();
+  renderComputer();
+}
 
 const settings = createSettings({
   api, $, seg, asks,
@@ -1880,6 +1923,7 @@ const settings = createSettings({
       $("frames").hidden = true;
       leaveApps();
       leaveHistory();
+      leaveMove();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
@@ -2121,13 +2165,14 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && [SETTINGS, APPS, HISTORY].includes(location.pathname);
+  const settings = !open && [SETTINGS, APPS, HISTORY, MOVE].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
   else if (settings && location.pathname === HISTORY) openHistory(false);
+  else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
