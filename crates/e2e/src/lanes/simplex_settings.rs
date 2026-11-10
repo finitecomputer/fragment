@@ -10,7 +10,12 @@
 //!   Telegram's setup is: linked, then Unlink, made sure of in its own
 //!   line, whose ticket closes the door at once; then Link again, its code
 //!   to scan, redeemed with a new door key, and linked: the way to
-//!   reconnect; Done, and Open is its SimpleX chat.
+//!   reconnect; Done, and Open is its SimpleX chat;
+//! - its owner's SimpleX chat with their old agent, staged by its move
+//!   (FIN-463), is offered first: Keep my SimpleX chat, or a new chat;
+//!   while the computer sleeps, why it waits; kept, by an adoption's ticket
+//!   the platform signs through Settings, redeemed on the computer with a
+//!   door key, and its owner's words relay.
 //!
 //! The page is the stub's own (images/bridge `simplex/page.html`), as is
 //! every ticket (the platform's, asked through Settings). The stub runs no
@@ -71,10 +76,11 @@ fn stand_in(agent: &str) -> String {
           window.fetch = async (u, init = {{}}) => {{
             const what = new URL(String(u), location.href).pathname.split("/simplex/")[1];
             if (what === "state") return answer(sx.view);
-            if (what === "link" || what === "unlink") {{
+            if (what === "link" || what === "unlink" || what === "adopt") {{
               sx.tickets.push({{ act: what, ticket: JSON.parse(init.body) }});
               document.documentElement.dataset.sxTickets = JSON.stringify(sx.tickets);
               if (what === "link") sx.set("inviting", {{ link: {link}, short: {link} }});
+              else if (what === "adopt") sx.set("linked", {{ name: {person} }});
               else sx.set("off");
               return answer(sx.view);
             }}
@@ -86,6 +92,7 @@ fn stand_in(agent: &str) -> String {
         qr = json!(QR),
         agent = json!(agent),
         link = json!(LINK),
+        person = json!(PERSON),
     )
 }
 
@@ -237,6 +244,32 @@ pub(super) fn checks(s: &mut Suite, api: &Api, c: &Agent<'_>, fetched: &dyn Fn(&
         json!({ "asked": asked, "off": off, "closed": closed }),
     );
     shoot_both(&mut b, &page, &shots, "a4-link", None)?;
+
+    // FIN-463: a chat with their old agent staged by its move, offered
+    // first; while the computer sleeps, why it waits; kept by its owner
+    let asleep = answers(&mut b, &page, "off", json!({ "staged": true, "alwaysOn": false })) && until_line(s, &mut b, &page, "Your SimpleX chat came over from finite.computer. You can keep it once your computer stays on.");
+    let asleep_now = now(&mut b, &page);
+    shoot_both(&mut b, &page, &shots, "a4a-keep-asleep", None)?;
+    let offered = answers(&mut b, &page, "off", json!({ "staged": true })) && until_line(s, &mut b, &page, "Your SimpleX chat came over from finite.computer.");
+    let offer = now(&mut b, &page);
+    shoot_both(&mut b, &page, &shots, "a4b-keep-offered", None)?;
+    let kept = press(&mut b, &page, "Keep my SimpleX chat") && until_line(s, &mut b, &page, &format!("Linked to {PERSON}."));
+    let after = now(&mut b, &page);
+    let adopt = after["tickets"].as_array().and_then(|t| t.last()).cloned().unwrap_or_default();
+    let redeemed = fetched(s, 470, &format!("door link {}", adopt["ticket"]))?;
+    replies += 1;
+    let (said_kept, answered) = relays(s, 471, "kept from my old agent")?;
+    replies += 1 + usize::from(answered);
+    shoot_both(&mut b, &page, &shots, "a4c-kept", None)?;
+    s.ok(
+        "a SimpleX chat staged by its move is offered first (Keep my SimpleX chat, Start a new chat), said to wait while its computer sleeps; Keep posts an adoption's ticket, the platform's through Settings, redeemed on its computer with a door key, and its owner's words relay",
+        asleep && asleep_now["buttons"] == json!([]) && offered && offer["buttons"] == json!(["Keep my SimpleX chat", "Start a new chat"]) && kept && adopt["act"] == "adopt" && adopt["ticket"]["act"] == "adopt" && adopt["ticket"]["agent"] == c.agent && redeemed == "door linked" && answered,
+        json!({ "asleep": asleep_now, "offer": offer, "after": after, "redeemed": redeemed, "said": said_kept }),
+    );
+    // Start a new chat instead: the link page's own way, after an unlink
+    let back = press(&mut b, &page, "Unlink") && press(&mut b, &page, "Unlink") && until_line(s, &mut b, &page, &format!("Link {name} to SimpleX Chat on your phone."));
+    let instead = answers(&mut b, &page, "off", json!({ "staged": true })) && until_line(s, &mut b, &page, "Your SimpleX chat came over from finite.computer.") && press(&mut b, &page, "Start a new chat") && until_line(s, &mut b, &page, &format!("Link {name} to SimpleX Chat on your phone."));
+    s.ok("Start a new chat sets the old one aside and offers Link SimpleX", back && instead && now(&mut b, &page)["buttons"] == json!(["Link SimpleX"]), now(&mut b, &page));
     // (its reminders left where they are: shell.rs proves the box's home)
     b.eval_in_frame(&page, AT, "(() => { const i = document.querySelector('#main .choice input'); i.checked = false; i.dispatchEvent(new Event('change')); return true; })()")?;
     let inviting = press(&mut b, &page, "Link SimpleX") && until_line(s, &mut b, &page, "Scan this in SimpleX Chat on your phone.") && s.eventually(WAIT, || now(&mut b, &page)["qr"] == true);
