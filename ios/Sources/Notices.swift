@@ -89,7 +89,7 @@ struct NoticesBand: View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let now = Int64(context.date.timeIntervalSince1970 * 1000)
             let shown = library.notices.filter { $0.shown(at: now) }
-            let refusals = library.refusals
+            let refusals = library.refusals(at: now)
             if library.noticesFailed || !shown.isEmpty || !refusals.isEmpty {
                 ScrollView {
                     VStack(spacing: 8) {

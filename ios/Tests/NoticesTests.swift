@@ -249,11 +249,11 @@ struct NoticesTests {
         let notice = try #require(library.notices.first)
         _ = await library.act(notice, notice.actions[0], api: api)
         await library.load(api)
-        let refusal = try #require(library.refusals.first)
-        #expect(library.refusals.count == 1 && refusal.id == "invite:garden--k3x9")
+        let refusal = try #require(library.refusals(at: 0).first)
+        #expect(library.refusals(at: 0).count == 1 && refusal.id == "invite:garden--k3x9")
         #expect(refusal.failure == NoticeFailure(said: "No invite to garden--k3x9 waits on you: it was taken back, answered, or ran out.", refused: true, title: "Garden plans", warns: false))
         library.failedNotices[refusal.id] = nil
-        #expect(library.refusals.isEmpty, "dismissed")
+        #expect(library.refusals(at: 0).isEmpty, "dismissed")
     }
 
     /// A notice's actions are one answer (a reviewer on #1170, for the web;
@@ -290,5 +290,16 @@ struct NoticesTests {
             #expect(posts == ["/api/invites/garden--k3x9/\(first == 0 ? "accept" : "decline")"], "one answer posted: \(posts)")
             #expect(!library.acting.contains(notice.id))
         }
+    }
+
+    /// A refusal outlives its notice's time too (Codex on #1180): Allow
+    /// refused on a paused key, the pause's time passes before another read,
+    /// and the refusal is a line of its own, not hidden with the notice.
+    @MainActor @Test func aRefusalOutlivesItsNoticesTime() throws {
+        let library = Library()
+        library.notices = try read(#"{"notices":[{"id":"key_paused:elevenlabs","kind":"key_paused","level":"warn","title":"ElevenLabs calls paused","until":{"at":120000,"said":"Calls resume"},"actions":[{"label":"Allow up to $20 an hour","post":"/api/computers/c/key-caps/elevenlabs","body":{"from":5}}]}]}"#)
+        library.failedNotices["key_paused:elevenlabs"] = NoticeFailure(said: "That key isn't paused any more.", refused: true, title: "ElevenLabs calls paused", warns: true)
+        #expect(library.refusals(at: 119_999).isEmpty, "while its notice shows, its words are under it")
+        #expect(library.refusals(at: 120_000).map(\.id) == ["key_paused:elevenlabs"], "its time passed: a line of its own")
     }
 }

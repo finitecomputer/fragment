@@ -57,10 +57,11 @@ final class Library {
     var noticesFailed = false
     var failedNotices: [String: NoticeFailure] = [:]
     var acting: Set<String> = []
-    /// The refusals whose notice the last read no longer has (an invite
-    /// taken back meanwhile): each a line of its own until dismissed.
-    var refusals: [(id: String, failure: NoticeFailure)] {
-        failedNotices.filter { id, f in f.refused && !notices.contains { $0.id == id } }.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    /// The refusals whose notice is not shown at `now` (the last read no
+    /// longer has it, an invite taken back; or its time passed): each a
+    /// line of its own until dismissed, as the band draws it.
+    func refusals(at now: Int64) -> [(id: String, failure: NoticeFailure)] {
+        failedNotices.filter { id, f in f.refused && !notices.contains { $0.id == id && $0.shown(at: now) } }.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
     /// A fragment of theirs an action's answer named, for the page to open
     /// (`FragmentRoot`): set by the first read begun after the answer if
