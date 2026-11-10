@@ -61,7 +61,7 @@ const AGAIN_MS: i64 = 1_000;
 /// page that offers it, at most.
 const OFFER_MAX_BYTES: usize = 64 * 1024;
 /// Staff's acts (`AdminAct`'s `op`).
-const ACTS: [&str; 4] = ["retry", "restart-old", "retire", "withdraw"];
+const ACTS: [&str; 5] = ["retry", "restart-old", "retire", "withdraw", "include"];
 /// Stages one alarm pass deletes, and the pages of keys of each: one, so
 /// at most 1,000 objects a stage a pass (R2 lists and deletes 1,000 a
 /// call; docs/migrations.md, "Deletion").
@@ -90,20 +90,22 @@ const NO_NOTICES: &[u8] = br#"{"notices":[]}"#;
 /// and binds them, and the queries built of them: whole at compile time.
 macro_rules! columns {
     () => {
-        "old, workos_id, state, reason, held_from, phase, attempt, agent, command, seq, since_ms, progress_ms, staged_ms, routine_ms, routines, opened, expires_ms, by_staff, generation, deadline_ms"
+        "old, workos_id, state, reason, held_from, phase, attempt, agent, command, seq, since_ms, progress_ms, staged_ms, routine_ms, routines, opened, expires_ms, by_staff, generation, why, dropped, deadline_ms"
     };
 }
 macro_rules! marks {
     () => {
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
     };
 }
-/// A move as staff read it: states and sizes, never a stage's bytes.
+/// A move as staff read it: states and sizes, never a stage's bytes; and
+/// staff's why while they keep it out (the will-not-move list).
 macro_rules! admin_row {
     () => {
         "SELECT m.old, m.workos_id, p.person, m.agent, m.state, m.reason, m.phase, m.attempt,
     CASE WHEN m.command IS NULL THEN NULL ELSE m.old || ':' || m.attempt || ':' || m.command END AS command,
-    m.since_ms, m.deadline_ms, m.staged_ms FROM moves m LEFT JOIN people p ON p.workos_id = m.workos_id"
+    m.since_ms, m.deadline_ms, m.staged_ms, CASE WHEN m.by_staff = 1 THEN COALESCE(m.why, '') END AS why
+    FROM moves m LEFT JOIN people p ON p.workos_id = m.workos_id"
     };
 }
 /// The unasked, whom a roster withdraws and the cutoff archives.
@@ -116,7 +118,9 @@ const INSERT_MOVE: &str = concat!("INSERT INTO moves (", columns!(), ", offer) V
 const UPDATE_MOVE: &str = concat!("UPDATE moves SET (", columns!(), ") = (", marks!(), ") WHERE old = ?");
 const ADMIN_PAGE: &str = concat!(admin_row!(), " WHERE m.old > ? ORDER BY m.old LIMIT ?");
 const ADMIN_ONE: &str = concat!(admin_row!(), " WHERE m.old = ?");
-const UNASKED_ALL: &str = concat!("SELECT * FROM moves WHERE ", unasked!());
+/// What a roster that does not name them withdraws: the unasked, and
+/// staff's withdrawn it has not dropped yet.
+const DROPPABLE: &str = concat!("SELECT * FROM moves WHERE ", unasked!(), " OR (state = 'withdrawn' AND by_staff = 1 AND dropped = 0)");
 const UNASKED_FIRST: &str = concat!("SELECT * FROM moves WHERE ", unasked!(), " ORDER BY old LIMIT ?");
 const UNASKED_COUNT: &str = concat!("SELECT COUNT(*) AS n FROM moves WHERE ", unasked!());
 
@@ -183,11 +187,12 @@ pub(crate) async fn admin(env: &Env, cfg: &Config, by: &str, method: Method, res
         }
         (Method::Post, [old]) => {
             old_ok(old)?;
-            let AdminAct { op } = crate::json_body(body)?;
+            let AdminAct { op, why } = crate::json_body(body)?;
             if !ACTS.contains(&op.as_str()) {
                 return Err(CellError::invalid(format!("an act is one of {}", ACTS.join(", "))));
             }
-            format!("act/{old}/{op}")
+            // who, then a withdrawal's why (the object checks it)
+            return pass(env, format!("act/{old}/{op}"), format!("{by}\n{}", why.unwrap_or_default())).await;
         }
         (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/migrations/{}", m.as_ref(), rest.join("/")))),
     };
@@ -509,7 +514,7 @@ fn refused(r: Refused) -> CellError {
         Refused::NotNow(_) | Refused::Stale => ErrorCode::Conflict,
         Refused::NotYours => ErrorCode::Forbidden,
         Refused::NoStage => ErrorCode::NotFound,
-        Refused::Unfit(_) => ErrorCode::InvalidRequest,
+        Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
     };
     CellError::new(code, r.message())
 }
@@ -738,8 +743,9 @@ impl MigrationsCell {
                 crate::json_answer(&json!({ "moves": &rows[..rows.len().min(PAGE)], "next": next }))
             }
             ("act", [old, act]) => {
-                self.act(old, act)?;
-                console_log!("migrations.staff: {act} {old} by {body}");
+                let (by, why) = body.split_once('\n').unwrap_or((&body, ""));
+                self.act(old, act, why)?;
+                console_log!("migrations.staff: {act} {old} by {by}");
                 crate::json_answer(&parts.rows(ADMIN_ONE, vec![text_value(old)])?.pop())
             }
             // where its zip goes, and its upload: the one the router made
@@ -854,7 +860,7 @@ impl MigrationsCell {
                         }
                         Some(m) => {
                             parts.exec("UPDATE moves SET offer = ? WHERE old = ?", vec![text_value(&offer), text_value(&old)])?;
-                            machine::relisted(&m, person.is_some(), now).or_else(|| person.as_ref().and_then(|_| machine::bind(&m, now)))
+                            machine::relisted(&m, &p.workos_id, person.is_some(), now).or_else(|| person.as_ref().and_then(|_| machine::bind(&m, now)))
                         }
                     };
                     if let Some(s) = step {
@@ -865,11 +871,12 @@ impl MigrationsCell {
                 }
             }
             // a move it no longer names keeps its state (an archived one waits
-            // for a late Yes); one unasked is withdrawn
-            for m in parts.moves(UNASKED_ALL, vec![])? {
+            // for a late Yes); one unasked is withdrawn, one staff withdrew
+            // marked dropped
+            for m in parts.moves(DROPPABLE, vec![])? {
                 if !listed.contains(&m.old) {
                     if let Some(s) = machine::withdrawn(&m, now) {
-                        withdrawn += 1;
+                        withdrawn += u32::from(m.unasked());
                         parts.apply(&s, now)?;
                     }
                 }
@@ -1051,20 +1058,31 @@ impl MigrationsCell {
         }
     }
 
-    fn act(&self, old: &str, act: &str) -> CellResult<()> {
-        let m = self.parts().get(old)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move")))?;
+    /// Staff's act on `old`'s move. A withdrawal of an old agent no roster
+    /// has listed yet keeps a row of its own (`Move::unlisted`), which the
+    /// roster's then fills in.
+    fn act(&self, old: &str, act: &str, why: &str) -> CellResult<()> {
+        let parts = self.parts();
         let now = self.now()?;
+        let found = parts.get(old)?;
+        let m = match (found.clone(), act) {
+            (Some(m), _) => m,
+            (None, "withdraw") => Move::unlisted(old, now),
+            (None, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move"))),
+        };
         let outcome = match act {
             "retry" => machine::retry(&m, now),
             "restart-old" => machine::restart_old(&m, now),
             "retire" => machine::retire(&m, now),
-            "withdraw" => machine::withdraw(&m, now),
+            "withdraw" => machine::withdraw(&m, why, now),
+            "include" => machine::include(&m, parts.person_of(&m.workos_id)?.is_some(), now),
             other => return Err(CellError::invalid(format!("no act {other}"))),
         };
-        if let Some(s) = outcome.map_err(refused)? {
-            self.commit(vec![s], now)?;
+        match (outcome.map_err(refused)?, found) {
+            (Some(s), None) => parts.insert(&s.to, "{}"),
+            (Some(s), Some(_)) => self.commit(vec![s], now),
+            (None, _) => Ok(()),
         }
-        Ok(())
     }
 
     /// The move whose stage `stage` names, if any (404 otherwise).
@@ -1331,6 +1349,7 @@ impl Parts {
                     "INSERT INTO routines (stage, agent, tries, next_ms) VALUES (?, ?, 0, ?) ON CONFLICT (stage) DO UPDATE SET agent = excluded.agent, tries = 0, next_ms = excluded.next_ms",
                     vec![text_value(stage), text_value(agent), SqlStorageValue::Integer(now)],
                 )?,
+                Effect::Forget => self.exec("DELETE FROM moves WHERE old = ?", vec![text_value(&s.to.old)])?,
             }
         }
         Ok(())

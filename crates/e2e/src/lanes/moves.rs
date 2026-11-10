@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use fragment_fakes::mover::{event, fixture_zip, staged, Mover, Script};
-use fragment_proto::migrations::{Has, Roster, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT};
+use fragment_proto::migrations::{Has, Roster, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT, WHY_MAX_BYTES};
 use std::time::Duration;
 use serde_json::{json, Value};
 
@@ -52,6 +52,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let operator = s.operator.clone();
     let admin = |method: &str, path: &str| api.signed(&operator, method, &format!("/api/admin/migrations{path}"), None);
     let act = |o: &str, op: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": op })));
+    let withdraw = |o: &str, why: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": "withdraw", "why": why })));
+    const WHY: &str = "a staff test agent";
     // a move as staff read it: the operators' list, page by page
     let moved = |o: &str| -> Result<Value> {
         let mut after = String::new();
@@ -263,7 +265,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let r = act(&a1, "retire")?;
     mover.script(Script::Done);
     mover.run_once()?;
-    let bad = act(&a1, "withdraw")?;
+    let bad = withdraw(&a1, WHY)?;
     s.ok("staff retire it: the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409)", r.body["state"] == "retiring" && state(&a1) == "moved" && bad.status == 409, format!("{} {}", r.body, bad));
 
     // ---- the one person's bound agent reads its own stage, while it
@@ -333,7 +335,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let gone = state(&b1);
     let r2 = mover.push(&roster("s4", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&format!("{run}-nobody"), &[&b1])]))?;
     let back = state(&b1);
-    let w = act(&b1, "withdraw")?;
+    let w = withdraw(&b1, WHY)?;
     mover.push(&roster("s5", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&format!("{run}-nobody"), &[&b1])]))?;
     s.ok(
         "a roster without an unasked move withdraws it, the next that lists it offers it again, and staff's withdrawal stays whatever a roster says; a moved one is untouched",
@@ -341,20 +343,90 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{} {} {gone} {back}", r.body, r2.body),
     );
 
+    // ---- the will-not-move list: staff withdraw an old agent ahead of the
+    // roster, saying why; `include` takes a withdrawal back
+    let (f1, g1) = (old("f1"), old("g1"));
+    let nobody = format!("{run}-nobody");
+    let (empty, long) = (withdraw(&f1, " ")?, withdraw(&f1, &"x".repeat(WHY_MAX_BYTES + 1))?);
+    let ahead = withdraw(&f1, WHY)?;
+    let again = withdraw(&f1, WHY)?;
+    s.ok(
+        "staff withdraw an old agent no roster has listed yet, saying why (none, or too long: 400); the same again changes nothing",
+        empty.status == 400 && long.status == 400 && ahead.status == 200 && ahead.body["state"] == "withdrawn" && ahead.body["why"] == WHY && ahead.body["workos_id"] == "" && again.status == 200 && again.body == ahead.body,
+        format!("{empty} {long} {ahead} {again}"),
+    );
+    let r = mover.push(&roster("s5b", vec![person(&alice_id, &[&a1, &a2, &f1]), person(&dave_id, &[&d1, &d2]), person(&nobody, &[&b1])]))?;
+    let f = moved(&f1)?;
+    let notices = api.signed(&alice, "GET", "/api/notices", None)?;
+    let offers = api.signed(&alice, "GET", "/api/migrations/offers", None)?;
+    let told = mover.commands()?.into_iter().any(|c| c.old == f1);
+    s.ok(
+        "a roster that lists it names whose it is and leaves it withdrawn, with its why: its person is not asked, and the mover told nothing",
+        r.status == 200 && f["state"] == "withdrawn" && f["workos_id"] == alice_id.as_str() && f["why"] == WHY && notices.status == 200 && !notices.text.contains(&format!("move:{f1}")) && offers.status == 200 && !offers.text.contains(&f1) && !told,
+        format!("{} {f} {notices} {offers} {told}", r.body),
+    );
+    let list = admin("GET", "")?;
+    let listed: Vec<String> = list.body["moves"].as_array().into_iter().flatten().filter(|m| m["why"].is_string()).filter_map(|m| m["old"].as_str().map(str::to_string)).collect();
+    s.ok("the operators' list gives staff's why with each move they withdrew, and none with any other", list.status == 200 && listed.contains(&b1) && listed.contains(&f1) && !listed.contains(&a2), json!(listed));
+    // include: b1, listed by the roster, its person not here: listed again
+    let inc = act(&b1, "include")?;
+    let inc_again = act(&b1, "include")?;
+    // f1, dropped by the roster: left withdrawn, the roster's, until a
+    // roster lists it, which offers it to its person (bound: open)
+    mover.push(&roster("s5c", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&nobody, &[&b1])]))?;
+    let dropped = act(&f1, "include")?;
+    mover.push(&roster("s5d", vec![person(&alice_id, &[&a1, &a2, &f1]), person(&dave_id, &[&d1, &d2]), person(&nobody, &[&b1])]))?;
+    let f_back = state(&f1);
+    // g1, withdrawn ahead of any roster: forgotten
+    let g = withdraw(&g1, WHY)?;
+    let forgot = act(&g1, "include")?;
+    let forgot_again = act(&g1, "include")?;
+    s.ok(
+        "include takes staff's withdrawal back: listed again (again: nothing more); one the roster dropped stays withdrawn until a roster lists it (then offered); one withdrawn ahead of any roster is forgotten (then 404)",
+        inc.status == 200 && inc.body["state"] == "listed" && inc.body["why"].is_null() && inc_again.body == inc.body
+            && dropped.status == 200 && dropped.body["state"] == "withdrawn" && dropped.body["why"].is_null() && f_back == "open"
+            && g.status == 200 && forgot.status == 200 && forgot.body.is_null() && moved(&g1).is_err() && forgot_again.status == 404,
+        format!("{inc} {dropped} {f_back} {forgot} {forgot_again}"),
+    );
+    // the same from the CLI, with the operator key's file
+    let file = s.dir("move-operator").join("operator.key");
+    std::fs::write(&file, format!("{}\n", operator.secret_hex()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let (home, key) = (s.dir("move-cli"), file.to_string_lossy().to_string());
+    let h1 = old("h1");
+    let cli = |args: &[&str]| s.cli_json(api, &home, &[&["operator"], args, &["--key-file", &key, "--json"]].concat());
+    let out = cli(&["withdraw", &h1, "--why", WHY]);
+    let list = cli(&["moves", "--withdrawn"]);
+    let back = cli(&["include", &h1]);
+    let after = cli(&["moves", "--withdrawn"]);
+    let olds = |v: &Result<Value>| v.as_ref().ok().and_then(|v| v["moves"].as_array().cloned()).unwrap_or_default().iter().filter_map(|m| m["old"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    s.ok(
+        "`fragment operator withdraw`, `moves --withdrawn` and `include` with the operator key's file: an old id no roster listed is withdrawn with its why, on the list, then forgotten",
+        out.as_ref().is_ok_and(|v| v["state"] == "withdrawn" && v["why"] == WHY) && olds(&list).contains(&h1) && back.as_ref().is_ok_and(Value::is_null) && !olds(&after).contains(&h1) && olds(&after).iter().all(|o| o != &a2),
+        format!("{out:?} {list:?} {back:?}"),
+    );
+    // f1 out again, for the cutoff below
+    withdraw(&f1, WHY)?;
+
     // ---- phase 2: past the cutoff, the unasked are staged and retired
     // unasked (archived); a late Yes imports the kept stage; 90 days on, expired
     // carol is on the old platform alone: she signs up only after the cutoff
     let carol = crate::Keys::generate();
     let c_id = s.workos.user(&Api::email_of(&carol)).id;
-    mover.push(&roster("s6", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&c_id, &[&c1])]))?;
+    mover.push(&roster("s6", vec![person(&alice_id, &[&a1, &a2, &f1]), person(&dave_id, &[&d1, &d2]), person(&c_id, &[&c1])]))?;
     let cutoff = crate::MIGRATIONS_CUTOFF_MS;
     let now = lever(json!({ "op": "clock", "offsetMs": offset.get() }))?["now"].as_i64().context("the object's now")?;
     later_by(cutoff - now + 1)?;
     let p2 = mover.commands()?.into_iter().filter(|c| [&a2, &c1, &d1].contains(&&c.old)).map(|c| (c.old.clone(), serde_json::to_value(&c).unwrap_or_default())).collect::<Vec<_>>();
+    let f_cut = mover.commands()?.into_iter().any(|c| c.old == f1);
     s.ok(
-        "at the cutoff every unasked move is archiving: stop_and_stage of its stage <old>.p2.<attempt>",
-        p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2.")))),
-        format!("{p2:?}"),
+        "at the cutoff every unasked move is archiving: stop_and_stage of its stage <old>.p2.<attempt>; staff's withdrawn, the roster listing it, is passed by",
+        p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2.")))) && !f_cut && state(&f1) == "withdrawn",
+        format!("{p2:?} {f_cut} {}", state(&f1)),
     );
     mover.run_once()?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
