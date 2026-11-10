@@ -1829,11 +1829,15 @@ pub struct WaitingInvite {
 }
 
 /// The answer to `POST /api/invites/<fragment>/accept`: the role they
-/// hold there now (a stronger one they held already is kept).
+/// hold there now (a stronger one they held already is kept), and the
+/// fragment's page, which a client opens (FIN-458: an action's answer may
+/// name a page to open). Add-only: an answer from before it names none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InviteAccepted {
     pub fragment: String,
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<String>,
 }
 
 /// `GET /api/f/<name>/invites` (owner): the invites waiting.
