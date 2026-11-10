@@ -259,7 +259,7 @@ def parser():
 
 HINTS = {
     "not_connected": "the person has not connected Linear (or must again): ask them to, in the shell's Settings, under Connections",
-    "forbidden": "the person narrowed this agent's connections and left Linear out",
+    "forbidden": "the person narrowed this agent's connections and left Linear out, or (a change refused while reads work, its message naming write or a scope) connected Linear read only: they allow changes in Settings, under Connections",
     "authentication_error": "Linear refused the connection's token: ask the person to reconnect Linear in Settings, under Connections",
 }
 
