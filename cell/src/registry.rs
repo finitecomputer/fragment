@@ -817,7 +817,7 @@ impl RegistryCell {
     /// the object idles).
     pub(crate) async fn asked(&self) -> CellResult<Vec<calls::Asked>> {
         let kept: Option<String> = self.state.storage().get(calls::ASKED_KEY).await?;
-        kept.map_or(Ok(vec![]), |k| serde_json::from_str(&k).map_err(|e| CellError::host(format!("the asked notices kept: {e}"))))
+        kept.map_or(Ok(vec![]), |k| crate::json_text(&k).map_err(|e| CellError::host(format!("the asked notices kept: {e}"))))
     }
 
     pub(crate) async fn keep_asked(&self, asked: &[calls::Asked]) -> CellResult<()> {
