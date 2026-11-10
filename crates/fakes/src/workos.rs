@@ -121,6 +121,10 @@ struct State {
     /// Connected accounts deleted (user id, provider), each asked once.
     deleted: Vec<(String, String)>,
     omit_id_token: bool,
+    omit_expires_in: bool,
+    /// Access tokens Pipes refreshed: each asked for after its import's
+    /// `expires_at`.
+    refreshes: usize,
     /// An `add` for a person with an account already is refused, as Pipes
     /// does until WorkOS enables additional connections.
     refuse_additional: bool,
@@ -146,8 +150,10 @@ const ACCOUNTS_LIMIT: usize = 25;
 /// standard one an `add` made; whether it is still authorized, its label
 /// (`account_display_name`), scopes and identifier as imported, and the
 /// stand-in provider's account its grant is (none: a test's lever made it),
-/// and what Pipes keeps of its provider's token answers (`metadata`: an
-/// import's that made it, or a test's lever).
+/// what Pipes keeps of its provider's token answers (`metadata`: an
+/// import's that made it, or a test's lever), and when its access token
+/// expires as imported (none: never imported), which Pipes refreshes at the
+/// first token asked for after it.
 #[derive(Clone, Debug)]
 struct Account {
     id: String,
@@ -159,6 +165,7 @@ struct Account {
     created_at: String,
     grant: Option<String>,
     metadata: Value,
+    expires_at: Option<String>,
 }
 
 /// A connected account as a test reads it, with no token.
@@ -188,7 +195,8 @@ enum Target {
 /// An import as it lands: (user id, provider), its label as sent (absent:
 /// an update keeps the one there), the scopes it names (none: none kept),
 /// its identifier (absent: an update keeps it), the account it lands on,
-/// the provider's account its grant is, and its metadata (a create's alone).
+/// the provider's account its grant is, its metadata (a create's alone), and
+/// when its access token expires.
 struct Import {
     user: String,
     provider: String,
@@ -198,6 +206,7 @@ struct Import {
     target: Target,
     account: String,
     metadata: Option<Value>,
+    expires_at: String,
 }
 
 impl Account {
@@ -228,7 +237,7 @@ impl State {
         let id = self.next("data_installation");
         let created_at = crate::codestorage::iso(crate::codestorage::now_ms());
         let list = self.accounts.entry((user.to_string(), provider.to_string())).or_default();
-        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None, metadata: json!({}) });
+        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None, metadata: json!({}), expires_at: None });
         list.last_mut().expect("just made")
     }
 
@@ -277,6 +286,7 @@ impl State {
         if let Some(m) = i.metadata {
             a.metadata = m;
         }
+        a.expires_at = Some(i.expires_at);
         let answer = a.json(&i.user, &i.provider);
         self.imports.push((i.user, i.provider, i.account));
         Some(answer)
@@ -457,6 +467,13 @@ impl WorkOs {
         s.named(&user, provider, None).map(|a| a.metadata.clone())
     }
 
+    /// The next code exchange names no `expires_in`, as Salesforce's never does.
+    pub fn omit_next_expires_in(&self) { self.state.lock().expect("workos state").omit_expires_in = true; }
+
+    /// How many access tokens Pipes refreshed: each asked for once its
+    /// import's `expires_at` had passed.
+    pub fn refreshes(&self) -> usize { self.state.lock().expect("workos state").refreshes }
+
     /// The next import is answered 504, as one whose outcome its caller
     /// cannot know, and lands only at `land_deferred_import`.
     pub fn defer_next_import(&self) { self.state.lock().expect("workos state").defer_import = true; }
@@ -624,6 +641,9 @@ impl WorkOs {
                         let claims = json!({ "iss": "https://oauth.test", "aud": "mock-connection-client", "sub": account, "email": format!("{account}@oauth.test"), "email_verified": true });
                         grant["id_token"] = format!("{}.{}.fake", b64(json!({ "alg": "none", "typ": "JWT" })), b64(claims)).into();
                     }
+                    if std::mem::take(&mut s.omit_expires_in) {
+                        grant.as_object_mut().expect("a grant").remove("expires_in");
+                    }
                     s.oauth_grants.insert(access.clone(), (refresh.clone(), account));
                     Response::json(200, &grant)
                 }
@@ -672,7 +692,8 @@ impl WorkOs {
                     // WorkOS: metadata is "not accepted on update"
                     if body.get("metadata").is_some() && req.method == "PUT" { return pipes_problem(422, "invalid_request", "metadata is not accepted on update"); }
                     let metadata = body.get("metadata").cloned();
-                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account, metadata };
+                    let expires_at = body["expires_at"].as_str().unwrap_or_default().to_string();
+                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account, metadata, expires_at };
                     if std::mem::take(&mut s.defer_import) {
                         s.deferred = Some(import);
                         return problem(504, "gateway_timeout", "test import deferred: it lands later");
@@ -872,6 +893,14 @@ impl WorkOs {
                         Some(false) => Response::json(200, &json!({ "active": false, "error": "needs_reauthorization" })),
                         Some(true) => {
                             let account = account.expect("matched");
+                            // an access token past its import's expiry is refreshed first
+                            let now = fragment_core::export::rfc3339(crate::codestorage::now_ms());
+                            if account.expires_at.as_ref().is_some_and(|e| *e <= now) {
+                                s.refreshes += 1;
+                                let later = fragment_core::export::rfc3339(crate::codestorage::now_ms() + 3_600_000);
+                                let held = s.accounts.get_mut(&(user.clone(), provider.clone())).and_then(|l| l.iter_mut().find(|a| a.id == account.id));
+                                held.expect("the account vended").expires_at = Some(later);
+                            }
                             let token = s.next(&format!("pipes_{provider}"));
                             s.pipes_tokens.insert(token.clone(), (user.clone(), provider.clone(), account.id.clone()));
                             // what the account holds, and what of the connection's asks it lacks
