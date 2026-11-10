@@ -1441,8 +1441,8 @@ impl std::error::Error for DirRefused {}
 /// Refuses `dir` (`DirRefused`) when it is `/`, `/tmp`, `home` or a folder
 /// above `home`, or holds a browser profile at its top level or in a
 /// subfolder: a `Default/Cookies`, a `Local State` or an
-/// `org.chromium.Chromium.*`. It reads those two levels only, and only
-/// what sync would send (`walk`). `home` is taken both as given and
+/// `org.chromium.Chromium.*`. It reads those levels only, and only what
+/// sync would send (`walk`). `home` is taken both as given and
 /// with its links resolved: a Hermes terminal's `HOME` is a link into the
 /// agent's work folder. A folder not there yet holds nothing.
 pub fn refuse_dir(dir: &Path, home: Option<&Path>) -> Result<(), DirRefused> {
@@ -1456,18 +1456,16 @@ pub fn refuse_dir(dir: &Path, home: Option<&Path>) -> Result<(), DirRefused> {
             return Err(DirRefused::Home { dir, home: h });
         }
     }
+    // a profile's folder is at depth 0 or 1, so its `Default/Cookies` at 2 or 3
     let profile = |e: &ignore::DirEntry| {
         let name = e.file_name().to_string_lossy();
-        let folder = e.file_type().is_some_and(|t| t.is_dir());
-        match &*name {
-            "Default" if folder => Some(e.path().join("Cookies")).filter(|c| c.is_file()),
-            "Local State" if !folder => Some(e.path().to_path_buf()),
-            _ if name.starts_with("org.chromium.Chromium.") => Some(e.path().to_path_buf()),
-            _ => None,
-        }
+        let file = e.file_type().is_some_and(|t| t.is_file());
+        let in_default = e.path().parent().and_then(Path::file_name).is_some_and(|p| p == "Default");
+        let chromium = e.depth() <= 2 && name.starts_with("org.chromium.Chromium.");
+        (file && name == "Cookies" && in_default) || (file && e.depth() <= 2 && name == "Local State") || chromium
     };
-    match walk(&dir).max_depth(Some(2)).build().flatten().find_map(|e| profile(&e)) {
-        Some(found) => Err(DirRefused::BrowserProfile { dir, found }),
+    match walk(&dir).max_depth(Some(3)).build().flatten().find(profile) {
+        Some(found) => Err(DirRefused::BrowserProfile { dir, found: found.into_path() }),
         None => Ok(()),
     }
 }
@@ -1592,6 +1590,13 @@ mod tests {
         fs::create_dir_all(repo.join("browser-profile/Default")).unwrap();
         fs::write(repo.join("browser-profile/Default/Cookies"), b"x").unwrap();
         fs::write(repo.join("browser-profile/Local State"), b"x").unwrap();
+        assert_eq!(refuse_dir(&repo, Some(&home)), Ok(()));
+        // or keeps only the profile's files out
+        let repo = git_folder("refuse-ignored-files", "browser-profile/Default/*\nbrowser-profile/Local State");
+        fs::create_dir_all(repo.join("browser-profile/Default")).unwrap();
+        fs::write(repo.join("browser-profile/Default/Cookies"), b"x").unwrap();
+        fs::write(repo.join("browser-profile/Local State"), b"x").unwrap();
+        fs::write(repo.join("browser-profile/notes.md"), b"x").unwrap();
         assert_eq!(refuse_dir(&repo, Some(&home)), Ok(()));
     }
 
