@@ -23,7 +23,11 @@
 // archive's own search (`h.archive.search`: q → [{key, snippet}], best
 // first) for its conversations whose words hold them, each with its best
 // snippet. Either failing, what the other found stands, and the page says
-// which was not searched (`answersOf`).
+// which was not searched (`answersOf`). The person's search is asked
+// again with each read of their list (`listed`, shell.js `load`) and as
+// the page opens: a chat's newest message is its list row's and its
+// search's at once (principal.rs), and comes to the list after the words
+// may have been typed, so what the list holds the search finds.
 // Opening a row opens it in the middle column; a message the person sends
 // in a chat they archived brings it back to the sidebar (shell.js, `said`).
 // Archived and imported rows end with `h.continueControl(source)` once it
@@ -129,8 +133,12 @@ export function createHistoryPage(page, h) {
   let filter = "all";
   let q = "";
   let limit = ROWS_STEP;
-  // the person's search for `q`: what it found, or why it failed
-  const search = { q: "", asked: 0, timer: 0, found: new Map(), foundImported: new Map(), failed: "" };
+  // the two searches for the words typed, the person's and their
+  // archive's: each the words of its newest answer (`q`) and that answer,
+  // as `Promise.allSettled` gives it; `asked` counts its asks
+  const searches = { mine: { q: "", asked: 0, answer: null }, archive: { q: "", asked: 0, answer: null } };
+  // typing not yet rested: both are asked once it does
+  let typing = 0;
   // each row's Continue, kept across drawings (what it is doing is its own)
   const controls = new Map();
   // a chat with nothing said yet: its first record as read, by name, with
@@ -191,26 +199,40 @@ export function createHistoryPage(page, h) {
     parts = { input, chips, status, list, more };
   }
 
-  // The person's search, once typing rests: a slower answer to an older
-  // query never replaces a newer one's.
+  // One search asked for `hint`: its answer kept and the page drawn, unless
+  // it was asked again meanwhile (a slower answer to an older ask never
+  // replaces a newer one's).
+  async function asking(search, hint, read) {
+    const mine = ++search.asked;
+    const [answer] = await Promise.allSettled([read()]);
+    if (mine !== search.asked) return;
+    Object.assign(search, { q: hint, answer });
+    render();
+  }
+  const searchMine = (hint) => asking(searches.mine, hint, () => h.api("GET", `/api/search?q=${encodeURIComponent(hint)}`));
+
+  // Both searches, once typing rests.
   function ask() {
-    clearTimeout(search.timer);
+    clearTimeout(typing);
+    typing = 0;
     const hint = hintOf(q);
     if (!hint) {
-      Object.assign(search, { q: "", found: new Map(), foundImported: new Map(), failed: "" });
+      for (const search of Object.values(searches)) Object.assign(search, { q: "", answer: null });
       return;
     }
-    if (hint === search.q) return;
-    search.timer = setTimeout(async () => {
-      const mine = ++search.asked;
-      const [chats, imported] = await Promise.allSettled([
-        h.api("GET", `/api/search?q=${encodeURIComponent(hint)}`),
-        h.archive.search ? h.archive.search(hint) : [],
-      ]);
-      if (mine !== search.asked) return;
-      Object.assign(search, { q: hint, ...answersOf(chats, imported) });
-      render();
+    if (hint === searches.mine.q && hint === searches.archive.q) return;
+    typing = setTimeout(() => {
+      typing = 0;
+      searchMine(hint);
+      asking(searches.archive, hint, () => (h.archive.search ? h.archive.search(hint) : []));
     }, SEARCH_WAIT_MS);
+  }
+
+  // The person's search asked again for the words typed, once they rest:
+  // a message their list holds now, it finds.
+  function again() {
+    const hint = hintOf(q);
+    if (shown && hint && !typing) searchMine(hint);
   }
 
   // The first records of the chats that need them, a few at a time; each
@@ -321,12 +343,14 @@ export function createHistoryPage(page, h) {
       return [{ name: f.name, title: h.chatTitle(f.name), at: f.previewAt ?? first.at, archived: !!f.archived, preview: f.preview ?? first.line, with: withWhom(f) }];
     });
     const entries = h.archive.name() ? h.archive.entries() : [];
-    const searched = hintOf(q) === search.q;
-    const rows = historyRows({ chats, entries, filter, q, ...(searched ? { found: search.found, foundImported: search.foundImported } : {}) });
+    const hint = hintOf(q);
+    const searched = !!hint && searches.mine.q === hint && searches.archive.q === hint;
+    const { found, foundImported, failed } = searched ? answersOf(searches.mine.answer, searches.archive.answer) : { found: new Map(), foundImported: new Map(), failed: "" };
+    const rows = historyRows({ chats, entries, filter, q, found, foundImported });
     for (const chip of parts.chips.children) chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
     const words = wordsOf(q).length > 0;
     const waiting = words && !searched;
-    parts.status.textContent = search.failed && searched ? search.failed : waiting ? "Searching messages…" : "";
+    parts.status.textContent = failed || (waiting ? "Searching messages…" : "");
     parts.status.hidden = !parts.status.textContent;
     if (!rows.length) {
       const empty = words ? (waiting ? "" : `Nothing found for “${q.trim()}”`) : filter === "archived" ? "No archived chats" : filter === "imported" ? "No imported chats" : "No chats yet";
@@ -344,12 +368,18 @@ export function createHistoryPage(page, h) {
       // what failed to be read is read again
       for (const [name, f] of firsts) if (f.failed) firsts.delete(name);
       render();
+      again();
       parts.input.focus({ preventScroll: true });
     },
     close() {
       shown = false;
     },
-    // the person's list changed, or the archive's index: drawn again
+    // the archive's index changed: drawn again
     render,
+    // the person's list read again: drawn again, and searched again
+    listed() {
+      render();
+      again();
+    },
   };
 }
