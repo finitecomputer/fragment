@@ -7,7 +7,8 @@
 
 use anyhow::{Context, Result};
 use fragment_fakes::mover::{event, fixture_zip, staged, Mover, Script};
-use fragment_proto::migrations::{Has, Roster, RosterAgent, RosterPerson, Sizes};
+use fragment_proto::migrations::{Has, Roster, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT};
+use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::api::Api;
@@ -132,8 +133,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("\"Never\" holds until \"Ask again\"; a move whose person is not known here takes no answer (409)", n.body["state"] == "never" && back.body["state"] == "open" && listed.status == 409, format!("{} {} {}", n.body, back.body, listed));
 
     // ---- Yes: the mover is told to stop and stage it
-    let (_, alice_agent) = api.own_agent(&alice)?;
-    let (_, strangers_agent) = api.own_agent(&stranger)?;
+    let (alice_agent_keys, alice_agent) = api.own_agent(&alice)?;
+    let (strangers_agent_keys, strangers_agent) = api.own_agent(&stranger)?;
     let theirs = answer(&a1, "yes", Some(&strangers_agent))?;
     let yes = answer(&a1, "yes", Some(&alice_agent))?;
     let yes_again = answer(&a1, "yes", Some(&alice_agent))?;
@@ -236,6 +237,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a stage not opened within two hours gets its routine once more (still importing), then the move is held (not_opened)", once_more && m["state"] == "held" && m["reason"] == "not_opened", &m);
 
     // ---- staff restart the old agent: offered again, the mover told to restart it
+    let staged_three = objects(&format!("p1/{a1}/3/"));
     let r = act(&a1, "restart-old")?;
     let restart = mover.commands()?.into_iter().find(|c| c.old == a1);
     mover.run_once()?;
@@ -245,6 +247,11 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["state"] == "open" && restart.is_some_and(|c| c.id == format!("{a1}:3:restart")) && m["command"].is_null() && m["agent"].is_null(),
         &m,
     );
+
+    // what the alarm deletes, it deletes after the call that queued it
+    let deleted = |s: &Suite, prefix: &str| s.eventually(Duration::from_secs(20), || objects(prefix).is_empty());
+    let gave_up = deleted(s, &format!("p1/{a1}/3/"));
+    s.ok("the stage it gave up on is deleted from the bucket by the alarm", staged_three.len() == 2 && gave_up, format!("{staged_three:?}"));
 
     // ---- a stage that fails at the last attempt is held; staff retire it
     let yes = answer(&a1, "yes", Some(&alice_agent))?;
@@ -258,6 +265,68 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     mover.run_once()?;
     let bad = act(&a1, "withdraw")?;
     s.ok("staff retire it: the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409)", r.body["state"] == "retiring" && state(&a1) == "moved" && bad.status == 409, format!("{} {}", r.body, bad));
+
+    // ---- the one person's bound agent reads its own stage, while it
+    // imports; no one else, ever
+    let e1 = old("e1");
+    mover.push(&roster("s2b", vec![person(&alice_id, &[&a1, &a2, &e1]), person(&dave_id, &[&d1, &d2]), person(&format!("{run}-nobody"), &[&b1])]))?;
+    answer(&e1, "yes", Some(&alice_agent))?;
+    let stage = format!("{e1}.p1.1");
+    let at = |what: &str| format!("/api/migrations/stages/{stage}/{what}");
+    let before = (api.signed(&alice_agent_keys, "POST", &at("open"), None)?, api.signed(&alice_agent_keys, "GET", &at("zip"), None)?);
+    s.ok("its bound agent reads nothing before the move imports (409)", before.0.status == 409 && before.1.status == 409, format!("{} {}", before.0, before.1));
+    mover.run_once()?;
+    let (alice_other_keys, _) = api.own_agent(&alice)?;
+    let mover_reads = (mover.call("GET", &at("zip"), None)?.status, mover.call("POST", &at("open"), None)?.status);
+    let refused = [
+        ("a stranger", api.signed(&stranger, "GET", &at("zip"), None)?.status),
+        ("another person's agent", api.signed(&strangers_agent_keys, "GET", &at("zip"), None)?.status),
+        ("the same person's other agent", api.signed(&alice_other_keys, "GET", &at("zip"), None)?.status),
+        ("its person, as themselves", api.signed(&alice, "GET", &at("zip"), None)?.status),
+        ("an operator", api.signed(&operator, "GET", &at("zip"), None)?.status),
+        ("another person's agent opening it", api.signed(&strangers_agent_keys, "POST", &at("open"), None)?.status),
+    ];
+    s.ok(
+        "while it imports, its stage is refused to a stranger, another person's agent, the same person's other agent, its person, and an operator (403), and to the mover (401: no route reads it a stage)",
+        refused.iter().all(|(_, status)| *status == 403) && mover_reads.0 == 401 && mover_reads.1 == 401,
+        format!("{refused:?} {mover_reads:?}"),
+    );
+    let row = moved(&e1)?;
+    let fields = ["old", "workos_id", "person", "agent", "state", "reason", "phase", "attempt", "command", "since_ms", "deadline_ms", "staged_ms"];
+    s.ok("staff's list says its state and when, never a stage's bytes or manifest", row["state"] == "importing" && row.as_object().is_some_and(|o| o.keys().all(|k| fields.contains(&k.as_str()))), &row);
+    let other = api.signed(&alice_agent_keys, "POST", &format!("/api/migrations/stages/{e1}.p1.9/open"), None)?;
+    let opened = api.signed(&alice_agent_keys, "POST", &at("open"), None)?;
+    let m = &opened.body["manifest"];
+    s.ok(
+        "its bound agent opens it: the manifest as completed; another attempt's stage is none (404)",
+        other.status == 404 && opened.status == 200 && opened.body["stage"] == stage.as_str() && m["format"] == STAGE_FORMAT && m["old"] == e1.as_str() && m["attempt"] == 1 && m["zip_bytes"] == 65_536 && m["left"][0]["why"] == "secret",
+        &opened.body,
+    );
+    let whole = api.signed(&alice_agent_keys, "GET", &at("zip"), None)?;
+    let range = api.call(crate::api::Call { method: "GET", url: format!("{}{}", api.base, at("zip")), keys: Some(&alice_agent_keys), extra: vec![("range", "bytes=100-199".to_string())], ..Default::default() })?;
+    let zip = mover.zip_bytes();
+    s.ok(
+        "it reads the zip whole (200), and by a range (206, that range alone, content-range of the whole)",
+        whole.status == 200 && whole.bytes == zip && range.status == 206 && range.bytes == zip[100..200] && range.header("content-range") == "bytes 100-199/65536" && range.header("accept-ranges") == "bytes",
+        format!("{} {} {}", whole.status, range.status, range.header("content-range")),
+    );
+    let bad = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": "yes" })))?;
+    let done = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true, "report_sha256": "cd".repeat(32) })))?;
+    let again = api.signed(&alice_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
+    let after = (api.signed(&alice_agent_keys, "GET", &at("zip"), None)?, api.signed(&alice_agent_keys, "POST", &at("open"), None)?);
+    s.ok(
+        "done well: retiring as migrated; the same done again changes nothing; its stage is refused to its own agent at once (409); a done that is not one is 400",
+        bad.status == 400 && done.status == 200 && done.body["state"] == "retiring" && again.status == 200 && again.body["state"] == "retiring" && after.0.status == 409 && after.1.status == 409,
+        format!("{bad} {} {} {}", done.body, after.0, after.1),
+    );
+    let retire = mover.commands()?.into_iter().find(|c| c.old == e1).map(|c| serde_json::to_value(&c).unwrap_or_default());
+    mover.run_once()?;
+    let gone = deleted(s, &format!("p1/{e1}/1/"));
+    s.ok(
+        "the old agent is retired as migrated (moved), and its stage deleted from the bucket by the alarm",
+        retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && gone && state(&e1) == "moved",
+        format!("{retire:?} {}", state(&e1)),
+    );
 
     // ---- a roster withdraws the unasked; staff's withdrawal holds
     let r = mover.push(&roster("s3", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2])]))?;
@@ -304,7 +373,10 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         before.is_null() && r.status == 200 && opened.status == 200 && after["person"].is_string() && after["state"] == "archived",
         format!("{before} {opened} {after}"),
     );
-    let (_, carol_agent) = api.own_agent(&carol)?;
+    let (carol_agent_keys, carol_agent) = api.own_agent(&carol)?;
+    // archived, the stage is no one's to read until its person says Yes
+    let unread = api.signed(&carol_agent_keys, "GET", &format!("/api/migrations/stages/{c1}.p2.{}/zip", moved(&c1)?["attempt"]), None)?;
+    s.ok("an archived stage is read by no one, its person's own agent included, until their Yes binds it (403)", unread.status == 403, &unread);
     for (o, who, agent) in [(&c1, "a late sign-up", &carol_agent), (&a2, "someone who never answered", &alice_agent)] {
         let late = answer(o, "yes", Some(agent))?;
         let late_move = moved(o)?;
@@ -314,9 +386,102 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
             &late_move,
         );
     }
+    // the late sign-up's import, to its end: the old agent retired as
+    // migrated, marked again from archived (what finite.computer redirects by)
+    let late_stage = format!("{c1}.p2.{}", moved(&c1)?["attempt"]);
+    let at = |what: &str| format!("/api/migrations/stages/{late_stage}/{what}");
+    let opened = api.signed(&carol_agent_keys, "POST", &at("open"), None)?;
+    let zip = api.signed(&carol_agent_keys, "GET", &at("zip"), None)?;
+    let done = api.signed(&carol_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
+    let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
+    mover.run_once()?;
+    let gone = deleted(s, &format!("p2/{c1}/"));
+    s.ok(
+        "the late sign-up reads the kept stage and says it is done: the old agent is retired as migrated, its stage deleted, the move done (moved)",
+        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && gone,
+        format!("{} {} {retire:?} {}", opened.status, done.body, state(&c1)),
+    );
+    let kept = objects(&format!("p2/{d1}/"));
     later_by(90 * DAY_MS)?;
     let e = moved(&d1)?;
-    s.ok("90 days past the cutoff an unclaimed archive expires (its stage's deletion is the alarm's: F7)", e["state"] == "expired", &e);
+    let gone = deleted(s, &format!("p2/{d1}/"));
+    s.ok("90 days past the cutoff an unclaimed archive expires, and its kept stage is deleted from the bucket", kept.len() == 2 && e["state"] == "expired" && gone, format!("{kept:?} {}", e["state"]));
     lever(json!({ "op": "clock", "offsetMs": 0 }))?;
+    Ok(())
+}
+
+/// The move into a real agent on a computer (the stub image): its routine
+/// lands on the agent fragment's own `tasks`, naming its stage, and the
+/// agent reads its stage through its computer's egress, signed as itself,
+/// then says it is done. What the importer then does with the bytes is
+/// the importer's (F8, F9).
+pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
+    use super::computers::{agent_replies, phase, turn_of, AGENT_JSON, CHAT_JSON};
+    use super::jobs::records;
+    if !s.section("move-import", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Computers]) {
+        return Ok(());
+    }
+    const WAKE: Duration = Duration::from_secs(90);
+    let mover = Mover::new(&api.base, s.mover.clone());
+    let old = format!("{}-o1", s.name("mi"));
+    let owner = api.person()?;
+    let workos_id = s.workos.user(&Api::email_of(&owner)).id;
+    // a computer, its agent fragment, and a chat the agent is in (as the computers lane makes them)
+    let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
+    let id = r.body["computer"].as_str().unwrap_or("").to_string();
+    let agent_name = s.named(api, &owner, "kestrel")?;
+    let agent = s.create(api, &owner, &agent_name)?;
+    s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
+    s.deploy(&agent);
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
+    let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && !identity.is_empty(), "the agent assigned: {r}");
+    let chat_name = s.named(api, &owner, "chat")?;
+    let chat = s.create(api, &owner, &chat_name)?;
+    s.commit(&chat, &[("fragment.json", Some(CHAT_JSON))]);
+    s.deploy(&chat);
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent joins its chat: {r}");
+    let woke = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    anyhow::ensure!(woke, "the computer wakes: {}", phase(api, &owner, &id));
+
+    // the move: Yes with this agent, staged
+    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people: vec![person(&workos_id, &[&old])] })?;
+    anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
+    let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
+    anyhow::ensure!(visit.status == 200 && visit.body["bound"] == 1, "its owner opens the move, and is bound: {visit}");
+    let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": identity })))?;
+    anyhow::ensure!(yes.status == 200, "Yes: {yes}");
+    mover.run_once()?;
+    let stage = format!("{old}.p1.1");
+    let agent_npub = agent["npub"].as_str().unwrap_or("").to_string();
+    let routine = || records(api, &owner, &agent_name, "tasks").into_iter().find(|r| r["body"]["kind"] == "routine" && r["body"]["text"].as_str().is_some_and(|t| t.contains(&stage)));
+    let landed = s.eventually(Duration::from_secs(30), || routine().is_some());
+    let r = routine().unwrap_or_default();
+    s.ok(
+        "staged: the import's routine lands on the agent's own tasks, as the agent fragment itself, with no chat, naming its stage and the skill",
+        landed && r["principal"] == agent_npub.as_str() && r["body"]["chat"].is_null() && r["body"]["text"].as_str().is_some_and(|t| t.contains("import-agent-home")),
+        &r,
+    );
+
+    // the agent reads its stage through its computer's egress, signed as itself
+    let say = |n: u32, text: &str| api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("mv{n}"), "body": { "text": text } })));
+    let fetched = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        let r = say(n, text)?;
+        let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let reply = || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+        s.eventually(WAKE, || reply().is_some());
+        Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let base = format!("http://api.fragment.internal/api/migrations/stages/{stage}");
+    let opened = fetched(s, 1, &format!("fetch {base}/open with {agent_name} in x-fragment-agent posting {{}}"))?;
+    let zip = fetched(s, 2, &format!("fetch {base}/zip with {agent_name} in x-fragment-agent"))?;
+    s.ok("the agent opens its stage and reads its zip through its own egress (NIP-98 as itself)", opened.starts_with("fetched 200:") && opened.contains(STAGE_FORMAT) && zip.starts_with("fetched 200:"), format!("{opened} | {}", zip.chars().take(40).collect::<String>()));
+    let done = fetched(s, 3, &format!("fetch {base}/done with {agent_name} in x-fragment-agent posting {{\"ok\":true}}"))?;
+    let after = fetched(s, 4, &format!("fetch {base}/zip with {agent_name} in x-fragment-agent"))?;
+    s.ok("it says it is done: the move retires the old agent, and its stage's routes refuse at once", done.starts_with("fetched 200:") && done.contains("retiring") && after.starts_with("fetched 409:"), format!("{done} | {after}"));
+    mover.run_once()?;
     Ok(())
 }

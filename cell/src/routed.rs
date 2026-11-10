@@ -208,6 +208,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
     } else if path == "signin/visibility" {
         Ok(Some((crate::auth::SIGNIN_HEADER, "1")))
+    } else if path.starts_with("stage/routine/") {
+        Ok(Some((crate::migrations::ROUTINE_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("test/") || path.starts_with("index/") || path.starts_with("migrations/") {

@@ -290,7 +290,7 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             // bytes another identity also set stay theirs
             let keys: Vec<String> = facts.pictures.iter().filter(|p| !p.shared).map(|p| format!("pictures/{}", p.sha)).collect();
             if !keys.is_empty() {
-                js::blob_delete(env, &keys).await?;
+                js::blob_delete(env, js::BLOBS, &keys).await?;
             }
             Ok(Did::finished(keys.len() as u64))
         }

@@ -47,6 +47,14 @@ pub const ARCHIVE_KEEP_MS: i64 = 90 * DAY_MS;
 /// Phase 2 moves in flight at once: the rest wait their turn.
 pub const ARCHIVING_MAX: usize = 8;
 
+/// The routine that starts a stage's import, on its new agent's own
+/// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;
+/// docs/chat-records.md, "A routine"). Its person's answers join it with
+/// the page that asks them (F6).
+pub fn routine_text(stage: &str) -> String {
+    format!("Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage {stage}.")
+}
+
 /// What the mailbox holds for a move. A stage's phase and id are the
 /// move's own (`Move::stage`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

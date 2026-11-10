@@ -33,6 +33,7 @@ step Computer 4 key_caps 3a6f4f9976a3efe3
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Migrations 1 baseline dcdbff021844dd7c
+step Migrations 2 opened_manifest 8ba2596d7c018f5c
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -228,4 +229,4 @@ Migrations table parts: CREATE TABLE parts (stage TEXT NOT NULL, n INTEGER NOT N
 Migrations table people: CREATE TABLE people (workos_id TEXT PRIMARY KEY, email TEXT NOT NULL, person TEXT)
 Migrations table routines: CREATE TABLE routines (stage TEXT PRIMARY KEY, agent TEXT NOT NULL, tries INTEGER NOT NULL, next_ms INTEGER NOT NULL)
 Migrations table sweeps: CREATE TABLE sweeps (prefix TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)
-Migrations table uploads: CREATE TABLE uploads (stage TEXT PRIMARY KEY, upload_id TEXT NOT NULL, created_ms INTEGER NOT NULL, manifest_sha256 TEXT, zip_bytes INTEGER)
+Migrations table uploads: CREATE TABLE uploads (stage TEXT PRIMARY KEY, upload_id TEXT NOT NULL, created_ms INTEGER NOT NULL, manifest_sha256 TEXT, zip_bytes INTEGER, manifest TEXT)

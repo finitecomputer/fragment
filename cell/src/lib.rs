@@ -603,7 +603,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
         return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
     };
-    let blob = js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+    let blob = js::blob_get(env, js::BLOBS, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
     let headers = Headers::new();
     headers.set("content-type", &picture.mime)?;
     headers.set("cache-control", "public, max-age=300")?;

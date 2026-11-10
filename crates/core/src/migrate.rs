@@ -161,7 +161,7 @@ pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("bas
 
 /// The finite.computer move's one object (docs/migrations.md): removable
 /// with the move, by a `deleted_classes` tag (the debt ledger).
-pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql")], variants: &[], kept: &[] };
+pub const MIGRATIONS: Class = Class { name: "Migrations", steps: &[step!("baseline", "migrations/0001_baseline.sql"), step!("opened_manifest", "migrations/0002_opened_manifest.sql")], variants: &[], kept: &[] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 7] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER, &SEARCH_INDEX, &MIGRATIONS];

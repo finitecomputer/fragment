@@ -565,7 +565,7 @@ impl PrincipalCell {
             h.set("content-length", &row.size.unwrap_or(0).to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
-        let b = js::blob_get(&self.env, &key, range).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
+        let b = js::blob_get(&self.env, js::BLOBS, &key, range).await?.ok_or_else(|| CellError::host(format!("export {id}'s archive is missing")))?;
         let status = match b.range {
             Some((offset, length)) => {
                 h.set("content-range", &format!("bytes {offset}-{}/{}", offset + length.max(1) - 1, b.size))?;
@@ -654,7 +654,7 @@ impl PrincipalCell {
                 js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
             }
         }
-        let (deleted, more) = js::blob_delete_under(&self.env, &format!("exports/{}/", ask.person), 10).await?;
+        let (deleted, more) = js::blob_delete_under(&self.env, js::BLOBS, &format!("exports/{}/", ask.person), 10).await?;
         if !more && !self.wiped.get() {
             self.run_sql("UPDATE exports SET state = 'expired', job = NULL, upload = NULL, gone_at = COALESCE(gone_at, ?), metered = 1", vec![SqlStorageValue::Integer(js::now_ms())])?;
         }
@@ -731,7 +731,7 @@ impl PrincipalCell {
                 if let Some(upload) = &r.upload {
                     js::upload_abort(&self.env, js::BLOBS, &archive_key(&r.person, &r.id), upload).await?;
                 }
-                let (_, more) = js::blob_delete_under(&self.env, &prefix(&r.person, &r.id), 10).await?;
+                let (_, more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix(&r.person, &r.id), 10).await?;
                 if more {
                     continue;
                 }
@@ -939,7 +939,7 @@ impl PrincipalCell {
             Ok(())
         })?;
         console_log!("{}", json!({ "export": r.id, "ready": size }));
-        if let Err(e) = js::blob_delete_under(&self.env, &format!("{}spool/", prefix(&r.person, &r.id)), 10).await {
+        if let Err(e) = js::blob_delete_under(&self.env, js::BLOBS, &format!("{}spool/", prefix(&r.person, &r.id)), 10).await {
             console_error!("{}", json!({ "export": r.id, "spool": "left, for its expiry", "error": e.message }));
         }
         if let Some(to) = job.plan.as_ref().and_then(|p| p.email.clone()) {

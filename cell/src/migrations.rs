@@ -8,8 +8,11 @@
 //!
 //! The router's half is here too: the mover's routes
 //! (`/api/migrations/mover/*`, signed by the key the deployment's
-//! `migrations.mover` names, and no other) and the operators'
-//! (`/api/admin/migrations`, the whole admin surface). A deployment with no
+//! `migrations.mover` names, and no other), the new agent's
+//! (`/api/migrations/stages/*`: its own stage, while it imports), and the
+//! operators' (`/api/admin/migrations`, the whole admin surface). After a
+//! pass of its deadlines, the alarm sends what it queued: each routine that
+//! starts an import, and the deletion of each stage done with. A deployment with no
 //! `migrations` answers none of them. Removable whole (the debt ledger's
 //! "The finite.computer move").
 //!
@@ -27,8 +30,8 @@ use std::pin::Pin;
 use fragment_core::migrations::{self as machine, Col, Effect, Move, Refused, Step};
 use fragment_nip98::Payload;
 use fragment_proto::migrations::{
-    parse_stage, stage_prefix, valid_old, AdminAct, Mailbox, MoveState, Report, Reported, RosterTaken, StageCompleted, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES, PARTS_MAX, PART_MAX_BYTES,
-    ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
+    parse_stage, stage_prefix, valid_old, AdminAct, Mailbox, MoveAt, MoveState, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES, PARTS_MAX,
+    PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
 };
 use fragment_proto::{limits, ErrorCode};
 use serde::Deserialize;
@@ -56,6 +59,19 @@ const AGAIN_MS: i64 = 1_000;
 const OFFER_MAX_BYTES: usize = 64 * 1024;
 /// Staff's acts (`AdminAct`'s `op`).
 const ACTS: [&str; 4] = ["retry", "restart-old", "retire", "withdraw"];
+/// Stages one alarm pass deletes, and the pages of keys (R2 lists and
+/// deletes 1,000 a call) of each.
+const SWEEPS_A_PASS: i64 = 4;
+const SWEEP_PAGES: usize = 2;
+/// Routines one pass sends, the tries each gets, and the wait after a
+/// failed one (doubling).
+const ROUTINES_A_PASS: i64 = 16;
+const ROUTINE_TRIES: i64 = 5;
+const ROUTINE_RETRY_MS: i64 = 30_000;
+/// The header a move's routine into an agent's fragment carries
+/// (routed.rs `marker`): the router never passes it. The routine goes as
+/// `stage/routine/<key>`, its text the body: appended once by its key.
+pub(crate) const ROUTINE_HEADER: &str = "x-fragment-move-routine";
 
 /// A move's columns (`fragment_core::migrations::COLUMNS`), as SQL names
 /// and binds them, and the queries built of them: whole at compile time.
@@ -107,6 +123,9 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
     let Some(m) = &cfg.migrations else { return Err(crate::no_route(url.path())) };
     if let (Method::Put, ["mover", "stages", stage, "parts", n]) = (req.method(), rest) {
         return part(req, env, url, &m.mover, stage, n).await;
+    }
+    if let ["stages", stage, op] = rest {
+        return stage_route(req, env, url, stage, op).await;
     }
     let ["mover", tail @ ..] = rest else { return Err(crate::no_route(url.path())) };
     let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
@@ -213,6 +232,29 @@ fn pass(env: &Env, op: String, body: String) -> Waits<'_, Response> {
     Box::pin(async move { crate::json_passed(ask(env, op, body).await?) })
 }
 
+/// `/api/migrations/stages/{stage}/…`: a new agent's own stage, signed as
+/// itself (its computer's egress signs so). The object says whether the
+/// stage is that agent's to read now: only the agent its person's Yes
+/// bound, while the move imports it. `open` answers its manifest; `zip`
+/// its bytes, whole or by a range; `done` ends the import.
+fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str, op: &'a str) -> Waits<'a, Response> {
+    Box::pin(async move {
+        let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+        let agent = crate::signer(env, &req, url, &bytes).await?.identity.id;
+        match (req.method(), op) {
+            (Method::Post, "open") => pass(env, format!("open/{stage}/{agent}"), String::new()).await,
+            (Method::Get, "zip") => {
+                let key = text(ask(env, format!("readable/{stage}/{agent}"), String::new()).await?)?;
+                let range = req.headers().get("range")?;
+                let zip = js::blob_get(env, STAGE, &key, range.as_deref()).await?.ok_or_else(|| CellError::host(format!("stage {stage} imports, and its zip is gone")))?;
+                crate::blobs::ranged(zip, "application/zip", None)
+            }
+            (Method::Post, "done") => pass(env, format!("done/{stage}/{agent}"), text(bytes)?).await,
+            _ => Err(crate::no_route(url.path())),
+        }
+    })
+}
+
 /// One part of a stage's zip: the object says whether the mover may upload
 /// this stage now, and where (its upload made here once, the first part's);
 /// the request's own stream goes to R2 unread; the object takes the part.
@@ -290,7 +332,7 @@ fn complete<'a>(env: &'a Env, stage: &'a str, body: String) -> Waits<'a, Respons
         // the manifest last: its presence is what staged means
         js::blob_put_bytes(env, STAGE, &format!("{prefix}{STAGE_MANIFEST}"), manifest.as_bytes()).await?;
         let sha = fragment_core::blob::sha256_hex(manifest.as_bytes());
-        pass(env, format!("completed/{stage}/{sha}/{size}"), String::new()).await
+        pass(env, format!("completed/{stage}/{sha}/{size}"), manifest.to_string()).await
     })
 }
 
@@ -403,6 +445,7 @@ fn read_roster(text: &str) -> CellResult<(RosterIn, Agents)> {
 #[durable_object]
 pub struct MigrationsCell {
     state: State,
+    env: Env,
     raw: JsValue,
     cfg: &'static Config,
     schema: crate::schema::Schema,
@@ -414,7 +457,7 @@ impl DurableObject for MigrationsCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let schema = crate::schema::Schema::start(&raw, state.storage().sql(), &fragment_core::migrate::MIGRATIONS, &state.id().to_string());
         let cfg = Config::from_env(&env);
-        MigrationsCell { state, raw, cfg, schema }
+        MigrationsCell { state, env, raw, cfg, schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -434,7 +477,11 @@ impl DurableObject for MigrationsCell {
         if self.schema.refused_alarm(&self.state, None).await? {
             return Response::ok("");
         }
-        if let Err(e) = self.supervise() {
+        let ran = match self.supervise() {
+            Ok(()) => self.outboxes().await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = ran {
             console_error!("migrations.alarm-failed: {}", e.message);
             // looked at again in a minute
             let _ = js::set_alarm(&self.raw, js::now_ms() + 60_000);
@@ -522,11 +569,46 @@ impl MigrationsCell {
                 crate::json_answer(&StageParts { parts: parts.stage_parts(stage)? })
             }
             ("complete", [stage]) => Ok(Response::ok(self.complete(stage, &body)?)?),
+            // the manifest written (the body), kept for the new agent's open
             ("completed", [stage, sha, bytes]) => {
                 self.may_upload(stage)?;
                 let done = StageCompleted { manifest_sha256: sha.to_string(), zip_bytes: number(bytes)? };
-                parts.exec("UPDATE uploads SET manifest_sha256 = ?, zip_bytes = ? WHERE stage = ?", vec![text_value(sha), SqlStorageValue::Integer(done.zip_bytes as i64), text_value(stage)])?;
+                parts.exec("UPDATE uploads SET manifest_sha256 = ?, zip_bytes = ?, manifest = ? WHERE stage = ?", vec![text_value(sha), SqlStorageValue::Integer(done.zip_bytes as i64), text_value(&body), text_value(stage)])?;
                 crate::json_answer(&done)
+            }
+            // the new agent's reads, each its own stage's, while it imports
+            // `StageOpened`: the stage's id (of the old ids' alphabet, checked
+            // by `of_stage`) and the manifest as its complete read it whole,
+            // JSON as it was written: set in place, read again by no one here
+            ("open", [stage, agent]) => {
+                let m = self.of_stage(stage)?;
+                if let Some(s) = machine::open(&m, agent, stage).map_err(refused)? {
+                    self.commit(vec![s], self.now()?)?;
+                }
+                let manifest = parts.rows("SELECT manifest FROM uploads WHERE stage = ?", vec![text_value(stage)])?.first().and_then(|r| r["manifest"].as_str().map(str::to_string)).ok_or_else(|| CellError::host(format!("stage {stage} imports, and its manifest is gone")))?;
+                crate::json_passed(format!("{{\"stage\":\"{stage}\",\"manifest\":{manifest}}}").into_bytes())
+            }
+            ("readable", [stage, agent]) => {
+                let m = self.of_stage(stage)?;
+                machine::readable(&m, agent, stage).map_err(refused)?;
+                Ok(Response::ok(format!("{}{STAGE_ZIP}", stage_prefix(m.phase, &m.old, m.attempt)))?)
+            }
+            ("done", [stage, agent]) => {
+                let done: StageDone = crate::json_body(body.as_bytes())?;
+                if let Some(why) = &done.why {
+                    text_ok("why", why)?;
+                }
+                let m = self.of_stage(stage)?;
+                let now = self.now()?;
+                let state = match machine::done(&m, agent, stage, &done, now).map_err(refused)? {
+                    None => m.state,
+                    Some(s) => {
+                        let state = s.to.state;
+                        self.commit(vec![s], now)?;
+                        state
+                    }
+                };
+                crate::json_answer(&MoveAt { state })
             }
             ("test", []) if self.cfg.test_hooks => self.test(crate::json_body(body.as_bytes())?),
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -651,6 +733,13 @@ impl MigrationsCell {
         Ok(())
     }
 
+    /// The move whose stage `stage` names, if any (404 otherwise).
+    fn of_stage(&self, stage: &str) -> CellResult<Move> {
+        let no_stage = || refused(Refused::NoStage);
+        let (old, _, _) = parse_stage(stage).ok_or_else(no_stage)?;
+        self.parts().get(&old)?.ok_or_else(no_stage)
+    }
+
     /// Whether the mover may upload `stage` now: its move (403 for a stage
     /// that is not its current command's, 409 while it does not stage).
     fn may_upload(&self, stage: &str) -> CellResult<Move> {
@@ -715,12 +804,71 @@ impl MigrationsCell {
         }
     }
 
+    /// What the alarm sends after its pass: each stage done with deleted
+    /// (its unfinished upload aborted first), a few a pass; and each routine
+    /// due appended to its agent's own fragment, keyed by its stage and how
+    /// many it had, so a retry appends it once. One that keeps failing goes
+    /// after `ROUTINE_TRIES` (the move's own deadline holds it, unopened).
+    /// Then the alarm again, at the next.
+    async fn outboxes(&self) -> CellResult<()> {
+        let parts = self.parts();
+        for r in parts.rows("SELECT prefix FROM sweeps ORDER BY at_ms, prefix LIMIT ?", vec![SqlStorageValue::Integer(SWEEPS_A_PASS)])? {
+            let prefix = r["prefix"].as_str().unwrap_or_default();
+            // the stage its prefix is (`p1/<old>/<attempt>/`)
+            let stage = match prefix.trim_end_matches('/').splitn(3, '/').collect::<Vec<_>>()[..] {
+                [phase @ ("p1" | "p2"), old, attempt] => format!("{old}.{phase}.{attempt}"),
+                _ => return Err(CellError::host(format!("{prefix} is no stage's prefix"))),
+            };
+            if let Some(u) = parts.rows("SELECT upload_id FROM uploads WHERE stage = ? AND manifest_sha256 IS NULL", vec![text_value(&stage)])?.first() {
+                js::upload_abort(&self.env, STAGE, &format!("{prefix}{STAGE_ZIP}"), u["upload_id"].as_str().unwrap_or_default()).await?;
+            }
+            if !js::blob_delete_under(&self.env, STAGE, prefix, SWEEP_PAGES).await?.1 {
+                for q in ["DELETE FROM parts WHERE stage = ?", "DELETE FROM uploads WHERE stage = ?"] {
+                    parts.exec(q, vec![text_value(&stage)])?;
+                }
+                parts.exec("DELETE FROM sweeps WHERE prefix = ?", vec![text_value(prefix)])?;
+            }
+        }
+        let now = self.now()?;
+        for r in parts.rows("SELECT stage, agent, tries FROM routines WHERE next_ms <= ? ORDER BY next_ms LIMIT ?", vec![SqlStorageValue::Integer(now), SqlStorageValue::Integer(ROUTINES_A_PASS)])? {
+            let (stage, tries) = (r["stage"].as_str().unwrap_or_default(), r["tries"].as_i64().unwrap_or(0));
+            match self.routine(stage, r["agent"].as_str().unwrap_or_default()).await {
+                Ok(()) => parts.exec("DELETE FROM routines WHERE stage = ?", vec![text_value(stage)])?,
+                Err(e) if tries + 1 >= ROUTINE_TRIES => {
+                    console_error!("migrations.routine-dropped: {stage}: {}", e.message);
+                    parts.exec("DELETE FROM routines WHERE stage = ?", vec![text_value(stage)])?;
+                }
+                Err(e) => {
+                    console_error!("migrations.routine-failed: {stage} (try {}): {}", tries + 1, e.message);
+                    let next = now + (ROUTINE_RETRY_MS << tries.clamp(0, 10));
+                    parts.exec("UPDATE routines SET tries = ?, next_ms = ? WHERE stage = ?", vec![SqlStorageValue::Integer(tries + 1), SqlStorageValue::Integer(next), text_value(stage)])?;
+                }
+            }
+        }
+        self.arm()
+    }
+
+    /// One routine into `agent`'s own fragment, for `stage`, while the
+    /// move still imports it.
+    async fn routine(&self, stage: &str, agent: &str) -> CellResult<()> {
+        let m = self.of_stage(stage)?;
+        if m.state != MoveState::Importing || m.stage().as_deref() != Some(stage) {
+            return Ok(());
+        }
+        let profiles = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids: vec![agent.to_string()], emails_of: vec![] }).await?;
+        let fragment = profiles.profiles.get(agent).and_then(|p| p.fragment.clone()).ok_or_else(|| CellError::host(format!("{agent} has no agent fragment")))?;
+        let key = format!("migration:{stage}:{}", m.routines);
+        crate::routed::object_answer(&self.env, "FRAGMENT", &fragment, &format!("stage/routine/{key}"), machine::routine_text(stage)).await?;
+        Ok(())
+    }
+
     fn cutoff_ms(&self) -> Option<i64> {
         self.cfg.migrations.as_ref().and_then(|m| m.cutoff_ms)
     }
 
-    /// The alarm at the earliest deadline of any move, or at the cutoff
-    /// while a move waits for it; none when nothing is due.
+    /// The alarm at the earliest deadline of any move, at the cutoff while
+    /// a move waits for it, at a routine's next try, or at once while a
+    /// stage waits to be deleted; none when nothing is due.
     fn arm(&self) -> CellResult<()> {
         let parts = self.parts();
         let deadline = parts.rows("SELECT MIN(deadline_ms) AS at FROM moves", vec![])?.first().and_then(|r| r["at"].as_i64());
@@ -728,7 +876,12 @@ impl MigrationsCell {
             Some(c) if parts.count(UNASKED_COUNT)? > 0 => Some(c),
             _ => None,
         };
-        match [deadline, cutoff].into_iter().flatten().min() {
+        let routine = parts.rows("SELECT MIN(next_ms) AS at FROM routines", vec![])?.first().and_then(|r| r["at"].as_i64());
+        let sweep = match parts.count("SELECT COUNT(*) AS n FROM sweeps")? {
+            0 => None,
+            _ => Some(self.now()?),
+        };
+        match [deadline, cutoff, routine, sweep].into_iter().flatten().min() {
             // the clock lever moves the object's time, not the alarm's
             Some(at) => js::set_alarm(&self.raw, (at - (self.now()? - js::now_ms())).max(js::now_ms() + 1)),
             None => Ok(()),
@@ -736,7 +889,8 @@ impl MigrationsCell {
     }
 
     /// The levers (`/api/test/migrations`, a fleet with levers alone): the
-    /// clock, its supervisor run at once; and a person's answers.
+    /// clock, its supervisor run at once (what that queued, the alarm sends
+    /// right after); and a person's answers.
     fn test(&self, v: Value) -> CellResult<Response> {
         let parts = self.parts();
         if v["op"] == "clock" {
