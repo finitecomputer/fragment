@@ -893,6 +893,34 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
         both.status == 400 && by_agent.status == 403 && by_agent.text.contains("only a person") && a_signer.status == 400 && a_signer.text.contains("never leaves") && held.text.contains("telegram-e2e") && held.text.contains("nostr-e2e"),
         format!("{both} {by_agent} {a_signer}"),
     );
+    // a name outside a Vault name's grammar never reaches a Vault's route:
+    // dot segments and separators, literal or percent-encoded, a slash, from
+    // the API and from the fragment's own page, aimed at a key that signs
+    // and at a token, are each refused (400), the Vault keeping both and
+    // the fragment given nothing (Alex's review of #1184: `../delete/…`)
+    let escapes = [
+        "../delete/nostr-e2e",
+        "../delete/telegram-e2e",
+        "%2e%2e/delete/nostr-e2e",
+        "%2E%2E%2Fdelete%2Fnostr-e2e",
+        "..%2fdelete%2ftelegram-e2e",
+        "telegram-e2e/../../delete/nostr-e2e",
+        "nostr-e2e/x",
+    ];
+    let mut refused = escapes.iter().map(|from| put(&owner, "PATH_E2E", json!({ "fromVault": from, "hosts": ["api.telegram.org"] }))).collect::<Result<Vec<_>>>()?;
+    let body = json!({ "fromVault": "../delete/nostr-e2e", "hosts": ["api.telegram.org"] }).to_string().into_bytes();
+    refused.push(api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/PATH_E2E"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?);
+    let held = vault(&owner, "GET", "/api/vault", None)?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    s.ok(
+        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash; from the API or its page) is refused (400) before any Vault route: the Vault keeps its token and its key that signs, and the fragment is given nothing",
+        refused.iter().all(|r| r.status == 400 && r.text.contains("is not one"))
+            && held.text.contains("\"telegram-e2e\"")
+            && held.text.contains("\"nostr-e2e\"")
+            && listed.status == 200
+            && !listed.text.contains("PATH_E2E"),
+        json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "first": refused.first().map(|r| r.text.clone()), "vault": held.text, "listed": listed.text }),
+    );
     let moved = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
     let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     let held = vault(&owner, "GET", "/api/vault", None)?;
