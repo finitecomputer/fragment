@@ -196,9 +196,10 @@ Copy out the `soul` and read it, with the `config`'s `personality`.
   and their standing preferences.
 - Keep what your SOUL.md already says about this platform.
 - Drop what was only about the old platform (the profile names it).
-- Never put a name in it. A habit that names you ("sign off with
-  '- Juniper'") becomes one that doesn't ("sign off with a dash and your
-  name"), so a rename keeps it true.
+- Never put a name in it, not even the old agent's: your name comes from
+  Settings, and a rename must keep your SOUL true. "You are Juniper,
+  Sam's assistant" becomes "You are Sam's assistant", and "sign off with
+  '- Juniper'" becomes "sign off with a dash and your name".
 
 **Name and picture:** change them only if your owner's answers say to
 keep the old ones (`fragment agent --name "<name>"`, and
