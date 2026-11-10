@@ -293,7 +293,7 @@ pub fn entries(buf: &[u8]) -> Result<(Vec<Entry>, usize), Refusal> {
             let (id, len) = (u16_at(extra, 0), u16_at(extra, 2) as usize);
             let field = extra.get(4..4 + len).ok_or_else(|| invalid("an extra field past its entry"))?;
             if id == 0x0001 {
-                let mut vals = field.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().expect("eight bytes")));
+                let mut vals = field.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c));
                 for v in [&mut size, &mut packed, &mut at] {
                     if *v == u64::from(u32::MAX) {
                         *v = vals.next().ok_or_else(|| invalid("a zip64 field short of its values"))?;

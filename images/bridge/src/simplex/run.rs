@@ -2333,9 +2333,8 @@ async fn maintenance_read(cfg: &Config, dir: &Path, name: &str, owner: ContactId
             }
         };
         let Resp::User { id: user } = ask(Cmd::User).await? else { return Err(Read::Invalid("it has no user".into())) };
-        match ask(Cmd::StartQuiet).await? {
-            Resp::Error { what } => return Err(Read::Failed(format!("its start: {what}"))),
-            _ => {}
+        if let Resp::Error { what } = ask(Cmd::StartQuiet).await? {
+            return Err(Read::Failed(format!("its start: {what}")));
         }
         let Resp::Contacts(contacts) = ask(Cmd::Contacts { user }).await? else { return Err(Read::Failed("its contacts did not read".into())) };
         let Some((_, owner_name)) = contacts.iter().find(|(c, _)| *c == owner).cloned() else { return Err(Read::Invalid(format!("its owner, contact {owner}, is not one of its contacts"))) };
