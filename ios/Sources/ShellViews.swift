@@ -132,8 +132,10 @@ struct SidebarView: View {
             HStack {
                 Text("Finite.Computer").font(.headline)
                 Spacer()
-                Button("Close", systemImage: "xmark") { close() }
-                    .labelStyle(.iconOnly).buttonStyle(.glass).buttonBorderShape(.circle).accessibilityIdentifier("sidebarClose")
+                Button { close() } label: {
+                    Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 44, height: 44).contentShape(.rect)
+                }
+                .buttonStyle(.plain).accessibilityLabel("Close").accessibilityIdentifier("sidebarClose")
             }.padding(20)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
@@ -156,7 +158,9 @@ struct SidebarView: View {
                                     }
                                     Spacer()
                                     Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
-                                }.padding(12).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+                                }
+                                // the new-chat button's glass, and its height
+                                .padding(8).padding(.trailing, 6).glassEffect(.regular.interactive(), in: .capsule)
                             }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
                             // a new chat with this agent: the launcher, its words to come
                             Button { library.selectedAgent = agent.name; navigate(.launcher) } label: {
@@ -189,7 +193,7 @@ struct SidebarView: View {
                 }
                 // Search, or start a chat from what is typed: the launcher (the web's ⌘K)
                 Button { navigate(.launcher) } label: {
-                    Image(systemName: "magnifyingglass").font(.system(size: 20, weight: .semibold)).frame(width: 56, height: 56)
+                    Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium)).frame(width: 40, height: 40)
                 }
                 .buttonStyle(.glass).buttonBorderShape(.circle)
                 .accessibilityLabel("Search or start a new chat").accessibilityIdentifier("sidebarSearch")
