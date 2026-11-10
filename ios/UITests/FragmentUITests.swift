@@ -253,34 +253,36 @@ final class FragmentUITests: XCTestCase {
     /// Notices that must be answered (FIN-458) show alone over the whole app,
     /// never in the band, the oldest first: an answer refused keeps it,
     /// saying why in the server's words; answered, the next; the last
-    /// answered, the app as it was. No owner asks one yet: the dev stack's
-    /// registry lever asked two ahead (`FRAGMENT_UITEST_ASKED`, the first's
-    /// title; its Not now refused, the second titled "New terms").
+    /// answered, the app as it was. No owner asks one yet: on a test fleet an
+    /// invite to a `must-answer` fragment is one, and the dev stack staged
+    /// two ahead (`FRAGMENT_UITEST_ASKED`, their fragments, oldest first),
+    /// the registry's next invite answer refused (its `DownFor` lever).
     func testNoticesThatMustBeAnsweredShowAloneUntilAnswered() throws {
         let env = ProcessInfo.processInfo.environment
-        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let title = env["FRAGMENT_UITEST_ASKED"] else {
-            throw XCTSkip("no dev stack or asked notice named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_ASKED)")
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], case let names = (env["FRAGMENT_UITEST_ASKED"] ?? "").split(separator: ",").map(String.init), names.count == 2 else {
+            throw XCTSkip("no dev stack or asked notices named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_ASKED: two fragments)")
         }
         XCUIDevice.shared.appearance = .light
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
         app.launch()
         if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
-        let asked = { (id: String) in app.descendants(matching: .any).matching(identifier: "mustAnswer:asked:\(id)").firstMatch }
-        XCTAssertTrue(asked("move").waitForExistence(timeout: 30), "the oldest shows, over the whole app")
-        XCTAssertTrue(app.staticTexts[title].exists && asked("move").buttons["Yes"].exists && asked("move").buttons["Never"].exists, "its words and its answers")
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:asked:")).firstMatch.exists, "never in the band")
+        let asked = { (name: String) in app.descendants(matching: .any).matching(identifier: "mustAnswer:invite:\(name)").firstMatch }
+        let (first, next) = (names[0], names[1])
+        XCTAssertTrue(asked(first).waitForExistence(timeout: 30), "the oldest shows, over the whole app")
+        XCTAssertTrue(asked(first).buttons["Accept"].exists && asked(first).buttons["Decline"].exists, "its words and its answers")
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "notice:invite:\(first)").firstMatch.exists, "never in the band")
         screenshot(app, "Must answer, light")
-        asked("move").buttons["Not now"].tap()
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "answer Yes or Never")).firstMatch.waitForExistence(timeout: 20), "refused: why, in the server's words")
-        XCTAssertTrue(asked("move").exists, "and it stays")
-        asked("move").buttons["Yes"].tap()
-        XCTAssertTrue(asked("terms").waitForExistence(timeout: 30), "answered, and read again without it: the next")
+        asked(first).buttons["Accept"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "try again shortly")).firstMatch.waitForExistence(timeout: 20), "refused: why, in the server's words")
+        XCTAssertTrue(asked(first).exists, "and it stays")
+        asked(first).buttons["Decline"].tap()
+        XCTAssertTrue(asked(next).waitForExistence(timeout: 30), "answered, and read again without it: the next")
         XCUIDevice.shared.appearance = .dark
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "dark, drawn")], timeout: 2)
         screenshot(app, "Must answer, dark")
-        asked("terms").buttons["Never"].tap()
-        XCTAssertTrue(asked("terms").waitForNonExistence(timeout: 30), "the last answered: the app as it was")
+        asked(next).buttons["Decline"].tap()
+        XCTAssertTrue(asked(next).waitForNonExistence(timeout: 30), "the last answered: the app as it was")
         XCUIDevice.shared.appearance = .light
     }
 }
