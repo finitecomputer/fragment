@@ -223,6 +223,32 @@ final class FragmentUITests: XCTestCase {
         XCTAssertTrue(unsaved.exists, "the other stays")
         screenshot(app, "After Later")
     }
+
+    /// An invite (FIN-458), against a real platform as above: someone shared
+    /// an app titled `TEST_RUNNER_FRAGMENT_UITEST_INVITE` with this person's
+    /// email. It is told over Home like any notice, from whom and as what;
+    /// Accept opens the app, its answer naming its page, and the invite goes.
+    func testAnInviteIsToldAndItsAcceptOpensTheApp() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let server = env["FRAGMENT_UITEST_SERVER"], let key = env["FRAGMENT_UITEST_KEY"], let title = env["FRAGMENT_UITEST_INVITE"] else {
+            throw XCTSkip("no dev stack or invite named (FRAGMENT_UITEST_SERVER, FRAGMENT_UITEST_KEY, FRAGMENT_UITEST_INVITE)")
+        }
+        XCUIDevice.shared.appearance = .light
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-saved-account", server, "--ui-test-key", key]
+        app.launch()
+        if app.buttons["Continue"].waitForExistence(timeout: 3) { app.buttons["Continue"].tap() }
+        let invite = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "notice:invite:")).firstMatch
+        XCTAssertTrue(invite.waitForExistence(timeout: 30), "the invite is told")
+        XCTAssertTrue(app.staticTexts[title].exists, "titled as it was sent")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label ENDSWITH %@", "invited you to edit it.")).firstMatch.exists, "from whom, and as what")
+        XCTAssertTrue(invite.buttons["Accept"].exists && invite.buttons["Decline"].exists)
+        screenshot(app, "Invite")
+        invite.buttons["Accept"].tap()
+        XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 30), "Accept opens the app its answer names")
+        screenshot(app, "Invite accepted")
+        XCTAssertTrue(invite.waitForNonExistence(timeout: 10), "and the invite is told no more")
+    }
 }
 
 /// Flows against a real platform: this machine's `cargo xtask dev`, named by

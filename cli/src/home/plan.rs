@@ -234,19 +234,30 @@ fn gitignores(src: &Source, files: &[(&Entry, &str)]) -> Vec<(String, Gitignore)
     out
 }
 
-fn ignored(ignores: &[(String, Gitignore)], rel: &str) -> bool {
+/// What the `.gitignore`s say of `rel` (a folder, `is_dir`) by itself:
+/// the nearest that names it decides, and `None` when none does.
+fn decides(ignores: &[(String, Gitignore)], rel: &str, is_dir: bool) -> Option<bool> {
     for (dir, g) in ignores {
         let sub = if dir.is_empty() { Some(rel) } else { rel.strip_prefix(&format!("{dir}/")) };
         let Some(sub) = sub else { continue };
-        let m = g.matched_path_or_any_parents(Path::new(sub), false);
+        let m = g.matched(Path::new(sub), is_dir);
         if m.is_ignore() {
-            return true;
+            return Some(true);
         }
         if m.is_whitelist() {
-            return false;
+            return Some(false);
         }
     }
-    false
+    None
+}
+
+/// Whether git would ignore `rel`, as git decides: a file under a folder
+/// that is ignored stays ignored whatever a later `!` says of the file
+/// (git never looks inside an ignored folder); else what the nearest
+/// `.gitignore` naming the file says.
+fn ignored(ignores: &[(String, Gitignore)], rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    (1..parts.len()).any(|n| decides(ignores, &parts[..n].join("/"), true) == Some(true)) || decides(ignores, rel, false) == Some(true)
 }
 
 /// What a plan brings and leaves, counted: by kind, and by why.
@@ -369,6 +380,25 @@ mod tests {
         let src = crate::home::open(&t.0, &layout()).unwrap();
         let p = plan(&src, &layout(), GIB, 100).unwrap();
         assert_eq!(p.left.iter().map(|l| (l.path.as_str(), l.why, l.bytes)).collect::<Vec<_>>(), [(".npmrc", Why::Secret, 9)]);
+    }
+
+    /// As git decides: a file under a folder a `.gitignore` ignores stays
+    /// ignored, whatever a later `!` says of the file (git never looks in
+    /// an ignored folder); a nearer `.gitignore` overrides a farther one.
+    #[test]
+    fn an_ignored_folder_keeps_its_files_ignored() {
+        let t = Temp::new();
+        put(&t.0, &[("work/p/.gitignore", 0, 1), ("work/p/private/keep.txt", 3, 1), ("work/p/private/other.txt", 3, 1), ("work/p/a.log", 3, 1), ("work/p/sub/.gitignore", 0, 1), ("work/p/sub/b.log", 3, 1), ("work/p/sub/c.log", 3, 1)]);
+        std::fs::write(t.0.join("work/p/.gitignore"), "private/\n!private/keep.txt\n*.log\n").unwrap();
+        std::fs::write(t.0.join("work/p/sub/.gitignore"), "!b.log\n").unwrap();
+        let src = Source::open(&t.0).unwrap();
+        let p = plan(&src, &layout(), GIB, 100).unwrap();
+        let mut picked: Vec<&str> = p.picked.iter().map(|p| p.from.as_str()).collect();
+        picked.sort();
+        assert_eq!(picked, ["work/p/.gitignore", "work/p/sub/.gitignore", "work/p/sub/b.log"]);
+        let mut ignored: Vec<&str> = p.left.iter().filter(|l| l.why == Why::Ignored).map(|l| l.path.as_str()).collect();
+        ignored.sort();
+        assert_eq!(ignored, ["p/a.log", "p/private/keep.txt", "p/private/other.txt", "p/sub/c.log"]);
     }
 
     #[test]
