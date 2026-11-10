@@ -364,6 +364,13 @@ pub fn sessions(s: &mut Suite, api: &Api) -> Result<()> {
         &from_hermes,
     );
 
+    // a home's zip, as a stage brings one (FIN-463), read through its
+    // layout: its database copied out, the same conversations, nothing twice
+    let zipped = s.dir("sessions-zip").join("home.zip");
+    fragment_fakes::old_home::zip(&zipped, &[("agent/hermes-home/state.db".to_string(), std::fs::read(hermes.join("state.db"))?)])?;
+    let from_zip = s.cli_json(api, &home, &["session", "import", &path(&zipped), "--layout", &path(&fragment_fakes::old_home::layout()), "--json"])?;
+    s.ok("a home's zip, read through its layout, holds the same conversations, and adds none twice", from_zip["added"] == 0 && from_zip["unchanged"] == 6, &from_zip);
+
     // restart: an import that stopped after its conversations, before its
     // indexes, is put right by the next
     let orphan = Session {
