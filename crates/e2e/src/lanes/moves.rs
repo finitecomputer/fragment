@@ -395,17 +395,21 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let done = api.signed(&carol_agent_keys, "POST", &at("done"), Some(&json!({ "ok": true })))?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
     mover.run_once()?;
-    let gone = deleted(s, &format!("p2/{c1}/"));
+    let late_kept = objects(&format!("p2/{c1}/"));
     s.ok(
-        "the late sign-up reads the kept stage and says it is done: the old agent is retired as migrated, its stage deleted, the move done (moved)",
-        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && gone,
-        format!("{} {} {retire:?} {}", opened.status, done.body, state(&c1)),
+        "the late sign-up reads the kept stage and says it is done: the old agent is retired as migrated, the move done (moved), its stage kept to its expiry",
+        opened.status == 200 && opened.body["manifest"]["phase"] == "p2" && zip.status == 200 && zip.bytes == mover.zip_bytes() && done.body["state"] == "retiring" && retire.as_ref().is_some_and(|c| c["kind"] == "retire" && c["as"] == "migrated") && state(&c1) == "moved" && late_kept.len() == 2,
+        format!("{} {} {retire:?} {} {late_kept:?}", opened.status, done.body, state(&c1)),
     );
     let kept = objects(&format!("p2/{d1}/"));
     later_by(90 * DAY_MS)?;
     let e = moved(&d1)?;
-    let gone = deleted(s, &format!("p2/{d1}/"));
-    s.ok("90 days past the cutoff an unclaimed archive expires, and its kept stage is deleted from the bucket", kept.len() == 2 && e["state"] == "expired" && gone, format!("{kept:?} {}", e["state"]));
+    let gone = deleted(s, &format!("p2/{d1}/")) && deleted(s, &format!("p2/{c1}/"));
+    s.ok(
+        "90 days past the cutoff an unclaimed archive expires, and every kept phase 2 stage is deleted from the bucket, the imported one's too",
+        kept.len() == 2 && e["state"] == "expired" && state(&c1) == "moved" && gone,
+        format!("{kept:?} {}", e["state"]),
+    );
     lever(json!({ "op": "clock", "offsetMs": 0 }))?;
     Ok(())
 }
