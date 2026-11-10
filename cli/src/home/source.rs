@@ -361,29 +361,16 @@ fn dos_seconds(t: zip::DateTime) -> Option<i64> {
     civil.to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_second())
 }
 
-/// A folder of an import's own for files copied out of a zip, under the
-/// system's temporary folder, removed with it (a crash's is cleared by the
-/// next import's, a day on).
+/// A folder for files copied out of a zip, inside a folder of the import's
+/// own (`root`: the session import's spool), removed with it; a crash's
+/// goes when that folder is cleared.
 pub struct Scratch {
     pub dir: PathBuf,
 }
 
-const SCRATCH_PREFIX: &str = "fragment-home-";
-const SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-
 impl Scratch {
-    pub fn new() -> Result<Scratch> {
-        let tmp = std::env::temp_dir();
-        if let Ok(dir) = std::fs::read_dir(&tmp) {
-            for e in dir.flatten() {
-                let stale = e.file_name().to_str().is_some_and(|n| n.starts_with(SCRATCH_PREFIX))
-                    && e.metadata().is_ok_and(|m| m.is_dir() && m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SCRATCH_STALE)));
-                if stale {
-                    let _ = std::fs::remove_dir_all(e.path());
-                }
-            }
-        }
-        let dir = tmp.join(format!("{SCRATCH_PREFIX}{}-{:016x}", std::process::id(), rand::random::<u64>()));
+    pub fn in_dir(root: &Path) -> Result<Scratch> {
+        let dir = root.join(format!("scratch-{:016x}", rand::random::<u64>()));
         // its owner's alone from its making: the system's temporary folder is
         // everyone's, and what is copied here is a person's private database
         std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&dir).with_context(|| format!("making {}", dir.display()))?;
@@ -452,7 +439,7 @@ pub mod tests {
             assert_eq!(z.read(path).unwrap(), *bytes, "{path} out of the zip");
         }
         assert_eq!(z.text("a/c/d.bin").unwrap(), None, "bytes with a NUL are not text");
-        let scratch = Scratch::new().unwrap();
+        let scratch = Scratch::in_dir(&t.0).unwrap();
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&scratch.dir).unwrap().permissions().mode() & 0o777, 0o700, "the scratch is its owner's alone");
         let out = z.local("big.dat", &scratch).unwrap();
