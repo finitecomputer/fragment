@@ -24,6 +24,7 @@ pub fn invite(fragment: &str, edit: bool, title: &str, from: Option<&str>) -> No
         detail: None,
         until: None,
         actions: vec![NoticeAction::post("Accept", at("accept"), empty()), NoticeAction::post("Decline", at("decline"), empty())],
+        must_answer: false,
     }
 }
 
@@ -41,6 +42,7 @@ pub fn seat_lapsed(admin: bool, pay_again: bool) -> Notice {
         detail: None,
         until: None,
         actions: pay_again.then(|| NoticeAction::post("Pay again", "/api/billing/checkout", Value::Object(Map::new()))).into_iter().collect(),
+        must_answer: false,
     }
 }
 
@@ -76,6 +78,7 @@ pub fn seat_ends(ending: Ending, at_ms: i64, now_ms: i64, portal: bool) -> Optio
         detail: None,
         until: None,
         actions: portal.then(|| NoticeAction::post("Payment and invoices", "/api/billing/portal", Value::Object(Map::new()))).into_iter().collect(),
+        must_answer: false,
     })
 }
 

@@ -66,12 +66,25 @@
       }
     };
 
+    // Who did it: the app stores `call.principal` (`by`), and the page
+    // shows them by email (a member's, to a member) from `__people`, asked
+    // once a person; an anonymous visitor or a link holder is no one.
+    const emails = new Map();
+    const emailOf = (id) => {
+      if (!emails.has(id)) emails.set(id, fetch(`./__people?id=${encodeURIComponent(id)}`)
+        .then((r) => (r.ok ? r.json() : {})).then((r) => r.profiles?.[id]?.email ?? null, () => null));
+      return emails.get(id);
+    };
+
     // the last 20 lines of activity, then live
     fragment.subscribe("activity", (r) => {
       const line = document.createElement("div");
       line.textContent = `${r.body.did} “${r.body.text}”`;
       $("activity").prepend(line);
       while ($("activity").children.length > 20) $("activity").lastChild.remove();
+      if (r.body.by && !r.body.by.startsWith("anon:")) {
+        emailOf(r.body.by).then((email) => { if (email) line.textContent = `${email} ${r.body.did} “${r.body.text}”`; });
+      }
     }, { last: 20 });
 
     // the fragment ended this page's connection for good

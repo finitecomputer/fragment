@@ -10,6 +10,11 @@ bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.at range i64
 bound ChannelRecord.seq range i64
+bound Command.as default null
+bound Command.attempt range u32
+bound Command.phase default null
+bound Command.secrets default []
+bound Command.stage default null
 bound Counts.events range u64
 bound Counts.files range u64
 bound Counts.members range u64
@@ -24,6 +29,7 @@ bound FragmentStatus.kind default "app"
 bound FragmentStatus.page default null
 bound FragmentStatus.reach default false
 bound FragmentStatus.title default null
+bound LeftBehind.bytes range u64
 bound ListedFragment.agentRole default null
 bound ListedFragment.agents default []
 bound ListedFragment.archived default false
@@ -57,31 +63,76 @@ bound LiveOut.result.message default null
 bound LiveOut.result.status default null
 bound LiveOut.result.status range u16
 bound LiveOut.subscribed.next range i64
+bound Manifest.attempt range u32
+bound Manifest.bytes range u64
+bound Manifest.files range u64
+bound Manifest.left default []
+bound Manifest.left_more default null
+bound Manifest.left_more range u64
+bound Manifest.zip_bytes range u64
 bound Member.addedAt range i64
+bound Member.email default null
 bound Member.kind default null
 bound Member.owner default null
 bound MessageHit.at range i64
 bound MessageHit.seq range i64
 bound Notice.actions default []
 bound Notice.detail default null
+bound Notice.mustAnswer default false
 bound Notice.text default null
 bound Notice.until default null
 bound NoticeAction.body default null
 bound NoticeAction.open default null
 bound NoticeAction.post default null
+bound OldBrain.bytes range u64
 bound OpDecl.description default null
 bound OpDecl.ephemeral default false
 bound OpDecl.input default null
 bound PageError.source default null
 bound PageReport.at range i64
 bound PageReport.dropped range u32
+bound Place.basic default null
+bound Place.format default null
+bound Place.header default null
+bound Place.query default null
+bound Place.sign default null
 bound PutDraft.text default null
+bound PutSecret.place default {}
+bound Report.bytes default null
+bound Report.bytes range u64
+bound Report.files default null
+bound Report.files range u64
+bound Report.manifest_sha256 default null
+bound Report.receipt default null
+bound Report.seq range u64
+bound Report.step default null
+bound Report.why default null
+bound Reported.attempt range u32
+bound Roster.observed_ms range i64
+bound RosterAgent.brains default []
+bound RosterAgent.last_active_ms default null
+bound RosterAgent.last_active_ms range i64
+bound RosterAgent.picture_url default null
+bound RosterAgent.sites default []
+bound RosterTaken.bound range u32
+bound RosterTaken.withdrawn range u32
+bound Secret.setAt range i64
 bound Seen.unread range u32
 bound Sharing.guests range u64
 bound Sharing.invites default null
 bound Sharing.invites range u64
 bound Sharing.members range u64
 bound Sharing.reach default false
+bound Sizes.cache range u64
+bound Sizes.history range u64
+bound Sizes.move range u64
+bound Sizes.total range u64
+bound Sizes.work range u64
+bound StageCompleted.zip_bytes range u64
+bound StageDone.report_sha256 default null
+bound StageDone.why default null
+bound StagePart.bytes range u64
+bound StagePart.n range u32
 bound Until.at range i64
 bound UploadLimits.filesPerMessage range u32
 bound UploadLimits.uploadMaxBytes range u64
@@ -89,6 +140,7 @@ bound Urls.platform default ""
 bound channels.read.query.after range i64
 bound channels.read.query.before range i64
 bound channels.read.query.limit range u64
+bound migrations.part.path.n range u32
 branches LiveIn.subscribe oneOf
 branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
@@ -112,6 +164,14 @@ field CodeStatus.error required string|null
 field CodeStatus.id required string|null
 field CodeStatus.operations required map<OpDecl>
 field CodeStatus.sha required string|null
+field Command.as optional Mark|null
+field Command.attempt required integer
+field Command.id required string
+field Command.kind required CommandKind
+field Command.old required string
+field Command.phase optional Phase|null
+field Command.secrets optional array<SecretKind>
+field Command.stage optional string|null
 field Counts.events required integer
 field Counts.files required integer
 field Counts.members required integer
@@ -142,6 +202,12 @@ field FragmentStatus.title optional string|null
 field FragmentStatus.urls required Urls
 field FragmentStatus.viewToken required string|null
 field FragmentStatus.visibility required Visibility
+field Has.nostr required boolean
+field Has.openrouter required boolean
+field Has.telegram required boolean
+field LeftBehind.bytes required integer
+field LeftBehind.path required string
+field LeftBehind.why required string
 field ListWatchFrame.changed.type required "changed"
 field ListWatchFrame.hello.type required "hello"
 field ListWatchFrame.invited.type required "invited"
@@ -248,8 +314,21 @@ field LiveOut.subscribed.channel required string
 field LiveOut.subscribed.more required boolean
 field LiveOut.subscribed.next required integer
 field LiveOut.subscribed.type required "subscribed"
+field Mailbox.commands required array<Command>
+field Manifest.attempt required integer
+field Manifest.bytes required integer
+field Manifest.files required integer
+field Manifest.format required string
+field Manifest.layout required string
+field Manifest.left optional array<LeftBehind>
+field Manifest.left_more optional integer|null
+field Manifest.old required string
+field Manifest.phase required Phase
+field Manifest.zip_bytes required integer
+field Manifest.zip_sha256 required string
 field Member.addedAt required integer
 field Member.addedBy required string
+field Member.email optional string|null
 field Member.kind optional IdentityKind|null
 field Member.owner optional string|null
 field Member.principal required string
@@ -260,11 +339,13 @@ field MessageHit.channel required string
 field MessageHit.fragment required string
 field MessageHit.seq required integer
 field MessageHit.snippet required string
+field MoveAt.state required MoveState
 field Notice.actions required array<NoticeAction>
 field Notice.detail optional string|null
 field Notice.id required string
 field Notice.kind required string
 field Notice.level required NoticeLevel
+field Notice.mustAnswer optional boolean
 field Notice.text optional string|null
 field Notice.title required string
 field Notice.until optional Until|null
@@ -273,6 +354,11 @@ field NoticeAction.label required string
 field NoticeAction.open optional string|null
 field NoticeAction.post optional string|null
 field NoticeList.notices required array<Notice>
+field OldBrain.bytes required integer
+field OldBrain.id required string
+field OldBrain.title required string
+field OldSite.name required string
+field OldSite.public required boolean
 field OpDecl.description optional string|null
 field OpDecl.ephemeral optional boolean
 field OpDecl.input optional any
@@ -289,6 +375,11 @@ field Pinned.name required string
 field Pinned.pinned required boolean
 field Pins.live required string|null
 field Pins.main required string|null
+field Place.basic optional string|null
+field Place.format optional string|null
+field Place.header optional string|null
+field Place.query optional string|null
+field Place.sign optional string|null
 field PostRecord.body required any
 field PostRecord.id required string
 field Posted.record required ChannelRecord
@@ -298,8 +389,49 @@ field Present.id required string
 field Present.principal required string
 field PutDraft.text optional string|null
 field PutDraft.turn required string
+field PutSecret.agents required array<string>
+field PutSecret.hosts required array<string>
+field PutSecret.place optional Place
+field PutSecret.value required string
+field Report.bytes optional integer|null
+field Report.command required string
+field Report.files optional integer|null
+field Report.kind required string
+field Report.manifest_sha256 optional string|null
+field Report.receipt optional string|null
+field Report.seq required integer
+field Report.step optional string|null
+field Report.why optional string|null
+field Reported.attempt required integer
+field Reported.state required MoveState
+field Reported.taken required boolean
+field Roster.observed_ms required integer
+field Roster.people required array<RosterPerson>
+field Roster.snapshot required string
+field RosterAgent.brains optional array<OldBrain>
+field RosterAgent.has required Has
+field RosterAgent.last_active_ms optional integer|null
+field RosterAgent.name required string
+field RosterAgent.old required string
+field RosterAgent.picture_url optional string|null
+field RosterAgent.sites optional array<OldSite>
+field RosterAgent.sizes required Sizes
+field RosterPerson.agents required array<RosterAgent>
+field RosterPerson.email required string
+field RosterPerson.workos_id required string
+field RosterTaken.bound required integer
+field RosterTaken.replay required boolean
+field RosterTaken.withdrawn required integer
 field SearchAnswer.fragments required array<ListedFragment>
 field SearchAnswer.messages required array<MessageHit>
+field Secret.agents required array<string>
+field Secret.hosts required array<string>
+field Secret.name required string
+field Secret.place required Place
+field Secret.setAt required integer
+field SecretList.secrets required array<Secret>
+field SecretRemoved.name required string
+field SecretRemoved.removed required boolean
 field Seen.name required string
 field Seen.unread required integer
 field SetArchived.archived required boolean
@@ -310,6 +442,24 @@ field Sharing.invites optional integer|null
 field Sharing.members required integer
 field Sharing.reach optional boolean
 field Sharing.visibility required Visibility
+field Sizes.cache required integer
+field Sizes.history required integer
+field Sizes.move required integer
+field Sizes.total required integer
+field Sizes.work required integer
+field StageComplete.manifest required Manifest
+field StageCompleted.manifest_sha256 required string
+field StageCompleted.zip_bytes required integer
+field StageDone.ok required boolean
+field StageDone.report_sha256 optional string|null
+field StageDone.why optional string|null
+field StageOpened.manifest required Manifest
+field StageOpened.stage required string
+field StagePart.bytes required integer
+field StagePart.etag required string
+field StagePart.n required integer
+field StagePart.sha256 required string
+field StageParts.parts required array<StagePart>
 field Until.at required integer
 field Until.said required string
 field UploadLimits.filesPerMessage required integer
@@ -335,7 +485,18 @@ field fragments.seen.path.name required string
 field fragments.status.path.name required string
 field live.open.path.name required string
 field members.list.path.name required string
+field migrations.complete.path.stage required string
+field migrations.done.path.stage required string
+field migrations.open.path.stage required string
+field migrations.part.path.n required integer
+field migrations.part.path.stage required string
+field migrations.part.query.sha256 required string
+field migrations.parts.path.stage required string
+field migrations.report.path.old required string
+field migrations.zip.path.stage required string
 field search.find.query.q required string
+field vault.put.path.secret required string
+field vault.remove.path.secret required string
 other FragmentKind other
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft
 route channels.draft accepts nip98
@@ -424,6 +585,56 @@ route members.list accepts session
 route members.list path members.list.path
 route members.list query members.list.query
 route members.list response MemberList
+route migrations.complete POST /api/migrations/mover/stages/{stage}/complete
+route migrations.complete accepts nip98
+route migrations.complete path migrations.complete.path
+route migrations.complete query migrations.complete.query
+route migrations.complete request StageComplete
+route migrations.complete response StageCompleted
+route migrations.done POST /api/migrations/stages/{stage}/done
+route migrations.done accepts nip98
+route migrations.done path migrations.done.path
+route migrations.done query migrations.done.query
+route migrations.done request StageDone
+route migrations.done response MoveAt
+route migrations.mailbox GET /api/migrations/mover/mailbox
+route migrations.mailbox accepts nip98
+route migrations.mailbox path migrations.mailbox.path
+route migrations.mailbox query migrations.mailbox.query
+route migrations.mailbox response Mailbox
+route migrations.open POST /api/migrations/stages/{stage}/open
+route migrations.open accepts nip98
+route migrations.open path migrations.open.path
+route migrations.open query migrations.open.query
+route migrations.open response StageOpened
+route migrations.part PUT /api/migrations/mover/stages/{stage}/parts/{n}
+route migrations.part accepts nip98
+route migrations.part path migrations.part.path
+route migrations.part query migrations.part.query
+route migrations.part response StagePart
+route migrations.part takes application/octet-stream
+route migrations.parts GET /api/migrations/mover/stages/{stage}/parts
+route migrations.parts accepts nip98
+route migrations.parts path migrations.parts.path
+route migrations.parts query migrations.parts.query
+route migrations.parts response StageParts
+route migrations.report POST /api/migrations/mover/agents/{old}/report
+route migrations.report accepts nip98
+route migrations.report path migrations.report.path
+route migrations.report query migrations.report.query
+route migrations.report request Report
+route migrations.report response Reported
+route migrations.roster PUT /api/migrations/mover/roster
+route migrations.roster accepts nip98
+route migrations.roster path migrations.roster.path
+route migrations.roster query migrations.roster.query
+route migrations.roster request Roster
+route migrations.roster response RosterTaken
+route migrations.zip GET /api/migrations/stages/{stage}/zip
+route migrations.zip accepts nip98
+route migrations.zip bytes application/zip
+route migrations.zip path migrations.zip.path
+route migrations.zip query migrations.zip.query
 route notices.list GET /api/notices
 route notices.list accepts nip98
 route notices.list accepts session
@@ -436,11 +647,32 @@ route search.find accepts session
 route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
+route vault.list GET /api/vault
+route vault.list accepts nip98
+route vault.list accepts session
+route vault.list path vault.list.path
+route vault.list query vault.list.query
+route vault.list response SecretList
+route vault.put PUT /api/vault/{secret}
+route vault.put accepts nip98
+route vault.put accepts session
+route vault.put path vault.put.path
+route vault.put query vault.put.query
+route vault.put request PutSecret
+route vault.put response Secret
+route vault.remove DELETE /api/vault/{secret}
+route vault.remove accepts nip98
+route vault.remove accepts session
+route vault.remove path vault.remove.path
+route vault.remove query vault.remove.query
+route vault.remove response SecretRemoved
 type Archived out object
 type ChannelNewest out object
 type ChannelPage out object
 type ChannelRecord out object
 type CodeStatus out object
+type Command out object
+type CommandKind out enum open
 type Counts out object
 type Docked out object
 type Done out object
@@ -449,7 +681,9 @@ type ErrorCode out enum open
 type FragmentKind out enum open
 type FragmentList out object
 type FragmentStatus out object
+type Has in object
 type IdentityKind out enum
+type LeftBehind both object
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -502,32 +736,59 @@ type LiveOut.result.#1.503.error out enum open
 type LiveOut.result.#1.507 out object
 type LiveOut.result.#1.507.error out enum open
 type LiveOut.subscribed out object
+type Mailbox out object
+type Manifest both object
+type Mark out enum
 type Member out object
 type MemberList out object
 type MessageHit out object
+type MoveAt out object
+type MoveState out enum open
 type Notice out object
 type NoticeAction out object
 type NoticeLevel out enum open
 type NoticeList out object
+type OldBrain in object
+type OldSite in object
 type OpDecl out object
 type OpKind out enum
 type PageError out object
 type PageErrorKind out enum
 type PageReport out object
+type Phase both enum
 type Pinned out object
 type Pins out object
+type Place both object closed
 type PostRecord in object closed
 type Posted out object
 type Present out object
 type PutDraft in object
+type PutSecret in object closed
 type Reason out enum open
+type Report in object
+type Reported out object
 type Role out enum
+type Roster in object
+type RosterAgent in object
+type RosterPerson in object
+type RosterTaken out object
 type SearchAnswer out object
+type Secret out object
+type SecretKind out enum
+type SecretList out object
+type SecretRemoved out object
 type Seen out object
 type SetArchived in object
 type SetDock in object
 type SetPinned in object
 type Sharing out object
+type Sizes in object
+type StageComplete in object
+type StageCompleted out object
+type StageDone in object
+type StageOpened out object
+type StagePart out object
+type StageParts out object
 type Until out object
 type UploadLimits out object
 type Urls out object
@@ -558,10 +819,37 @@ type live.open.path in object
 type live.open.query in object
 type members.list.path in object
 type members.list.query in object
+type migrations.complete.path in object
+type migrations.complete.query in object
+type migrations.done.path in object
+type migrations.done.query in object
+type migrations.mailbox.path in object
+type migrations.mailbox.query in object
+type migrations.open.path in object
+type migrations.open.query in object
+type migrations.part.path in object
+type migrations.part.query in object
+type migrations.parts.path in object
+type migrations.parts.query in object
+type migrations.report.path in object
+type migrations.report.query in object
+type migrations.roster.path in object
+type migrations.roster.query in object
+type migrations.zip.path in object
+type migrations.zip.query in object
 type notices.list.path in object
 type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
+type vault.list.path in object
+type vault.list.query in object
+type vault.put.path in object
+type vault.put.query in object
+type vault.remove.path in object
+type vault.remove.query in object
+value CommandKind restart
+value CommandKind retire
+value CommandKind stop_and_stage
 value ErrorCode already_exists
 value ErrorCode app_failed
 value ErrorCode budget_used_up
@@ -649,6 +937,22 @@ value LiveOut.result.#1.503.error node_full
 value LiveOut.result.#1.503.error registry_unavailable
 value LiveOut.result.#1.503.error wont_wake
 value LiveOut.result.#1.507.error storage_full
+value Mark archived
+value Mark migrated
+value MoveState archived
+value MoveState archiving
+value MoveState asked
+value MoveState expired
+value MoveState held
+value MoveState importing
+value MoveState later
+value MoveState listed
+value MoveState moved
+value MoveState never
+value MoveState open
+value MoveState retiring
+value MoveState staging
+value MoveState withdrawn
 value NoticeLevel info
 value NoticeLevel warn
 value OpKind job
@@ -658,6 +962,8 @@ value PageErrorKind console
 value PageErrorKind exception
 value PageErrorKind network
 value PageErrorKind security
+value Phase p1
+value Phase p2
 value Reason admins_full
 value Reason already_offered
 value Reason gone
@@ -690,6 +996,9 @@ value Role editor
 value Role owner
 value Role public
 value Role viewer
+value SecretKind nostr_nsec
+value SecretKind openrouter_key
+value SecretKind telegram_bot_token
 value Visibility link
 value Visibility members
 value Visibility public

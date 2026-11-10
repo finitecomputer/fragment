@@ -397,8 +397,13 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
 }
 
 /// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).
+/// The platform's bucket of blobs, pictures, exports and saves; the
+/// functions that take a bucket's binding name take this, or the move's
+/// `STAGE` (migrations.rs).
+pub const BLOBS: &str = "BLOBS";
+
 fn blobs(env: &Env) -> CellResult<Bucket> {
-    Ok(env.bucket("BLOBS")?)
+    Ok(env.bucket(BLOBS)?)
 }
 
 async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {
@@ -481,9 +486,18 @@ pub async fn browser_fetch(env: &JsValue, req: worker::Request) -> CellResult<wo
     Ok(worker::Response::from(resp))
 }
 
-/// Stores bytes at `key`.
-pub async fn blob_put_bytes(env: &Env, key: &str, bytes: &[u8]) -> CellResult<()> {
-    blobs(env)?.put(key, bytes.to_vec()).execute().await?;
+/// Stores bytes at `key` in `bucket` (a binding's name).
+pub async fn blob_put_bytes(env: &Env, bucket: &str, key: &str, bytes: &[u8]) -> CellResult<()> {
+    env.bucket(bucket)?.put(key, bytes.to_vec()).execute().await?;
+    Ok(())
+}
+
+/// Sets the Durable Object's alarm at `at_ms`, not waiting for it: its
+/// storage's writes are ordered and its output gate holds the answer until
+/// they are durable.
+pub fn set_alarm(state: &JsValue, at_ms: i64) -> CellResult<()> {
+    let storage = get(state, "storage")?;
+    call(&storage, "setAlarm", &[JsValue::from_f64(at_ms as f64)]).map_err(|e| CellError::host(format!("setAlarm: {}", js_message(&e))))?;
     Ok(())
 }
 
@@ -502,14 +516,14 @@ pub struct BlobBody {
 
 /// The request's own `Range` header goes to R2 as it came, which reads it
 /// (workers-rs's `get` takes only a parsed range).
-pub async fn blob_get(env: &Env, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
+pub async fn blob_get(env: &Env, bucket: &str, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
     let options = Object::new();
     if let Some(r) = range {
         let headers = worker_sys::web_sys::Headers::new().map_err(|e| CellError::host(js_message(&e)))?;
         headers.set("range", r).map_err(|e| CellError::host(js_message(&e)))?;
         set(&options, "range", JsValue::from(headers));
     }
-    let object = await_js(call(blobs(env)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
+    let object = await_js(call(env.bucket(bucket)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
     if object.is_null() || object.is_undefined() {
         return Ok(None);
     }
@@ -536,27 +550,29 @@ pub async fn blob_range(env: &Env, key: &str, offset: u64, length: u64) -> CellR
     Ok(Some(body.bytes().await?))
 }
 
-/// Starts a multipart upload at `key`, typed `content_type`: its id.
-pub async fn upload_start(env: &Env, key: &str, content_type: &str) -> CellResult<String> {
+/// Starts a multipart upload at `key` in `bucket` (a binding's name),
+/// typed `content_type`: its id.
+pub async fn upload_start(env: &Env, bucket: &str, key: &str, content_type: &str) -> CellResult<String> {
     let metadata = worker::HttpMetadata { content_type: Some(content_type.to_string()), ..Default::default() };
-    let upload = blobs(env)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
+    let upload = env.bucket(bucket)?.create_multipart_upload(key).http_metadata(metadata).execute().await?;
     Ok(upload.upload_id().await)
 }
 
 /// Uploads part `part` (from 1) of the upload `upload` at `key`: its etag.
-/// The same part again replaces it.
-pub async fn upload_part(env: &Env, key: &str, upload: &str, part: u16, bytes: Vec<u8>) -> CellResult<String> {
+/// The same part again replaces it. `body` is its bytes, or a request's
+/// own stream of the length it declared, which R2 reads unbuffered.
+pub async fn upload_part(env: &Env, bucket: &str, key: &str, upload: &str, part: u16, body: impl Into<worker::Data>) -> CellResult<String> {
     assert!(part >= 1, "parts count from 1");
-    let uploaded = blobs(env)?.resume_multipart_upload(key, upload)?.upload_part(part, bytes).await?;
+    let uploaded = env.bucket(bucket)?.resume_multipart_upload(key, upload)?.upload_part(part, body).await?;
     Ok(uploaded.etag())
 }
 
 /// Completes the upload with `parts` (number, etag), in order: the
 /// object's size. workers-rs takes only the parts its own calls answered,
 /// so the list goes as R2's binding takes it.
-pub async fn upload_complete(env: &Env, key: &str, upload: &str, parts: &[(u16, String)]) -> CellResult<u64> {
+pub async fn upload_complete(env: &Env, bucket: &str, key: &str, upload: &str, parts: &[(u16, String)]) -> CellResult<u64> {
     assert!(!parts.is_empty() && parts.windows(2).all(|w| w[0].0 < w[1].0), "a completion names its parts once each, in order");
-    let bucket = blobs(env)?;
+    let bucket = env.bucket(bucket)?;
     let pending = await_js(call(bucket.as_ref(), "resumeMultipartUpload", &[key.into(), upload.into()]), "resumeMultipartUpload").await?;
     let list = Array::new();
     for (n, etag) in parts {
@@ -571,37 +587,39 @@ pub async fn upload_complete(env: &Env, key: &str, upload: &str, parts: &[(u16, 
 
 /// Aborts the upload: its parts go. One already gone (completed, aborted,
 /// or expired) is no failure.
-pub async fn upload_abort(env: &Env, key: &str, upload: &str) -> CellResult<()> {
-    match blobs(env)?.resume_multipart_upload(key, upload)?.abort().await {
+pub async fn upload_abort(env: &Env, bucket: &str, key: &str, upload: &str) -> CellResult<()> {
+    match env.bucket(bucket)?.resume_multipart_upload(key, upload)?.abort().await {
         Ok(()) => Ok(()),
         Err(e) if e.to_string().contains("NoSuchUpload") || e.to_string().contains("10024") => Ok(()),
         Err(e) => Err(e.into()),
     }
 }
 
-pub async fn blob_delete(env: &Env, keys: &[String]) -> CellResult<()> {
-    Ok(blobs(env)?.delete_multiple(keys.to_vec()).await?)
+pub async fn blob_delete(env: &Env, bucket: &str, keys: &[String]) -> CellResult<()> {
+    Ok(env.bucket(bucket)?.delete_multiple(keys.to_vec()).await?)
 }
 
-/// The first page of keys under `prefix`, and whether there are more.
-pub async fn blob_list(env: &Env, prefix: &str) -> CellResult<(Vec<String>, bool)> {
-    let listed = blobs(env)?.list().prefix(prefix).execute().await?;
+/// The first page of keys under `prefix` in `bucket` (a binding's name),
+/// and whether there are more.
+pub async fn blob_list(env: &Env, bucket: &str, prefix: &str) -> CellResult<(Vec<String>, bool)> {
+    let listed = env.bucket(bucket)?.list().prefix(prefix).execute().await?;
     Ok((listed.objects().iter().map(|o| o.key()).collect(), listed.truncated()))
 }
 
-/// Deletes what BLOBS holds under `prefix`, at most `pages` pages (R2's
-/// list, up to 1000 keys each) a call: how many it deleted, and whether
-/// any are left (the caller's to call again). A deleted fragment's blobs
-/// (ended.rs) and a wiped computer's saves (computer.rs) go so.
-pub async fn blob_delete_under(env: &Env, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
+/// Deletes what `bucket` (a binding's name) holds under `prefix`, at most
+/// `pages` pages (R2's list, up to 1000 keys each) a call: how many it
+/// deleted, and whether any are left (the caller's to call again). A
+/// deleted fragment's blobs (ended.rs), a wiped computer's saves
+/// (computer.rs) and a move's stages done with (migrations.rs) go so.
+pub async fn blob_delete_under(env: &Env, bucket: &str, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
     assert!(prefix.ends_with('/') && pages > 0, "a prefix of its own, a bounded number of pages");
     let mut deleted = 0u64;
     for _ in 0..pages {
         // each page listed is deleted, so the next list starts afresh
-        let (keys, more) = blob_list(env, prefix).await?;
+        let (keys, more) = blob_list(env, bucket, prefix).await?;
         assert!(keys.iter().all(|k| k.starts_with(prefix)), "a listing under a prefix answers keys under it");
         if !keys.is_empty() {
-            blob_delete(env, &keys).await?;
+            blob_delete(env, bucket, &keys).await?;
             deleted += keys.len() as u64;
         }
         if !more {

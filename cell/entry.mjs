@@ -64,6 +64,26 @@ export class SearchIndex extends DurableObject {
   alarm(info) { return this.rs.alarm(info); }
 }
 
+// A person's Vault (vault.rs): their secrets, sealed; the router and the
+// platform's own code call it.
+export class Vault extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.VaultCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+}
+
+// The finite.computer move (migrations.rs): one object, the router's alone.
+export class Migrations extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.MigrationsCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+}
+
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);

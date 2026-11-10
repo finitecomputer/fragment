@@ -78,6 +78,7 @@ Every change is checked against this table.
 | Public addresses | the registry's `public_addresses`: one label, one fragment npub, never reassigned | the router resolves them there and the fragment checks the npub; a delete or wipe keeps the reservation |
 | A person's wipe | the registry's `wipes` (docs/api.md, "Operators: wiping a person") | a wiped person's ledger, list and computer each keep one row saying so |
 | Secrets | the object that owns each, sealed; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
+| A person's secrets for their agents (FIN-466) | their `Vault` object, each value sealed for it (docs/secrets.md, "A person's Vault") | none: no answer, list, log or export names a value |
 | A person's connections | WorkOS Pipes (one account a provider, or several: `accounts_max`); one being made, the registry's `connection_signins` (docs/pipes-browser-binding.md) | which account each agent uses, its computer's `agent_accounts`; a guest holds placeholders only |
 | Orgs, their admins and seats | the registry (docs/billing.md) | each holder's plan and standing pushed to their ledger in the registry's order (`SetSeat.seq`); the registry is the seat's one writer |
 | An org's credit and monthly budget (decisions 66 to 68) | its ledger (`org:<id>`) | none: operators grant and set them; its billing admins read them |
@@ -112,6 +113,7 @@ Every change is checked against this table.
 | What members are doing: each one's newest listed record | the channel's records | the fragment's `listed`, and each member's list row (docs/api.md, Listed records) |
 | Native iPhone drafts and pending sends | protected, backup-excluded Application Support files, scoped to platform and person (`ios/Sources/ChatDraftStore.swift`) | bounded to 32 saved chats, 16 pending sends each; a send is saved before HTTP, retried only with the same id and body, never once refused; editing, saving and loading hold one set of bounds (`SavedChat`), and no saved file stops a chat; device keys live only in Keychain |
 | A person's own view of their fragments (archived, docked, read up to) | their list, the `Principal` cell | none |
+| A finite.computer old agent's move: its roster row, its person's answers, its state and deadlines, the mover's command | the `Migrations` object (docs/migrations.md; removable with the move) | none: the mover acts on its commands alone, and staff read and act through its operators' routes |
 | A person's export | their list, the `Principal` cell, and its archive in R2 | the archive is a copy as read, never updated, deleted after seven days (docs/api.md, Export) |
 
 ## Schemas: the platform objects' steps

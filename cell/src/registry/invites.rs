@@ -22,7 +22,7 @@
 //! tries in all (`fragment_core::backoff::claim_retry_ms`). Past them it
 //! waits on its person's next sign-in, which tries it afresh.
 
-use fragment_core::{backoff, mail};
+use fragment_core::{backoff, levers, mail};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, Reason, Role};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ pub(crate) struct NoticesOf {
 
 impl Call for NoticesOf {
     const PATH: &'static str = "/invites/notices";
-    type Answer = serde_json::Value;
+    type Answer = fragment_proto::notice::NoticeList;
 }
 
 /// `POST /invites/answer`: the asker's yes (`yes`) or no to `fragment`'s
@@ -274,9 +274,11 @@ impl RegistryCell {
     /// What the registry tells `b.person` (`NoticesOf`), in words: their
     /// seat, lapsed or ending by itself soon (Pay again for its admin, and
     /// Payment and invoices for whoever pays, where seats are sold), then
-    /// their invites. A seat's lapse and its return are told their pages by
-    /// their ledger, whose standing follows the seat (`ledger.rs` `told`).
-    fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
+    /// their invites; on a local fleet, one to a `must-answer…` fragment as
+    /// one that must be answered (`fragment_core::levers::must_answer_invite`).
+    /// A seat's lapse and its return are told their pages by their ledger,
+    /// whose standing follows the seat (`ledger.rs` `told`).
+    fn notices_of(&self, b: NoticesOf) -> CellResult<fragment_proto::notice::NoticeList> {
         use fragment_core::registry::said;
         let mine = self.my_seat(&b.person)?;
         let sold = self.cfg.stripe().is_ok();
@@ -285,13 +287,15 @@ impl RegistryCell {
             (true, Some(end)) => said::seat_ends(said::Ending::Trial, end * 1000, js::now_ms(), mine.pays && sold),
             (true, None) => None,
         });
+        let fleet = self.cfg.test_hooks.then_some(if self.cfg.levers_scoped { levers::Fleet::Branch } else { levers::Fleet::Local });
         let invites = self.waiting_on(&b.person)?;
         let invites = invites.iter().map(|i| {
             let s = |k: &str| i[k].as_str().unwrap_or_default();
-            said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
+            let mut n = said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str());
+            n.must_answer = levers::must_answer_invite(fleet, s("fragment"));
+            n
         });
-        let notices: Vec<fragment_proto::notice::Notice> = seat.into_iter().chain(invites).collect();
-        Ok(serde_json::json!({ "notices": notices }))
+        Ok(fragment_proto::notice::NoticeList { notices: seat.into_iter().chain(invites).collect() })
     }
 
     /// The email of `person`'s that `fragment`'s invite waits on for their

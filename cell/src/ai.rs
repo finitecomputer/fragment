@@ -477,7 +477,7 @@ impl FragmentCell {
     /// or `None` when it is gone.
     async fn blob(&self, sha: &str) -> Result<Option<crate::js::BlobBody>, StepFail> {
         let key = self.blob_key(sha).map_err(retry)?;
-        crate::js::blob_get(&self.env, &key, None).await.map_err(retry)
+        crate::js::blob_get(&self.env, crate::js::BLOBS, &key, None).await.map_err(retry)
     }
 
     /// `job.ai.text`: the model route's call, streamed (`read_text`), kept

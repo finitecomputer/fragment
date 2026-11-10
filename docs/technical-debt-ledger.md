@@ -532,29 +532,23 @@ unfinished design, not debt.
 - **Delete when:** the release's build rebuilds a change to one of its
   files in seconds, and dev builds the release's again.
 
-## The cell's Wasm budget raised to 6.6 MB
+## The cell's Wasm budget raised to 7.5 MB
 
-- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
-  6.5 MB to 6.6 MB (Paul, 2026-11-03) so the fixes that let every
-  computer restart could land: a folder that will not fit set aside, its
-  owner getting it back or dropping it, it in their export, and the
-  disk read and told as it fills (about 66 KB together, on a cell that
-  had reached 6.454 MB).
+- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) is 7.5 MB
+  (Paul, 2026-11-10). It went 6.0 → 6.5 MB for launch week (10-14),
+  6.6 MB for the restart fixes (11-03), and 7.5 MB for the
+  finite.computer move (FIN-463: its Migrations object, about 143 KB)
+  and the Vault (FIN-466, about 98 KB). The untangle pass (M6, M7) had
+  just brought the cell back to 6.31 MB.
 - **Risk:** slower isolate starts and less memory for every object, and
-  an easier next raise.
-- **Delete when:** the cell is back under 6.5 MB and the budget is set
-  back to 6.5 MB. Candidates: the export's archive builder in a Worker of
-  its own (the launch entry's), and the Computer DO's routes, whose big
-  async functions grow with each await point a feature adds.
-
-## The cell's Wasm budget was raised for launch
-
-- **Shortcut:** `CELL_WASM_MAX_BYTES` (xtask/src/build.rs) went from
-  6.0 MB to 6.5 MB so launch week's features could land.
-- **Risk:** slower starts, less memory, an easier next raise.
-- **Delete when:** the cell is back under 6.0 MB (first candidate: the
-  export's archive builder in a Worker of its own) and the budget is
-  set back to 6.0 MB.
+  an easier next raise. Every fragment's isolate carries machinery it
+  never uses.
+- **Delete when:** the cell is split into Workers of their own, so a
+  fragment carries only its own machinery (Paul, 11-10: "eventually we
+  should refactor so these are multiple workers not a monolith… why
+  should every fragment need all this machinery"), and the move's code
+  is removed (FIN-463's debt entry). First candidates: the Migrations
+  object, the export's archive builder, the Computer DO's routes.
 
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
@@ -654,6 +648,49 @@ unfinished design, not debt.
   carries decision 63; then `meet_invites`, the kept claims, the alarm's
   claims and the `role IS NULL` clauses go, and `invite_claims` with
   them (a step that drops it).
+
+## The finite.computer move (FIN-463)
+
+- **Shortcut:** fragment carries, for the move of finite.computer's
+  agents (docs/migrations.md): a `Migrations` Durable Object (one, with
+  its schema steps), its routes (`/api/migrations/*`, on the wire, and
+  `/api/admin/migrations`), `fragment_proto::migrations` and
+  `fragment_core::migrations`, the `STAGE` R2 bucket and its lifecycle
+  rules in `xtask deploy`, the stage's reads (one zip by ranges; no
+  mount), the mover's npub in the config (`migrations.mover`; it signs
+  with its own key, so fragment holds no secret for it), the e2e lane `move` and the fake mover;
+  and, from its other PRs, the page `/move`, the welcome's slot, the
+  notices owner, the sign-in call (`signin.rs`), `Source::Stage` and
+  `fragment stage` in the CLI, the `finite-computer` layout and profile
+  of the `import-agent-home` skill, and the vault's `nostr_nsec`
+  purpose. finite-mono carries `finite-mover`, `finite-mover-host`,
+  their keys, its database role, Core's `moved` column and two CLI
+  subcommands.
+- **Risk:** Wasm while it lives; one more global object asked by
+  `GET /api/notices` (with F4); the mover's key can upload a stage for
+  an old agent it was told to stage, into a consenting person's new
+  agent. It holds no bucket credential and reads no stage.
+- **Delete when:** every roster agent is `moved`, `withdrawn` or
+  `expired`, phase 2's 90 days have passed, and no move is `held`. Then,
+  in order:
+  1. Turn the mover off; remove `migrations` from the config.
+  2. Delete the class with a `deleted_classes` tag (xtask learns to
+     retire a class's steps from `schema.lock`).
+  3. Retire its wire facts in `wire.retired`.
+  4. Remove `/move`, the welcome's slot, the notices owner and the
+     sign-in call.
+  5. Remove `Source::Stage`, `fragment stage`, and the `finite-computer`
+     layout and profile.
+  6. Remove `finite-chat-archive/1` once phase 0 ends.
+  7. Remove the vault's `nostr_nsec` purpose and what it holds.
+  8. Delete the `STAGE` bucket (Paul).
+  9. Remove the SPECIAL-CASE-INVENTORY row and this entry.
+  10. In finite-mono: the mover, the host reader, the database role and
+      the ssh account.
+
+  What stays: `fragment home`, the `import-agent-home` skill and its
+  `hermes` layout, must-answer notices, the comp's `until`, the vault,
+  and the wire's bytes answer.
 
 ## The registry is one Durable Object for the fleet
 

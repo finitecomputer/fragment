@@ -1578,6 +1578,12 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub owner: Option<String>,
+    /// A person member's email, as the share sheet shows it (decision
+    /// 48): in `GET members` to the owner and their agent for them, and in
+    /// no other list (add-only: absent from an older platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub email: Option<String>,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -2530,11 +2536,13 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod migrations;
 pub mod notice;
 pub mod org;
 #[cfg(feature = "schema")]
 pub mod routes;
 pub mod search;
+pub mod vault;
 pub mod wipe;
 
 #[cfg(test)]
