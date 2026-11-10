@@ -248,6 +248,13 @@ pub struct ProviderView {
     /// is, or its row names no scopes (no `connection_oauth`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<Vec<String>>,
+    /// What a connection's account lets the person's agents do, as its
+    /// grant holds it (`connection_signin::access_of`): what they picked
+    /// as they connected it, or read only where they left every write
+    /// scope unticked. None when `granted` is, or its row names no
+    /// `connection_oauth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ConnectionAccess>,
     /// The deployment's note on it (its catalog row's `note`), which
     /// settings shows under its name, connected or not: plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +278,32 @@ pub struct ProviderView {
     pub charged: Option<ProviderPrice>,
 }
 
+/// What a person lets their agents do with a connection's account, picked
+/// as they connect it: read only, or read and write. Its provider enforces
+/// it (the account is granted only the scopes asked for it), and settings
+/// shows it as the grant holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionAccess {
+    Read,
+    Write,
+}
+
+impl ConnectionAccess {
+    /// Its word on the wire and in a pending connect's row.
+    pub fn word(self) -> &'static str {
+        match self {
+            ConnectionAccess::Read => "read",
+            ConnectionAccess::Write => "write",
+        }
+    }
+
+    /// Read back from its word. None: no access this code knows.
+    pub fn of_word(word: &str) -> Option<ConnectionAccess> {
+        [ConnectionAccess::Read, ConnectionAccess::Write].into_iter().find(|a| a.word() == word)
+    }
+}
+
 /// One of a person's accounts at a connection that takes several: its
 /// Pipes id (what an agent's pick, a reconnect and a disconnect name), its
 /// label, state and scopes as `ProviderView`'s are a single account's.
@@ -285,6 +318,8 @@ pub struct ConnectionAccount {
     pub granted: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ConnectionAccess>,
     /// One they disconnected that Pipes holds still (its disconnect did not
     /// finish, or an import landed after it): not connected, used by no
     /// agent; settings offers to disconnect it again.

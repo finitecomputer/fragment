@@ -419,12 +419,16 @@ fn now_s() -> i64 {
     crate::codestorage::now_ms() / 1000
 }
 
-/// What the stand-in provider's connection asks for (`connection_oauth`).
+/// What the stand-in provider's connection asks for as read only
+/// (`connection_oauth.access.read`).
 pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
+/// What it asks for as read and write: read only's, and sending mail.
+pub const CONNECTION_WRITE_SCOPES: [&str; 4] = ["mail.read", "files.read", "mail.send", "openid"];
 
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
-        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": CONNECTION_SCOPES, "revoke": format!("{}/test-oauth/revoke", self.url) })
+        let access = json!({ "read": { "scopes": CONNECTION_SCOPES }, "write": { "scopes": CONNECTION_WRITE_SCOPES } });
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
 
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.

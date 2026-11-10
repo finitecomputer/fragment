@@ -37,6 +37,7 @@ struct Pending {
     expires_at: i64,
     intent: String,
     account: Option<String>,
+    access: String,
 }
 
 impl RegistryCell {
@@ -74,8 +75,8 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::RateLimited, "too many connection authorizations under way; finish one or wait ten minutes"));
         }
         let (intent, account) = b.intent.columns();
-        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into())])?;
+        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into()), b.access.word().into()])?;
         Ok(ConnectionBegun { state, challenge: own_signin::challenge(&verifier) })
     }
 
@@ -115,9 +116,11 @@ impl RegistryCell {
         let (status, answer) = keys::connection_exchange(&self.env, &b.provider, o, &callback, &code, verifier).await?;
         if (400..500).contains(&status) { return Ok(CodeRefused); }
         if status != 200 { return Ok(Failed); }
-        // a partial grant is imported as granted; one of signing in alone
-        // gives the person's agents nothing, and is said so
-        let tokens = match connection_signin::tokens(&answer, &o.scopes) {
+        // asked for what the person picked; a partial grant is imported as
+        // granted, and one of signing in alone gives their agents nothing,
+        // and is said so
+        let Some(access) = fragment_proto::computer::ConnectionAccess::of_word(&pending.access) else { return Ok(NotUnderWay) };
+        let tokens = match connection_signin::tokens(&answer, &o.access.of(access).scopes) {
             Ok(tokens) => tokens,
             Err(connection_signin::Refused::NoScopes) => return Ok(NoScopes),
             Err(connection_signin::Refused::Invalid) => return Ok(Failed),

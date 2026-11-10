@@ -53,6 +53,11 @@ fn connect(api: &Api, session: &str, body: Value, account: &str, grant: Option<&
 /// A connect as `connect`, up to its callback: the authorize answer, and
 /// where the browser goes back with its cookie (none: refused).
 fn prepared(api: &Api, session: &str, body: Value, account: &str, grant: Option<&str>) -> Result<(Reply, Option<(String, String)>)> {
+    // the access the person picked: read only, unless the body names one
+    let mut body = body;
+    if body.get("access").is_none() {
+        body["access"] = "read".into();
+    }
     let r = shell(api, session, "POST", &format!("/api/connections/{SEVERAL}/authorize"), Some(&body))?;
     if r.status != 200 {
         return Ok((r, None));
@@ -83,7 +88,7 @@ fn ids(accounts: &[Value]) -> Vec<String> {
 pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
     let email = "several-a@e2e.test";
     let a = api.sign_in(email)?;
-    let add = || json!({ "add": true });
+    let add = || json!({ "add": true, "access": "read" });
 
     // a row of one account takes neither
     let one = shell(api, &a, "POST", "/api/connections/e2e-oauth/authorize", Some(&add()))?;
@@ -336,7 +341,7 @@ fn raced(s: &mut Suite, api: &Api) -> Result<()> {
         });
         Ok((a?, b?, waited))
     };
-    let add = || json!({ "add": true });
+    let add = || json!({ "add": true, "access": "read" });
     let (_, x) = prepared(api, &one, add(), "d-two", None)?;
     let (_, y) = prepared(api, &two, add(), "d-two", None)?;
     let (a, b, waited) = together(s, x.context("first")?, y.context("second")?)?;
@@ -368,7 +373,7 @@ fn outlasted(s: &mut Suite, api: &Api) -> Result<()> {
     let first = connect(api, &one, json!({}), "g-one", None)?;
     anyhow::ensure!(ok(&first), "connect g's first account");
     let wait = std::time::Duration::from_secs(20);
-    let add = || json!({ "add": true });
+    let add = || json!({ "add": true, "access": "read" });
     let state_of = |r: &Reply| reqwest::Url::parse(r.body["url"].as_str().unwrap_or_default()).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned())).unwrap_or_default();
     // the first held at its import, the second past its exchange and its
     // checks, waiting its turn; then `meanwhile`, then the first let go

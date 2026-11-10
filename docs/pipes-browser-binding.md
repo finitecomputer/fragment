@@ -34,13 +34,32 @@ back to WorkOS's own authorize URL. The routes are docs/api.md's
   unverified email dropped, and shown to its person, never used for
   access.
 
+## Access
+
+A person picks, as they connect, what their agents may do with the
+account: read only, or read and write. A row's `connection_oauth.access`
+names the scopes each asks for (`read.scopes`, `write.scopes`), and the
+connect asks the provider for the picked one's alone (`POST …/authorize`
+`{access}`, required: the platform never picks for them), so the provider
+enforces it: a token of a read-only grant cannot write. Read and write
+asks for at least one scope read only does not (the catalog refuses a row
+otherwise), and that is how Settings tells a grant's access
+(`connection_signin::access_of`): read and write while it holds such a
+scope, else read only, so it is said as the grant holds it, never as
+asked. A read-only account offers Allow changes (a reconnect asking for
+read and write). Going back to read only is a disconnect, then a connect
+as read only: a provider that keeps what was granted before (Google's
+`include_granted_scopes`) would keep the write scopes through a
+reconnect, and the account would still say read and write.
+
 ## Partial grants
 
 A person may untick permissions on the provider's consent screen. A
 grant of anything beyond signing in connects with what it holds, and the
 import records its scopes exactly; one of signing in alone
 (`IDENTITY_SCOPES`) imports nothing (`?refused=no-scopes`). Settings names
-what is missing, and a reconnect asks only for the rest.
+what its access asks for that is missing, and a reconnect asks only for
+the rest.
 
 ## Disconnecting
 

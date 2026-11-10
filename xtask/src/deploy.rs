@@ -1760,7 +1760,7 @@ mod tests {
         d.providers.push(serde_json::json!({
             "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
             "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
-            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "scopes": ["scope"] },
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "access": { "read": { "scopes": ["scope.readonly"] }, "write": { "scopes": ["scope"] } } },
             "key": "fragment-google-oauth-secret"
         }));
         let (catalog, _) = catalog_of(&d).unwrap();
