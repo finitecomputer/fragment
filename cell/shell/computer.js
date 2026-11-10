@@ -130,7 +130,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const cover = document.getElementById("must-answer");
     if (cover?.open && changes.some((c) => c.target !== cover && c.target.open)) {
       cover.close();
-      cover.showModal();
+      reshow(cover);
       focusChosen(cover, false);
     }
   });
@@ -142,6 +142,13 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   let chosen = null;
   const keyOf = (b) => b.dataset.action ?? b.textContent;
   document.getElementById("must-answer")?.addEventListener("focusin", (e) => (chosen = keyOf(e.target)));
+  // The cover shown (again), the person's answer kept: `showModal` focuses
+  // its first button, which `focusin` would take for their choice.
+  function reshow(cover) {
+    const kept = chosen;
+    cover.showModal();
+    chosen = kept;
+  }
   function focusChosen(cover, fresh) {
     const buttons = [...cover.querySelectorAll("button")];
     const kept = chosen && buttons.find((b) => keyOf(b) === chosen);
@@ -345,10 +352,15 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     cover.dataset.id = n.id;
     cover.oncancel = (e) => e.preventDefault();
     cover.onkeydown = (e) => e.stopPropagation();
-    cover.onclose = () => cover.dataset.id && !cover.open && cover.showModal();
+    cover.onclose = () => {
+      if (cover.dataset.id && !cover.open) {
+        reshow(cover);
+        focusChosen(cover, false);
+      }
+    };
     cover.setAttribute("aria-label", n.title);
     cover.replaceChildren(...own.map(pageRow), noticeRow(n));
-    if (!cover.open) cover.showModal();
+    if (!cover.open) reshow(cover);
     focusChosen(cover, fresh);
   }
   // The restart, done: awake on a newer start, or a newer start that won't

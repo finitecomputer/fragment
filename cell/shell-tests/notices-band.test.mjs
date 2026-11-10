@@ -92,6 +92,8 @@ function topLayer() {
         layer.push(this);
         this.open = true;
         changed.push(this);
+        // as a browser does: its first button that takes the focus has it
+        walk(this).find((n) => n.tag === "button" && !n.disabled)?.focus();
       },
       close() {
         if (layer.includes(this)) layer.splice(layer.indexOf(this), 1);
