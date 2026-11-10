@@ -881,9 +881,20 @@ impl LedgerCell {
                 reply(self.mutate(move |l, s, now| if l.is_org() { Err(Refused::PersonsOnly) } else { Ok(l.status(s, now, book)) }).await?)
             }
             NoticesOf::PATH => {
-                let NoticesOf {} = decode(&body)?;
-                let sold = self.cfg.stripe().is_ok();
-                reply(self.mutate(move |l, _, now| Ok(NoticeList { notices: l.said(now, sold) })).await?)
+                // read alone, outside any transaction, as nothing is written:
+                // the head as last written (its body, `{}`, says nothing). A
+                // ledger no call has written yet has none to tell (its
+                // standing ok, or a guest's), and an org's tells no one.
+                let now = js::now_ms() + self.offset_ms()?;
+                let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
+                let notices = match (Payer::parse(&payer), rows.into_iter().next()) {
+                    (Some(Payer::Person(_)), Some(row)) => {
+                        let ledger: Ledger = crate::json_text(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+                        ledger.said(now, self.cfg.stripe().is_ok())
+                    }
+                    _ => vec![],
+                };
+                reply(NoticeList { notices })
             }
             OrgStatus::PATH => {
                 let OrgStatus {} = decode(&body)?;
