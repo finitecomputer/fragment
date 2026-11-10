@@ -2017,6 +2017,7 @@ mod tests {
         let o = p.connection_oauth.as_ref().expect("its connect");
         assert_eq!((o.client_id.as_str(), o.scopes.join(" "), o.revoke.as_deref()), ("salesforce-client", "api refresh_token openid email".to_string(), Some("https://login.salesforce.com/services/oauth2/revoke")));
         assert_eq!(p.account_host.as_ref().map(|a| (a.metadata.as_str(), a.under.as_str())), Some(("instance_url", "my.salesforce.com")));
+        assert!(p.note.as_deref().is_some_and(|n| n.contains("dedicated integration user")), "Settings says how to limit what agents may do: {:?}", p.note);
         assert!(catalog.intercepts().contains(&"*.my.salesforce.com".to_string()));
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_SALESFORCE".into(), "fragment-salesforce-oauth-secret")));
     }
@@ -2041,7 +2042,7 @@ mod tests {
         let d = with(note).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
-        assert!(catalog.providers().iter().filter(|p| p.name != "google").all(|p| p.note.is_none()), "the other rows have none");
+        assert!(catalog.providers().iter().filter(|p| !["google", "salesforce"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Salesforce's");
         let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
         let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");

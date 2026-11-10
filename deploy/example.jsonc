@@ -341,11 +341,14 @@
     // Its token goes to login.salesforce.com (the identity a helper learns
     // its org's host from) and to the org's own host, as Pipes' metadata
     // names it (`account_host`). Salesforce's answer names no `expires_in`:
-    // its grant lands expired, and Pipes refreshes it first.
+    // its grant lands expired, and Pipes refreshes it first. Its scopes reach
+    // all the signed-in user may do (Salesforce has no narrower one), so its
+    // note says how to limit that.
     { "name": "salesforce", "kind": "connection",
       "hosts": ["login.salesforce.com"],
       "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "note": "Your agents can do anything the Salesforce user you sign in as can. To limit them, sign in as a dedicated integration user with only the permissions they need.",
       // "key": "<the client secret's store name>",
       // "connection_oauth": { "authorize": "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent",
       //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
