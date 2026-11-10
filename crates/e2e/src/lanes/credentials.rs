@@ -262,6 +262,9 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let own = format!("acme.{under}");
     s.workos.connect(&email, ORG_CONNECTION, true);
     s.workos.keep_metadata(&email, ORG_CONNECTION, json!({ "instance_url": format!("https://{own}") }));
+    // the owner's read tells the computer at once, as above
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    anyhow::ensure!(state_of(&r, ORG_CONNECTION) == "connected", "the account host's connection connected: {r}");
     let fetch = |s: &Suite, host: &str| format!("fetch http://{host}/services/data/v62.0/sobjects with {}", placeholder(s, w.id, w.agent, ORG_CONNECTION));
     let swapped_at = |s: &Suite, host: &str| s.workos.tokens(ORG_CONNECTION).last().is_some_and(|t| s.upstream.seen().last().is_some_and(|seen| seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {t}")));
     let at_own = say(s, 164, &fetch(s, &own))?;
