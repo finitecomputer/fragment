@@ -441,8 +441,12 @@ never reaches another agent's core.
   maintenance mode (`-m`, started with nothing subscribed): their contact
   there and their name, and their chat's newest item, which is marked
   delivered, so nothing the old agent already had is carried as new. The
-  door's key is registered, the files become the core's databases, and the
-  link is bound to that contact, at this start's generation (no rollback).
+  door's key is registered, then the adoption's intent is written
+  (`staged/commit.json`), then the files become the core's databases and
+  the link is bound to that contact, at this start's generation (no
+  rollback), and written; only then does the staged copy go. A failed
+  write or a crash anywhere in between is finished at the next start (and
+  retried meanwhile) before any core runs or anything else links.
   Its core then starts: what arrived while it moved is carried, the old
   agent's other contacts are deleted (told), its groups left and deleted,
   and its address deleted, each asked at every start until the core says
