@@ -135,12 +135,14 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
   });
   raised.observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] });
-  // the button that has the cover's focus, by its label (the page's own by
-  // their action), as the person moves it: kept through a redraw of the
-  // same notice, while it is off too, and over a dialog opened meanwhile,
-  // so Enter is always the answer the person chose
+  // The answer that has the cover's focus, by what it does (`dataset.answer`;
+  // the page's own buttons by their `action`), as the person moves it: kept
+  // through a redraw of the same notice, a rename of it, while it is off,
+  // and over a dialog opened meanwhile. The cover never gives an answer the
+  // focus the person didn't: shown, and when theirs is gone, the focus is
+  // the cover's own, where Enter answers nothing.
   let chosen = null;
-  const keyOf = (b) => b.dataset.action ?? b.textContent;
+  const keyOf = (b) => b.dataset.action ?? b.dataset.answer ?? null;
   document.getElementById("must-answer")?.addEventListener("focusin", (e) => (chosen = keyOf(e.target)));
   // The cover shown (again), the person's answer kept: `showModal` focuses
   // its first button, which `focusin` would take for their choice.
@@ -150,11 +152,13 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     chosen = kept;
   }
   function focusChosen(cover, fresh) {
-    const buttons = [...cover.querySelectorAll("button")];
-    const kept = chosen && buttons.find((b) => keyOf(b) === chosen);
+    const kept = chosen && [...cover.querySelectorAll("button, a")].find((b) => keyOf(b) === chosen);
     if (kept) {
       if (!kept.disabled) kept.focus();
-    } else if (fresh || !cover.contains(document.activeElement)) buttons[0]?.focus();
+    } else if (fresh || chosen || !cover.contains(document.activeElement)) {
+      chosen = null;
+      cover.focus();
+    }
   }
   // the countdowns as last drawn, each its line and its time (`countdown`)
   let counting = [];
@@ -186,10 +190,13 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       link.href = a.open;
       link.target = "_blank";
       link.rel = "noopener";
+      link.dataset.answer = `open ${a.open}`;
       return link;
     }
     const b = el("button", main ? "primary" : null, a.label);
     b.type = "button";
+    // what it does, whatever its label says (the cover keeps the focus by it)
+    b.dataset.answer = `post ${a.post} ${JSON.stringify(a.body ?? {})}`;
     b.disabled = pending.has(n.id);
     b.onclick = () => act(n, a);
     return b;
@@ -350,6 +357,9 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const fresh = cover.dataset.id !== n.id;
     if (fresh) chosen = null;
     cover.dataset.id = n.id;
+    // shown, the cover's own focus (its first answer's otherwise)
+    cover.tabIndex = -1;
+    cover.autofocus = true;
     cover.oncancel = (e) => e.preventDefault();
     cover.onkeydown = (e) => e.stopPropagation();
     cover.onclose = () => {

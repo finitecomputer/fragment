@@ -30,8 +30,9 @@ class Node {
   querySelector(tag) {
     return walk(this).find((n) => n.tag === tag) ?? null;
   }
-  querySelectorAll(tag) {
-    return walk(this).filter((n) => n.tag === tag);
+  querySelectorAll(selector) {
+    const tags = selector.split(",").map((t) => t.trim());
+    return walk(this).filter((n) => tags.includes(n.tag));
   }
   focus() {
     globalThis.document.activeElement = this;
@@ -92,8 +93,10 @@ function topLayer() {
         layer.push(this);
         this.open = true;
         changed.push(this);
-        // as a browser does: its first button that takes the focus has it
-        walk(this).find((n) => n.tag === "button" && !n.disabled)?.focus();
+        // as a browser does: itself, if it says so (`autofocus`), else its
+        // first button that takes the focus
+        if (this.autofocus) this.focus();
+        else walk(this).find((n) => n.tag === "button" && !n.disabled)?.focus();
       },
       close() {
         if (layer.includes(this)) layer.splice(layer.indexOf(this), 1);
@@ -357,7 +360,7 @@ test("a notice that must be answered shows alone, over the page and never in the
   p.calls[1].ok({ notices: [paused(), first, second] });
   await settle();
   assert.deepEqual(p.asked().words, ["Move to finite.chat?", "Said by the server.", "Not yet: answer Yes, or Never."]);
-  assert.equal(globalThis.document.activeElement?.textContent, "Yes", "drawn again, its first answer has the focus");
+  assert.equal(globalThis.document.activeElement, p.cover, "drawn again, no answer they didn't choose has the focus: the cover's own");
   // answered, and the read after it has it no more: the next
   p.answer("Yes");
   assert.deepEqual([p.calls[2].path, p.calls[2].body], ["/api/notices/asked/move", { answer: "Yes" }]);
@@ -522,4 +525,32 @@ test("a read that fails while a notice must be answered says so in the cover, wi
   p.calls.at(-1).ok({ notices: [] });
   await settle();
   assert.equal(p.cover.open, false, "read again without it: the page, as it was");
+});
+
+test("the cover never gives the focus to an answer the person didn't choose: shown, its own; theirs kept by what it does, renamed or a link; gone, its own again", async (t) => {
+  const asked = mustAnswer("must-answer-1--k3x9", "Garden plans");
+  const p = page(t, [asked]);
+  assert.equal(globalThis.document.activeElement, p.cover, "shown: the cover's own focus, where Enter answers nothing");
+  // Decline, renamed by the next read: still theirs
+  p.coverButton("Decline").focus();
+  const renamed = { ...asked, actions: [asked.actions[0], { ...asked.actions[1], label: "No thanks" }] };
+  p.load();
+  p.calls[0].ok({ notices: [renamed] });
+  await settle();
+  assert.equal(globalThis.document.activeElement?.textContent, "No thanks", "the same answer, by what it does");
+  // gone from the next read: the cover's own focus, not Accept
+  p.load();
+  p.calls[1].ok({ notices: [{ ...asked, actions: [asked.actions[0]] }] });
+  await settle();
+  assert.equal(globalThis.document.activeElement, p.cover, "their answer gone: the cover's own focus");
+  // a link they moved to is kept too
+  const help = { label: "Read the terms", open: "https://finite.chat/terms" };
+  p.load();
+  p.calls[2].ok({ notices: [{ ...asked, actions: [...asked.actions, help] }] });
+  await settle();
+  walk(p.cover).find((n) => n.tag === "a").focus();
+  p.load();
+  p.calls[3].ok({ notices: [{ ...asked, actions: [...asked.actions, help] }] });
+  await settle();
+  assert.equal(globalThis.document.activeElement?.tag, "a", "the link, still");
 });
