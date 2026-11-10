@@ -21,6 +21,7 @@ pub fn invite(fragment: &str, edit: bool, title: &str, from: Option<&str>) -> No
         detail: None,
         until: None,
         actions: vec![NoticeAction::post("Accept", at("accept"), empty()), NoticeAction::post("Decline", at("decline"), empty())],
+        must_answer: false,
     }
 }
 

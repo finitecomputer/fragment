@@ -666,6 +666,17 @@ it gets none of it.
 
 Visitors without a key call as an anonymous principal (a cookie), so
 `public` operations work on a public fragment with no login.
+
+**Who did it.** Store `call.principal` with what someone did, and show
+them by email when the page draws: `fetch("./__people?id=" + id)` →
+`{profiles: {[id]: {kind, email?, name?, picture}}}` (at most 64 ids a
+time; `job.people(ids)` in a job). People show as their email to the
+fragment's members (they were invited by it), an agent by its name, and
+an anonymous visitor or link holder as no one. `await fragment.me()`
+says who this page is: `{id, principal, role}`; `fragment.me({ email:
+true })` adds `email` for a signed-in member (one more ask). Keep no table of names in your app: nobody can pick
+someone else's, and none goes stale. A mutation's `call` carries no
+name or email (it is the app's own transaction); ask when you draw.
 `await fragment.push.register(who)` (from a click) subscribes the
 browser to web push; `call.push(who, payload)` or `job.push(...)` reaches
 every browser registered with that `who` (`*` for all).
@@ -855,7 +866,7 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
 
 ```
 fragment visibility my-thing [public|link|members]
-fragment members list my-thing
+fragment members list my-thing                            # each person by email too, to the owner (and their agent)
 fragment members add my-thing bea@example.com --role editor   # a person, by email
 fragment members add my-thing <npub> --role viewer            # one of your own agents (or any key of one)
 fragment members role my-thing bea@example.com editor         # someone in already: their role
@@ -1015,6 +1026,8 @@ layout file a platform's import skill carries.
 fragment home survey ~/old-home --json                         # what an import would bring, and what stays
 fragment home survey stage.zip --layout ./layouts/x.json       # a zip, read through a platform's layout
 fragment home extract stage.zip agent/SOUL.md skills/ --to ~/import   # files and folders, copied out as they are
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9   # its own files, into a fragment of files
+fragment home files stage.zip --layout ./layouts/x.json --into old-files--k3x9 --plan   # only what it would bring
 ```
 
 The survey lists the chats' database (`fragment session import` brings
@@ -1028,6 +1041,13 @@ password or key (`.env`, `auth.json`, a private key) is left out unread,
 and named: nothing an import makes holds it. A zip naming a file by a
 path that is not plain (`..`, `a/./b`) is refused whole. `extract`
 copies into a folder apart from the home, never through a link.
+
+`fragment home files` brings the home's own files (its layout's work
+folder) into a fragment you edit, under `files/`, each file of 1 MiB or
+more as a blob, and writes `left-behind.md` beside them: every file or
+folder left out, its size, and why. A fragment with no `fragment.json`
+gets one whose page is the files view (`fragment deploy` shows it).
+Running it again sends only what is missing.
 
 ## Agents
 
@@ -1154,6 +1174,7 @@ fragment export [--out FILE]             fragment channel <name> [<channel>] [--
 fragment session import <path> [--kind K]   # an agent's past conversations, into your Session Archive
 fragment home survey <source> [--layout L]   # what an import of an agent's home would bring
 fragment home extract <source> <path>... --to <dir> [--layout L]
+fragment home files <source> --into <name> [--plan] [--layout L]   # its files, into a fragment of files
 fragment cap <name> <usd>|default        fragment post <name> <channel> --body JSON [--id ID]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T] [--title T]      fragment replay <name> <run>

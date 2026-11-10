@@ -364,6 +364,10 @@ pub struct Fleet {
     pub platform_url: String,
     /// Who may grant credit and set plans (`FRAGMENT_OPERATORS`).
     pub operators: Option<String>,
+    /// The finite.computer move (`FRAGMENT_MIGRATIONS_MOVER`,
+    /// `FRAGMENT_MIGRATIONS_CUTOFF_MS`: the mover's npub, and phase 2's
+    /// cutoff in ms): the e2e's `move` lane's.
+    pub migrations: Option<(String, String)>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
@@ -572,6 +576,10 @@ impl Fleet {
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
+        }
+        if let Some((mover, cutoff_ms)) = &self.migrations {
+            vars.push(("FRAGMENT_MIGRATIONS_MOVER", mover.as_str()));
+            vars.push(("FRAGMENT_MIGRATIONS_CUTOFF_MS", cutoff_ms.as_str()));
         }
         if let Some(o) = &self.observability {
             vars.push(("FRAGMENT_ACCOUNT_ID", o.account_id.as_str()));

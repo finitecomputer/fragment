@@ -149,7 +149,7 @@ mod tests {
         let files = cell_sources();
         assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
         assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
-        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell"), ("vault.rs", "VaultCell")];
+        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell"), ("search_index.rs", "SearchIndexCell"), ("vault.rs", "VaultCell"), ("migrations.rs", "MigrationsCell")];
         for (file, class) in objects {
             let text = &files[file];
             let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(uses(&files, "routed::probed(&req, "), checked, "and answers a probe once, there");
         let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
         let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
-        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the six checked above");
+        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the seven checked above");
         let made: Vec<&&str> = code.iter().filter(|l| l.contains("InternalRoute.request(")).collect();
         assert!(made.len() >= 3 && made.iter().all(|l| l.contains("InternalRoute.request(this.env, ") || l.contains("InternalRoute.request(env, ")), "the JavaScript's internal calls are stamped from its env: {made:?}");
         let called: Vec<&&str> = code.iter().filter(|l| l.contains("getByName(")).collect();
