@@ -195,7 +195,7 @@ pub const ROUTES: &[Route] = &[
         operation: "fragments.watch",
         method: Method::Get,
         path: "/api/fragments/watch",
-        summary: "A socket that says when the signer's list, or the invites waiting on them, change.",
+        summary: "A socket that says when the signer's list, or what they are told, changes.",
         auth: SIGNED,
         params: &[],
         request: None,
@@ -406,9 +406,10 @@ pub struct Done {
 }
 
 /// A frame of `GET /api/fragments/watch`, the socket that follows a
-/// signer's list. Frames name nothing: on `changed` or `invited` the page
-/// reads its list, or its invites, again with its own credential. The
-/// cell writes these as constant text (cell/src/principal.rs).
+/// signer's list. Frames name nothing: on `changed` the page reads its
+/// list, and what it is told (`GET /api/notices`), again with its own
+/// credential. The cell writes these as constant text
+/// (cell/src/principal.rs).
 ///
 /// Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does
 /// not know (the shell's list, the iOS app).
@@ -420,8 +421,9 @@ pub enum ListWatchFrame {
     Hello,
     /// Their list changed: a row added, gone, or changed.
     Changed,
-    /// The invites waiting on their emails changed: one made, renewed or
-    /// taken back.
+    /// The invites waiting on their emails changed. Sent no more since
+    /// FIN-458 (an invite is a notice: `changed`); kept for the readers
+    /// that know it.
     Invited,
 }
 
