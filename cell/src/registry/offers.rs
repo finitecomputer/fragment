@@ -280,7 +280,11 @@ impl RegistryCell {
         let person = mine.person.as_deref().ok_or_else(|| CellError::host(format!("{} merges into an offer", offer.id)))?;
         let (seat, comped) = match (mine.seat()?, offer.seat()?) {
             (Some(_), Some(_)) => return Err(conflict("you hold a seat in this org already: decline this offer").because(Reason::HoldsSeat)),
-            (_, Some(k)) => (Some(k), offer.comped),
+            (_, Some(k)) => {
+                // its seat comes with its end, if it ends (a comp's `until_ms`)
+                self.exec("UPDATE org_members SET until_ms = (SELECT until_ms FROM org_members WHERE id = ?) WHERE id = ?", vec![offer.id.as_str().into(), mine.id.as_str().into()])?;
+                (Some(k), offer.comped)
+            }
             (held, None) => (held, mine.comped),
         };
         self.exec("DELETE FROM org_members WHERE id = ?", vec![offer.id.as_str().into()])?;
