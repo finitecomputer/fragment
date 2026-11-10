@@ -44,9 +44,10 @@ connect asks the provider for the picked one's alone (`POST …/authorize`
 enforces it: a token of a read-only grant cannot write. Read and write
 asks for at least one scope read only does not (the catalog refuses a row
 otherwise), and that is how Settings tells a grant's access
-(`connection_signin::access_of`): read and write while it holds such a
-scope, else read only, so it is said as the grant holds it, never as
-asked. A read-only account offers Allow changes (a reconnect asking for
+(`connection_signin::access_of`): read only while every scope it holds,
+but signing in, is one read only asks for, else read and write (a scope
+the row no longer names, or one the provider added, is never taken for
+reading), so it is said as the grant holds it, never as asked. A read-only account offers Allow changes (a reconnect asking for
 read and write). Going back to read only is a disconnect, then a connect
 as read only: a provider that keeps what was granted before (Google's
 `include_granted_scopes`) would keep the write scopes through a
