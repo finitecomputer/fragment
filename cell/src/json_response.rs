@@ -25,6 +25,11 @@ pub(crate) fn json_response<T: serde::Serialize>(value: &T) -> CellResult<Respon
     Ok(json_answer(value)?.with_headers(no_store()))
 }
 
+/// `json_response` of JSON another object wrote, passed on as it came.
+pub(crate) fn json_bytes(bytes: Vec<u8>) -> CellResult<Response> {
+    Ok(Response::from_bytes(bytes)?.with_headers(no_store()))
+}
+
 fn no_store() -> Headers {
     let headers = Headers::new();
     headers.set("content-type", "application/json").expect("static header");

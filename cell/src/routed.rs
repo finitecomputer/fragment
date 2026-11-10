@@ -210,6 +210,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::auth::SIGNIN_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
+    } else if path.starts_with("vault/") {
+        Ok(Some((crate::vault::VAULT_HEADER, "1")))
     } else if path.starts_with("test/") || path.starts_with("index/") {
         // a search index is called by its fragment's supervisor alone:
         // the router never names one
@@ -336,9 +338,15 @@ pub(crate) async fn send_again(env: &Env, binding: &str, name: &str, make: impl 
 /// `name` of `binding`: its answer, read from its bytes once as `T`, or its
 /// refusal as it named it (`refusal`).
 pub(crate) async fn ask_object<T: DeserializeOwned>(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<T> {
-    let body = serde_json::to_string(body).map_err(|e| CellError::host(format!("{path}'s body: {e}")))?;
-    let bytes = object_answer(env, binding, name, path, body).await?;
+    let bytes = ask_bytes(env, binding, name, path, body).await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("{binding} {name}'s answer to {path}: {e}")))
+}
+
+/// `ask_object`'s answer as its bytes, unread: for a caller that passes it
+/// on as it came (the router, a person's Vault's answer to them).
+pub(crate) async fn ask_bytes(env: &Env, binding: &str, name: &str, path: &str, body: &impl Serialize) -> CellResult<Vec<u8>> {
+    let body = serde_json::to_string(body).map_err(|e| CellError::host(format!("{path}'s body: {e}")))?;
+    object_answer(env, binding, name, path, body).await
 }
 
 /// `ask_object`'s round trip, one copy for every answer's type: its 200's
@@ -382,13 +390,14 @@ const PROBE_HEADER: &str = "x-fragment-probe";
 /// at a deploy), and an object of each other class named for the probe, a
 /// name no fragment, person or computer has (`__`). One that never existed
 /// is made by the probe, its schema's steps run and nothing more.
-const PROBED: [(&str, &str, &str); 6] = [
+const PROBED: [(&str, &str, &str); 7] = [
     ("Registry", "REGISTRY", crate::registry::NAME),
     ("Principal", "PRINCIPAL", "__probe"),
     ("Ledger", "LEDGER", "__probe"),
     ("Fragment", "FRAGMENT", "__probe"),
     ("Computer", "COMPUTER", "__probe"),
     ("SearchIndex", "SEARCH_INDEX", "__probe"),
+    ("Vault", "VAULT", "__probe"),
 ];
 
 /// An object's answer to a deploy's probe, the second thing its `fetch`

@@ -1870,6 +1870,19 @@ authorization is browser-bound (docs/pipes-browser-binding.md).
 | `PUT /api/connections/{provider}/key` | a person | `{key}` (1 to 4096 printable characters, no space) → `{provider, state: "set"}`: an own key, sealed by their computer (404 without one); another kind 400 |
 | `DELETE /api/connections/{provider}/key` | a person | → `{provider, state: "not_set"}` |
 
+## A person's Vault (FIN-466)
+
+A person's secrets, which their agents use without holding them
+(docs/secrets.md, "A person's Vault"): one `Vault` object a person. Every
+route is the person's own, signed or from the shell; an agent's, theirs
+included, is 403. No answer names a value.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/vault` | a person | → `SecretList {secrets: [{name, hosts, place, agents, setAt}]}`, by name |
+| `PUT /api/vault/{secret}` | a person | `PutSecret {value, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog provider's. `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets (400 past it); anything else wrong 400, nothing written |
+| `DELETE /api/vault/{secret}` | a person | → `SecretRemoved {name, removed}` |
+
 ## The shell
 
 The platform's own page (cell/shell/, its files at `/__shell/<file>` from
