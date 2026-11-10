@@ -44,6 +44,7 @@ mod ledger;
 mod limits;
 mod members;
 mod migrations;
+mod moves;
 mod native;
 mod notes;
 mod orgs;
@@ -169,6 +170,8 @@ const LANES: &[Lane] = &[
     checkout::checkout,
     sync::folder_sync,
     migrations::migrations,
+    moves::moves,
+    moves::move_import,
     restart::restart,
 ];
 
@@ -205,7 +208,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page",
+        "members", "billing", "governance", "billing-page", "move", "move-import",
     ],
 ];
 

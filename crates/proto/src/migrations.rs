@@ -218,7 +218,8 @@ pub enum HeldReason {
     ImportFailed,
     /// The new agent never said it was done.
     ImportTimedOut,
-    /// The mover never said it retired the old agent.
+    /// The mover never said it retired the old agent (each failure is
+    /// asked again until this).
     RetireTimedOut,
     /// Phase 2's stage or retirement failed.
     ArchiveFailed,

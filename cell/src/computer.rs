@@ -2392,7 +2392,7 @@ impl ComputerCell {
         for record in &records {
             self.call("forget", &[js::to_js(record), JsValue::from_f64(FORGET_PASS_MS as f64)]).await?;
         }
-        let (objects, more) = js::blob_delete_under(&self.env, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
+        let (objects, more) = js::blob_delete_under(&self.env, js::BLOBS, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
         if !more {
             // one step, no await: its record emptied, the mark kept
             crate::schema::remake(self.sql(), &fragment_core::migrate::COMPUTER)?;
@@ -2426,7 +2426,7 @@ impl ComputerCell {
         }
         let last = (b.offset + b.length).min(size) - 1;
         let key = format!("{}{}.tar.zst", self.backups_prefix(), b.record);
-        let blob = js::blob_get(&self.env, &key, Some(&format!("bytes={}-{last}", b.offset))).await?;
+        let blob = js::blob_get(&self.env, js::BLOBS, &key, Some(&format!("bytes={}-{last}", b.offset))).await?;
         let blob = blob.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("the record {}'s archive is gone", b.record)))?;
         if blob.size != size {
             return Err(CellError::new(ErrorCode::NotFound, format!("the record {}'s archive is {} bytes, not the {size} it says", b.record, blob.size)));
@@ -2446,7 +2446,7 @@ impl ComputerCell {
             false => None,
         };
         let saves = self.saves()?;
-        let (keys, more) = js::blob_list(&self.env, &self.backups_prefix()).await?;
+        let (keys, more) = js::blob_list(&self.env, js::BLOBS, &self.backups_prefix()).await?;
         Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.all().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
     }
 

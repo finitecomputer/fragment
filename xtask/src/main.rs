@@ -327,6 +327,8 @@ fn dev(args: &[String]) -> Result<()> {
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),
+        // dev runs no move (docs/migrations.md)
+        migrations: None,
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,

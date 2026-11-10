@@ -9,7 +9,7 @@ use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
-use crate::api::{self, Api};
+use crate::api::{self, Api, Reply};
 use crate::Suite;
 
 fn listed(api: &Api, keys: &Keys, name: &str) -> Result<Option<String>> {
@@ -85,6 +85,18 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a stranger cannot list members", r.status == 403, &r);
     let r = api.signed(&bob, "GET", &path("members"), None)?;
     s.ok("a member lists members", r.status == 200 && r.body["members"].as_array().map_or(0, |a| a.len()) == 2, &r);
+    // each person by email, to the owner and their agent for them, as the
+    // share sheet shows them (decision 48); to anyone else, by npub alone
+    let emails = |r: &Reply| -> Vec<String> { r.body["members"].as_array().into_iter().flatten().filter_map(|m| m["email"].as_str().map(str::to_string)).collect() };
+    let want = vec![Api::email_of(&owner), Api::email_of(&bob)];
+    let owners = api.signed(&owner, "GET", &path("members"), None)?;
+    let (hand, _) = super::delegation::agent_of(api, &owner)?;
+    let for_owner = api.signed(&hand, "GET", &format!("{}?for={}", path("members"), api.identity(&owner)?), None)?;
+    s.ok(
+        "the owner's list names each person by email too, and so does their agent's for them; a member's names none",
+        emails(&owners) == want && emails(&for_owner) == want && emails(&r).is_empty(),
+        format!("{owners} {for_owner} {r}"),
+    );
 
     // invites by email (decision 48), each waiting for its person's yes (decision 63)
     let invite = |email: &str, role: &str| api.signed(&owner, "POST", &path("invites"), Some(&json!({ "email": email, "role": role })));
