@@ -93,7 +93,7 @@ test("Bring over: the move opened (the comp), a seat waited for, then each a new
   await settle();
   p.next("POST", "/api/migrations/offers").ok({ offers: [] });
   await settle();
-  p.next("GET", "/api/seat").ok({ guest: false });
+  p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
   assert.equal(p.guest(), false, "a seat, as the platform said");
   assert.deepEqual(p.made.map((m) => m.spec), [{ name: "Juniper", role: null, quiet: true, from: "a" }], "made for its old agent, which its agent.json keeps");
@@ -151,7 +151,7 @@ test("one new agent an old one: an agent made for it before whose Yes never arri
   await settle();
   p.next("POST", "/api/migrations/offers").ok({ offers: [] });
   await settle();
-  p.next("GET", "/api/seat").ok({ guest: false });
+  p.next("GET", "/api/ledger").ok({ plan: "seat" });
   await settle();
   p.next("GET", "/api/f/mine--a1b2/file?path=agent.json").ok({ tier: "standard" });
   await settle();

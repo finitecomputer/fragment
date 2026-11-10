@@ -146,13 +146,14 @@ export function createMovePage(root, h) {
     draw();
   }
 
-  // a seat of theirs, as the platform says (the comp's reaches the ledger
-  // a moment after it is given); a guest makes no agent
+  // a seat of theirs, as their ledger says (the comp's plan reaches it a
+  // moment after the registry gives it, and the ledger is what refuses a
+  // guest's making), as the welcome waits (onboarding.js `seated`)
   async function seated() {
     const t0 = Date.now();
     for (;;) {
-      const seat = await api("GET", "/api/seat");
-      if (!seat.guest) return h.setGuest(false);
+      const ledger = await api("GET", "/api/ledger");
+      if (ledger.plan !== "guest") return h.setGuest(false);
       if (Date.now() - t0 > SEAT_WAIT_MS) throw new Error("Your seat isn't ready yet. Try again in a moment.");
       await new Promise((r) => timers.setTimeout(r, 1000));
     }

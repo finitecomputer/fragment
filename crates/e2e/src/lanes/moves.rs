@@ -812,12 +812,15 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     let ledger = super::shell::shell(api, session, "GET", "/api/ledger", None, &[])?;
     let seat = super::shell::shell(api, session, "GET", "/api/seat", None, &[])?;
     let still = b.eval(&page, "location.pathname")?;
+    let list = super::shell::shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let kinds: Vec<String> = list.body["fragments"].as_array().map(|l| l.iter().filter_map(|f| f["kind"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let one_each = kinds.iter().filter(|k| *k == "agent").count() == 1 && kinds.iter().filter(|k| *k == "chat").count() == 1;
     let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
     s.ok(
-        "Bring over: the guest is given the comp (a comped seat, $25), a new agent is made with its chat not opened (the page stays), and its Yes starts the move: stopping, in the server's words",
-        making && asked && still == "/move" && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Stopping Juniper on finite.computer…") && m["state"] == "asked" && m["agent"].is_string()
+        "Bring over: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: stopping, in the server's words",
+        making && asked && still == "/move" && one_each && b.eval(&page, &said)?.as_str().is_some_and(|w| w == "Stopping Juniper on finite.computer…") && m["state"] == "asked" && m["agent"].is_string()
             && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
-        json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still }),
+        json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still, "kinds": kinds }),
     );
     // the mover stops it and stages it: the page follows, read again
     mover.run_once()?;
