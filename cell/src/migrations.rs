@@ -59,10 +59,11 @@ const AGAIN_MS: i64 = 1_000;
 const OFFER_MAX_BYTES: usize = 64 * 1024;
 /// Staff's acts (`AdminAct`'s `op`).
 const ACTS: [&str; 4] = ["retry", "restart-old", "retire", "withdraw"];
-/// Stages one alarm pass deletes, and the pages of keys (R2 lists and
-/// deletes 1,000 a call) of each.
+/// Stages one alarm pass deletes, and the pages of keys of each: one, so
+/// at most 1,000 objects a stage a pass (R2 lists and deletes 1,000 a
+/// call; docs/migrations.md, "Deletion").
 const SWEEPS_A_PASS: i64 = 4;
-const SWEEP_PAGES: usize = 2;
+const SWEEP_PAGES: usize = 1;
 /// Routines one pass sends, the tries each gets, and the wait after a
 /// failed one (doubling).
 const ROUTINES_A_PASS: i64 = 16;
