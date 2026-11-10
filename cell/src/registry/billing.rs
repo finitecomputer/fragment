@@ -451,14 +451,7 @@ impl RegistryCell {
     /// `people`'s pages told their notices changed (FIN-458: their seat is
     /// the registry's to tell), after the answer (`wait_until`).
     pub(super) fn tell_after(&self, people: Vec<String>) {
-        let env = self.env.clone();
-        self.state.wait_until(async move {
-            for person in people {
-                if let Err(e) = crate::principal::tell_changed(&env, &person).await {
-                    console_error!("{}", serde_json::json!({ "seat-told": person, "failed": e.message }));
-                }
-            }
-        });
+        crate::principal::tell_later(&self.state, &self.env, people, "seat.told-failed");
     }
 
     /// An orphan subscription's cancel, after its grace (`CancelOrphan`).

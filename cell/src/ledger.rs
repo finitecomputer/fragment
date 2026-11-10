@@ -39,6 +39,7 @@
 //! and kept nowhere, so nothing makes the ledger again.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use fragment_core::ledger::gate::{Gate, Step};
 use fragment_core::ledger::org::Payer;
@@ -96,6 +97,10 @@ pub struct LedgerCell {
     /// The standing its person was last told (`told`), as kept in its meta:
     /// read once an activation, so a call compares in memory.
     told: Cell<Option<Standing>>,
+    /// The standing the last transaction left (`settled`), for `told`: kept
+    /// beside, not in, what `transact` answers, so its closures' types (one
+    /// for each caller) carry none of it.
+    left: Rc<Cell<Option<Standing>>>,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
     /// When this activation last set the alarm for (the ledger's clock):
@@ -120,7 +125,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, env, told: Cell::new(None), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
+        LedgerCell { state, raw, env, told: Cell::new(None), left: Rc::default(), cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), fail_grants: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -656,6 +661,28 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
+/// A standing as its meta keeps the last one told ("told"): a number, as
+/// nothing reads it but `told`'s comparison.
+fn told_key(standing: Standing) -> u8 {
+    match standing {
+        Standing::Ok => 0,
+        Standing::AgentsStopped { why } => 10 + why as u8,
+        Standing::ReadOnly { why } => 20 + why as u8,
+    }
+}
+
+/// How every transaction ends, the same for each (`transact`'s closures,
+/// one for each caller, carry none of it): the head written back, the
+/// store's fault if any, the standing it leaves kept in `left` (`told`),
+/// and when the next sweep is due.
+#[inline(never)]
+fn settled(store: &SqlStore, ledger: &Ledger, now: i64, left: &Cell<Option<Standing>>) -> CellResult<i64> {
+    save(store, ledger);
+    store.checked()?;
+    left.set(Some(ledger.standing(now)));
+    Ok(ledger.next_sweep_ms(now))
+}
+
 /// Writes the head back, and an org's budget in its own row, which no
 /// head's rewrite touches.
 fn save(store: &SqlStore, ledger: &Ledger) {
@@ -698,17 +725,16 @@ impl LedgerCell {
     /// ledger's now: the head is written back whatever `op` answers (a
     /// refusal changed nothing but the month it rolled to), and a store
     /// that failed rolls everything back. Answers `op`'s
-    /// answer and when the next sweep is due (the ledger's clock).
-    fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64, Standing)> {
+    /// answer and when the next sweep is due (the ledger's clock); the
+    /// standing it leaves is in `left`.
+    fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
         let now = js::now_ms() + self.offset_ms()?;
-        let (sql, cfg) = (self.sql(), self.cfg);
+        let (sql, cfg, left) = (self.sql(), self.cfg, self.left.clone());
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
             let answer = op(&mut ledger, &mut store, now);
-            save(&store, &ledger);
-            store.checked()?;
-            Ok((answer, ledger.next_sweep_ms(now), ledger.standing(now)))
+            Ok((answer, settled(&store, &ledger, now, &left)?))
         })
     }
 
@@ -716,11 +742,11 @@ impl LedgerCell {
     /// sooner than this activation last set it, and its person told when
     /// their standing changed (`told`).
     async fn mutate<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
-        let (answer, next, standing) = self.transact(op)?;
+        let (answer, next) = self.transact(op)?;
         if self.armed.get().is_none_or(|armed| next < armed) {
             self.arm(next).await?;
         }
-        self.told(standing);
+        self.told();
         answer.map_err(Failed::Refused)
     }
 
@@ -731,24 +757,21 @@ impl LedgerCell {
     /// An org's ledger tells no one; a first standing is kept, not told.
     /// Told after the answer (`wait_until`), never on its path: a gate's ask
     /// waits on no page. Best effort: a page not told reads it next time.
-    fn told(&self, standing: Standing) {
+    #[inline(never)]
+    fn told(&self) {
+        let Some(standing) = self.left.take() else { return };
         if self.told.get() == Some(standing) {
             return;
         }
         let Ok(Some(payer)) = self.meta("payer") else { return };
         self.told.set(Some(standing));
         let Some(Payer::Person(person)) = Payer::parse(&payer) else { return };
-        let said = serde_json::to_string(&standing).expect("a standing serializes");
+        let said = told_key(standing).to_string();
         let kept = self.meta("told").ok().flatten();
         if kept.as_deref() == Some(said.as_str()) || self.set_meta("told", &said).is_err() || kept.is_none() {
             return;
         }
-        let env = self.env.clone();
-        self.state.wait_until(async move {
-            if let Err(e) = crate::principal::tell_changed(&env, &person).await {
-                console_error!("{}", json!({ "event": "ledger.told-failed", "message": e.message }));
-            }
-        });
+        crate::principal::tell_later(&self.state, &self.env, vec![person], "ledger.told-failed");
     }
 
     /// Sets the alarm for `at` on the ledger's clock.
@@ -765,10 +788,10 @@ impl LedgerCell {
             // a ledger no one has called has nothing to sweep
             return Ok(core::Swept { forgotten: 0 });
         }
-        let (swept, next, standing) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
+        let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
         self.arm(next).await?;
-        self.told(standing);
+        self.told();
         Ok(swept)
     }
 
