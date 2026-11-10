@@ -30,40 +30,59 @@ The survey's `parts` lists them: `brains` (each a folder under
 step 4 (personality). Load `brain-finite` before the brains, and
 `apps-finite` before the sites.
 
+**Run each block below as one command, as written.** Your terminal
+starts every command in your work folder, and a variable or a `cd` never
+carries over to the next: each block sets what it needs and names every
+folder whole.
+
 ### Brains, as brains
 
-For each brain folder `<id>` (make each brain once, as `SKILL.md`'s rules
-say: its full name in `progress.md` right after `fragment create`):
+For each brain folder `<id>`: its name is in
+`workspace/finitebrain/<id>.json`, or else the first heading of its
+`index.md`, or else its id. Make the brain once, as `SKILL.md`'s rules
+say (its full name in `progress.md` right after):
 
 ```sh
-fragment home extract <source> workspace/finitebrain/<id> --to ~/home-import/home --layout <L>
 fragment create <a short label from its name> --visibility members --template brain --title "<its name>"
-mkdir -p ~/home-import/work/brains/<id> && cd ~/home-import/work/brains/<id>
-fragment sync <its name> --dir .
 ```
 
-Its name is in `workspace/finitebrain/<id>.json`, or else the first
-heading of its `index.md`, or else its id. Copy its files in (`~/home-import/home/workspace/finitebrain/<id>/`),
-leaving out what the old brain made for itself:
-- `AGENTS.md`, `_index.md` and `.keep` in each folder;
-- `_wiki/` folders;
-- hidden folders.
+Then copy its files into a work folder of the brain's own, leaving out
+what the old brain made for itself (`AGENTS.md`, `_index.md` and `.keep`
+in each folder, `_wiki/` folders, hidden folders):
+
+```sh
+W="$HOME/home-import/work/brains/<id>" H="$HOME/home-import/home/workspace/finitebrain/<id>" && \
+fragment home extract <source> workspace/finitebrain/<id> --to "$HOME/home-import/home" --layout <L> && \
+mkdir -p "$W" && fragment sync <its name> --dir "$W" && \
+tar -C "$H" --exclude=AGENTS.md --exclude=_index.md --exclude=.keep --exclude=_wiki --exclude='*/.*' -cf - . | tar -C "$W" -xf - && \
+ls "$W" && find "$W" -type f -not -path "$W/.fragment/*" | wc -l
+```
 
 Each top-level folder becomes one of the brain's wikis (`raw/`, `wiki/`,
 `index.md`, `log.md`).
 
-**Assets.** A note whose frontmatter `resource` names a file in the
-copy: move that file to `<wiki>/raw/assets/<a clean name>`, and rewrite
-the note's frontmatter as `brain-finite` says (`resource:
+**Assets.** A note whose frontmatter `resource` names a file of the old
+computer: `/data/<path>` (or `file:///data/<path>`) is the home's
+`<path>`. Copy it out (`fragment home extract <source> <path> --to
+"$HOME/home-import/home" --layout <L>`), move it to
+`"$HOME/home-import/work/brains/<id>/<wiki>/raw/assets/<a clean name>"`,
+and rewrite the note's frontmatter as `brain-finite` says (`resource:
 raw/assets/<file>`, and `finite_asset` with its `content_type`, `size`
 and `content_hash: sha256:<hex>`). Leave a note whose resource is a web
-address as it is.
+address, or a file the home doesn't hold, as it is.
 
-Then push it, and check that search finds it:
+Then push it, only if its folder holds nothing but the brain: the old
+brain's own top level and `fragment.json`. Anything else stops it:
 
 ```sh
-fragment sync <its name> --dir .
-fragment call <its name> index_status
+W="$HOME/home-import/work/brains/<id>" H="$HOME/home-import/home/workspace/finitebrain/<id>" && \
+if ls "$W" | grep -vxF -e fragment.json -f <(ls "$H" | grep -vxF -e AGENTS.md -e _index.md -e .keep -e _wiki); then echo "STOP: $W holds more than the brain: not pushed"; else fragment sync <its name> --dir "$W" && fragment call <its name> index_status; fi
+```
+
+If it says STOP, push nothing, and say in the report what it listed.
+Otherwise check that search finds it:
+
+```sh
 fragment call <its name> search --input '{"q": "<a word from one of its pages>"}'
 ```
 
@@ -74,39 +93,36 @@ teammates once those teammates have moved.
 ### Sites, as apps
 
 Each `sites/<site>/` is the site's files, as its repository held them.
-Make each app once, as `SKILL.md`'s rules say. The folder served is
-`sites/<site>.json`'s `path`, else its `finite.toml`'s `path`, else the
-whole folder (`.`). Leave out `finite.toml` itself.
-
-**The folder served stays inside the site.** That `path` is the home's
-data, so check it before you copy anything. Use it only if it is a plain
-relative folder (`.`, `public`, `site/dist`: no `..`, not starting with
-`/`). Then check where it really is:
-
-```sh
-fragment home extract <source> sites/<site> --to ~/home-import/home --layout <L>
-root="$(realpath -e -- "$HOME/home-import/home/sites/<site>")"
-served="$(realpath -e -- "$root/<path>")" || served="$root"
-case "$served/" in "$root/"*) ;; *) served="$root" ;; esac
-```
-
-If `path` was not plain, or `served` came out as `$root` when `path` was
-not `.`, it pointed outside the site: serve the whole folder, and say so
-in the report. Then make the app and copy in what it serves, every path
-quoted:
+Make each app once, as `SKILL.md`'s rules say:
 
 ```sh
 fragment create <site> --visibility members --template blank --title "<its title>"
-mkdir -p "$HOME/home-import/work/sites/<site>" && cd "$HOME/home-import/work/sites/<site>"
-fragment sync <its name> --dir .
-rm -rf site && mkdir site && cp -R -- "$served/." site/
-rm -f site/finite.toml
 ```
 
 The app's label is the site's name made valid: lowercase letters, digits
 and single dashes (never `--`), at most 57 characters.
 
-Before you deploy, find what only worked on Finite Sites, and fix it:
+**The folder served stays inside the site.** It is `sites/<site>.json`'s
+`path`, else its `finite.toml`'s `path`, else the whole folder (`.`). That
+`path` is the home's data: use it only if it is a plain relative folder
+(`.`, `public`, `site/dist`: no `..`, not starting with `/`), and only
+where `realpath` puts it inside the site; otherwise serve the whole site
+folder, and say so in the report. One command checks it and copies what
+it serves into the app's `site/`, leaving out `finite.toml`:
+
+```sh
+W="$HOME/home-import/work/sites/<site>" && \
+fragment home extract <source> sites/<site> --to "$HOME/home-import/home" --layout <L> && \
+root="$(realpath -e -- "$HOME/home-import/home/sites/<site>")" && \
+{ served="$(realpath -e -- "$root/<path>")" || served="$root"; } && \
+case "$served/" in "$root/"*) ;; *) served="$root" ;; esac && \
+mkdir -p "$W" && fragment sync <its name> --dir "$W" && \
+rm -rf -- "${W:?}/site" && mkdir -p "$W/site" && cp -R -- "$served/." "$W/site/" && rm -f -- "$W/site/finite.toml" && \
+echo "served: $served" && ls "$W" && find "$W/site" -type f | wc -l
+```
+
+Before you deploy, find what only worked on Finite Sites, and fix it,
+in the files under `"$HOME/home-import/work/sites/<site>/site/"`:
 - **Old addresses.** Links and assets pointing at
   `https://<site>.finite.site/...` should become relative.
 - **Old platform calls.** Remove calls to `finite.site` APIs, and an
@@ -121,13 +137,17 @@ Before you deploy, find what only worked on Finite Sites, and fix it:
 - **A site that expects a server:** move what works, and note what
   doesn't.
 
-Open `site/index.html` with your browser tool at its `file://` path and
-see that it renders. Then:
+Open `file://$HOME/home-import/work/sites/<site>/site/index.html` with
+your browser tool and see that it renders. Then deploy it, only if its
+folder holds nothing but the app (`fragment.json`, `README.md` and
+`site`):
 
 ```sh
-fragment deploy <its name> --dir .
-fragment status <its name>
+W="$HOME/home-import/work/sites/<site>" && \
+if ls "$W" | grep -vxF -e fragment.json -e README.md -e site; then echo "STOP: $W holds more than the app: not deployed"; else fragment deploy <its name> --dir "$W" && fragment status <its name>; fi
 ```
+
+If it says STOP, deploy nothing, and say in the report what it listed.
 
 **Public.** Make a site public only if its `sites/<site>.json` says
 `"visibility": "public"` and your owner's answers say to keep public
