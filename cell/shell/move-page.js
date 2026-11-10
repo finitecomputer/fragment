@@ -20,6 +20,8 @@
 // agent fragments' names), `identityOf` (an agent fragment's identity, once
 // its computer has it), and `timers`.
 
+import { platformImage } from "./computer.js";
+
 const IN_FLIGHT = new Set(["asked", "staging", "importing", "retiring", "archiving"]);
 const ASKABLE = new Set(["open", "later", "archived"]);
 // how often a move under way is read again, and how long a seat may take
@@ -57,8 +59,7 @@ export function createMovePage(root, h) {
     if (o.image) {
       const pic = el("img", "move-pic");
       pic.alt = "";
-      pic.src = o.image;
-      pic.onerror = () => pic.remove();
+      platformImage(pic, o.image);
       li.append(pic);
     }
     const copy = el("div", "move-copy");

@@ -72,7 +72,7 @@ test("its agents in the server's words: the askable ones each a choice and a nam
     { old: "b", words: ["Old b", "You said never."], pick: false, buttons: ["Ask again"] },
     { old: "c", words: ["Old c", "Copying Old c…"], pick: false, buttons: [] },
   ]);
-  assert.equal(walk(p.root).find((n) => n.tag === "img")?.src, "/api/migrations/offers/a/picture");
+  assert.equal(walk(p.root).find((n) => n.tag === "img")?.dataset.src, "/api/migrations/offers/a/picture");
   assert.ok(p.button("Bring over"), "the one question's answer");
   assert.ok(p.timers.due, "a move under way is read again");
   p.timers.due();
