@@ -67,19 +67,27 @@ struct Placed {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Taken(pub String, pub String);
 
-/// `name`'s value in `person`'s Vault, for its move into a fragment of
-/// theirs as that fragment's secret (members.rs, `fromVault`): the mover
-/// keeps it, then removes that revision here (`delete_taken`), so it has
-/// one home at the end and is never lost between. A Nostr key is refused:
-/// it never leaves.
-pub(crate) async fn take(env: &Env, person: &str, name: &str) -> CellResult<Taken> {
-    crate::routed::ask_object(env, "VAULT", person, &format!("vault/take/{name}"), &None::<&RawValue>).await
+/// `vault/moved`'s body: the destination a take claimed for, and the
+/// revision it answered. A tuple on the wire.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Moved(String, String);
+
+/// `name`'s value in `person`'s Vault, for its move into `to` (`fragment/
+/// KEY`, members.rs `fromVault`), claimed for `to` as it is read
+/// (`fragment_core::vault::Claimed`: another destination's take is refused,
+/// 409, while it stands). The mover keeps it, then completes (`moved`), so
+/// it has one home at the end and is never lost between. A Nostr key is
+/// refused: it never leaves.
+pub(crate) async fn take(env: &Env, person: &str, name: &str, to: &str) -> CellResult<Taken> {
+    crate::routed::ask_object(env, "VAULT", person, &format!("vault/take/{name}"), &to).await
 }
 
-/// Removes `name` from `person`'s Vault only while it holds the value a
-/// `take` answered as `revision`: one its person set since stays.
-pub(crate) async fn delete_taken(env: &Env, person: &str, name: &str, revision: &str) -> CellResult<()> {
-    crate::routed::ask_bytes(env, "VAULT", person, &format!("vault/delete/{name}"), &Some(revision)).await.map(drop)
+/// `to`'s move of `name`, kept there, completed: removed from `person`'s
+/// Vault while it still holds the value `take` answered as `revision`,
+/// claimed for `to` (one its person set since stays). Again, it removes
+/// nothing.
+pub(crate) async fn moved(env: &Env, person: &str, name: &str, to: &str, revision: &str) -> CellResult<()> {
+    crate::routed::ask_bytes(env, "VAULT", person, &format!("vault/moved/{name}"), &Moved(to.to_string(), revision.to_string())).await.map(drop)
 }
 
 /// Removes `name` from `person`'s Vault: its answer, a `SecretRemoved`.
@@ -172,8 +180,12 @@ impl VaultCell {
         let answer = match path.trim_start_matches('/').split('/').collect::<Vec<_>>()[..] {
             ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "list"] => self.list()?,
-            ["vault", "delete", name] => self.delete(name, crate::json_body::<Option<String>>(&req.bytes().await?)?.as_deref())?,
-            ["vault", "take", name] => self.take(name).await?,
+            ["vault", "delete", name] => self.delete(name)?,
+            ["vault", "take", name] => self.take(name, &crate::json_body::<String>(&req.bytes().await?)?).await?,
+            ["vault", "moved", name] => {
+                let Moved(to, revision) = crate::json_body(&req.bytes().await?)?;
+                self.moved(name, &to, &revision)?
+            }
             _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
         };
         Ok(Response::from_bytes(answer.into_bytes())?)
@@ -204,7 +216,7 @@ impl VaultCell {
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: js::now_ms() };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec(
-            "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret",
+            "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret, claim = NULL",
             vec![name.into(), sealed.into(), text.as_str().into()],
         )?;
         Ok(text)
@@ -219,29 +231,41 @@ impl VaultCell {
         Ok(format!("{{\"secrets\":[{}]}}", texts.join(",")))
     }
 
-    /// `name`'s value, opened for its move, and its revision: `Taken`'s
-    /// JSON. None, or a Nostr key, refused.
-    async fn take(&self, name: &str) -> CellResult<String> {
-        let rows = self.rows("SELECT sealed, secret FROM secrets WHERE name = ?", vec![name.into()])?;
+    /// `name`'s value, opened for its move into `to`, and its revision:
+    /// `Taken`'s JSON. Claimed for `to` in the turn that reads it, before
+    /// anything yields (`fragment_core::vault::take`). None, a Nostr key,
+    /// or one claimed for another destination, refused.
+    async fn take(&self, name: &str, to: &str) -> CellResult<String> {
+        let rows = self.rows("SELECT sealed, secret, claim FROM secrets WHERE name = ?", vec![name.into()])?;
         let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no secret {name} in your vault (GET /api/vault lists them)")))?;
         let kept: Placed = crate::json_text(row["secret"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored secret: {e}")))?;
         if kept.place.sign.is_some() {
             return Err(CellError::invalid(format!("{name} is a key that signs: it never leaves your vault")));
         }
+        rules::take(name, row["claim"].as_str(), to).map_err(|e| CellError::new(ErrorCode::Conflict, e.to_string()))?;
         let sealed = row["sealed"].as_str().unwrap_or_default().to_string();
+        self.sql().exec("UPDATE secrets SET claim = ? WHERE name = ? AND sealed = ?", vec![to.into(), name.into(), sealed.as_str().into()])?;
         let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
         let value = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a secret that is not text"))?;
         serde_json::to_string(&Taken(value, revision_of(&sealed))).map_err(|e| CellError::host(e.to_string()))
     }
 
-    /// `name` removed (a move's: only while it holds `revision`):
-    /// `SecretRemoved`'s JSON.
-    fn delete(&self, name: &str, revision: Option<&str>) -> CellResult<String> {
-        let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
-        let held = rows.first().and_then(|r| r["sealed"].as_str()).filter(|sealed| revision.is_none_or(|rev| revision_of(sealed) == rev));
-        let removed = held.is_some();
-        if let Some(sealed) = held {
-            self.sql().exec("DELETE FROM secrets WHERE name = ? AND sealed = ?", vec![name.into(), sealed.into()])?;
+    /// `name` removed: `SecretRemoved`'s JSON.
+    fn delete(&self, name: &str) -> CellResult<String> {
+        let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
+        self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
+        serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))
+    }
+
+    /// `to`'s move of `name` completed: removed while it is claimed for
+    /// `to` and holds `revision` (`fragment_core::vault::completes`), in one
+    /// turn. `SecretRemoved`'s JSON.
+    fn moved(&self, name: &str, to: &str, revision: &str) -> CellResult<String> {
+        let rows = self.rows("SELECT sealed, claim FROM secrets WHERE name = ?", vec![name.into()])?;
+        let held = rows.first().and_then(|r| Some((r["sealed"].as_str()?, r["claim"].as_str())));
+        let removed = held.is_some_and(|(sealed, claim)| rules::completes(claim, &revision_of(sealed), to, revision));
+        if removed {
+            self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
         }
         serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))
     }

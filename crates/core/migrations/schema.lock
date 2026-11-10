@@ -33,6 +33,7 @@ step Computer 4 key_caps 3a6f4f9976a3efe3
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
+step Vault 2 claims b4b34835457aa761
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -218,5 +219,5 @@ SearchIndex index sections_source: CREATE INDEX sections_source ON sections (sou
 SearchIndex table sources: CREATE TABLE sources ( source TEXT PRIMARY KEY, revision TEXT NOT NULL, title TEXT NOT NULL, at TEXT, fields TEXT NOT NULL, chunks INTEGER NOT NULL)
 SearchIndex table vectors: CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, code BLOB NOT NULL, q BLOB NOT NULL)
 
-Vault table secrets: CREATE TABLE secrets (name TEXT PRIMARY KEY, sealed TEXT NOT NULL, secret TEXT NOT NULL)
+Vault table secrets: CREATE TABLE secrets (name TEXT PRIMARY KEY, sealed TEXT NOT NULL, secret TEXT NOT NULL, claim TEXT)
 Vault table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
