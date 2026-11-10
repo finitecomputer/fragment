@@ -356,7 +356,9 @@ async fn picture(cfg: &Config, at: String) -> CellResult<Response> {
     }
     let h = Headers::new();
     h.set("content-type", &kind)?;
-    h.set("cache-control", "private, max-age=3600")?;
+    // kept by no cache: its URL is the same for whoever signs in next on
+    // this browser, and the shell reads it with its own header anyway
+    h.set("cache-control", "no-store")?;
     h.set("x-content-type-options", "nosniff")?;
     Ok(Response::from_bytes(bytes)?.with_headers(h))
 }

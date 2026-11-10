@@ -129,7 +129,7 @@ pub struct Config {
 
 #[derive(Debug, Serialize)]
 pub struct Part {
-    /// The folder's name under the part (`.` for files directly in it).
+    /// The folder's name under the part's folder.
     pub name: String,
     pub files: usize,
     pub bytes: u64,
@@ -209,9 +209,10 @@ fn parts(src: &Source, layout: &Layout) -> BTreeMap<String, Vec<Part>> {
         let mut by: BTreeMap<String, Part> = BTreeMap::new();
         let skip = if folder == "." { 0 } else { folder.len() + 1 };
         for e in src.under(folder) {
-            let rel = &e.path[skip..];
-            let sub = rel.split_once('/').map_or(".", |(d, _)| d).to_string();
-            let p = by.entry(sub.clone()).or_insert(Part { name: sub, files: 0, bytes: 0 });
+            // each part is a folder of its own; a file beside them is a
+            // platform's facts about one (its profile reads it), no part
+            let Some((sub, _)) = e.path[skip..].split_once('/') else { continue };
+            let p = by.entry(sub.to_string()).or_insert(Part { name: sub.to_string(), files: 0, bytes: 0 });
             (p.files, p.bytes) = (p.files + 1, p.bytes + e.size);
         }
         out.insert(name.clone(), by.into_values().collect());
@@ -335,5 +336,24 @@ mod tests {
         assert_eq!(got, [(1, vec!["fsite".to_string()]), (3, vec!["fsite".to_string(), "/data/workspace".to_string()])]);
         assert!(attention_lines("x", "fsite", &[]).is_empty());
         assert_eq!(frontmatter("---\nname: a\ndescription: \"b: c\"\n  nested: x\n---\nbody").get("description").map(String::as_str), Some("b: c"));
+    }
+
+    #[test]
+    fn a_part_is_a_folder_and_a_file_beside_it_is_none() {
+        let t = crate::home::source::tests::Temp::new();
+        for (p, body) in [("sites/garden/index.html", "hi"), ("sites/garden.json", "{}"), ("brains/b/index.md", "# B"), ("brains/b.json", "{}"), ("brains/b/raw/n.md", "n")] {
+            let path = t.0.join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let mut layout = Layout::hermes();
+        layout.parts = [("sites".to_string(), "sites".to_string()), ("brains".to_string(), "brains".to_string())].into();
+        let got = parts(&Source::open(&t.0).unwrap(), &layout);
+        let named = |k: &str| got[k].iter().map(|p| (p.name.as_str(), p.files)).collect::<Vec<_>>();
+        // the facts a platform writes beside a part's folder (finite.computer's
+        // `sites/<site>.json`) are no part: one named "." sent an agent to
+        // make a site of the whole folder
+        assert_eq!(named("sites"), [("garden", 1)]);
+        assert_eq!(named("brains"), [("b", 2)]);
     }
 }
