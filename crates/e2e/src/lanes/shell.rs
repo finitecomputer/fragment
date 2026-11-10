@@ -309,13 +309,13 @@ fn unread_and_seen(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
 
 /// A watch socket of a person's list, past its `hello`; or why not (the
 /// refusal's status is in it).
-fn watching(socket: Result<Socket>) -> Result<Socket, String> {
+pub(crate) fn watching(socket: Result<Socket>) -> Result<Socket, String> {
     socket.and_then(|mut w| w.expect("hello").map(|_| w)).map_err(|e| format!("{e:#}"))
 }
 
 /// The next frame a watch socket was sent, or why none came (its read
 /// waits 5 s: a change reaches it in the request that made it).
-fn told(w: &mut Result<Socket, String>) -> Value {
+pub(crate) fn told(w: &mut Result<Socket, String>) -> Value {
     match w {
         Ok(w) => w.next().unwrap_or_else(|e| json!(format!("{e:#}"))),
         Err(why) => json!(why.clone()),
@@ -2234,7 +2234,7 @@ fn invite_must(s: &Suite, api: &Api, sharer: &fragment_nip98::Keys, email: &str,
 /// What the page shows of a notice that must be answered: whether it is
 /// open, its id and words, whether it covers the whole page (what is at
 /// its middle is in it), and the band's rows.
-const MUST_ANSWER_SEEN: &str = "(() => { const d = document.getElementById('must-answer'); const r = d.getBoundingClientRect(); const at = document.elementFromPoint(innerWidth / 2, innerHeight / 2); \
+pub(crate) const MUST_ANSWER_SEEN: &str = "(() => { const d = document.getElementById('must-answer'); const r = d.getBoundingClientRect(); const at = document.elementFromPoint(innerWidth / 2, innerHeight / 2); \
     return { open: d.open, id: d.dataset.id ?? null, words: d.innerText, covers: d.open && r.width >= innerWidth - 1 && r.height >= innerHeight - 1 && d.contains(at), \
     band: [...document.querySelectorAll('#computer-notices .computer-notice')].map((n) => n.dataset.id ?? n.dataset.kind) }; })()";
 

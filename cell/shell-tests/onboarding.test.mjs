@@ -302,3 +302,37 @@ for (const stray of [false, true]) {
     assert.deepEqual(world.writes().map((w) => w.replace(/--[a-z0-9]{4}/g, "")), ["POST /api/f/wren/channels/tasks"]);
   });
 }
+
+// The move's page (FIN-463 F6): a quiet Add made for an old agent (`from`),
+// cut short, is gone on with as the agent it made, handed back to Add
+// (`agent`): never found again by its name, nor passed over because its
+// chat was made. Made whole, there is one Wren and one chat of its.
+for (const [where, when, done] of [
+  ["its chat made, before its computer took it", at(/\/agents\/wren--/, "PUT"), false],
+  ["its chat made, its answer lost", create("wren-chat"), true],
+  ["its agent made, its answer lost", create("wren"), true],
+]) {
+  // the page asks Add by the old agent's name each time; Add, handed the
+  // agent made, keeps that agent's own name whatever it is asked
+  for (const [how, name] of [["on the same page", "Wren"], ["after a reload", "Wren"], ["after a reload, asked by another name", "Wren Two"]]) {
+    // made no further than its fragment, nothing names it but its name
+    if (where.startsWith("its agent made") && name !== "Wren") continue;
+    test(`the move's page: a quiet Add cut short (${where}) is gone on with ${how}, never a second`, async () => {
+      const world = platform();
+      const first = page(world, { at: "move" });
+      await first.load();
+      world.cut(when, done);
+      await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+      const p = how.startsWith("after") ? page(world, { at: "move" }) : first;
+      await p.load();
+      // the agent the page finds for the old one (its agent.json's `from`): the one made, if its making got that far
+      const made = world.rows().find((f) => f.kind === "agent" && f.title === "Wren");
+      const wrote = made && world.files(made.name).get("agent.json");
+      const agent = wrote && JSON.parse(wrote).from === "old1" ? made.name : null;
+      const again = await p.onboarding.addAgent({ name, role: "Researcher", quiet: true, from: "old1", agent });
+      madeWhole(world);
+      const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren");
+      assert.equal(again?.id, world.computer().agents.find((a) => a.fragment === wren.name)?.identity, "Add answers the one it made");
+    });
+  }
+}

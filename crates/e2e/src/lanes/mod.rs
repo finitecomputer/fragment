@@ -172,6 +172,8 @@ const LANES: &[Lane] = &[
     migrations::migrations,
     moves::moves,
     moves::move_import,
+    moves::move_ui,
+    moves::move_comp,
     restart::restart,
 ];
 
@@ -208,7 +210,7 @@ pub const SHARDS: [&[&str]; 5] = [
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
-        "members", "billing", "governance", "billing-page", "move", "move-import",
+        "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
     ],
 ];
 
