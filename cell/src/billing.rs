@@ -53,6 +53,9 @@ struct Checkout {
 #[derive(Serialize)]
 struct Portal {
     url: String,
+    /// The page to open, `url` again (FIN-458: a notice's Payment and
+    /// invoices opens it; docs/api.md).
+    open: String,
 }
 
 fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
@@ -313,7 +316,7 @@ async fn portal(env: &Env, cfg: &Config, by: By) -> CellResult<Portal> {
         url: String,
     }
     let s: Session = stripe.post("/v1/billing_portal/sessions", &form, &format!("fragment-portal-{}", hex::encode(js::random_bytes::<8>()))).await?;
-    Ok(Portal { url: s.url })
+    Ok(Portal { open: s.url.clone(), url: s.url })
 }
 
 /// `/api/billing/…`: a person's.

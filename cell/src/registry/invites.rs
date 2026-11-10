@@ -271,17 +271,26 @@ impl RegistryCell {
         )
     }
 
-    /// What the registry tells `b.person` (`NoticesOf`): their invites, in
-    /// words.
+    /// What the registry tells `b.person` (`NoticesOf`), in words: their
+    /// seat, lapsed or ending by itself soon (Pay again for its admin, and
+    /// Payment and invoices for whoever pays, where seats are sold), then
+    /// their invites. A seat's lapse and its return are told their pages by
+    /// their ledger, whose standing follows the seat (`ledger.rs` `told`).
     fn notices_of(&self, b: NoticesOf) -> CellResult<serde_json::Value> {
-        let notices: Vec<fragment_proto::notice::Notice> = self
-            .waiting_on(&b.person)?
-            .iter()
-            .map(|i| {
-                let s = |k: &str| i[k].as_str().unwrap_or_default();
-                fragment_core::registry::said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
-            })
-            .collect();
+        use fragment_core::registry::said;
+        let mine = self.my_seat(&b.person)?;
+        let sold = self.cfg.stripe().is_ok();
+        let seat = mine.seat.as_ref().and_then(|s| match (s.good, s.trial_ends) {
+            (false, _) => Some(said::seat_lapsed(s.admin, s.admin && sold)),
+            (true, Some(end)) => said::seat_ends(said::Ending::Trial, end * 1000, js::now_ms(), mine.pays && sold),
+            (true, None) => None,
+        });
+        let invites = self.waiting_on(&b.person)?;
+        let invites = invites.iter().map(|i| {
+            let s = |k: &str| i[k].as_str().unwrap_or_default();
+            said::invite(s("fragment"), s("role") == "editor", s("title"), i["from"].as_str())
+        });
+        let notices: Vec<fragment_proto::notice::Notice> = seat.into_iter().chain(invites).collect();
         Ok(serde_json::json!({ "notices": notices }))
     }
 
