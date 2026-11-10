@@ -195,9 +195,10 @@ with no clock, so every reader is told the same, and when they change the
 DO tells its owner's open pages (`/api/fragments/watch`'s `changed`):
 
 - `wont_wake`: its starts kept failing.
-- `disk_filling`: its disk, read (`df`) once each start is ready and
-  after each awake save (never before a start is ready: a read holds up
-  no deadline), is used past `DISK_TOLD_USED_PCT` (80%) with at most
+- `disk_filling`: its disk, read (`df`) in each start that restores a
+  save or a snapshot, before its guest is let go (a step of the start,
+  within its deadline), and after each awake save, is used past
+  `DISK_TOLD_USED_PCT` (80%) with at most
   `DISK_TOLD_FREE_MAX` (5 GB) free: the room left, told until a read finds
   clearly more (at most `DISK_CLEAR_USED_PCT`, 70%, used, or at least
   `DISK_CLEAR_FREE_MIN`, 6 GB, free), so a disk at the edge never shows
@@ -451,7 +452,7 @@ a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
 the slowest 6% of tries, each tried again. A start takes an alarm of its
 own: the one start an alarm makes (a retry's, or one owed after a sleep),
-with the disk's read once it is ready and the alarm's other events, fits
+its disk's read among its steps, with the alarm's other events, fits
 15 minutes (`RESTORE_MS` leaves them their 65 seconds). So an owner's
 sleep answers within 14 minutes.
 

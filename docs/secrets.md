@@ -79,7 +79,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   (`fragment_core::vault::check`), so no one sends a value anywhere its
   setter did not mean. No hosts: parked, it fills nothing.
 - **Only its person writes it**, from their session or their own key;
-  their agents are refused every route.
+  their agents are refused every route. The CLI's `fragment vault
+  set|list|rm` reads a value from a hidden prompt, or stdin, never argv or
+  the environment, and never prints one.
 - **An agent uses one through its computer's swap**, as an own key: its
   view lists each secret bound to it with a host, as `fck_<name>_<tag>`
   toward its hosts, and the computer's egress catches those hosts (armed

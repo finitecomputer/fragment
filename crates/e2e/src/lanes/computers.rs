@@ -289,19 +289,18 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
 /// The disk checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes.
 const DISK_CHECKS: [&str; 2] = [
-    "its disk is read once its start is ready: its size and what is free",
-    "and at its next start once it is ready, not before",
+    "its disk is read in its start, before its guest runs: its size and what is free, read by that start",
+    "and in its next start, by that start",
 ];
 
-/// Its disk, read (`df`) once its start is ready (`reads_disk_after`; its
-/// read after an awake save is the save checks'), as the `saves` lever
-/// shows it; each read judged
-/// by what made it (a start come up, a save taken), never a fixed wait.
-/// A start's read follows its `Ready`, so its view says awake first: an
-/// owner's wake answers after the read, but a start its alarm made (a
-/// restart's, as the recovery checks before these leave it) does not, so
-/// a start's read is waited for as itself, the read made at or after the
-/// start came up (its `restored.at`), never as its phase.
+/// Its disk, read (`df`) in each start before its guest is let go
+/// (`try_start`; its read after an awake save is the save checks'), as the
+/// `saves` lever shows it, each read naming its start. A start that came up
+/// has read it, so a view that says awake (an owner's wake, or the recovery
+/// checks' restart, which its alarm made) finds that start's read there: no
+/// wait. FIN-462: read once a start was ready, the read raced its guest's
+/// first seconds, the start's slowest moment, and could run out its bound
+/// (`DISK_READ_MS`) on a loaded box, the read never to come.
 /// When a read finds it filling is `disk_filling`'s, proved by the core's
 /// and the shell's tests: a test fleet's computers share their host's
 /// disk. Starts and ends awake.
@@ -310,27 +309,18 @@ fn disk_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
     let disk = || lever(api, c.id, "saves").map(|r| r.body["disk"].clone()).unwrap_or(Value::Null);
     let at = |d: &Value| d["at"].as_i64().unwrap_or(0);
-    // the read of the start that came up at `restored`'s `at`
-    let read_of = |s: &Suite, restored: &Value| {
-        let up = restored["at"].as_i64().unwrap_or(i64::MAX);
-        let mut d = Value::Null;
-        let read = s.eventually(c.wake, || {
-            d = disk();
-            at(&d) >= up
-        });
-        (read, d)
-    };
-    let v = view();
-    let (read, d) = read_of(s, &v["restored"]);
+    // read by the start that came up at `restored`, before it came up
+    let read_by = |d: &Value, restored: &Value| d["generation"].as_u64().is_some_and(|g| g > 0) && d["generation"] == restored["generation"] && at(d) <= restored["at"].as_i64().unwrap_or(0);
+    let (v, d) = (view(), disk());
     let (total, free) = (d["total"].as_u64().unwrap_or(0), d["free"].as_u64().unwrap_or(u64::MAX));
-    s.ok(DISK_CHECKS[0], v["phase"] == "awake" && read && total > 0 && free <= total, json!({ "disk": d, "restored": v["restored"] }));
-    // a sleep and a wake: read at the start, once it came up
+    s.ok(DISK_CHECKS[0], v["phase"] == "awake" && read_by(&d, &v["restored"]) && total > 0 && free <= total, json!({ "disk": d, "restored": v["restored"] }));
+    // a sleep and a wake: read in the start the wake made
     api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
-    let (read, started) = read_of(s, &woke.body["restored"]);
+    let started = disk();
     s.ok(
         DISK_CHECKS[1],
-        woke.body["phase"] == "awake" && read && at(&started) > at(&d) && started["total"].as_u64() == Some(total),
+        woke.body["phase"] == "awake" && read_by(&started, &woke.body["restored"]) && at(&started) > at(&d) && started["total"].as_u64() == Some(total),
         json!({ "disk": started, "restored": woke.body["restored"] }),
     );
     Ok(())
