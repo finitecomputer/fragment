@@ -109,6 +109,19 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
   // off until that action's read is done, whatever draws it meanwhile, and
   // asks nothing (an invite's Accept and Decline are one answer)
   const pending = new Set();
+  // While a notice must be answered (`drawAsked`), the page's own keys take
+  // nothing (its shortcuts open the launcher, toggle the desktop): a key in
+  // the cover acts on it and stops there; any other is taken here first.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      const cover = document.getElementById("must-answer");
+      if (!cover?.open || cover.contains(e.target)) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    },
+    true,
+  );
   // the countdowns as last drawn, each its line and its time (`countdown`)
   let counting = [];
   let tick = null;
@@ -298,6 +311,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const fresh = cover.dataset.id !== n.id;
     cover.dataset.id = n.id;
     cover.oncancel = (e) => e.preventDefault();
+    cover.onkeydown = (e) => e.stopPropagation();
     cover.onclose = () => cover.dataset.id && cover.showModal();
     cover.setAttribute("aria-label", n.title);
     cover.replaceChildren(noticeRow(n));
