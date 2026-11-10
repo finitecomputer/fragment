@@ -1981,7 +1981,10 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // the example offers Linear beside Google; the hosted e2e's preview, not yet
+            let connections: &[&str] = if file == "deploy/example.jsonc" { &["google", "linear"] } else { &["google"] };
+            let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"].into_iter().chain(connections.iter().copied()).chain(["perplexity", "google-places", "xai", "elevenlabs", "openrouter"]).collect();
+            assert_eq!(names, expected, "{file}");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
@@ -1991,6 +1994,27 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// The example's Linear row, its commented connect uncommented (a client
+    /// id and the secret's store name filled in), loads: its one scope, its
+    /// revocation, and its client secret bound as the cell's.
+    #[test]
+    fn the_example_linear_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "linear""#).expect("the example's linear row");
+        let row = &example[start..start + example[start..].find(r#""env": ["LINEAR_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-linear-oauth-secret").replace("<the app's client id>", "linear-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/linear-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let o = catalog.get("linear").and_then(|p| p.connection_oauth.as_ref()).expect("its connect");
+        assert_eq!((o.client_id.as_str(), o.scopes.as_slice(), o.revoke.as_deref()), ("linear-client", ["write".to_string()].as_slice(), Some("https://api.linear.app/oauth/revoke")));
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_LINEAR".into(), "fragment-linear-oauth-secret")));
     }
 
     /// A provider's note: the example's (its google row's, commented out)

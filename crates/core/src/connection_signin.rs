@@ -703,4 +703,27 @@ mod tests {
         assert_eq!(prompts, ["select_account consent"]);
         assert_eq!(u.query_pairs().filter(|(k, v)| k == "include_granted_scopes" && v == "true").count(), 1);
     }
+
+    /// Linear's row (deploy/example.jsonc): Linear's authorize takes its
+    /// scopes comma-separated and always grants `read` beside them, so the
+    /// row asks for `write` alone, one scope either way; its answer names
+    /// both, space-separated (linear.app/developers/oauth-2-0-authentication,
+    /// read 2026-11-10), and nothing is missing. An answer naming its scopes
+    /// as a list (Linear's apps made before December 2023) is refused, never
+    /// read as a grant of nothing.
+    #[test]
+    fn a_grant_of_more_than_was_asked_connects_with_nothing_missing() {
+        let o = ConnectionOAuth { authorize: "https://linear.app/oauth/authorize?actor=user&prompt=consent".into(), exchange: "https://api.linear.app/oauth/token".into(), client_id: "client".into(), scopes: vec!["write".into()], revoke: Some("https://api.linear.app/oauth/revoke".into()) };
+        assert!(check(&o).is_ok());
+        let u = url::Url::parse(&authorize_url(&o, "https://platform.example/api/connections/linear/callback", "challenge", "state")).unwrap();
+        let query: Vec<(String, String)> = u.query_pairs().into_owned().collect();
+        assert!(query.contains(&("scope".into(), "write".into())) && query.contains(&("actor".into(), "user".into())) && query.contains(&("prompt".into(), "consent".into())), "{query:?}");
+        let answer = json!({ "access_token": "mock-access", "token_type": "Bearer", "expires_in": 86399, "scope": "read write", "refresh_token": "mock-refresh" });
+        let granted = tokens(&answer, &o.scopes).expect("Linear's documented answer");
+        assert_eq!(granted.import_body("2026-11-10T00:00:00Z", None)["scopes"], json!(["read", "write"]), "Pipes holds what Linear granted");
+        assert!(missing(&o.scopes, &granted.scopes).is_empty());
+        let mut listed = answer;
+        listed["scope"] = json!(["read", "write"]);
+        assert_eq!(tokens(&listed, &o.scopes).err(), Some(Refused::Invalid));
+    }
 }

@@ -316,6 +316,20 @@
       // absent, one, as before
       // "accounts_max": 5,
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
+    // The person's Linear workspace, as Google is: Pipes' `linear`
+    // provider, connected through the browser once its OAuth app's secret
+    // is in the store (the app Pipes' Linear integration uses, with the
+    // platform's callback beside Pipes'). Linear grants `read` beside
+    // whatever is asked and takes its scopes comma-separated, so the row
+    // asks for `write` alone; `actor=user` acts as the person.
+    { "name": "linear", "kind": "connection",
+      "hosts": ["api.linear.app", "uploads.linear.app"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://linear.app/oauth/authorize?actor=user&prompt=consent",
+      //   "exchange": "https://api.linear.app/oauth/token", "revoke": "https://api.linear.app/oauth/revoke",
+      //   "client_id": "<the app's client id>", "scopes": ["write"] },
+      "env": ["LINEAR_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },
