@@ -661,16 +661,6 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
-/// A standing as its meta keeps the last one told ("told"): a number, as
-/// nothing reads it but `told`'s comparison.
-fn told_key(standing: Standing) -> u8 {
-    match standing {
-        Standing::Ok => 0,
-        Standing::AgentsStopped { why } => 10 + why as u8,
-        Standing::ReadOnly { why } => 20 + why as u8,
-    }
-}
-
 /// How every transaction ends, the same for each (`transact`'s closures,
 /// one for each caller, carry none of it): the head written back, the
 /// store's fault if any, the standing it leaves kept in `left` (`told`),
@@ -754,7 +744,7 @@ impl LedgerCell {
     /// one last told them (FIN-458: their notices are this ledger's words
     /// for it, `GET /api/notices`). Kept in its meta, so a change by the
     /// clock alone (a month's credit, its sweep) is told too, and told once.
-    /// An org's ledger tells no one; a first standing is kept, not told.
+    /// An org's ledger tells no one; none told yet is news too (`said::news`).
     /// Told after the answer (`wait_until`), never on its path: a gate's ask
     /// waits on no page. Best effort: a page not told reads it next time.
     #[inline(never)]
@@ -766,9 +756,8 @@ impl LedgerCell {
         let Ok(Some(payer)) = self.meta("payer") else { return };
         self.told.set(Some(standing));
         let Some(Payer::Person(person)) = Payer::parse(&payer) else { return };
-        let said = told_key(standing).to_string();
-        let kept = self.meta("told").ok().flatten();
-        if kept.as_deref() == Some(said.as_str()) || self.set_meta("told", &said).is_err() || kept.is_none() {
+        let said = core::said::told_key(standing);
+        if !core::said::news(self.meta("told").ok().flatten().as_deref(), &said) || self.set_meta("told", &said).is_err() {
             return;
         }
         crate::principal::tell_later(&self.state, &self.env, vec![person], "ledger.told-failed");
