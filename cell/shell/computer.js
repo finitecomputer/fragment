@@ -97,11 +97,18 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     b.append(icon(name), typeof words === "string" ? el("span", null, words) : words);
     return b;
   };
-  // the notices whose last action failed, by id, and why: the server's own
-  // words for its refusal (Paul, 2026-11-09), else the page's for a call
-  // that never reached it; said under their words until one goes through
-  // or the notice is gone
+  // the notices whose last action failed, by id: why (`said`: the server's
+  // own words for its refusal, Paul 2026-11-09, else the page's for a call
+  // that never reached it), whether the server refused it, and the notice's
+  // title and level. Said under its words until it is acted on again; a
+  // refusal outlives its notice (an invite taken back meanwhile), a line of
+  // its own until dismissed (`refusalRow`); a call that never reached the
+  // server goes with its notice, the read saying what is true now
   const failed = new Map();
+  // the notices with an action under way, by id: every action of each is
+  // off until that action's read is done, whatever draws it meanwhile, and
+  // asks nothing (an invite's Accept and Decline are one answer)
+  const pending = new Set();
   // the countdowns as last drawn, each its line and its time (`countdown`)
   let counting = [];
   let tick = null;
@@ -120,7 +127,7 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
       counting.push({ u: n.until, line });
       copy.append(line);
     }
-    if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id)));
+    if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id).said));
     if (n.detail) copy.append(el("p", "notice-detail", n.detail));
     (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
     row.append(copy, actions);
@@ -136,28 +143,54 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     }
     const b = el("button", main ? "primary" : null, a.label);
     b.type = "button";
-    b.onclick = () => act(n, a, b);
+    b.disabled = pending.has(n.id);
+    b.onclick = () => act(n, a);
     return b;
+  }
+  // A refusal whose notice the read after it no longer has: the notice's
+  // title and the server's words, until dismissed (OK asks nothing).
+  function refusalRow(id, f) {
+    const row = el("div", f.level === "warn" ? "computer-notice warn" : "computer-notice");
+    row.dataset.kind = "refused";
+    row.dataset.id = id;
+    const copy = el("div", "notice-copy");
+    const actions = el("div", "notice-actions");
+    copy.append(el("strong", null, f.title), el("p", null, f.said));
+    const ok = el("button", "primary", "OK");
+    ok.type = "button";
+    ok.onclick = () => {
+      failed.delete(id);
+      renderComputer();
+    };
+    actions.append(ok);
+    row.append(copy, actions);
+    return row;
   }
   // An action: its route posted with its body, then the notices read again,
   // one more read in the page's sequence (`load`: the newest wins), which
-  // decides what shows whatever the post answered. Failed, the notice says
-  // why, as that read finds it, its button back to tap again. Its answer
-  // may name a page to open (Paul, 2026-11-09: an invite's app, a
-  // checkout), opened once that read has it (an app accepted is in the list).
-  async function act(n, a, button) {
+  // decides what shows whatever the post answered. Its notice's actions are
+  // off meanwhile (`pending`). Failed, the notice says why (`failed`), its
+  // buttons back to tap again. Its answer may name a page to open (Paul,
+  // 2026-11-09: an invite's app, a checkout), opened once that read has it.
+  async function act(n, a) {
     // the start the server named, so a stale row's press restarts nothing newer
     if (restarts(a)) return restartComputer(a.body?.generation);
-    button.disabled = true;
+    if (pending.has(n.id)) return;
+    pending.add(n.id);
+    failed.delete(n.id);
+    renderComputer();
     let answer = null;
     try {
       answer = await api("POST", a.post, a.body ?? {});
-      failed.delete(n.id);
     } catch (e) {
-      failed.set(n.id, e?.status ? e.message : "Couldn't do that. Try again.");
+      const refused = !!e?.status;
+      failed.set(n.id, { said: refused ? e.message : "Couldn't do that. Try again.", refused, title: n.title, level: n.level });
     }
     // as a change told this page: only the cards whose rows it touched read again
     await load(true).catch(() => {});
+    pending.delete(n.id);
+    // drawn again whatever the read came to (failed: as the last read said)
+    renderComputer();
     if (typeof answer?.open === "string") openPage(answer.open);
   }
   // The countdowns, live: each line said again as its minute changes (in
@@ -231,13 +264,17 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const box = document.getElementById("computer-notices");
     const t = now();
     const all = notices() ?? [];
-    for (const id of failed.keys()) if (!all.some((n) => n.id === id)) failed.delete(id);
+    // a failure whose notice is gone: a refusal stays, a line of its own; a
+    // call that never reached the server goes with it
+    const gone = [...failed].filter(([id]) => !all.some((n) => n.id === id));
+    for (const [id, f] of gone) if (!f.refused) failed.delete(id);
     // a notice a restart answers waits while it runs; one whose time passed is gone
     const told = all.filter((n) => !(n.until && n.until.at <= t) && !(restart && (n.actions ?? []).some(restarts)));
     counting = [];
     // a read that failed, its notices' too: what the last said stays, under its line
     const own = reads().updating ? ["deploying"] : computerFailed() || reads().listFailed || reads().noticesFailed ? ["refresh"] : [];
-    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.map(noticeRow)];
+    const refusals = gone.filter(([, f]) => f.refused).map(([id, f]) => refusalRow(id, f));
+    const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
     countdown();

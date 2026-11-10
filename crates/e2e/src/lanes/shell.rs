@@ -5819,8 +5819,9 @@ fn say_in(s: &Suite, b: &mut Browser, page: &Page, host: &str, text: &str) -> bo
 /// chat (its history card alone) is listed with the card's time and newest
 /// words; archived, it is under Archived with its chip, and gone from the
 /// sidebar; its title filters it at once, and a word only its messages
-/// hold finds it through the person's search, its snippet shown; it opens
-/// in the middle column and one Back is History again; in the sidebar,
+/// hold finds it through the person's search, its snippet shown, and so
+/// do words typed before the message that holds them came (FIN-461); it
+/// opens in the middle column and one Back is History again; in the sidebar,
 /// nothing said in it yet, it is one line; on a phone its
 /// Continue sits under its words, which stay shown. Invalid: a chat
 /// nothing was said in is not listed, and words nothing holds say so.
@@ -5910,8 +5911,22 @@ fn history_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Perso
     b.eval(page, &fill(".history-search input", "warmer"))?;
     let found = b.until(page, &format!("{}?.querySelector('.history-preview.found')?.textContent.includes('warmer')", row(&bread)), wait);
     let _ = b.screenshot(page, &shots.join("desktop-history-search.png"));
+    let list = b.eval(page, "document.querySelector('.history-list').innerText")?;
     b.eval(page, &fill(".history-search input", ""))?;
-    s.ok("a word only a chat's messages hold finds it in History, its snippet shown", found, json!({ "list": b.eval(page, "document.querySelector('.history-list').innerText")? }));
+    s.ok("a word only a chat's messages hold finds it in History, its snippet shown", found, json!({ "list": list }));
+    // words typed before a message holds them: found once it comes, with
+    // nothing typed again (its search follows the person's list)
+    b.eval(page, &fill(".history-search input", "banneton"))?;
+    let nothing = b.until(page, "document.querySelector('.history-empty')?.textContent === 'Nothing found for “banneton”'", wait);
+    let came = shell(api, me.session, "POST", &format!("/api/f/{bread}/channels/chat"), Some(&json!({ "id": "e2e-banneton", "body": { "text": "the banneton wants more flour" } })), &[])?;
+    let found = b.until(page, &format!("{}?.querySelector('.history-preview.found')?.textContent.includes('banneton')", row(&bread)), wait);
+    let list = b.eval(page, "document.querySelector('.history-list').innerText")?;
+    b.eval(page, &fill(".history-search input", ""))?;
+    s.ok(
+        "a message that comes while History's words are typed is found in it as it comes",
+        nothing && came.status == 200 && found,
+        json!({ "nothing": nothing, "posted": came.status, "list": list }),
+    );
     // a reload at /history stays there
     b.eval(page, "(window.__before_reload = true, true)")?;
     b.reload(page)?;

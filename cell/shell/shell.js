@@ -1984,7 +1984,7 @@ async function load(changed = false) {
   sessionArchive.load().catch(() => {});
   renderApps();
   appsPage.listed().catch(() => {});
-  historyPage.render();
+  historyPage.listed();
   renderHeading();
   renderComputer();
   rosterChanged();
