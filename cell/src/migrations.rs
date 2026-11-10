@@ -90,7 +90,7 @@ macro_rules! marks {
 macro_rules! admin_row {
     () => {
         "SELECT m.old, m.workos_id, p.person, m.agent, m.state, m.reason, m.phase, m.attempt,
-    CASE WHEN m.command IS NULL THEN NULL ELSE m.old || ':' || m.attempt || ':' || CASE WHEN m.command LIKE 'retire%' THEN 'retire' ELSE m.command END END AS command,
+    CASE WHEN m.command IS NULL THEN NULL ELSE m.old || ':' || m.attempt || ':' || m.command END AS command,
     m.since_ms, m.deadline_ms, m.staged_ms FROM moves m LEFT JOIN people p ON p.workos_id = m.workos_id"
     };
 }
@@ -867,22 +867,24 @@ impl MigrationsCell {
         self.cfg.migrations.as_ref().and_then(|m| m.cutoff_ms)
     }
 
-    /// The alarm at the earliest deadline of any move, at the cutoff while
-    /// a move waits for it, at a routine's next try, or at once while a
-    /// stage waits to be deleted; none when nothing is due.
+    /// The alarm when it next has work: the earliest deadline of any move,
+    /// or the cutoff while a move waits for it and there is room to archive
+    /// (`machine::next_wake`); a routine's next try; or at once while a
+    /// stage waits to be deleted. None when nothing is due.
     fn arm(&self) -> CellResult<()> {
         let parts = self.parts();
         let deadline = parts.rows("SELECT MIN(deadline_ms) AS at FROM moves", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let cutoff = match self.cutoff_ms() {
-            Some(c) if parts.count(UNASKED_COUNT)? > 0 => Some(c),
-            _ => None,
+        let (unasked, archiving) = match self.cutoff_ms() {
+            Some(_) => (parts.count(UNASKED_COUNT)?, parts.count("SELECT COUNT(*) AS n FROM moves WHERE state = 'archiving'")? as usize),
+            None => (0, 0),
         };
         let routine = parts.rows("SELECT MIN(next_ms) AS at FROM routines", vec![])?.first().and_then(|r| r["at"].as_i64());
         let sweep = match parts.count("SELECT COUNT(*) AS n FROM sweeps")? {
             0 => None,
             _ => Some(self.now()?),
         };
-        match [deadline, cutoff, routine, sweep].into_iter().flatten().min() {
+        let moves = machine::next_wake(deadline, self.cutoff_ms(), unasked, archiving, self.now()?);
+        match [moves, routine, sweep].into_iter().flatten().min() {
             // the clock lever moves the object's time, not the alarm's
             Some(at) => js::set_alarm(&self.raw, (at - (self.now()? - js::now_ms())).max(js::now_ms() + 1)),
             None => Ok(()),

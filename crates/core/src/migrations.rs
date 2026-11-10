@@ -73,7 +73,8 @@ impl Act {
         }
     }
 
-    /// As its column holds it.
+    /// As its column holds it, and its command's id names it (its step:
+    /// a retirement's with its mark, so phase 2's two are two commands).
     fn stored(self) -> &'static str {
         match self {
             Act::StopAndStage => "stop_and_stage",
@@ -281,7 +282,7 @@ impl Move {
 
     /// Its current command's id, while it has one.
     pub fn command_id(&self) -> Option<String> {
-        self.command.map(|act| command_id(&self.old, self.attempt, act.kind()))
+        self.command.map(|act| command_id(&self.old, self.attempt, act.stored()))
     }
 
     /// Its command as the mailbox answers it, flat.
@@ -289,7 +290,7 @@ impl Move {
         let act = self.command?;
         let staging = act == Act::StopAndStage;
         Some(Command {
-            id: command_id(&self.old, self.attempt, act.kind()),
+            id: command_id(&self.old, self.attempt, act.stored()),
             old: self.old.clone(),
             attempt: self.attempt,
             kind: act.kind(),
@@ -337,10 +338,23 @@ impl Move {
             MoveState::Archived => self.expires_ms,
             _ => None,
         };
-        let keep = self.staged_ms.filter(|_| self.phase == Phase::P1).map(|at| at + KEEP_MS);
-        match (state, keep) {
+        match (state, self.stage_expires()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
+        }
+    }
+
+    /// When its stage goes, whatever else it waits for: a phase 1 one
+    /// `KEEP_MS` after it was written, done or not; a held phase 2 one at
+    /// its expiry (it is the only copy left: its old agent was retired, so
+    /// a failed import keeps it for staff's retry until then). An archived
+    /// one goes as it expires (`tick`).
+    fn stage_expires(&self) -> Option<i64> {
+        let at = self.staged_ms?;
+        match (self.phase, self.state) {
+            (Phase::P1, _) => Some(at + KEEP_MS),
+            (Phase::P2, MoveState::Held) => self.expires_ms,
+            _ => None,
         }
     }
 
@@ -607,13 +621,18 @@ pub fn open(m: &Move, agent: &str, stage: &str) -> Outcome {
 
 /// The agent says its import ended: well, the old agent is retired as
 /// migrated (a phase 2 one is marked again); not, staff take it. The stage
-/// is swept either way. The same answer again changes nothing.
+/// is swept either way, but a phase 2 one a failed import keeps (to its
+/// expiry). The same answer again changes nothing.
 pub fn done(m: &Move, agent: &str, stage: &str, d: &StageDone, now: i64) -> Outcome {
     its_stage(m, agent, stage)?;
     match (m.state, d.ok) {
         (MoveState::Importing, ok) => {
             let mut effects = vec![];
-            let from = m.clone().swept(&mut effects);
+            let from = match (ok, m.phase) {
+                // phase 2's stage is the only copy: kept for staff's retry
+                (false, Phase::P2) => m.clone(),
+                _ => m.clone().swept(&mut effects),
+            };
             let to = match ok {
                 true => Move { command: Some(Act::Retire(Mark::Migrated)), seq: 0, ..from.moved(MoveState::Retiring, now) },
                 false => from.held(HeldReason::ImportFailed, now),
@@ -635,8 +654,8 @@ pub fn tick(m: &Move, now: i64) -> Option<Step> {
     if !due {
         return None;
     }
-    // a phase 1 stage past its keep goes first, whatever the state
-    if m.phase == Phase::P1 && m.staged_ms.is_some_and(|at| at + KEEP_MS <= now) {
+    // a stage past its keep goes first, whatever the state
+    if m.stage_expires().is_some_and(|at| at <= now) {
         let mut effects = vec![];
         let to = m.clone().swept(&mut effects);
         // what else is due is looked at again at the next pass
@@ -668,6 +687,16 @@ pub fn tick(m: &Move, now: i64) -> Option<Step> {
     Some(Step { to, effects: vec![] })
 }
 
+/// When the object's alarm next has work: the earliest deadline of any
+/// move (`deadline`), or the cutoff while an unasked move waits for it and
+/// there is room to archive one. Past the cutoff with every slot taken,
+/// an archiving move's own deadline wakes it (or its report, which sets
+/// the alarm again): not the past cutoff, at once, over and over.
+pub fn next_wake(deadline: Option<i64>, cutoff_ms: Option<i64>, unasked: u64, archiving: usize, now: i64) -> Option<i64> {
+    let cutoff = cutoff_ms.filter(|c| unasked > 0 && (*c > now || archiving < ARCHIVING_MAX));
+    [deadline, cutoff].into_iter().flatten().min()
+}
+
 /// Phase 2, at the cutoff (`cutoff_ms`): a move whose person never said
 /// Yes is staged and retired, unasked, its stage kept `ARCHIVE_KEEP_MS`
 /// past the cutoff. The object takes at most `ARCHIVING_MAX` at once.
@@ -694,7 +723,8 @@ pub fn retry(m: &Move, now: i64) -> Outcome {
         (Some(MoveState::Archiving), _) => m.clone().swept(&mut effects).attempt_again(MoveState::Archiving, Phase::P2, now),
         (Some(MoveState::Importing), Phase::P2) => {
             let agent = m.agent.clone().ok_or(Refused::Unfit("a held import has its agent"))?;
-            return Ok(Some(m.importing(agent, now, m.staged_ms.unwrap_or(now))));
+            let staged = m.staged_ms.ok_or(Refused::Unfit("its phase 2 stage is gone, past its expiry: nothing is left to import"))?;
+            return Ok(Some(m.importing(agent, now, staged)));
         }
         _ => {
             if m.agent.is_none() {
@@ -981,7 +1011,7 @@ mod tests {
         let d = done(&i, AGENT, "prj_1.p1.1", &ok(), T0 + 100).unwrap().unwrap();
         assert_eq!(d.effects, vec![Effect::Sweep { prefix: "p1/prj_1/1/".into() }]);
         assert_eq!((d.to.state, d.to.command, d.to.staged_ms), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated)), None));
-        assert_eq!(d.to.command_id().as_deref(), Some("prj_1:1:retire"));
+        assert_eq!(d.to.command_id().as_deref(), Some("prj_1:1:retire_migrated"));
         assert_eq!(readable(&d.to, AGENT, "prj_1.p1.1"), Err(Refused::NotNow(MoveState::Retiring)), "its routes refuse at once");
         assert_eq!(done(&restarted(&d.to), AGENT, "prj_1.p1.1", &ok(), T0 + 101), Ok(None), "replay");
         let bad = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
@@ -1010,7 +1040,7 @@ mod tests {
         let r = done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0).unwrap().unwrap().to;
         // failed: still retiring, its command still the mover's, its deadline unmoved
         let f = to(report(&r, &report_on(&r, 1, "failed"), T0 + 5));
-        assert_eq!((f.state, f.command_id().as_deref(), f.deadline()), (MoveState::Retiring, Some("prj_1:1:retire"), r.deadline()));
+        assert_eq!((f.state, f.command_id().as_deref(), f.deadline()), (MoveState::Retiring, Some("prj_1:1:retire_migrated"), r.deadline()));
         assert_eq!(report(&f, &report_on(&r, 1, "failed"), T0), Ok(None), "replay");
         // the next try goes through: moved
         let m = to(report(&restarted(&f), &report_on(&r, 2, "retired"), T0 + 6));
@@ -1019,7 +1049,7 @@ mod tests {
         let h = tick(&f, T0 + RETIRE_MS).expect("due").to;
         assert_eq!((h.state, h.reason), (MoveState::Held, Some(HeldReason::RetireTimedOut)));
         let again = to(retry(&h, T0 + 1));
-        assert_eq!((again.state, again.command_id().as_deref()), (MoveState::Retiring, Some("prj_1:1:retire")));
+        assert_eq!((again.state, again.command_id().as_deref()), (MoveState::Retiring, Some("prj_1:1:retire_migrated")));
         // phase 2's retirement the same, held at its own deadline
         let a = cutoff(&Move::listed("o", "u", false, T0), T0, T0).unwrap().to;
         let s = to(report(&a, &report_on(&a, 1, staged_event()), T0 + 1));
@@ -1098,7 +1128,7 @@ mod tests {
         let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
         let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
         assert_eq!((st.state, st.command, st.staged_ms), (MoveState::Archiving, Some(Act::Retire(Mark::Archived)), Some(cut + 2)));
-        assert_eq!(st.command_id().as_deref(), Some("prj_1:1:retire"));
+        assert_eq!(st.command_id().as_deref(), Some("prj_1:1:retire_archived"));
         let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
         assert_eq!((ar.state, ar.deadline()), (MoveState::Archived, Some(cut + ARCHIVE_KEEP_MS)), "kept 90 days, not 14");
         // its 90 days: expired, swept
@@ -1112,6 +1142,63 @@ mod tests {
         let d = done(&late.to, AGENT, "prj_1.p2.1", &ok(), cut + 11).unwrap().unwrap();
         assert_eq!((d.to.state, d.to.command), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated))));
         assert_eq!(d.effects, vec![Effect::Sweep { prefix: "p2/prj_1/1/".into() }]);
+    }
+
+    /// Phase 2's two retirements are two commands: as archived at the
+    /// cutoff, then as migrated after a late import. A mover that keys its
+    /// work by the id does both, the second not answered from the first's
+    /// receipt.
+    #[test]
+    fn a_late_import_retires_under_a_command_of_its_own() {
+        let cut = T0;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let archived = st.command_id().expect("retired as archived");
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let late = to(yes(&ar, AGENT, cut + 10));
+        let d = to(done(&late, AGENT, "o.p2.1", &ok(), cut + 11));
+        let migrated = d.command_id().expect("retired as migrated");
+        assert_ne!(archived, migrated, "two retirements, two commands");
+        // the archive's receipt again is stale: it changes nothing
+        assert_eq!(report(&d, &Report { command: archived, ..report_on(&d, 1, "retired") }, cut + 12), Err(Refused::Stale));
+    }
+
+    /// A phase 2 stage is the only copy left (its old agent is retired), so
+    /// it is kept until its expiry whatever its import does: a failed
+    /// import keeps it for staff's retry; held past its expiry, it goes,
+    /// and a retry is refused.
+    #[test]
+    fn a_failed_late_import_keeps_its_stage_until_it_expires() {
+        let cut = T0;
+        let a = cutoff(&Move::listed("o", "u", true, T0), cut, cut).unwrap().to;
+        let s = to(report(&a, &report_on(&a, 1, "stopped"), cut + 1));
+        let st = to(report(&restarted(&s), &report_on(&s, 2, staged_event()), cut + 2));
+        let ar = to(report(&st, &report_on(&st, 1, "retired"), cut + 3));
+        let late = to(yes(&ar, AGENT, cut + 10));
+        let failed = StageDone { ok: false, report_sha256: None, why: Some("x".into()) };
+        let f = done(&late, AGENT, "o.p2.1", &failed, cut + 11).unwrap().unwrap();
+        assert_eq!((f.to.state, f.to.reason), (MoveState::Held, Some(HeldReason::ImportFailed)));
+        assert_eq!((f.effects.as_slice(), f.to.deadline()), (&[][..], Some(cut + ARCHIVE_KEEP_MS)), "kept, to its expiry");
+        let again = to(retry(&f.to, cut + 12));
+        assert_eq!((again.state, again.stage().as_deref()), (MoveState::Importing, Some("o.p2.1")));
+        let gone = tick(&f.to, cut + ARCHIVE_KEEP_MS).expect("its expiry");
+        assert_eq!(gone.effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+        assert_eq!((gone.to.state, gone.to.deadline()), (MoveState::Held, None));
+        assert!(matches!(retry(&gone.to, cut + ARCHIVE_KEEP_MS + 1), Err(Refused::Unfit(_))), "nothing left to import");
+    }
+
+    /// Past the cutoff, the alarm wakes for it only while there is room to
+    /// archive: with every slot taken, an archiving move's own deadline
+    /// wakes it, not the past cutoff again at once.
+    #[test]
+    fn past_the_cutoff_with_no_room_the_alarm_waits_for_a_deadline() {
+        let (cut, now) = (T0, T0 + 5);
+        assert_eq!(next_wake(Some(cut + 99), Some(cut + 10), 1, 0, cut), Some(cut + 10), "before it: the cutoff");
+        assert_eq!(next_wake(None, Some(cut), 3, ARCHIVING_MAX - 1, now), Some(cut), "past it, with room: at once");
+        assert_eq!(next_wake(Some(now + 60_000), Some(cut), 3, ARCHIVING_MAX, now), Some(now + 60_000), "no room: the next deadline");
+        assert_eq!(next_wake(None, Some(cut), 3, ARCHIVING_MAX, now), None, "no room, no deadline: nothing");
+        assert_eq!(next_wake(None, Some(cut + 10), 0, 0, cut), None, "nothing unasked: no cutoff");
     }
 
     #[test]
@@ -1146,7 +1233,7 @@ mod tests {
         assert_eq!((c.id.as_str(), c.kind, c.stage.as_deref(), c.mark), ("prj_1:1:stop_and_stage", CommandKind::StopAndStage, Some("prj_1.p1.1"), None));
         m.command = Some(Act::Retire(Mark::Archived));
         let c = restarted(&m).command().unwrap();
-        assert_eq!((c.id.as_str(), c.kind, c.phase, c.stage, c.mark), ("prj_1:1:retire", CommandKind::Retire, None, None, Some(Mark::Archived)));
+        assert_eq!((c.id.as_str(), c.kind, c.phase, c.stage, c.mark), ("prj_1:1:retire_archived", CommandKind::Retire, None, None, Some(Mark::Archived)));
         m.command = Some(Act::Restart);
         assert_eq!(restarted(&m).command().map(|c| (c.kind, c.mark)), Some((CommandKind::Restart, None)));
         m.command = None;
