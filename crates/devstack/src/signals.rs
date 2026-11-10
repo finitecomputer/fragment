@@ -106,13 +106,33 @@ mod tests {
 
     /// This test run again as a child doing `what`, `ignoring` SIGHUP as
     /// nohup would start it, once it says it is ready, and the line saying so.
+    /// Its termination signals start at their defaults and unblocked,
+    /// whatever this test started with: an ignored disposition and a
+    /// blocked mask are both inherited across exec, and a background job of
+    /// a non-interactive shell starts with SIGINT ignored (nohup, SIGHUP),
+    /// so a `cargo xtask check` run detached made a child that kept them
+    /// ignored and never ended.
     fn spawn(test: &str, what: &str, ignoring_hup: bool) -> (Child, BufReader<std::process::ChildStdout>, String) {
         let mut cmd = Command::new(std::env::current_exe().expect("the test binary"));
         cmd.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(CHILD, what).stdout(Stdio::piped());
-        if ignoring_hup {
-            // SAFETY: signal(2) between fork and exec, async-signal-safe
-            unsafe { cmd.pre_exec(|| if libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
-        }
+        // SAFETY: signal(2), sigemptyset(3), sigaddset(3) and sigprocmask(2)
+        // between fork and exec, each async-signal-safe, on a set of its own
+        unsafe {
+            cmd.pre_exec(move || {
+                let mut unblock: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut unblock);
+                for signal in TERMINATION {
+                    let disposition = if ignoring_hup && signal == libc::SIGHUP { libc::SIG_IGN } else { libc::SIG_DFL };
+                    if libc::signal(signal, disposition) == libc::SIG_ERR || libc::sigaddset(&mut unblock, signal) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                if libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+        };
         let mut child = cmd.spawn().expect("the child starts");
         let mut out = BufReader::new(child.stdout.take().expect("its stdout"));
         let (mut line, mut ready) = (String::new(), None);

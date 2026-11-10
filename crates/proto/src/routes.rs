@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
 use crate::notice::NoticeList;
+use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
     Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
@@ -149,13 +150,14 @@ pub struct Route {
 pub const ANY_ROUTE: [ErrorCode; 2] = [ErrorCode::Deploying, ErrorCode::SchemaRefused];
 
 /// Each group's tag: its name and what its routes are about.
-pub const TAGS: [(&str, &str); 6] = [
+pub const TAGS: [(&str, &str); 7] = [
     ("fragments", "A signer's list of the fragments they hold a role on, and their own view of each."),
     ("notices", "What the platform tells a person, each in its own words, with what they may do about it."),
     ("search", "A signer's search over their own list."),
     ("members", "Who is in a fragment."),
     ("channels", "A fragment's channels: its records, read, posted and drafted."),
     ("live", "A fragment's live socket: records as they are appended, presence, drafts and queries."),
+    ("vault", "A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered."),
 ];
 
 // Each route's credentials are what its dispatch takes (cell/src/lib.rs):
@@ -168,6 +170,7 @@ const SIGNED: &[Auth] = &[Auth::Nip98, Auth::Session];
 const VISITOR: &[Auth] = &[Auth::Nip98, Auth::Site, Auth::Frame, Auth::Link, Auth::Anyone];
 
 const NAME: Param = Param { name: "name", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The fragment's name, in full." };
+const SECRET: Param = Param { name: "secret", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The secret's name: 1 to 32 of a-z, 0-9 and -." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
 
 pub const ROUTES: &[Route] = &[
@@ -353,6 +356,39 @@ pub const ROUTES: &[Route] = &[
         request: None,
         answer: Answer::Socket { sends: Some(ty::<LiveIn>()), receives: ty::<LiveOut>() },
         errors: &[Unauthenticated, Forbidden, NotFound],
+    },
+    Route {
+        operation: "vault.list",
+        method: Method::Get,
+        path: "/api/vault",
+        summary: "The signer's secrets, by name, each with its hosts, place and agents: never a value.",
+        auth: SIGNED,
+        params: &[],
+        request: None,
+        answer: Answer::Json(ty::<SecretList>()),
+        errors: &[Unauthenticated, Forbidden],
+    },
+    Route {
+        operation: "vault.put",
+        method: Method::Put,
+        path: "/api/vault/{secret}",
+        summary: "Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.",
+        auth: SIGNED,
+        params: &[SECRET],
+        request: Some(ty::<PutSecret>()),
+        answer: Answer::Json(ty::<Secret>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest],
+    },
+    Route {
+        operation: "vault.remove",
+        method: Method::Delete,
+        path: "/api/vault/{secret}",
+        summary: "Removes a secret: its agents' next use of it is refused.",
+        auth: SIGNED,
+        params: &[SECRET],
+        request: None,
+        answer: Answer::Json(ty::<SecretRemoved>()),
+        errors: &[Unauthenticated, Forbidden],
     },
 ];
 
