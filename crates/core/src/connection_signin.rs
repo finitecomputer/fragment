@@ -223,13 +223,21 @@ pub fn tokens_of(answer: &Value, requested: &[String], named: &[String]) -> Resu
 /// `access_of`) reads the row's own spelling.
 fn spelled_as_asked(granted: Vec<String>, named: &[String]) -> Vec<String> {
     let last = |r: &str| r.contains("://").then(|| r.rsplit('/').next().unwrap_or(r).to_string());
-    let only = |found: Vec<&String>| (found.len() == 1).then(|| found[0].clone());
     let mut spelled: Vec<String> = vec![];
     for g in granted {
-        let as_named = named.contains(&g).then(|| g.clone())
-            .or_else(|| only(named.iter().filter(|r| r.eq_ignore_ascii_case(&g)).collect()))
-            .or_else(|| only(named.iter().filter(|r| last(r).is_some_and(|s| s.eq_ignore_ascii_case(&g))).collect()));
-        let s = as_named.unwrap_or(g);
+        // each step decides when it finds one or more: one is the name, more
+        // is a tie, kept as answered; the next step looks only where none
+        let by_case: Vec<&String> = named.iter().filter(|r| r.eq_ignore_ascii_case(&g)).collect();
+        let by_last: Vec<&String> = named.iter().filter(|r| last(r).is_some_and(|s| s.eq_ignore_ascii_case(&g))).collect();
+        let s = if named.contains(&g) {
+            g
+        } else if !by_case.is_empty() {
+            if by_case.len() == 1 { by_case[0].clone() } else { g }
+        } else if by_last.len() == 1 {
+            by_last[0].clone()
+        } else {
+            g
+        };
         if !spelled.contains(&s) {
             spelled.push(s);
         }
@@ -870,6 +878,7 @@ mod tests {
         assert_eq!(spell(&["read"], &["https://a.example/read", "read"]), ["read"], "an exact name over an alias");
         assert_eq!(spell(&["READ"], &["https://a.example/read", "read"]), ["read"], "one named so without regard to case");
         assert_eq!(spell(&["Read"], &["https://a.example/read", "https://a.example/READ"]), ["Read"], "two of other case: not guessed");
+        assert_eq!(spell(&["Read"], &["read", "READ", "https://a.example/read"]), ["Read"], "a tie of case is kept as answered, never taken on to a URL's last segment");
         assert_eq!(spell(&["mail.read", "Mail.Read"], &["https://graph.microsoft.com/Mail.Read"]), ["https://graph.microsoft.com/Mail.Read"], "one scope, kept once");
         assert_eq!(spell(&["email"], &["https://www.googleapis.com/auth/userinfo.email"]), ["email"], "Google's sign-in names are no aliases of each other");
         assert_eq!(spell(&["api", "refresh_token"], &["api", "refresh_token", "openid"]), ["api", "refresh_token"], "as named, unchanged");
