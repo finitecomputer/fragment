@@ -38,7 +38,7 @@ fn piped_cli(s: &Suite, api: &Api, home: &std::path::Path, args: &[&str], value:
 }
 
 /// Every node log the run has written so far, whole.
-fn logs(s: &Suite) -> String {
+pub(crate) fn logs(s: &Suite) -> String {
     let mut text = String::new();
     for entry in std::fs::read_dir(&s.scratch).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();

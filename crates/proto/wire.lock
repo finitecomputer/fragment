@@ -205,6 +205,11 @@ field FragmentStatus.title optional string|null
 field FragmentStatus.urls required Urls
 field FragmentStatus.viewToken required string|null
 field FragmentStatus.visibility required Visibility
+field HandedOff.handed required array<SecretKind>
+field Handoff.command required string
+field Handoff.items required array<HandoffItem>
+field HandoffItem.kind required SecretKind
+field HandoffItem.value required string
 field Has.nostr required boolean
 field Has.openrouter required boolean
 field Has.telegram required boolean
@@ -508,6 +513,7 @@ field migrations.part.path.stage required string
 field migrations.part.query.sha256 required string
 field migrations.parts.path.stage required string
 field migrations.report.path.old required string
+field migrations.secrets.path.old required string
 field migrations.yes.path.old required string
 field migrations.zip.path.stage required string
 field search.find.query.q required string
@@ -670,6 +676,12 @@ route migrations.roster path migrations.roster.path
 route migrations.roster query migrations.roster.query
 route migrations.roster request Roster
 route migrations.roster response RosterTaken
+route migrations.secrets POST /api/migrations/mover/agents/{old}/secrets
+route migrations.secrets accepts nip98
+route migrations.secrets path migrations.secrets.path
+route migrations.secrets query migrations.secrets.query
+route migrations.secrets request Handoff
+route migrations.secrets response HandedOff
 route migrations.visit POST /api/migrations/offers
 route migrations.visit accepts nip98
 route migrations.visit accepts session
@@ -734,6 +746,9 @@ type ErrorCode out enum open
 type FragmentKind out enum open
 type FragmentList out object
 type FragmentStatus out object
+type HandedOff out object
+type Handoff in object closed
+type HandoffItem in object closed
 type Has in object
 type IdentityKind out enum
 type LeftBehind both object
@@ -830,7 +845,7 @@ type RosterPerson in object
 type RosterTaken out object
 type SearchAnswer out object
 type Secret out object
-type SecretKind out enum
+type SecretKind both enum
 type SecretList out object
 type SecretRemoved out object
 type Seen out object
@@ -899,6 +914,8 @@ type migrations.report.path in object
 type migrations.report.query in object
 type migrations.roster.path in object
 type migrations.roster.query in object
+type migrations.secrets.path in object
+type migrations.secrets.query in object
 type migrations.visit.path in object
 type migrations.visit.query in object
 type migrations.yes.path in object

@@ -97,6 +97,12 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   whole (not an event stream, at most 8 MiB) and each value it echoes
   named `{{name}}`, as a job's fetch names its own.
 - **A wipe empties it** with their ledger, and keeps the row that says so.
+- **An old finite.computer agent's keys come in once** (FIN-463 F11;
+  docs/migrations.md, "The secrets hand-off"): on its person's Yes, the
+  move puts each into their Vault, bound to the new agent
+  (`vault/handoff`), and keeps a receipt in the same turn, so a retry
+  never puts back one they removed or moved since. A hand-off never
+  takes the name of another agent's secret.
 - **A secret moves out once, whole**: its person may move one into a
   fragment they edit as that fragment's secret (`fromVault` on `PUT
   /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as

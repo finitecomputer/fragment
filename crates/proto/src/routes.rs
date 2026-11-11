@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::live::{LiveIn, LiveOut};
-use crate::migrations::{Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
+use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
 use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
@@ -411,6 +411,17 @@ pub const ROUTES: &[Route] = &[
         request: Some(Body::Json(ty::<Report>())),
         answer: Answer::Json(ty::<Reported>()),
         errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "migrations.secrets",
+        method: Method::Post,
+        path: "/api/migrations/mover/agents/{old}/secrets",
+        summary: "The old agent's secrets, read once it is stopped, each into its person's Vault within the call: only for its current stop_and_stage's kinds. The same command again puts nothing.",
+        auth: SIGNATURE,
+        params: &[OLD],
+        request: Some(Body::Json(ty::<Handoff>())),
+        answer: Answer::Json(ty::<HandedOff>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict, TooLarge],
     },
     Route {
         operation: "migrations.part",

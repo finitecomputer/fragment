@@ -163,7 +163,7 @@ pub const SEARCH_INDEX: Class = Class { name: "SearchIndex", steps: &[step!("bas
 
 /// A person's Vault (FIN-466): its secrets; a wipe empties it and keeps
 /// the row that says so.
-pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql"), step!("claims", "vault/0002_claims.sql")], variants: &[], kept: &["wiped"] };
+pub const VAULT: Class = Class { name: "Vault", steps: &[step!("baseline", "vault/0001_baseline.sql"), step!("claims", "vault/0002_claims.sql"), step!("receipts", "vault/0003_receipts.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
 /// The finite.computer move's one object (docs/migrations.md): removable
