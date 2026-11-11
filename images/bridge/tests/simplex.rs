@@ -1120,3 +1120,72 @@ async fn a_rename_reaches_the_owners_app() {
     assert_eq!(last.as_ref().and_then(|p| p["displayName"].as_str()), Some("Waffle Bot"), "the person's app shows its name now");
     println!("frames in {}", lab.dir.display());
 }
+
+/// Goal (FIN-483): a second core started on a copy of a linked agent's
+/// databases (an old agent run again after its conversation moved) takes
+/// its contact's queues, and the bridge's core, told so
+/// (`contactAnotherClient`), is started again by the bridge, which takes
+/// them back: the phone is heard and answered again with no restart of the
+/// computer and no relink.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn a_second_core_on_its_databases_is_outlasted() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("another", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    say(&mut person, at_person, "before the fork").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the fork")).await;
+
+    // a copy of its databases, taken under a hold (whole), as an old
+    // agent's are; its core started again after
+    c.exec("touch /run/computer/hold");
+    let t0 = Instant::now();
+    // bounded: 20 s, the platform's wait for an answer
+    while c.exec("test -e /run/computer/held && echo yes").trim() != "yes" {
+        assert!(t0.elapsed() < Duration::from_secs(20), "the hold answered");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let fork = lab.db_dir("fork");
+    std::fs::create_dir_all(&fork).expect("its folder");
+    for f in ["sx_chat.db", "sx_agent.db"] {
+        std::fs::copy(data.join("simplex/juniper--k3x9").join(f), fork.join(f)).expect("copied");
+    }
+    c.exec("rm -f /run/computer/hold /run/computer/held");
+    c.state_until(Duration::from_secs(30), "running again", |v| v["running"] == true).await;
+
+    // the second core takes the queues; the bridge's is told, and starts again
+    let mut second = lab.start("fork", true).await;
+    let t0 = Instant::now();
+    // bounded by 60 s
+    while c.events("simplex.taken").is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(60), "its core was told another client took its chat\n{}", wire::cut(&logs(&c.name), 6_000));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    c.state_until(Duration::from_secs(60), "started again", |v| v["running"] == true && v["phase"] == "linked").await;
+    second.drain(Duration::from_secs(2)).await;
+    drop(second);
+    lab.stop("fork");
+
+    // heard and answered again, its computer never restarted, nothing relinked
+    let t0 = Instant::now();
+    say(&mut person, at_person, "after the fork").await;
+    received(&mut person, Duration::from_secs(120), |got| got.iter().any(|t| t == "echo: [paul] after the fork")).await;
+    println!("answered again {} ms after the second core stopped", t0.elapsed().as_millis());
+    assert_eq!(c.events("simplex.core_up").iter().filter(|e| e["rollback"] == true).count(), 0, "no rollback read into it");
+    say(&mut person, at_person, "and again").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] and again")).await;
+}
