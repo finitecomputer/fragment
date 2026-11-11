@@ -796,7 +796,7 @@ mod tests {
         let g = parse(br#"{"files":{"page":true,"graph":true}}"#).unwrap();
         assert_eq!(g.files, Some(FilesDecl { page: true, graph: true, ..FilesDecl::default() }), "it opens on its graph");
         assert_eq!(serde_json::to_value(g.files.as_ref().unwrap()).unwrap(), serde_json::json!({ "page": true, "graph": true }));
-        assert_eq!(serde_json::from_value::<FilesDecl>(serde_json::json!({ "page": true })).unwrap().graph, false, "a stored decl from before reads as no graph");
+        assert!(!serde_json::from_value::<FilesDecl>(serde_json::json!({ "page": true })).unwrap().graph, "a stored decl from before reads as no graph");
         assert_eq!(parse(br#"{"files":{}}"#).unwrap().files, Some(FilesDecl::default()), "page is false unless said");
         assert_eq!(parse(b"{}").unwrap().files, None);
         for (bad, says) in [

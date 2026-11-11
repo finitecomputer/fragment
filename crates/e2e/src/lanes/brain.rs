@@ -514,7 +514,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let wait = Duration::from_secs(20);
     // its page is the files view, on its graph: the brain's tree, its pages, titled by it
     let node = |p: &str| format!("!!document.querySelector('#graph .node[data-path=\"{p}\"]')");
-    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && {} && {}", node(SOLAR), node(CAFE)), wait);
+    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && {} && {}", node(SOLAR), node("garden/index.md")), wait);
     let caught_up = s.eventually(WAIT, || {
         let l = woke();
         l.len() == woke_before + 1 && l.iter().all(|r| r["status"] == "succeeded" && r["principal"] == own) && index(api, &keys, &name)["indexing"] == false
@@ -530,20 +530,22 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and coming back again, with nothing changed since, starts none", decided && woke().len() == woke_before + 1, json!(woke()));
     let brand = chrome.eval(&tab, "document.getElementById('brand')?.textContent ?? ''")?;
     s.ok("its page is the files view on its graph: the brain's tree and its pages, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
-    // a page chosen in the graph is previewed with its links, each way, as the reader resolves them
+    // a page chosen in the graph is previewed with what links to it, as the
+    // reader resolves links; the café source, removed above, left the graph
+    // and its link with it
     chrome.eval(&tab, &format!("(location.hash = '#graph/{SOLAR}', true)"))?;
     let rows = |label: &str| format!("[...document.querySelectorAll('#peek .peek-list')].find((l) => l.querySelector('h3')?.textContent.startsWith('{label}'))?.querySelectorAll('.peek-row') ?? []");
     let previewed = chrome.until(
         &tab,
         &format!(
-            "document.querySelector('#peek .peek-title')?.textContent === 'Solar panels' && [...{}].some((r) => r.dataset.path === '{CAFE}') && [...{}].some((r) => r.dataset.path === 'garden/index.md') && document.querySelector('#tree .row.active')?.dataset.path === '{SOLAR}'",
+            "document.querySelector('#peek .peek-title')?.textContent === 'Solar panels' && [...{}].length === 0 && ['garden/index.md', 'garden/log.md'].every((p) => [...{}].some((r) => r.dataset.path === p)) && document.querySelector('#tree .row.active')?.dataset.path === '{SOLAR}' && !{}",
             rows("Links to"),
             rows("Linked from"),
+            node(CAFE),
         ),
         wait,
     );
-    let _ = chrome.screenshot(&tab, &s.dir("brain-page").join("graph.png"));
-    s.ok("a page chosen in its graph is previewed, with the source it links to and the index that links to it, and marked in the tree", previewed, chrome.eval(&tab, "document.getElementById('peek')?.innerText.slice(0, 400) ?? ''")?);
+    s.ok("a page chosen in its graph is previewed, with the index and the log that link to it (the source it linked, removed, gone with its link), and marked in the tree", previewed, chrome.eval(&tab, "document.getElementById('peek')?.innerText.slice(0, 400) ?? ''")?);
     // its front page, read, and a page that says what links to it
     chrome.eval(&tab, "(location.hash = '#/index.md', true)")?;
     let front = chrome.until(&tab, "document.getElementById('reader')?.textContent.includes('Each folder here is a wiki') && document.getElementById('graph').hidden", wait);
