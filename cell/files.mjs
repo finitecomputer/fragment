@@ -1239,12 +1239,24 @@ function zoomAt(cx, cy, by) {
   apply();
 }
 
+// A page in the middle of what the graph shows: beside the chosen page's
+// card, or above its sheet, when it lies over the graph (narrower windows).
 function centerOn(node) {
   G.auto = false;
-  G.tx = svg.clientWidth / 2 - G.k * node.x;
-  G.ty = svg.clientHeight / 2 - G.k * node.y;
+  const box = svg.getBoundingClientRect();
+  let w = box.width;
+  let ht = box.height;
+  const card = $("peek");
+  if (!card.hidden && getComputedStyle(card).position === "absolute") {
+    const over = card.getBoundingClientRect();
+    if (over.left - box.left > box.width / 3) w = over.left - box.left;
+    else ht = Math.max(over.top - box.top, 80);
+  }
+  G.tx = w / 2 - G.k * node.x;
+  G.ty = ht / 2 - G.k * node.y;
   apply();
 }
+const overlaid = () => !$("peek").hidden && getComputedStyle($("peek")).position === "absolute";
 
 // Names: every page's when few or close; else the most linked.
 function names() {
@@ -1300,7 +1312,7 @@ function choose(path, center) {
   mark();
   peek(node);
   if (G.local) fit();
-  else if (center && node) centerOn(node);
+  else if (node && (center || overlaid())) centerOn(node);
 }
 
 function toggleLocal() {
