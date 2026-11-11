@@ -439,7 +439,9 @@ never reaches another agent's core.
   a new invitation beside it, and the link page says to scan that. The
   stalled one is kept, never torn down: one whose acceptance was queued
   looks the same and finishes once its servers answer. Whichever connects
-  is the link, and the other is let go then.
+  is the link, and the other is let go then. A new invitation the core
+  will not make leaves the link asking with the stalled one kept (its door
+  key too), says so, and is asked again at the next start or Try again.
 - **An owner's old SimpleX conversation can be kept** (FIN-463,
   `simplex/stage.rs`; docs/migrations.md, "SimpleX in a stage"). Before the
   move's routine reaches the agent (`driver.rs` `feed` holds it, within

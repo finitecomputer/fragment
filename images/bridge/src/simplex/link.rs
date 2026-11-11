@@ -55,7 +55,10 @@
 //!   (`Notice::Stalled`), and if it is still, a new invitation is made and
 //!   its owner told to scan that (`Notice::ScanLost`). The stalled one is
 //!   kept beside it (`earlier`), never torn down while it may finish:
-//!   whichever connects is the link, and the other is let go then.
+//!   whichever connects is the link, and the other is let go then. A
+//!   replacement the core will not make (its servers down) leaves the link
+//!   asking, the stalled one kept, and is asked again at the next start or
+//!   its owner's try.
 //! - **A reply the core will not send now** waits in the outbox until the
 //!   ratchet is `ok`. Failed syncs keep replies held too. Restarts and timer
 //!   ticks (`Resync`) read `/_info` before retrying: a forced sync replaces
@@ -378,6 +381,10 @@ impl Link {
                 if self.phase == Phase::Off {
                     self.phase = Phase::Asking;
                     out.push(Action::Ask(Cmd::Invite));
+                } else if self.phase == Phase::Asking && self.earlier.is_some() {
+                    // a replacement that may have failed, asked again (one
+                    // still under way answers twice: the second is let go)
+                    out.push(Action::Ask(Cmd::Invite));
                 }
             }
             Input::Unlink => match std::mem::take(&mut self.phase) {
@@ -479,9 +486,14 @@ impl Link {
             Input::Failed { cmd, what } => {
                 let what = wire::cut(what, 300).to_string();
                 match cmd {
+                    // a replacement for a stalled scan: still asking, the
+                    // stalled one kept (it may finish yet, and its door key
+                    // with it), asked again at the next start or its owner's
+                    // try; a first invitation, off
                     Cmd::Invite if self.phase == Phase::Asking => {
-                        self.phase = Phase::Off;
-                        out.extend(self.earlier.take().map(|e| Action::Ask(e.gone())));
+                        if self.earlier.is_none() {
+                            self.phase = Phase::Off;
+                        }
                         out.push(Action::Tell(Notice::Failed { what }));
                     }
                     // A failure proves neither completion nor acceptance.
@@ -1175,15 +1187,67 @@ mod tests {
         let stalled_again = [conn(5, None, "requested", since - 1)];
         assert_eq!(twice.apply(Input::Conns { conns: &stalled_again, since, again: true }), vec![Action::Ask(Cmd::Delete { contact: 3, notify: false }), Action::Ask(Cmd::Invite), Action::Tell(Notice::ScanLost), Action::Save]);
         assert_eq!(twice.earlier, Some(Earlier { conn: 5, contact: None }));
-        // an invitation the core will not make: off, and the stalled one let go
-        assert_eq!(twice.apply(Input::Failed { cmd: &Cmd::Invite, what: "x" }), vec![Action::Ask(Cmd::DeleteConn { conn: 5 }), Action::Tell(Notice::Failed { what: "x".into() })]);
-        assert_eq!((twice.phase, twice.earlier), (Phase::Off, None));
+        // a replacement the core will not make: still asking, the stalled one
+        // kept (`a_failed_replacement_keeps_the_stalled_scan`)
+        assert_eq!(twice.apply(Input::Failed { cmd: &Cmd::Invite, what: "x" }), vec![Action::Tell(Notice::Failed { what: "x".into() })]);
+        assert_eq!((twice.phase, twice.earlier), (Phase::Asking, Some(Earlier { conn: 5, contact: None })));
         // only an invitation is looked at: linked or off, nothing
         let mut bound = linked();
         assert!(bound.apply(Input::Conns { conns: &[conn(1, None, "requested", 0)], since, again: true }).is_empty());
         assert!(bound.apply(Input::Recheck).is_empty());
         assert!(Link::default().apply(Input::Conns { conns: &[conn(1, None, "requested", 0)], since, again: true }).is_empty());
         assert!(Link::default().apply(Input::Recheck).is_empty());
+    }
+
+    /// A link whose scan stalled, its replacement asked (`a_scan_cut_short_is_made_anew`).
+    fn stalled_and_asking() -> Link {
+        let mut link = Link::default();
+        invited(&mut link);
+        let stalled = [ConnState { conn: 1, contact: Some(3), status: "requested".into(), updated_ms: Some(1) }];
+        assert_eq!(link.apply(Input::Conns { conns: &stalled, since: 2, again: true }), vec![Action::Ask(Cmd::Invite), Action::Tell(Notice::ScanLost), Action::Save]);
+        link
+    }
+
+    /// Goal (Alex's review of #1223): a replacement the core will not make
+    /// (its servers down) keeps the stalled scan, which may finish yet: the
+    /// link stays asking, so its door key is kept, and it is told; asked
+    /// again at the next start or when its owner asks; and the stalled scan
+    /// that connects is the link. A first invitation that fails, with
+    /// nothing kept, is off as before.
+    #[test]
+    fn a_failed_replacement_keeps_the_stalled_scan() {
+        let what = "errorAgent BROKER NETWORK NETLSError";
+        let failed = |link: &mut Link| link.apply(Input::Failed { cmd: &Cmd::Invite, what });
+        let original = Resp::Connected { contact: 3, conn: 1, name: "paul".into() };
+        // the replacement fails, then the stalled scan finishes: linked to it
+        let mut link = stalled_and_asking();
+        assert_eq!(failed(&mut link), vec![Action::Tell(Notice::Failed { what: what.into() })], "told, nothing let go");
+        assert_eq!((link.phase.clone(), link.earlier), (Phase::Asking, Some(Earlier { conn: 1, contact: Some(3) })));
+        assert_eq!(link.apply(Input::Said(&original)), vec![Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!((link.contact(), link.earlier), (Some(3), None));
+        // a restart after it: kept in its file, the replacement asked again,
+        // and the stalled scan still the owner's
+        let mut link = stalled_and_asking();
+        failed(&mut link);
+        let mut back = Link::from_json(&link.to_json()).expect("its file reads");
+        assert_eq!(back, link);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Invite)]);
+        assert_eq!(back.apply(Input::Said(&original)), vec![Action::Tell(Notice::Linked { name: "paul".into() }), Action::Save]);
+        assert_eq!(back.contact(), Some(3));
+        // its owner's "Try again" asks it again too
+        let mut again = stalled_and_asking();
+        failed(&mut again);
+        assert_eq!(again.apply(Input::Want), vec![Action::Ask(Cmd::Invite)]);
+        // an unlink after it lets the stalled scan go, and is off
+        let mut unlinked = stalled_and_asking();
+        failed(&mut unlinked);
+        assert_eq!(unlinked.apply(Input::Unlink), vec![Action::Ask(Cmd::Delete { contact: 3, notify: false }), Action::Save]);
+        assert_eq!((unlinked.phase.clone(), unlinked.earlier), (Phase::Off, None));
+        // a first invitation that fails, with nothing kept: off, as before
+        let mut first = Link::default();
+        assert_eq!(first.apply(Input::Want), vec![Action::Ask(Cmd::Invite)]);
+        assert_eq!(failed(&mut first), vec![Action::Tell(Notice::Failed { what: what.into() })]);
+        assert_eq!(first.phase, Phase::Off);
     }
 
     /// Goal: a ratchet the core finds out of step is synchronized once,
