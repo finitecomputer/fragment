@@ -46,6 +46,16 @@ file's download (`@microsoft.graph.downloadUrl`) is a link of its own on
 another host that needs no token: fetch it without one, never with the
 placeholder.
 
+## Not allowed
+
+Your owner picks, as they connect Microsoft, the services you may use:
+Outlook mail, Outlook calendar, OneDrive and Contacts. A call to one they
+left out is refused by Microsoft (403, `erroraccessdenied` or
+`accessdenied`). Tell your owner, in plain words, which they didn't allow,
+and that they can add it in Settings → Connections → Reconnect to add
+(their organization's admin may need to approve it). Go on with what they
+did allow.
+
 ## Read only
 
 Your owner picks, as they connect Microsoft, whether you may only read

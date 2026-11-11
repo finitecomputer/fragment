@@ -12,7 +12,7 @@ pub const TOKEN_MAX_BYTES: usize = 8192;
 pub const PENDING_PER_SESSION_MAX: u64 = 8;
 /// One synchronous SQLite statement: a mismatched callback consumes nothing;
 /// the winner consumes the transaction before the caller awaits any vendor.
-pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at, intent, account, access";
+pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at, intent, account, access, services";
 /// A disconnect's end of every attempt at its account still pending, each
 /// session's: (issuer, subject, provider). No index has the subject: it
 /// reads at most the fleet's pending sign-ins (`signins_pending_max`).
@@ -91,7 +91,86 @@ pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
             return Err("its write access asks for a scope its read access does not: that scope is how a grant of read and write is told from one of read only (a provider with no read-only scope names write alone)".into());
         }
     }
+    if let Some(services) = &o.services {
+        check_services(o, services)?;
+    }
     Ok(())
+}
+
+/// A connection's services, at most (`ConnectionOAuth::services`).
+pub const SERVICES_MAX: usize = 16;
+/// A service's name for people, at most, in characters.
+pub const SERVICE_NAME_MAX_CHARS: usize = 40;
+
+/// Whether `id` is a service's id: `^[a-z0-9-]{1,32}$`.
+pub fn service_id_ok(id: &str) -> bool {
+    (1..=32).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A row's services: 1 to `SERVICES_MAX`, each a unique id and a plain
+/// one-line name, its scopes the row's own (of an access it offers), none a
+/// sign-in one and none another service's; and of each access, every
+/// service asks for something, so picking one is never picking nothing.
+fn check_services(o: &ConnectionOAuth, services: &[catalog::Service]) -> Result<(), String> {
+    if !(1..=SERVICES_MAX).contains(&services.len()) {
+        return Err(format!("its services are 1 to {SERVICES_MAX}"));
+    }
+    let offered: Vec<&Grant> = o.access.offered().into_iter().filter_map(|a| o.access.of(a)).collect();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut taken = std::collections::BTreeSet::new();
+    for s in services {
+        if !service_id_ok(&s.id) || !ids.insert(s.id.as_str()) {
+            return Err(format!("{:?} is not a service's id (^[a-z0-9-]{{1,32}}$), or is named twice", s.id));
+        }
+        let chars = s.name.chars().count();
+        if !(1..=SERVICE_NAME_MAX_CHARS).contains(&chars) || s.name.trim().is_empty() || s.name.chars().any(char::is_control) {
+            return Err(format!("service {}'s name is 1 to {SERVICE_NAME_MAX_CHARS} characters of one line", s.id));
+        }
+        if s.scopes.is_empty() {
+            return Err(format!("service {} names no scope", s.id));
+        }
+        for scope in &s.scopes {
+            if identity(scope) || !offered.iter().any(|g| g.scopes.contains(scope)) || !taken.insert(scope.as_str()) {
+                return Err(format!("service {}'s scope {scope:?} is no access's, a sign-in one, or another service's", s.id));
+            }
+        }
+        if offered.iter().any(|g| !g.scopes.iter().any(|x| s.scopes.contains(x))) {
+            return Err(format!("service {} asks for nothing of one of the row's accesses: each access asks for some of each service's scopes", s.id));
+        }
+    }
+    Ok(())
+}
+
+/// The services a connect picked (`POST …/authorize`'s `services`): none
+/// named is every one; else 1 to `SERVICES_MAX` ids, each once, which the
+/// route holds to its row's.
+pub fn services_asked(body: &Value) -> Result<Option<Vec<String>>, String> {
+    let Some(v) = body.get("services") else { return Ok(None) };
+    let list = v.as_array().filter(|l| (1..=SERVICES_MAX).contains(&l.len())).ok_or(format!("`services` is a list of 1 to {SERVICES_MAX} of the row's services' ids (GET /api/connections lists them)"))?;
+    let mut ids: Vec<String> = vec![];
+    for id in list {
+        let id = id.as_str().filter(|i| service_id_ok(i)).ok_or("a service is its id, as GET /api/connections lists it")?;
+        if ids.iter().any(|x| x == id) {
+            return Err(format!("{id:?} is named twice"));
+        }
+        ids.push(id.to_string());
+    }
+    Ok(Some(ids))
+}
+
+/// What a connect of `access` asks for, of the services `picked` (none: every
+/// one): the access's scopes no service names, and those of a picked one.
+/// None: the row offers no such access, or a picked service is none of its
+/// (a row of no services takes no pick).
+pub fn scopes_asked(o: &ConnectionOAuth, access: ConnectionAccess, picked: Option<&[String]>) -> Option<Vec<String>> {
+    let grant = o.access.of(access)?;
+    let Some(picked) = picked else { return Some(grant.scopes.clone()) };
+    let services = o.services.as_deref()?;
+    if picked.iter().any(|id| !services.iter().any(|s| &s.id == id)) {
+        return None;
+    }
+    let of = |scope: &String| services.iter().find(|s| s.scopes.contains(scope));
+    Some(grant.scopes.iter().filter(|scope| of(scope).is_none_or(|s| picked.contains(&s.id))).cloned().collect())
 }
 
 /// What a grant of `granted` lets its agents do: read only while every
@@ -112,12 +191,12 @@ pub fn access_of(o: &ConnectionOAuth, granted: &[String]) -> Option<ConnectionAc
     })
 }
 
-/// The provider's page a person is sent to, asking for what `grant` (the
-/// access they picked, `Access::of`) asks.
-pub fn authorize_url(o: &ConnectionOAuth, grant: &Grant, callback: &str, challenge: &str, state: &str) -> String {
+/// The provider's page a person is sent to, asking for `scopes` (what the
+/// access and services they picked ask for: `scopes_asked`).
+pub fn authorize_url(o: &ConnectionOAuth, scopes: &[String], callback: &str, challenge: &str, state: &str) -> String {
     let mut u = url::Url::parse(&o.authorize).expect("catalog checked");
     u.query_pairs_mut().append_pair("client_id", &o.client_id).append_pair("redirect_uri", callback)
-        .append_pair("response_type", "code").append_pair("scope", &grant.scopes.join(" "))
+        .append_pair("response_type", "code").append_pair("scope", &scopes.join(" "))
         .append_pair("state", state).append_pair("code_challenge", challenge).append_pair("code_challenge_method", "S256");
     u.into()
 }
@@ -374,7 +453,7 @@ mod tests {
     fn config() -> ConnectionOAuth {
         let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
         let access = catalog::Access { read: Some(grant(&["mail.read", "files.read"])), write: grant(&["mail.read", "mail.send", "files.read"]) };
-        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, revoke: None }
+        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, services: None, revoke: None }
     }
 
     fn id_token(claims: Value) -> Value {
@@ -647,9 +726,9 @@ mod tests {
     fn authorize_and_exchange_bind_the_same_client_callback_and_challenge() {
         let o = config();
         let callback = "https://platform.example/api/connections/mail/callback";
-        let u = url::Url::parse(&authorize_url(&o, o.access.of(ConnectionAccess::Read).unwrap(), callback, "challenge", "state")).unwrap();
+        let u = url::Url::parse(&authorize_url(&o, &o.access.of(ConnectionAccess::Read).unwrap().scopes, callback, "challenge", "state")).unwrap();
         let q: std::collections::BTreeMap<_, _> = u.query_pairs().into_owned().collect();
-        let wrote = url::Url::parse(&authorize_url(&o, &o.access.write, callback, "challenge", "state")).unwrap();
+        let wrote = url::Url::parse(&authorize_url(&o, &o.access.write.scopes, callback, "challenge", "state")).unwrap();
         assert_eq!(wrote.query_pairs().find(|(k, _)| k == "scope").map(|(_, v)| v.into_owned()).as_deref(), Some("mail.read mail.send files.read"), "read and write asks for its own scopes");
         assert_eq!(q["state"], "state");
         assert_eq!(q["code_challenge_method"], "S256");
@@ -773,7 +852,7 @@ mod tests {
         let sign = ["openid", "email", "profile", "offline_access"].map(String::from);
         let grant = |scopes: &[&str]| Grant { scopes: sign.iter().cloned().chain(scopes.iter().map(|s| g(s))).collect() };
         let access = catalog::Access { read: Some(grant(&["User.Read", "Mail.Read", "Calendars.Read", "Files.Read", "Contacts.Read"])), write: grant(&["User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite", "Contacts.ReadWrite"]) };
-        let o = ConnectionOAuth { authorize: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account".into(), exchange: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(), client_id: "client".into(), access, revoke: None };
+        let o = ConnectionOAuth { authorize: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account".into(), exchange: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(), client_id: "client".into(), access, services: None, revoke: None };
         assert!(check(&o).is_ok());
         let answer = |scopes: &[&str]| {
             let mut a = id_token(json!({ "aud": "client", "sub": "AAAAAAAAAAAAAAAAAAAAAIkzqFVrSaSaFHy782bbtaQ", "email": "ada@contoso.com", "preferred_username": "ada@contoso.com", "name": "Ada" }));
@@ -795,6 +874,52 @@ mod tests {
         assert_eq!(tokens(&granting("openid offline_access"), &o.access.write.scopes).err(), Some(Refused::NoScopes));
     }
 
+    /// Services: a connect asks for the picked ones' scopes of its access,
+    /// beside those no service names; none picked is every one; a pick of
+    /// none, or of one the row doesn't offer, is refused. A row's services
+    /// are its own scopes, each one service's, of every access it offers.
+    #[test]
+    fn a_connect_asks_for_the_services_its_person_picked_alone() {
+        let mut o = config();
+        o.access.read.as_mut().unwrap().scopes.push("openid".into());
+        o.access.write.scopes.push("openid".into());
+        let service = |id: &str, scopes: &[&str]| catalog::Service { id: id.into(), name: id.to_uppercase(), scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        o.services = Some(vec![service("mail", &["mail.read", "mail.send"]), service("files", &["files.read"])]);
+        assert_eq!(check(&o), Ok(()));
+        let ids = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let asked = |a, picked: Option<&[&str]>| scopes_asked(&o, a, picked.map(ids).as_deref());
+        assert_eq!(asked(ConnectionAccess::Read, Some(&["mail"])), Some(ids(&["mail.read", "openid"])), "a service's read scope, and signing in");
+        assert_eq!(asked(ConnectionAccess::Write, Some(&["mail"])), Some(ids(&["mail.read", "mail.send", "openid"])));
+        assert_eq!(asked(ConnectionAccess::Write, Some(&["files"])), Some(ids(&["files.read", "openid"])));
+        assert_eq!(asked(ConnectionAccess::Read, None), Some(o.access.read.as_ref().unwrap().scopes.clone()), "none picked: every one");
+        assert_eq!(asked(ConnectionAccess::Read, Some(&["calendar"])), None, "a service the row doesn't offer");
+        assert_eq!(scopes_asked(&config(), ConnectionAccess::Read, Some(&ids(&["mail"]))), None, "a row of no services takes no pick");
+        // the body's list: 1 to 16 ids, each once
+        assert_eq!(services_asked(&json!({ "access": "read" })), Ok(None));
+        assert_eq!(services_asked(&json!({ "services": ["mail", "files"] })), Ok(Some(ids(&["mail", "files"]))));
+        for bad in [json!({ "services": [] }), json!({ "services": ["mail", "mail"] }), json!({ "services": ["Mail"] }), json!({ "services": "mail" }), json!({ "services": [7] }), json!({ "services": vec!["s"; SERVICES_MAX + 1] })] {
+            assert!(services_asked(&bad).is_err(), "{bad}");
+        }
+        // a row's services: its own scopes, each one service's, of each access
+        let refused = |services: Vec<catalog::Service>| {
+            let mut bad = o.clone();
+            bad.services = Some(services);
+            check(&bad).is_err()
+        };
+        assert!(refused(vec![]), "none");
+        assert!(refused(vec![service("mail", &["mail.read"]), service("mail", &["files.read"])]), "an id twice");
+        assert!(refused(vec![service("Mail", &["mail.read"])]), "an id not lower case");
+        assert!(refused(vec![service("mail", &[])]), "no scope");
+        assert!(refused(vec![service("mail", &["calendar.read"])]), "a scope no access names");
+        assert!(refused(vec![service("mail", &["mail.read", "openid"])]), "a sign-in scope");
+        assert!(refused(vec![service("mail", &["mail.read"]), service("more", &["mail.read", "files.read"])]), "one scope two services'");
+        assert!(refused(vec![service("send", &["mail.send"])]), "a service read only asks nothing of");
+        let mut named = service("mail", &["mail.read"]);
+        named.name = "Mail
+and more".into();
+        assert!(refused(vec![named]), "a name of two lines");
+    }
+
     /// Google's row asks it to show its account chooser, then its consent,
     /// and to keep what the person granted before, so a reconnect asks only
     /// for the rest (docs/pipes-browser-binding.md): the authorize URL's own
@@ -805,7 +930,7 @@ mod tests {
         let mut o = config();
         o.authorize = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent".into();
         assert!(check(&o).is_ok());
-        let u = url::Url::parse(&authorize_url(&o, &o.access.write, "https://platform.example/api/connections/google/callback", "challenge", "state")).unwrap();
+        let u = url::Url::parse(&authorize_url(&o, &o.access.write.scopes, "https://platform.example/api/connections/google/callback", "challenge", "state")).unwrap();
         let prompts: Vec<String> = u.query_pairs().filter(|(k, _)| k == "prompt").map(|(_, v)| v.into_owned()).collect();
         assert_eq!(prompts, ["select_account consent"]);
         assert_eq!(u.query_pairs().filter(|(k, v)| k == "include_granted_scopes" && v == "true").count(), 1);

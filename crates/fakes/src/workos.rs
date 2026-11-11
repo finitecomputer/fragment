@@ -428,7 +428,9 @@ pub const CONNECTION_WRITE_SCOPES: [&str; 4] = ["mail.read", "files.read", "mail
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
         let access = json!({ "read": { "scopes": CONNECTION_SCOPES }, "write": { "scopes": CONNECTION_WRITE_SCOPES } });
-        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "revoke": format!("{}/test-oauth/revoke", self.url) })
+        // a person picks among its services as they connect: Mail, Files
+        let services = json!([{ "id": "mail", "name": "Mail", "scopes": ["mail.read", "mail.send"] }, { "id": "files", "name": "Files", "scopes": ["files.read"] }]);
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "services": services, "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
 
     /// The stand-in provider's connection as a provider with no read-only
@@ -437,6 +439,8 @@ impl WorkOs {
     pub fn one_access_connection_oauth(&self) -> Value {
         let mut o = self.connection_oauth();
         o["access"] = json!({ "write": { "scopes": CONNECTION_SCOPES } });
+        // and no services: every scope of its one access
+        o.as_object_mut().expect("an object").remove("services");
         o
     }
 

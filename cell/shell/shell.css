@@ -761,6 +761,9 @@ label.settings-line { cursor: pointer; }
 .provider-status-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .provider-account { font: var(--type-body-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-access { font: var(--type-body-sm); color: var(--text-secondary); }
+.provider-services { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; padding: 0; border: 0; }
+.provider-services legend { width: 100%; margin-bottom: 4px; padding: 0; font: var(--type-body-sm); color: var(--text-secondary); }
+.provider-service { display: inline-flex; align-items: center; gap: 6px; font: var(--type-body-sm); }
 .provider-status .settings-actions { flex: none; margin: 0; }
 .provider-status .quiet { font: var(--type-control); min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; background: var(--bg-active); color: var(--text-primary); }
 .provider-status [data-action=disconnect], .provider-status [data-action=remove-key] { color: var(--danger-text); }

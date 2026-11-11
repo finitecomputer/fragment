@@ -262,6 +262,12 @@ pub struct ProviderView {
     /// another kind, or a connection with no `connection_oauth`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accesses: Option<Vec<ConnectionAccess>>,
+    /// The services a person may pick among as they connect a connection
+    /// (its row's `connection_oauth.services`: Mail, Calendar, Files), each
+    /// its id and its name for people. None where its row names none: a
+    /// connect asks for every scope of its access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<ConnectionService>>,
     /// The deployment's note on it (its catalog row's `note`), which
     /// settings shows under its name, connected or not: plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,6 +315,14 @@ impl ConnectionAccess {
     pub fn of_word(word: &str) -> Option<ConnectionAccess> {
         [ConnectionAccess::Read, ConnectionAccess::Write].into_iter().find(|a| a.word() == word)
     }
+}
+
+/// A service a connection offers to pick (`ProviderView::services`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionService {
+    pub id: String,
+    pub name: String,
 }
 
 /// One of a person's accounts at a connection that takes several: its

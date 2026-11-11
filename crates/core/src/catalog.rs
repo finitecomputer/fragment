@@ -178,6 +178,16 @@ pub struct ConnectionOAuth {
     /// What a person may let their agents do, picked as they connect: each
     /// access's scopes (docs/pipes-browser-binding.md, Access).
     pub access: Access,
+    /// The services a person may pick among as they connect (Mail,
+    /// Calendar, Files): each names the scopes, of either access, that are
+    /// its, and a connect asks for the picked ones' alone, beside the scopes
+    /// no service names (signing in). Where a provider's own consent can't
+    /// leave a permission out (Microsoft's), this is how a person does; where
+    /// it can (Google's), it's the same choice made before its page. None:
+    /// every scope of the access, as before (docs/pipes-browser-binding.md,
+    /// Services).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<Service>>,
     /// Where a disconnect revokes the grant (RFC 7009, `POST token=`): a
     /// token Pipes mints for the account, whose grant goes with it
     /// (Google's `https://oauth2.googleapis.com/revoke` takes an access
@@ -185,6 +195,16 @@ pub struct ConnectionOAuth {
     /// deletes the account at Pipes and the grant stays at the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoke: Option<String>,
+}
+
+/// One service of a connection's (`ConnectionOAuth::services`): its id (what
+/// a connect names), its name for people, and its scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Service {
+    pub id: String,
+    pub name: String,
+    pub scopes: Vec<String>,
 }
 
 /// A connection's accesses, each what its authorization asks for: read and

@@ -2005,10 +2005,11 @@ mod tests {
         let root = devstack::repo_root();
         let example = fs::read_to_string(root.join("deploy/example.jsonc")).unwrap();
         let access = fs::read_to_string(root.join("templates/skills/skills/productivity/microsoft-finite/references/microsoft-365-access.json")).unwrap();
+        let services = fs::read_to_string(root.join("templates/skills/skills/productivity/microsoft-finite/references/microsoft-365-services.json")).unwrap();
         let start = example.find(r#"{ "name": "microsoft""#).expect("the example's microsoft row");
         let row = &example[start..start + example[start..].find(r#""env": ["MICROSOFT_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
         let open = row.lines().filter(|l| !l.trim_start().starts_with("// several") && !l.trim_start().starts_with(r#"// "accounts_max""#)).map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
-        let open = open.replace("<the client secret's store name>", "fragment-microsoft-oauth-secret").replace("<the app's client id>", "microsoft-client").replace("<the Microsoft skill's references/microsoft-365-access.json>", &access);
+        let open = open.replace("<the client secret's store name>", "fragment-microsoft-oauth-secret").replace("<the app's client id>", "microsoft-client").replace("<the Microsoft skill's references/microsoft-365-access.json>", &access).replace("<the Microsoft skill's references/microsoft-365-services.json>", &services);
         let dir = root.join("target/xtask-tests/microsoft-connect");
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("deploy.jsonc");
@@ -2021,7 +2022,30 @@ mod tests {
         assert_eq!(serde_json::to_value(&o.access).unwrap(), written, "the skill's access file is the row's access");
         assert_eq!((o.client_id.as_str(), o.revoke.as_deref(), p.hosts.as_slice()), ("microsoft-client", None, &["graph.microsoft.com".to_string()][..]));
         assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Read, fragment_core::catalog::ConnectionAccess::Write]);
+        let ids: Vec<&str> = o.services.iter().flatten().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["mail", "calendar", "files", "contacts"], "its services, as the skill's file names them");
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_MICROSOFT".into(), "fragment-microsoft-oauth-secret")));
+    }
+
+    /// The Google skill's access and services files, which the example's
+    /// google row (and a deployment's) names, make a connect the catalog
+    /// takes: each service of each access, its scopes the access's own.
+    #[test]
+    fn the_google_skills_access_and_services_make_a_connect() {
+        let dir = devstack::repo_root().join("templates/skills/skills/productivity/google-workspace-finite/references");
+        let read = |f: &str| serde_json::from_str::<Value>(&fs::read_to_string(dir.join(f)).unwrap()).unwrap();
+        let row = serde_json::json!([{
+            "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
+            "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline", "exchange": "https://oauth2.googleapis.com/token", "client_id": "client",
+                "access": read("google-workspace-access.json"), "services": read("google-workspace-services.json") }
+        }]);
+        let catalog = fragment_core::catalog::Catalog::parse(&row.to_string()).expect("the skill's files make a connect");
+        let o = catalog.get("google").and_then(|p| p.connection_oauth.as_ref()).unwrap();
+        let ids: Vec<&str> = o.services.iter().flatten().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["gmail", "drive", "sheets", "docs", "calendar", "contacts"]);
+        let gmail_read = fragment_core::connection_signin::scopes_asked(o, fragment_core::catalog::ConnectionAccess::Read, Some(&["gmail".to_string()])).unwrap();
+        assert_eq!(gmail_read, ["https://www.googleapis.com/auth/gmail.readonly", "openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"]);
     }
 
     /// A provider's note: the example's (its google row's, commented out)
