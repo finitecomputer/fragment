@@ -2034,7 +2034,7 @@ machine behind them, are docs/migrations.md. Without the deployment's
 | `GET /api/migrations/stages/{stage}/zip` | the same | the zip; `Range` → 206 |
 | `POST /api/migrations/stages/{stage}/done` | the same | `StageDone {ok, report_sha256?, why?}` → `MoveAt {state}` |
 | `GET /api/admin/migrations` | an operator | → `AdminMoves {moves, next?}` (`?after=<old>`) |
-| `POST /api/admin/migrations/{old}` | an operator | `AdminAct {op}` (`retry`, `restart-old`, `retire`, `withdraw`) → `AdminMove` |
+| `POST /api/admin/migrations/{old}` | an operator | `AdminAct {op, why?}` (`retry`, `restart-old`, `retire`, `withdraw` with its `why`, `include`) → `AdminMove`, or `null` once gone |
 
 ## Computers (docs/computers.md)
 

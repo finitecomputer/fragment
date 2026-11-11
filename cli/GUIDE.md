@@ -1236,6 +1236,9 @@ fragment operator log [--before N] [--key-file F]
 fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]
 fragment operator payer <org> <email|npub> [--id I] [--key-file F]
+fragment operator moves [--withdrawn] [--key-file F]   # the finite.computer move; --withdrawn: the will-not-move list, each with its why
+fragment operator withdraw <old> --why W [--key-file F]   # keep an old agent out of the move (ahead of the roster too)
+fragment operator include <old> [--key-file F]   # take a withdrawal back
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs
