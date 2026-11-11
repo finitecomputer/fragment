@@ -191,32 +191,6 @@ pub struct ConnectionOAuth {
     pub revoke: Option<String>,
 }
 
-/// How a connection's OAuth client authenticates to its provider (RFC
-/// 6749 §2.3.1), under the names OAuth's metadata gives the two
-/// (`client_secret_post`, `client_secret_basic`): its row's `client_auth`,
-/// beside its `connection_oauth`. On the wire: `"post"` (a row that names
-/// none) or `"basic"`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClientAuth {
-    /// Its id and secret in the code exchange's form, and nothing at a
-    /// revocation (Google's, Linear's and Salesforce's take the token
-    /// alone).
-    #[default]
-    Post,
-    /// HTTP Basic, its id and secret in the `Authorization` header of the
-    /// code exchange and of a revocation, and in neither's body: what
-    /// Zoom's, Airtable's, Xero's and Notion's token endpoints ask
-    /// (`connection_signin::client_authorization`).
-    Basic,
-}
-
-impl ClientAuth {
-    fn is_post(&self) -> bool {
-        *self == ClientAuth::Post
-    }
-}
-
 /// A connection whose accounts each live at a host of their own under its
 /// provider's (a Salesforce org at its My Domain, `acme.my.salesforce.com`):
 /// beside its named `hosts`, its token goes to a host under `under` only
@@ -338,6 +312,32 @@ pub struct OfferedModel {
 pub struct Models {
     pub base_url: String,
     pub offer: Vec<OfferedModel>,
+}
+
+/// How a connection's OAuth client authenticates to its provider (RFC
+/// 6749 §2.3.1), under the names OAuth's metadata gives the two
+/// (`client_secret_post`, `client_secret_basic`): its row's `client_auth`,
+/// beside its `connection_oauth`. On the wire: `"post"` (a row that names
+/// none) or `"basic"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuth {
+    /// Its id and secret in the code exchange's form, and nothing at a
+    /// revocation (Google's, Linear's and Salesforce's take the token
+    /// alone).
+    #[default]
+    Post,
+    /// HTTP Basic, its id and secret in the `Authorization` header of the
+    /// code exchange and of a revocation, and in neither's body: what
+    /// Zoom's, Airtable's, Xero's and Notion's token endpoints ask
+    /// (`connection_signin::client_authorization`).
+    Basic,
+}
+
+impl ClientAuth {
+    fn is_post(&self) -> bool {
+        *self == ClientAuth::Post
+    }
 }
 
 /// One provider a deployment offers.
