@@ -134,7 +134,7 @@ impl RegistryCell {
             None => None,
         };
         let Some(asked) = connection_signin::scopes_asked(o, access, picked.as_deref()) else { return Ok(NotUnderWay) };
-        let tokens = match connection_signin::tokens(&answer, &asked) {
+        let tokens = match connection_signin::tokens_of(&answer, &asked, &connection_signin::scopes_named(o)) {
             Ok(tokens) => tokens,
             Err(connection_signin::Refused::NoScopes) => return Ok(NoScopes),
             Err(connection_signin::Refused::Invalid) => return Ok(Failed),

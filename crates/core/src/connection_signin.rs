@@ -253,6 +253,24 @@ pub enum Refused {
 }
 
 pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
+    tokens_of(answer, requested, requested)
+}
+
+/// Every scope a row names, of either access: what a grant's answer is
+/// read against (`spelled_as_asked`), whichever access was asked for.
+pub fn scopes_named(o: &ConnectionOAuth) -> Vec<String> {
+    let mut named: Vec<String> = vec![];
+    for s in o.access.read.iter().chain([&o.access.write]).flat_map(|g| g.scopes.iter()) {
+        if !named.contains(s) {
+            named.push(s.clone());
+        }
+    }
+    named
+}
+
+/// `tokens`, its answer's scopes spelled as `named` (the row's every scope,
+/// `scopes_named`) spells them where the provider answered them another way.
+pub fn tokens_of(answer: &Value, requested: &[String], named: &[String]) -> Result<Tokens, Refused> {
     use Refused::Invalid;
     let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
@@ -265,7 +283,7 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
         None => requested.to_vec(),
         Some(s) => {
             let s = s.as_str().filter(|s| s.len() <= SCOPES_MAX * (SCOPE_MAX_BYTES + 1)).ok_or(Invalid)?;
-            spelled_as_asked(bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?, requested)
+            spelled_as_asked(bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?, named)
         }
     };
     if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
@@ -274,19 +292,23 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
     Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
 }
 
-/// A grant's scopes, each spelled as its row asked for it where the
-/// provider answered it another way: without regard to case, or by the last
-/// segment of a scope asked for as a URL (Microsoft may answer
-/// `https://graph.microsoft.com/Mail.Read` as `Mail.Read`, or lower case).
-/// A scope asked for no way stays as answered, and one answered twice so is
-/// kept once. Whatever reads the grant after (its import, `missing`,
+/// A grant's scopes, each spelled as its row names it (`named`: the row's
+/// every scope) where the provider answered it another way (Microsoft may
+/// answer `https://graph.microsoft.com/Mail.Read` as `Mail.Read`, or lower
+/// case): as named exactly, else the one scope named so without regard to
+/// case, else the one scope named as a URL whose last segment it is. Two
+/// such, or none, and it stays as answered: never guessed. One answered twice
+/// so is kept once. Whatever reads the grant after (its import, `missing`,
 /// `access_of`) reads the row's own spelling.
-fn spelled_as_asked(granted: Vec<String>, requested: &[String]) -> Vec<String> {
-    let short = |r: &str| r.contains("://").then(|| r.rsplit('/').next().unwrap_or(r)).map(str::to_string);
+fn spelled_as_asked(granted: Vec<String>, named: &[String]) -> Vec<String> {
+    let last = |r: &str| r.contains("://").then(|| r.rsplit('/').next().unwrap_or(r).to_string());
+    let only = |found: Vec<&String>| (found.len() == 1).then(|| found[0].clone());
     let mut spelled: Vec<String> = vec![];
     for g in granted {
-        let asked = requested.iter().find(|r| r.eq_ignore_ascii_case(&g) || short(r).is_some_and(|s| s.eq_ignore_ascii_case(&g)));
-        let s = asked.cloned().unwrap_or(g);
+        let as_named = named.contains(&g).then(|| g.clone())
+            .or_else(|| only(named.iter().filter(|r| r.eq_ignore_ascii_case(&g)).collect()))
+            .or_else(|| only(named.iter().filter(|r| last(r).is_some_and(|s| s.eq_ignore_ascii_case(&g))).collect()));
+        let s = as_named.unwrap_or(g);
         if !spelled.contains(&s) {
             spelled.push(s);
         }
@@ -903,9 +925,33 @@ mod tests {
             assert_eq!((access_of(&o, &granted.scopes), missing(read, &granted.scopes)), (Some(ConnectionAccess::Read), vec![]), "{scope}");
             assert!(granted.scopes.iter().all(|s| ["openid", "profile", "email"].contains(&s.as_str()) || read.contains(s)), "{scope}: {:?}", granted.scopes);
         }
+        let named = scopes_named(&o);
         let mut wrote = short.clone();
         wrote["scope"] = json!("openid Mail.Read mail.send");
-        assert_eq!(tokens(&wrote, &o.access.write.scopes).map(|t| access_of(&o, &t.scopes)).ok().flatten(), Some(ConnectionAccess::Write), "a write scope by its short name is read and write");
+        assert_eq!(tokens_of(&wrote, &o.access.write.scopes, &named).map(|t| access_of(&o, &t.scopes)).ok().flatten(), Some(ConnectionAccess::Write), "a write scope by its short name is read and write");
+        // read against the row's every scope, whichever access was asked: a
+        // read and write connect answered with read only's short names is
+        // read only, as their full names are
+        let mut read_only = short.clone();
+        read_only["scope"] = json!("openid User.Read Mail.Read");
+        let full = tokens_of(&{ let mut a = short.clone(); a["scope"] = json!(format!("openid {} {}", g("User.Read"), g("Mail.Read"))); a }, &o.access.write.scopes, &named).map(|t| access_of(&o, &t.scopes)).ok().flatten();
+        assert_eq!((tokens_of(&read_only, &o.access.write.scopes, &named).map(|t| access_of(&o, &t.scopes)).ok().flatten(), full), (Some(ConnectionAccess::Read), Some(ConnectionAccess::Read)));
+    }
+
+    /// A provider's answer spelled another way is read as the row names its
+    /// scopes, never guessed: an exact name first; a short or other-case name
+    /// only where it is one scope's; two such, and it stays as answered.
+    #[test]
+    fn an_answer_spelled_another_way_is_read_as_its_row_names_it_never_guessed() {
+        let named = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let spell = |granted: &[&str], row: &[&str]| spelled_as_asked(named(granted), &named(row));
+        assert_eq!(spell(&["read"], &["https://a.example/read", "https://b.example/read"]), ["read"], "two URL scopes end in it: not guessed");
+        assert_eq!(spell(&["read"], &["https://a.example/read", "read"]), ["read"], "an exact name over an alias");
+        assert_eq!(spell(&["READ"], &["https://a.example/read", "read"]), ["read"], "one named so without regard to case");
+        assert_eq!(spell(&["Read"], &["https://a.example/read", "https://a.example/READ"]), ["Read"], "two of other case: not guessed");
+        assert_eq!(spell(&["mail.read", "Mail.Read"], &["https://graph.microsoft.com/Mail.Read"]), ["https://graph.microsoft.com/Mail.Read"], "one scope, kept once");
+        assert_eq!(spell(&["email"], &["https://www.googleapis.com/auth/userinfo.email"]), ["email"], "Google's sign-in names are no aliases of each other");
+        assert_eq!(spell(&["api", "refresh_token"], &["api", "refresh_token", "openid"]), ["api", "refresh_token"], "as named, unchanged");
     }
 
     /// Services: a connect asks for the picked ones' scopes of its access,
