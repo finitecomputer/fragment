@@ -121,6 +121,9 @@ struct State {
     /// Connected accounts deleted (user id, provider), each asked once.
     deleted: Vec<(String, String)>,
     omit_id_token: bool,
+    /// The next code exchange answers no `scope`: RFC 6749's "the one
+    /// requested", which the callback must know.
+    omit_scope: bool,
     /// An `add` for a person with an account already is refused, as Pipes
     /// does until WorkOS enables additional connections.
     refuse_additional: bool,
@@ -447,6 +450,10 @@ impl WorkOs {
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
     pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
 
+    /// The next code exchange answers no `scope`, as a provider may when it
+    /// granted what was asked (RFC 6749 §5.1).
+    pub fn omit_next_scope(&self) { self.state.lock().expect("workos state").omit_scope = true; }
+
     /// The next import is answered 504, as one whose outcome its caller
     /// cannot know, and lands only at `land_deferred_import`.
     pub fn defer_next_import(&self) { self.state.lock().expect("workos state").defer_import = true; }
@@ -605,6 +612,9 @@ impl WorkOs {
                     let access = s.next("mock_access");
                     let refresh = s.next("mock_refresh");
                     let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes });
+                    if std::mem::take(&mut s.omit_scope) {
+                        grant.as_object_mut().expect("an object").remove("scope");
+                    }
                     // OpenID Connect's ID token beside the grant when `openid` was asked
                     // for, unsigned as the fake's AuthKit tokens are: its account's
                     // email, for this client

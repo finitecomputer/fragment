@@ -124,10 +124,12 @@ impl RegistryCell {
         let Some(access) = fragment_proto::computer::ConnectionAccess::of_word(&pending.access) else { return Ok(NotUnderWay) };
         // what it asked for: an access, or a service, its row no longer
         // offers (gone since) finishes nothing
-        let picked: Option<Vec<String>> = match &pending.services {
-            Some(text) => match serde_json::from_str(text) {
-                Ok(ids) => Some(ids),
-                Err(_) => return Ok(NotUnderWay),
+        // held to a pick's shape as the route held it (1 to 16 ids, each
+        // once), whatever the row says it is
+        let picked = match &pending.services {
+            Some(text) => match serde_json::from_str::<serde_json::Value>(text).map(|v| connection_signin::services_asked(&serde_json::json!({ "services": v }))) {
+                Ok(Ok(Some(ids))) => Some(ids),
+                _ => return Ok(NotUnderWay),
             },
             None => None,
         };
