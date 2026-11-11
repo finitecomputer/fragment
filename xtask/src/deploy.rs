@@ -2678,7 +2678,11 @@ mod tests {
         assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].get("FRAGMENT_EGRESS_ALLOW").is_none(), "the default names none");
         v["egress_allow"] = json!(["*.corp.internal", "10.20.0.0/16", "100.101.102.103"]);
         let d = load(&config_file("egress-named", &v)).unwrap();
-        assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_EGRESS_ALLOW"], "*.corp.internal,10.20.0.0/16,100.101.102.103");
+        let rendered = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_EGRESS_ALLOW"].clone();
+        assert_eq!(rendered, "*.corp.internal,10.20.0.0/16,100.101.102.103");
+        // as the cell reads it back at its start
+        let read = fragment_core::egress::Allow::from_var(rendered.as_str(), &n.platform_host, &n.suffix).unwrap();
+        assert!(!read.is_empty() && read.celld().starts_with("*.corp.internal,10.20.0.0/16,100.101.102.103/32,!"), "{}", read.celld());
         for (entry, said) in [("127.0.0.0/8", "loopback"), ("p5.finite.place", "the platform's own"), ("*.finite.place", "the platform's own"), ("wiki:80", "no host name")] {
             v["egress_allow"] = json!([entry]);
             let d = load(&config_file("egress-refused", &v)).unwrap();

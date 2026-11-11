@@ -321,8 +321,19 @@ impl Allow {
         never_net(ip, width).is_none() && self.entries.iter().any(|e| matches!(e, Entry::Net(n, len) if overlap((*n, *len), (ip, width))))
     }
 
+    /// The list a Worker variable (`FRAGMENT_EGRESS_ALLOW`) holds, as `var`
+    /// wrote it: absent, empty or blank, none (`var` of an empty list is
+    /// `""`); else its comma-separated entries, each read by `parse`, so an
+    /// empty one among them (`a,,b`, a trailing comma) is refused.
+    pub fn from_var(raw: Option<&str>, platform_host: &str, fragment_suffix: &str) -> Result<Allow, AllowError> {
+        match raw.map(str::trim).filter(|r| !r.is_empty()) {
+            None => Ok(Allow::NONE),
+            Some(list) => Allow::parse(&list.split(',').collect::<Vec<_>>(), platform_host, fragment_suffix),
+        }
+    }
+
     /// The list as a Worker variable (`FRAGMENT_EGRESS_ALLOW`), comma
-    /// separated, as `parse` reads it back.
+    /// separated, as `from_var` reads it back.
     pub fn var<S: AsRef<str>>(list: &[S]) -> String {
         list.iter().map(|e| e.as_ref().trim()).collect::<Vec<_>>().join(",")
     }
@@ -377,18 +388,59 @@ mod tests {
         assert!(check("http://127.0.0.1:9999/", true, &Allow::NONE).is_ok(), "dev and e2e allow local egress");
     }
 
-    // An empty list, as a deployment that names none reads it, is exactly
-    // no list: every URL is answered as before, error for error.
+    /// `check` as master had it before the allowlist (f3f82ee8d), verbatim
+    /// but for its name: what an empty list must still answer.
+    fn master_check(raw: &str, allow_local: bool) -> Result<url::Url, String> {
+        let url = url::Url::parse(raw).map_err(|e| format!("not a URL: {e}"))?;
+        if !matches!(url.scheme(), "https" | "http") {
+            return Err(format!("{}: only http and https", url.scheme()));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("credentials in the URL are refused; send them in a header".into());
+        }
+        if url.host().is_none() {
+            return Err("the URL has no host".into());
+        }
+        if super::local(&url) && !allow_local {
+            return Err(format!("{} is on a private network; jobs reach public addresses only", url.host_str().unwrap_or("")));
+        }
+        Ok(url)
+    }
+
+    // An empty list, however a deployment arrives at it (no variable, an
+    // empty or blank one, `var` of an empty list), answers every URL as
+    // master did, error for error: against master's own `check`, and
+    // against a table of master's verdicts written out.
     #[test]
     fn an_empty_list_is_today() {
-        let empty = allow(&[]);
-        assert!(empty.is_empty() && empty.celld().is_empty());
         assert_eq!(Allow::var::<&str>(&[]), "");
-        for raw in PUBLIC.iter().chain(LOCAL.iter()).copied().chain(["http://wiki.corp.example/", "http://fragment.corp.example/", "https://x.apps.corp.example/"]) {
-            for local in [false, true] {
-                assert_eq!(check(raw, local, &empty), check(raw, local, &Allow::NONE), "{raw}");
+        let empties = [None, Some(""), Some("   "), Some(Allow::var::<&str>(&[]).as_str())]
+            .map(|raw| Allow::from_var(raw, "fragment.corp.example", "apps.corp.example").expect("empty is no list"));
+        let extra = ["http://wiki.corp.example/", "http://fragment.corp.example/", "https://x.apps.corp.example/", "http://wiki.internal/", "http://10.20.0.1/"];
+        for empty in empties.iter().chain([&allow(&[]), &Allow::NONE]) {
+            assert!(empty.is_empty() && empty.celld().is_empty());
+            for raw in PUBLIC.iter().chain(LOCAL.iter()).chain(extra.iter()).copied().chain(["ftp://x.example/", "https://u:p@x.example/", "not a url"]) {
+                for local in [false, true] {
+                    assert_eq!(check(raw, local, empty), master_check(raw, local), "{raw}");
+                }
             }
         }
+        let empty = &empties[1];
+        for (raw, verdict) in [
+            ("https://api.example.com/v1/chat", Ok("https://api.example.com/v1/chat")),
+            ("http://wiki.corp.example/", Ok("http://wiki.corp.example/")),
+            ("http://10.20.0.1/", Err("10.20.0.1 is on a private network; jobs reach public addresses only")),
+            ("http://100.101.102.103/", Err("100.101.102.103 is on a private network; jobs reach public addresses only")),
+            ("http://wiki.internal/", Err("wiki.internal is on a private network; jobs reach public addresses only")),
+            ("http://intranet/", Err("intranet is on a private network; jobs reach public addresses only")),
+            ("http://169.254.169.254/latest", Err("169.254.169.254 is on a private network; jobs reach public addresses only")),
+            ("http://localhost:8790/", Err("localhost is on a private network; jobs reach public addresses only")),
+            ("https://u:p@x.example/", Err("credentials in the URL are refused; send them in a header")),
+            ("ftp://x.example/", Err("ftp: only http and https")),
+        ] {
+            assert_eq!(check(raw, false, empty).map(String::from).as_deref().map_err(String::as_str), verdict, "{raw}");
+        }
+        assert!(check("http://10.20.0.1/", true, empty).is_ok(), "dev and e2e allow local egress, as before");
     }
 
     // Valid: a listed name, glob, address or network opens its local hosts,
@@ -499,11 +551,20 @@ mod tests {
         assert_eq!(a.celld(), "*.corp.internal,10.0.0.0/8,*.internal,!fragment.corp.internal,!apps.corp.internal");
     }
 
+    // The Worker variable, as the cell reads it at its start (config.rs
+    // hands `from_var` the variable's raw value): what `var` writes reads
+    // back as the list; an empty entry among others is refused.
     #[test]
     fn the_variable_reads_back() {
         let list = [" wiki.internal ", "10.20.0.0/16"];
         let var = Allow::var(&list);
         assert_eq!(var, "wiki.internal,10.20.0.0/16");
-        assert_eq!(allow(&var.split(',').collect::<Vec<_>>()), allow(&list));
+        let read = |raw: &str| Allow::from_var(Some(raw), "fragment.corp.example", "apps.corp.example");
+        assert_eq!(read(&var), Ok(allow(&list)));
+        assert_eq!(read(&format!(" {var}\n")), Ok(allow(&list)), "a variable's surrounding blanks");
+        for bad in ["wiki.internal,,10.20.0.0/16", "wiki.internal,", ",wiki.internal", ",", "wiki.internal, ,10.20.0.0/16"] {
+            assert_eq!(read(bad), Err(AllowError::NotAnEntry(String::new())), "{bad:?}");
+        }
+        assert_eq!(read("wiki.internal,127.0.0.1"), Err(AllowError::Never("127.0.0.1".into(), Never::Loopback)));
     }
 }

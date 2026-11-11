@@ -358,11 +358,13 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
-        // the deploy checked it: one out of shape is a broken deploy
-        let egress_allow = var(env, "FRAGMENT_EGRESS_ALLOW").map_or(fragment_core::egress::Allow::NONE, |l| {
+        // its raw value, read whole by the core (`Allow::from_var`: absent or
+        // blank, none); the deploy checked it: one out of shape is a broken deploy
+        let egress_allow = {
             let platform = url::Url::parse(&platform_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-            fragment_core::egress::Allow::parse(&l.split(',').collect::<Vec<_>>(), &platform, &host_suffix).unwrap_or_else(|e| panic!("FRAGMENT_EGRESS_ALLOW: {e}"))
-        });
+            let raw = env.var("FRAGMENT_EGRESS_ALLOW").ok().map(|v| v.to_string());
+            fragment_core::egress::Allow::from_var(raw.as_deref(), &platform, &host_suffix).unwrap_or_else(|e| panic!("FRAGMENT_EGRESS_ALLOW: {e}"))
+        };
         let providers = providers(env);
         let models = fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
             .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}"));
