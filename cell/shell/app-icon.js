@@ -224,8 +224,9 @@ export function createIconEditor(h, name, title, f, inline = false) {
     if (chosen) change(upload, "The icon was not uploaded", () => put(chosen));
   };
   remove.onclick = () => change(remove, "The icon was not removed", async () => {
-    await h.api("DELETE", path);
-    return { ...row, picture: undefined };
+    // the icon it shows now: its template's (a brain's), or none
+    const out = await h.api("DELETE", path);
+    return { ...row, picture: out.icon ?? undefined };
   });
   const dispose = () => {
     sheets.delete(sheet);
