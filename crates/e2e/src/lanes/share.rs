@@ -165,7 +165,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains(&owner_name)
             && r.text.contains("Your agent")
             && r.text.contains("name=\"email\"")
-            && r.text.contains("General access"),
+            && r.text.contains("aria-label=\"Who can open it\""),
         &r,
     );
     // whoever the owner lets into a chat can talk to their agent in it: the
@@ -807,19 +807,19 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.click(&home, share)?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("People with access"));
     chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
     let closed = done && chrome.until(&home, &format!("!document.getElementById('sheet').open && !document.querySelector('#sheet iframe') && !!document.querySelector({row:?})"), wait);
     s.ok(
-        "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its Done closes it (the shell reads the list again)",
+        "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its X closes it (the shell reads the list again)",
         shown && closed,
         format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
     );
 
     // ---- at a short window and a tall one: the dialog is as tall as the
     // sheet says, all of it in view when it fits and scrolling when it does
-    // not, and its Done, clicked where it is drawn, closes it
+    // not, and its X, clicked where it is drawn, closes it
     let (mut all, mut seen) = (true, vec![]);
     for (height, fits) in [(700, false), (1440, true)] {
         chrome.viewport(&home, 1280, height, false)?;
@@ -850,10 +850,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
                     && (!fits || laid["dialog"].as_f64() == own)
             });
         chrome.screenshot(&home, &s.scratch.join(format!("share-dialog-{height}.png")))?;
-        // Done where it is drawn: the dialog scrolled to it, and the point
-        // the frame's place in the page plus the button's in the frame,
-        // the button what is there
-        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = d.scrollHeight; return true; })()")?;
+        // the X where it is drawn: the dialog scrolled to it (its top),
+        // and the point the frame's place in the page plus the button's in
+        // the frame, the button what is there
+        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = 0; return true; })()")?;
         let frame = chrome.eval(&home, "(() => { const r = document.querySelector('#sheet iframe')?.getBoundingClientRect(); return r ? [r.left, r.top] : []; })()")?;
         let done = chrome
             .eval_in_frame(&home, "/share/", "(() => { const r = document.querySelector('button[data-done]').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return document.elementFromPoint(x, y)?.closest('button[data-done]') ? [x, y] : []; })()")
@@ -866,7 +866,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             chrome.click_at(&home, at)?;
         }
         let closed = at.is_some() && chrome.until(&home, "!document.getElementById('sheet').open && !document.querySelector('#sheet iframe')", wait);
-        seen.push(format!("{height}: sized {sized} {laid} Done at {at:?} closed {closed}"));
+        seen.push(format!("{height}: sized {sized} {laid} X at {at:?} closed {closed}"));
         all &= sized && fitted && closed;
         if !all {
             break;
@@ -874,7 +874,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     }
     chrome.viewport(&home, 1280, 800, false)?;
     s.ok(
-        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its Done, clicked where it is drawn, closes it",
+        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its X, clicked where it is drawn, closes it",
         all,
         seen.join("; "),
     );
@@ -894,10 +894,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         text,
     );
     chrome.click(&home, &format!("{access} button[data-action=sharing]"))?;
-    let opened = chrome.until(&home, &format!("!!document.querySelector({access:?})?.querySelector('.app-sharing-frame')?.style.height"), wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let opened = chrome.until(&home, &format!("!!document.querySelector({access:?})?.querySelector('.app-sharing-frame')?.style.height"), wait) && s.eventually(wait, || inside(&mut chrome).contains("People with access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = opened && chrome.until(&home, &format!("!document.querySelector({access:?})?.querySelector('.app-sharing-frame') && !!document.querySelector({access:?})"), wait);
-    s.ok("Sharing expands inline, and Done closes it back to the page", opened && closed, inside(&mut chrome));
+    s.ok("Sharing expands inline, and its X closes it back to the page", opened && closed, inside(&mut chrome));
     chrome.close(home)?;
 
     // the sheet as the owner sees it, at a popup's size and a phone's, light
@@ -907,7 +907,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     for (width, mobile, scheme, shot) in [(480, false, "light", "share-sheet.png"), (390, true, "dark", "share-sheet-phone.png")] {
         chrome.viewport(&shown, width, 900, mobile)?;
         chrome.color_scheme(&shown, scheme)?;
-        let ready = chrome.until(&shown, "document.readyState === 'complete' && !!document.querySelector('footer')", wait);
+        let ready = chrome.until(&shown, "document.readyState === 'complete' && !!document.querySelector('main.share .people')", wait);
         fits.push((width, ready && chrome.eval(&shown, "document.documentElement.scrollWidth <= innerWidth")? == json!(true)));
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
@@ -915,12 +915,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- a keyboard: arrow keys over its choices send nothing (a closed
     // select's did, on Linux and Windows: an ArrowDown on a member's role
-    // removed them, on General access made it public)
+    // removed them, on General access made it public): a member's role
+    // menu, closed and open, and the access switch
     chrome.viewport(&shown, 480, 900, false)?;
     chrome.reload(&shown)?;
-    let armed_now = chrome.until(&shown, "!!document.querySelector('footer') && ![...document.querySelectorAll('[data-arm]')].some(b => b.disabled)", wait);
+    let armed_now = chrome.until(&shown, "!!document.querySelector('main.share .people') && ![...document.querySelectorAll('[data-arm]')].some(b => b.disabled)", wait);
     let before = (api.status(&owner, &chat)?.body["visibility"].clone(), role_of(&member_id)?);
-    for focus in [format!("form:has(input[value={member_id:?}]) button[value=editor]"), "button[value=public]".to_string()] {
+    let menu = format!("details.menu:has(input[value={member_id:?}])");
+    for focus in [format!("{menu} summary"), format!("{menu} button[value=editor]"), "button[value=public]".to_string()] {
+        if focus.ends_with("[value=editor]") {
+            chrome.eval(&shown, &format!("(document.querySelector({menu:?}).open = true, true)"))?;
+        }
         chrome.eval(&shown, &format!("(document.querySelector({focus:?}).focus(), true)"))?;
         for key in ["ArrowDown", "ArrowDown", "ArrowUp", "ArrowDown"] {
             chrome.press(&shown, key, false)?;
@@ -929,7 +934,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_millis(500));
     let after = (api.status(&owner, &chat)?.body["visibility"].clone(), role_of(&member_id)?);
     s.ok("arrow keys over a member's role and over General access change nothing", armed_now && before == after && after.0 == "link", format!("{before:?} → {after:?}"));
-    // Remove asks a second click: the first only says what it does
+    // Remove, in the member's menu, asks a second click: the first only
+    // says what it does
+    chrome.eval(&shown, &format!("(document.querySelector({menu:?}).open = false, true)"))?;
+    chrome.click(&shown, &format!("{menu} summary"))?;
     let remove = format!("form:has(input[name=action][value=remove]):has(input[value={member_id:?}]) button");
     chrome.click(&shown, &remove)?;
     std::thread::sleep(Duration::from_millis(300));

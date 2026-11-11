@@ -708,6 +708,22 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = visibility(&name, "members")?;
     s.ok("narrowing it (members only) is never refused", r.status == 200, &r);
+    // its owner's sheet shows With link and Public, unavailable, saying
+    // why: never hidden, and no form sends them
+    let session = api.sign_in(&Api::email_of(&owner))?;
+    let sheet = super::signin::with_session(api, "GET", &format!("/share/{name}"), &session)?;
+    let locked = |v: &str| sheet.text.contains(&format!("<button type=\"button\" value=\"{v}\" aria-pressed=\"false\" aria-disabled=\"true\""));
+    s.ok(
+        "with a key, its owner's sheet shows With link and Public unavailable, with the reason, and offers neither",
+        sheet.status == 200
+            && locked("link")
+            && locked("public")
+            && sheet.text.contains("With link")
+            && sheet.text.contains("can't be shared by link or made public for now")
+            && !sheet.text.contains("name=\"visibility\" value=\"link\"")
+            && !sheet.text.contains("name=\"visibility\" value=\"public\""),
+        sheet.status,
+    );
 
     // its key gone, its link opens it again; so opened, it takes no key until it is not
     let gone = api.signed(&owner, "DELETE", &at(&name, "secrets/API_KEY"), None)?;
