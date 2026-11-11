@@ -217,6 +217,10 @@ impl FragmentCell {
             Err(e) if matches!(e.refused, Some(Refused::GuestCreates | Refused::GuestPayer | Refused::ReadOnly { .. })) => return Ok(Err(Skip::OwnerPays)),
             Err(e) => console_error!("{}", json!({ "event": "card.standing-unknown", "message": e.message })),
         }
+        // a runtime without Browser Rendering (celld) shoots nothing: said once a live
+        if !js::has_binding(self.env.as_ref(), "BROWSER") {
+            return Ok(Err(Skip::NoBrowser));
+        }
         Ok(Ok(card::visit(&origin, visitor, &self.must(MetaKey::ViewToken)?)))
     }
 
@@ -262,6 +266,7 @@ impl FragmentCell {
             let code = match skip {
                 Skip::OwnerPays => ErrorCode::BudgetUsedUp,
                 Skip::NotAnApp | Skip::MembersOnly => ErrorCode::InvalidRequest,
+                Skip::NoBrowser => ErrorCode::HostFailed,
             };
             return Err(CellError::new(code, skip.message()));
         }

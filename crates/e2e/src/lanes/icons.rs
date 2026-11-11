@@ -128,6 +128,9 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("icons", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
+    if s.on_celld() {
+        return no_images(s, api);
+    }
     cli_icons(s, api)?;
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
@@ -359,6 +362,26 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     at_once(s, api)?;
     capped(s, api)?;
     read_only(s, api)?;
+    Ok(())
+}
+
+/// celld has no Images binding (docs/self-host.md): a making, and an
+/// upload that needs fitting, are refused at once, typed, saying why, with
+/// nothing asked of the model; the section's other checks need Images.
+fn no_images(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let name = s.named(api, &owner, "icons-none")?;
+    s.create(api, &owner, &name)?;
+    let mark = s.ai.calls().len();
+    let made = make(api, &owner, &name, json!({ "hint": "a teapot" }))?;
+    let fitted = put(api, &owner, &name, &photo())?;
+    let said = |r: &Reply| r.code() == Some(ErrorCode::HostFailed) && r.message().contains("no Images binding");
+    s.ok(
+        "with no Images binding, a making and an upload that needs fitting are refused at once, typed (host_failed), saying why, and nothing is asked of the model",
+        said(&made) && said(&fitted) && s.ai.calls().len() == mark,
+        json!({ "make": told(&made), "upload": told(&fitted), "calls": s.ai.calls().len() - mark }),
+    );
+    s.skip("icons made, fitted, kept, served, limited and charged, by the API and the CLI, and favicons", "celld has no Images binding, so the node makes and fits no icons (docs/self-host.md)");
     Ok(())
 }
 

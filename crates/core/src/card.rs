@@ -115,6 +115,9 @@ pub enum Skip {
     MembersOnly,
     /// Its owner pays for nothing now (a guest), or is past the overdraft.
     OwnerPays,
+    /// The deployment has no browser to shoot with: no `browser` binding (a
+    /// self-hosted one on celld, docs/self-host.md).
+    NoBrowser,
 }
 
 impl Skip {
@@ -123,6 +126,7 @@ impl Skip {
             Skip::NotAnApp => "a chat or an agent is not an app: it has no card",
             Skip::MembersOnly => "a members-only fragment's page is not shot: a visitor without an account sees only its refusal (an uploaded card is its members' all the same)",
             Skip::OwnerPays => "its owner's ledger takes no shot now (a guest pays for nothing; past the overdraft, nothing new is made)",
+            Skip::NoBrowser => "this deployment has no browser to shoot cards with (no `browser` binding)",
         }
     }
 }

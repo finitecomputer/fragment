@@ -913,13 +913,16 @@ struct Forward {
 /// A blob upload declares its length, at most `most`: past that it is
 /// refused unread (the API's upload, and a page's at `__blob/<sha256>`).
 /// A person's bound is the deployment's (`Config::uploads`, which clients
-/// are told); an agent's, through its computer's egress, a blob's.
-fn blob_length(req: &Request, most: u64) -> CellResult<()> {
+/// are told); an agent's, through its computer's egress, a blob's. The
+/// length, as the header to forward it with: the bytes stream through, and
+/// a runtime that does not carry a streamed body's length on to an object
+/// (celld; docs/self-host.md) is told it, as the computer's egress tells it.
+fn blob_length(req: &Request, most: u64) -> CellResult<(String, String)> {
     let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
     match declared {
         None => Err(CellError::invalid("a blob upload declares its content-length")),
         Some(n) if n > most => Err(CellError::too_large("a blob", n as usize, most as usize)),
-        Some(_) => Ok(()),
+        Some(n) => Ok(("content-length".to_string(), n.to_string())),
     }
 }
 
@@ -1038,10 +1041,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     // a page's blob upload streams through, as the API's does: the router
     // never holds its bytes (the fragment checks who uploads, and the hash)
     let upload = match (req.method(), rest.strip_prefix("__blob/")) {
-        (Method::Put, Some(sha)) => {
-            blob_length(&req, cfg.uploads.upload_max_bytes)?;
-            Some(sha)
-        }
+        (Method::Put, Some(sha)) => Some((sha, blob_length(&req, cfg.uploads.upload_max_bytes)?)),
         _ => None,
     };
     // a GET or HEAD has no body to wait for
@@ -1051,7 +1051,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         _ => read_body(&mut req, limits::BODY_MAX_BYTES).await?,
     };
     let payload = match upload {
-        Some(sha) => Payload::Streamed { sha256_hex: sha },
+        Some((sha, _)) => Payload::Streamed { sha256_hex: sha },
         None => Payload::Read(&body),
     };
     let mut credential = site_credential(&req, url, payload, fetched)?;
@@ -1080,11 +1080,11 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         framed = Framed::OwnPage;
     }
     let routed = Routed { name: name.to_string(), url: url.clone(), signed, credential };
-    let body = match upload {
-        Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
-        None => bytes_body(body),
+    let (body, length) = match upload {
+        Some((_, length)) => (req.inner().body().map(worker::wasm_bindgen::JsValue::from), Some(length)),
+        None => (bytes_body(body), None),
     };
-    let extra = identity.map(|id| vec![(address::IDENTITY_HEADER.to_string(), id.to_string())]).unwrap_or_default();
+    let extra = identity.map(|id| (address::IDENTITY_HEADER.to_string(), id.to_string())).into_iter().chain(length).collect();
     let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
@@ -1440,11 +1440,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
-            blob_length(&req, cfg.uploads_for(principal.identity.kind).upload_max_bytes)?;
+            let length = blob_length(&req, cfg.uploads_for(principal.identity.kind).upload_max_bytes)?;
             let name = named_fragment(name)?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let routed = Routed { name, url: url.clone(), signed: Some(principal), credential: None };
-            forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![] }).await
+            forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![length] }).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
