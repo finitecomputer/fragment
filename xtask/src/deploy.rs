@@ -1760,7 +1760,7 @@ mod tests {
         d.providers.push(serde_json::json!({
             "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
             "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
-            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "scopes": ["scope"] },
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "access": { "read": { "scopes": ["scope.readonly"] }, "write": { "scopes": ["scope"] } } },
             "key": "fragment-google-oauth-secret"
         }));
         let (catalog, _) = catalog_of(&d).unwrap();
@@ -1981,7 +1981,18 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // the example offers Linear beside Google, and Salesforce; the hosted e2e's preview, not yet
+            let example = file == "deploy/example.jsonc";
+            let connections: &[&str] = if example { &["google", "linear"] } else { &["google"] };
+            let orgs: &[&str] = if example { &["salesforce"] } else { &[] };
+            let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"]
+                .into_iter()
+                .chain(connections.iter().copied())
+                .chain(["perplexity", "google-places", "xai", "elevenlabs"])
+                .chain(orgs.iter().copied())
+                .chain(["openrouter"])
+                .collect();
+            assert_eq!(names, expected, "{file}");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
@@ -1991,6 +2002,56 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// The example's Linear row, its commented connect uncommented (a client
+    /// id and the secret's store name filled in), loads: its one scope, its
+    /// revocation, and its client secret bound as the cell's.
+    #[test]
+    fn the_example_linear_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "linear""#).expect("the example's linear row");
+        let row = &example[start..start + example[start..].find(r#""env": ["LINEAR_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-linear-oauth-secret").replace("<the app's client id>", "linear-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/linear-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let o = catalog.get("linear").and_then(|p| p.connection_oauth.as_ref()).expect("its connect");
+        let scopes = |a: fragment_core::catalog::ConnectionAccess| o.access.of(a).map(|g| g.scopes.clone()).unwrap_or_default();
+        assert_eq!((o.client_id.as_str(), o.revoke.as_deref()), ("linear-client", Some("https://api.linear.app/oauth/revoke")));
+        assert_eq!((scopes(fragment_core::catalog::ConnectionAccess::Read), scopes(fragment_core::catalog::ConnectionAccess::Write)), (vec!["read".to_string()], vec!["write".to_string()]), "read only asks for read, read and write for write");
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_LINEAR".into(), "fragment-linear-oauth-secret")));
+    }
+
+    /// The example's Salesforce row, its commented connect uncommented (a
+    /// consumer key and the secret's store name filled in), loads: its
+    /// scopes, its revocation, its account host, and its client secret
+    /// bound as the cell's.
+    #[test]
+    fn the_example_salesforce_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "salesforce""#).expect("the example's salesforce row");
+        let row = &example[start..start + example[start..].find(r#""env": ["SALESFORCE_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-salesforce-oauth-secret").replace("<the app's consumer key>", "salesforce-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/salesforce-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("salesforce").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        assert_eq!((o.client_id.as_str(), o.access.write.scopes.join(" "), o.revoke.as_deref()), ("salesforce-client", "api refresh_token openid email".to_string(), Some("https://login.salesforce.com/services/oauth2/revoke")));
+        assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Write], "Salesforce has no read-only scope: read and write alone, the user's permissions its limit");
+        assert_eq!(p.account_host.as_ref().map(|a| (a.metadata.as_str(), a.under.as_str())), Some(("instance_url", "my.salesforce.com")));
+        assert!(p.note.as_deref().is_some_and(|n| n.contains("dedicated integration user")), "Settings says how to limit what agents may do: {:?}", p.note);
+        assert!(catalog.intercepts().contains(&"*.my.salesforce.com".to_string()));
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_SALESFORCE".into(), "fragment-salesforce-oauth-secret")));
     }
 
     /// A provider's note: the example's (its google row's, commented out)
@@ -2013,7 +2074,7 @@ mod tests {
         let d = with(note).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
-        assert!(catalog.providers().iter().filter(|p| p.name != "google").all(|p| p.note.is_none()), "the other rows have none");
+        assert!(catalog.providers().iter().filter(|p| !["google", "salesforce"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Salesforce's");
         let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
         let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");

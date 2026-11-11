@@ -191,7 +191,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && row(crate::SWAP_ROUTER)["state"] == "not_set"
             && row(crate::SWAP_ROUTER)["signIn"]["manage"].is_string()
             && row(crate::SWAP_ROUTER)["models"].as_array().is_some_and(|m| !m.is_empty())
-            && rows.len() == crate::SWAP_KEYS.len() + 5,
+            && rows.len() == crate::SWAP_KEYS.len() + 6,
         &r,
     );
     let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
@@ -4188,7 +4188,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // each row: its provider, kind, state, agents allowed, and uses
     let rows = "[...document.querySelectorAll('#settings-connections [data-provider]')].map((r) => [r.dataset.provider, r.dataset.kind, r.dataset.state, \
                 r.querySelectorAll('[data-agent][aria-pressed=true]').length, [...r.querySelectorAll('[data-use]')].map((u) => [u.dataset.use, Number(u.dataset.calls), Number(u.dataset.micros)])])";
-    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 5, row("perplexity")), wait);
+    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 6, row("perplexity")), wait);
     let got = b.eval(page, rows)?;
     let of = |p: &str| got.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
     let perplexity_charge = 7_500; // $0.005 a call at list, and the margin
@@ -4229,7 +4229,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let list = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["connections"].clone()).unwrap_or(Value::Null);
-    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER, "e2e-oauth", crate::SEVERAL]).collect();
+    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER, "e2e-oauth", crate::SEVERAL, crate::ORG_CONNECTION]).collect();
     s.ok(
         "pressing an agent takes that provider from it (a narrowing of the rest), and the page says so",
         narrowed && list.as_array().is_some_and(|l| l.len() == others.len() && others.iter().all(|p| l.iter().any(|x| x == p))),
@@ -4325,8 +4325,41 @@ fn partial_grant_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
         came_back && connected && whole && s.workos.scopes(email, PARTIAL) == ["mail.read", "files.read", "openid"],
         json!({ "cameBack": came_back, "connected": connected, "whole": whole, "scopes": s.workos.scopes(email, PARTIAL) }),
     );
-    let off = shell(api, session, "DELETE", &format!("/api/connections/{PARTIAL}"), None, &[])?;
-    anyhow::ensure!(off.status == 200, "disconnect {PARTIAL} after its checks: {off}");
+    access_ui(s, api, b, page, session, email, PARTIAL)
+}
+
+/// A connection's access in its sheet (docs/pipes-browser-binding.md,
+/// Access): connected read only, it says so and offers Allow changes,
+/// which goes through the provider's page asking for read and write; then
+/// it says read and write and how to go back, and offers it no more; not
+/// connected, a connect for each access, the person's to pick. `provider`
+/// is connected read only, all of it granted, and is disconnected again
+/// for the checks after.
+fn access_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, email: &str, provider: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("#settings-connections [data-provider={provider:?}]");
+    let said = b.eval(page, &format!("[document.querySelector('{row} .provider-access')?.textContent ?? null, document.querySelector('{row} [data-action=allow-changes]')?.textContent ?? null, document.querySelector('{row} .provider-access-how')?.textContent ?? null]"))?;
+    sheet_of(b, page, &row)?;
+    let (came_back, connected) = connected_in_window(s, b, page, &format!("{row} [data-action=allow-changes]"), provider)?;
+    b.reload(page)?;
+    let changed = b.until(page, &format!("document.querySelector('{row} .provider-access')?.dataset.access === 'write' && !document.querySelector('{row} [data-action=allow-changes]') && !!document.querySelector('{row} .provider-access-how')"), wait);
+    let now = b.eval(page, &format!("[document.querySelector('{row} .provider-access')?.textContent ?? null, document.querySelector('{row} .provider-access-how')?.textContent ?? null]"))?;
+    s.ok(
+        "connected read only, a connection says so and offers Allow changes, which asks for read and write through the provider's page; then it says read and write, and how to make it read only again, and offers no Allow changes",
+        said == json!(["Read only", "Allow changes", null]) && came_back && connected && changed && s.workos.scopes(email, provider) == ["mail.read", "files.read", "mail.send", "openid"]
+            && now == json!(["Read and write", "To make it read only again, disconnect it, then connect it read only."]),
+        json!({ "before": said, "cameBack": came_back, "connected": connected, "after": now, "scopes": s.workos.scopes(email, provider) }),
+    );
+    let off = shell(api, session, "DELETE", &format!("/api/connections/{provider}"), None, &[])?;
+    anyhow::ensure!(off.status == 200, "disconnect {provider} after its checks: {off}");
+    b.reload(page)?;
+    let offered = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_connected' && document.querySelectorAll('{row} [data-action=connect]').length === 2"), wait);
+    let buttons = b.eval(page, &format!("[...document.querySelectorAll('{row} [data-action=connect]')].map((b) => [b.dataset.access, b.textContent])"))?;
+    s.ok(
+        "not connected, a connection offers a connect for each access, read only and read and write: the person picks, never the platform",
+        offered && buttons == json!([["read", "Connect read only"], ["write", "Connect read and write"]]),
+        &buttons,
+    );
     Ok(())
 }
 
@@ -4377,12 +4410,12 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     let one = b.eval(
         page,
         &format!(
-            "[...document.querySelectorAll('{row} .provider-account-row')].map((a) => [a.querySelector('.provider-account')?.textContent, a.dataset.state, a.querySelector('.provider-missing')?.textContent ?? null, a.querySelector('[data-action=reconnect]')?.textContent ?? null, a.querySelector('[data-action=disconnect]')?.textContent ?? null]).concat([[document.querySelector('{row} [data-action=add-account]')?.textContent ?? null, document.querySelectorAll('{row} select').length]])"
+            "[...document.querySelectorAll('{row} .provider-account-row')].map((a) => [a.querySelector('.provider-account')?.textContent, a.dataset.state, a.querySelector('.provider-missing')?.textContent ?? null, a.querySelector('[data-action=reconnect]')?.textContent ?? null, a.querySelector('[data-action=disconnect]')?.textContent ?? null]).concat([[document.querySelector('{row} [data-action=add-account]')?.textContent ?? null, document.querySelectorAll('{row} select').length, document.querySelectorAll('{row} [data-action=add-account]').length, document.querySelectorAll('{row} .provider-access, {row} [data-action=allow-changes]').length]])"
         ),
     )?;
     s.ok(
-        "a connection that takes several accounts lists each in its row: its label, state, what it was not allowed with a Reconnect to add, and its own Disconnect; the head offers Add another; with one account, no agent is asked which",
-        shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0]]),
+        "a connection that takes several accounts lists each in its row: its label, state, what it was not allowed with a Reconnect to add, and its own Disconnect; the head offers one Add another (its provider has no read-only scope: one access, none said, no Allow changes); with one account, no agent is asked which",
+        shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0, 1, 0]]),
         &one,
     );
     sheet_of(b, page, &row)?;

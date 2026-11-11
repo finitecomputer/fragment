@@ -59,6 +59,7 @@ pub fn row(name: &str, hosts: Vec<String>, placement: Placement) -> catalog::Pro
         oauth: None,
         connection_oauth: None,
         accounts_max: None,
+        account_host: None,
         models: None,
         note: None,
     }
@@ -108,12 +109,15 @@ pub fn name_form(name: &str) -> Result<(), VaultError> {
     }
 }
 
-/// Whether `name` may name a secret: its form (`name_form`), and none the
-/// deployment's catalog uses (a placeholder names one or the other).
+/// Whether `name` may name a secret: its form (`name_form`), and no key
+/// the deployment's catalog offers (a key's placeholder, `fck_`, names one
+/// or the other). A connection's name may be a secret's too: its
+/// placeholder is `fcx_`, so a secret named before the deployment offered
+/// a connection of that name stays its person's (`Catalog::named`).
 pub fn name_ok(name: &str, catalog: &Catalog) -> Result<(), VaultError> {
     name_form(name)?;
-    if catalog.get(name).is_some() {
-        return Err(VaultError::Name(format!("{name:?} is a provider this deployment offers: name it otherwise")));
+    if catalog.named(name, false).is_some() {
+        return Err(VaultError::Name(format!("{name:?} is a key this deployment offers: name it otherwise")));
     }
     Ok(())
 }
@@ -283,9 +287,24 @@ mod tests {
     }
 
     #[test]
-    fn names_a_provider_uses_or_of_another_form_are_refused() {
+    fn names_a_key_uses_or_of_another_form_are_refused() {
         for name in ["openrouter", "", "Linear", "-x", "x-", "a_b", &"x".repeat(33)] {
             assert!(matches!(check(name, &put("v", &["a.example.com"], Place::default(), &[AGENT]), &catalog()), Err(VaultError::Name(_))), "{name:?}");
+        }
+    }
+
+    /// A connection's name may name a secret (its placeholder is `fcx_`,
+    /// the secret's `fck_`): one a person named before the deployment
+    /// offered that connection is set again as it was; a key's name never.
+    #[test]
+    fn a_connections_name_may_name_a_secret_and_a_keys_never() {
+        let c = Catalog::parse(r#"[{"name": "openrouter", "kind": "own", "hosts": ["openrouter.ai"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["OPENROUTER_API_KEY"]},
+            {"name": "linear", "kind": "connection", "hosts": ["api.linear.app"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["LINEAR_OAUTH_ACCESS_TOKEN"]},
+            {"name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["PERPLEXITY_API_KEY"]}]"#).expect("a catalog");
+        assert!(check("linear", &put("lin_api_abc", &["api.linear.app"], Place::default(), &[AGENT]), &c).is_ok());
+        for key in ["openrouter", "perplexity"] {
+            let refused = check(key, &put("v", &["a.example.com"], Place::default(), &[AGENT]), &c);
+            assert!(matches!(&refused, Err(VaultError::Name(why)) if why.contains("is a key this deployment offers")), "{key}: {refused:?}");
         }
     }
 

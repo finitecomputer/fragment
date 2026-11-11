@@ -176,4 +176,19 @@ mod tests {
         }
         assert!(format!("{:#}", Layout::named("finite-computer").err().unwrap()).contains("is `hermes` or a layout file"));
     }
+
+    /// Goal (FIN-463): the finite-computer layout the import skill ships
+    /// never reads what its stage keeps for the computer itself: the old
+    /// agent's SimpleX identity (`.finite-stage/simplex/`), which only its
+    /// bridge adopts, at its owner's word (docs/migrations.md).
+    #[test]
+    fn the_finite_computer_layout_never_reads_the_stages_own_files() {
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../templates/skills/skills/productivity/import-agent-home/profiles/finite-computer.layout.json");
+        let l = Layout::named(shipped).unwrap();
+        let secret = l.secret_globs().unwrap();
+        for p in [".finite-stage/simplex/chat.db", ".finite-stage/simplex/agent.db", ".finite-stage/simplex/owner.json"] {
+            assert!(secret.is_match(p), "{p}");
+        }
+        assert!(!secret.is_match("workspace/notes.md"));
+    }
 }
