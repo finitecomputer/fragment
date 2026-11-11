@@ -4206,11 +4206,11 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     );
     s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
     // each row's tile: its provider, its letter, and whether it holds a mark
-    // filled with the tile's own text colour (provider-marks.js)
+    // filled with the tile's own text colour, unstroked (provider-marks.js)
     let tiles = b.eval(
         page,
         "[...document.querySelectorAll('#settings-connections [data-provider] .provider-tile')].map((t) => { const m = t.querySelector('svg.provider-mark path'); \
-         return [t.closest('[data-provider]').dataset.provider, t.textContent, !!m && getComputedStyle(m).fill === getComputedStyle(t).color]; })",
+         return [t.closest('[data-provider]').dataset.provider, t.textContent, !!m && getComputedStyle(m).fill === getComputedStyle(t).color && getComputedStyle(m).stroke === 'none']; })",
     )?;
     let tile = |p: &str| tiles.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
     let marked = ["google", "openrouter", "x", "perplexity", "google-places", "elevenlabs"];
