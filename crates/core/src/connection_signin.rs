@@ -1181,43 +1181,66 @@ and more".into();
     }
 
     /// Atlassian's row (deploy/example.jsonc, the Jira skill's
-    /// references/atlassian-access.json): its authorize names the API's
-    /// audience and its consent, the scopes space-separated, `offline_access`
-    /// for a refresh token; its token endpoint takes the form's client secret
-    /// (`client_secret_post`, its server metadata). Its answer names the
-    /// scopes granted, space-separated, in an order of its own, beside an
-    /// hour's `expires_in` (developer.atlassian.com/cloud/jira/platform/
-    /// oauth-2-3lo-apps, read 2026-11-11). `write:jira-work` tells read and
+    /// references/atlassian-access.json and atlassian-services.json): its
+    /// authorize names the API's audience and its consent, the scopes
+    /// space-separated, `offline_access` for a refresh token; its token
+    /// endpoint takes the form's client secret (`client_secret_post`, its
+    /// server metadata). Its answer names the scopes granted, space-separated,
+    /// in an order of its own, beside an hour's `expires_in`
+    /// (developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps, read
+    /// 2026-11-11). Its services are Jira and Confluence, each picked alone
+    /// or both; `write:jira-work` or `write:page:confluence` tells read and
     /// write from read only, and no ID token comes: no account label.
     #[test]
-    fn atlassians_answer_connects_jira_read_only_or_read_and_write() {
-        let grant = |scopes: &str| Grant { scopes: scopes.split(' ').map(String::from).collect() };
-        let access = catalog::Access { read: Some(grant("read:jira-work read:jira-user read:me offline_access")), write: grant("read:jira-work write:jira-work read:jira-user read:me offline_access") };
-        let o = ConnectionOAuth { authorize: "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent".into(), exchange: "https://auth.atlassian.com/oauth/token".into(), client_id: "client".into(), access, services: None, revoke: None };
-        assert!(check(&o).is_ok());
+    fn atlassians_answer_connects_jira_and_confluence_read_only_or_read_and_write() {
+        let scopes = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        const JIRA_READ: &str = "read:jira-work read:jira-user";
+        const CONFLUENCE_READ: &str = "read:page:confluence read:space:confluence search:confluence";
+        let access = catalog::Access {
+            read: Some(Grant { scopes: scopes(&format!("{JIRA_READ} {CONFLUENCE_READ} read:me offline_access")) }),
+            write: Grant { scopes: scopes("read:jira-work write:jira-work read:jira-user read:page:confluence write:page:confluence read:space:confluence search:confluence read:me offline_access") },
+        };
+        let service = |id: &str, name: &str, s: &str| catalog::Service { id: id.into(), name: name.into(), scopes: scopes(s) };
+        let services = vec![service("jira", "Jira", "read:jira-work write:jira-work read:jira-user"), service("confluence", "Confluence", "read:page:confluence write:page:confluence read:space:confluence search:confluence")];
+        let o = ConnectionOAuth { authorize: "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent".into(), exchange: "https://auth.atlassian.com/oauth/token".into(), client_id: "client".into(), access, services: Some(services), revoke: None };
+        assert_eq!(check(&o), Ok(()));
         let callback = "https://platform.example/api/connections/atlassian/callback";
-        for access in [ConnectionAccess::Read, ConnectionAccess::Write] {
-            let grant = o.access.of(access).unwrap();
-            let query: Vec<(String, String)> = url::Url::parse(&authorize_url(&o, &grant.scopes, callback, "challenge", "state")).unwrap().query_pairs().into_owned().collect();
-            for pair in [("audience", "api.atlassian.com"), ("prompt", "consent"), ("response_type", "code"), ("code_challenge_method", "S256"), ("scope", grant.scopes.join(" ").as_str())] {
-                assert!(query.contains(&(pair.0.into(), pair.1.into())), "{access:?}: {pair:?} in {query:?}");
+        let picks = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for (access, picked, asked) in [
+            (ConnectionAccess::Read, None, format!("{JIRA_READ} {CONFLUENCE_READ} read:me offline_access")),
+            (ConnectionAccess::Read, Some(picks(&["jira"])), format!("{JIRA_READ} read:me offline_access")),
+            (ConnectionAccess::Read, Some(picks(&["confluence"])), format!("{CONFLUENCE_READ} read:me offline_access")),
+            (ConnectionAccess::Write, Some(picks(&["jira"])), "read:jira-work write:jira-work read:jira-user read:me offline_access".to_string()),
+            (ConnectionAccess::Write, Some(picks(&["confluence"])), "read:page:confluence write:page:confluence read:space:confluence search:confluence read:me offline_access".to_string()),
+            (ConnectionAccess::Write, Some(picks(&["jira", "confluence"])), o.access.write.scopes.join(" ")),
+        ] {
+            let wanted = scopes_asked(&o, access, picked.as_deref()).expect("a pick of the row's");
+            let query: Vec<(String, String)> = url::Url::parse(&authorize_url(&o, &wanted, callback, "challenge", "state")).unwrap().query_pairs().into_owned().collect();
+            for pair in [("audience", "api.atlassian.com"), ("prompt", "consent"), ("response_type", "code"), ("code_challenge_method", "S256"), ("scope", asked.as_str())] {
+                assert!(query.contains(&(pair.0.into(), pair.1.into())), "{access:?} {picked:?}: {pair:?} in {query:?}");
             }
         }
         let form: std::collections::BTreeMap<String, String> = url::form_urlencoded::parse(exchange_form(&o, callback, "code", "verifier", "fake-secret").as_bytes()).into_owned().collect();
         assert_eq!((form["client_secret"].as_str(), form["code_verifier"].as_str()), ("fake-secret", "verifier"), "the client secret in the form, beside the PKCE verifier");
-        let answer = json!({ "access_token": "eyJ.mock-access", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "mock-refresh", "scope": "write:jira-work read:jira-work offline_access read:me read:jira-user" });
+        let answering = |scope: &str| json!({ "access_token": "eyJ.mock-access", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "mock-refresh", "scope": scope });
+        let named = scopes_named(&o);
+        // both, read and write, answered in an order of Atlassian's own
         let requested = &o.access.write.scopes;
-        let granted = tokens(&answer, requested).expect("Atlassian's documented answer");
+        let answer = answering("write:jira-work read:jira-work search:confluence offline_access read:me read:page:confluence write:page:confluence read:space:confluence read:jira-user");
+        let granted = tokens_of(&answer, requested, &named).expect("Atlassian's documented answer");
         assert_eq!(granted.expires_in, Some(3600));
-        assert_eq!(granted.import_body("2026-11-11T00:00:00Z", None)["scopes"], json!(["write:jira-work", "read:jira-work", "offline_access", "read:me", "read:jira-user"]), "Pipes holds what Atlassian granted");
+        assert_eq!(granted.import_body("2026-11-11T00:00:00Z", None)["scopes"], json!(scopes("write:jira-work read:jira-work search:confluence offline_access read:me read:page:confluence write:page:confluence read:space:confluence read:jira-user")), "Pipes holds what Atlassian granted");
         assert!(missing(requested, &granted.scopes).is_empty());
         assert_eq!(access_of(&o, &granted.scopes), Some(ConnectionAccess::Write));
         assert_eq!((account_label(&answer, "client"), account_identifier(&answer, "client")), (None, None), "no ID token, so no account label");
-        let mut read = answer.clone();
-        read["scope"] = json!("read:jira-work offline_access read:me read:jira-user");
-        let read_scopes = &o.access.read.as_ref().unwrap().scopes;
-        let read_only = tokens(&read, read_scopes).expect("a read-only grant");
-        assert_eq!((access_of(&o, &read_only.scopes), missing(read_scopes, &read_only.scopes)), (Some(ConnectionAccess::Read), vec![]), "read only, as picked, nothing missing");
+        // Confluence alone, read only: read only, nothing it asked for missing
+        let asked = scopes_asked(&o, ConnectionAccess::Read, Some(&picks(&["confluence"]))).unwrap();
+        let read_only = tokens_of(&answering("search:confluence read:space:confluence read:me read:page:confluence offline_access"), &asked, &named).expect("a read-only grant of Confluence");
+        assert_eq!((access_of(&o, &read_only.scopes), missing(&asked, &read_only.scopes)), (Some(ConnectionAccess::Read), vec![]), "read only, as picked, nothing missing");
+        // Jira alone, read and write: read and write
+        let asked = scopes_asked(&o, ConnectionAccess::Write, Some(&picks(&["jira"]))).unwrap();
+        let jira = tokens_of(&answering("read:jira-work write:jira-work read:jira-user read:me offline_access"), &asked, &named).expect("Jira alone");
+        assert_eq!((access_of(&o, &jira.scopes), missing(&asked, &jira.scopes)), (Some(ConnectionAccess::Write), vec![]));
         // `offline_access` left out: no refresh token, nothing imported
         let mut short = answer;
         short.as_object_mut().unwrap().remove("refresh_token");

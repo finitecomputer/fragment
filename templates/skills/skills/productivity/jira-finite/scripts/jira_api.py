@@ -465,17 +465,16 @@ def parser():
     return top
 
 
-READ_ONLY = "connected read only (the person allows changes in Settings, under Connections), or the site they picked isn't this one"
 HINTS = {
     "not_connected": "the person has not connected Atlassian (or must again): ask them to, in the shell's Settings, under Connections",
     "forbidden": "the person narrowed this agent's connections and left Atlassian out",
     "unauthorized": "Atlassian refused the connection's token: ask the person to reconnect Atlassian in Settings, under Connections",
-    "scope_does_not_match": "the connection may not do this: " + READ_ONLY,
+    "scope_does_not_match": "the connection may not do this: connected read only, or without Jira (the person adds either in Settings, under Connections)",
     "no_permission": "the person's Jira permissions don't allow it in this project",
     "not_found": "no such issue or project, or the person may not see it",
     "choose_site": "name the site with --site; `sites` lists them",
     "no_such_site": "`sites` lists the sites the person granted; they add one by connecting Atlassian again in Settings (Disconnect, then Connect) and picking it",
-    "no_site": "the person granted no Jira site: they connect Atlassian again in Settings and pick a site with Jira",
+    "no_site": "the person didn't allow Jira (they add it in Settings, under Connections: Reconnect to add), or no site they picked has Jira",
     "rate_limited": "Atlassian limits requests: wait as it says, then try once more",
 }
 

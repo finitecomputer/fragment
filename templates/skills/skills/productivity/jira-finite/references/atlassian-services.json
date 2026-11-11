@@ -1,0 +1,21 @@
+[
+  {
+    "id": "jira",
+    "name": "Jira",
+    "scopes": [
+      "read:jira-work",
+      "write:jira-work",
+      "read:jira-user"
+    ]
+  },
+  {
+    "id": "confluence",
+    "name": "Confluence",
+    "scopes": [
+      "read:page:confluence",
+      "write:page:confluence",
+      "read:space:confluence",
+      "search:confluence"
+    ]
+  }
+]

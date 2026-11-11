@@ -50,6 +50,15 @@ again (Settings → Connections: Disconnect, then Connect) and picking it.
 Where there are several, name one with `--site` (its name, its host or its
 cloud id).
 
+## Not allowed
+
+Your owner picks, as they connect Atlassian, the services you may use: Jira,
+Confluence (`confluence-finite`), or both. Connected without Jira, `check`
+says no site has `jira`, the helper's commands say `no_site`, and Atlassian
+refuses a Jira call (401 `scope_does_not_match`). Tell your owner, in plain
+words, that they didn't allow Jira, and that they can add it in Settings →
+Connections → Reconnect to add. Go on with what they did allow.
+
 ## Read only
 
 Your owner picks, as they connect Atlassian, whether you may only read
@@ -123,11 +132,11 @@ status, message, hint}`, and exit 1.
 | `not_connected` | Your owner connects Atlassian in Settings → Connections |
 | `forbidden` | Your owner left Atlassian off this agent's connections |
 | `unauthorized` | Your owner reconnects Atlassian in Settings → Connections |
-| `scope_does_not_match` | A change refused while reads work: connected read only (they allow changes in Settings → Connections) |
+| `scope_does_not_match` | Connected without Jira (they add it in Settings → Connections), or, a change refused while reads work, read only (they allow changes there) |
 | `no_permission` | Their Jira permissions don't allow it in that project |
 | `not_found` | The key is wrong, or the issue is one they may not see |
 | `choose_site` / `no_such_site` | Name a site with `--site`; `$JAPI sites` lists them |
-| `no_site` | No Jira site was granted: they connect Atlassian again and pick one |
+| `no_site` | Jira wasn't allowed (they add it in Settings → Connections → Reconnect to add), or no site they picked has Jira |
 | `invalid_input` | Jira says which field: an issue type, priority or field the project doesn't have |
 | `rate_limited` | Wait as the message says, then try once more |
 | `redirected` | Atlassian answered a redirect (an attachment's content), which the helper never follows with the token: say so, and stop |

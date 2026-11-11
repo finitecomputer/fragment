@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twenty-two skills. Twelve are Fragment platform contracts:
+Twenty-three skills. Thirteen are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -48,6 +48,7 @@ Twenty-two skills. Twelve are Fragment platform contracts:
 | linear-finite | Connected Linear access through per-agent placeholders; no API key or local OAuth |
 | salesforce-finite | Connected Salesforce access through per-agent placeholders, to the connected org's own host alone; no session id or local OAuth |
 | jira-finite | Connected Jira access through per-agent placeholders, to the person's Atlassian sites through api.atlassian.com; no API token or local OAuth |
+| confluence-finite | Connected Confluence access through the same Atlassian connection's placeholders, through api.atlassian.com; no API token or local OAuth |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |

@@ -30,6 +30,10 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     "write:jira-work": "Jira issues",
     "read:jira-user": "Jira people",
     "read:me": "Profile",
+    "read:page:confluence": "Confluence pages (read)",
+    "write:page:confluence": "Confluence pages",
+    "read:space:confluence": "Confluence spaces",
+    "search:confluence": "Confluence search",
     // Google's
     "gmail.readonly": "Gmail (read)",
     "gmail.modify": "Gmail (manage)",

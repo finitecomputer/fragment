@@ -2112,19 +2112,22 @@ mod tests {
     }
 
     /// The example's Atlassian row, its commented connect uncommented (a
-    /// client id, the secret's store name and the Jira skill's access file
-    /// filled in), loads: its two accesses as the skill's file names them,
-    /// no revocation (Atlassian documents none for its apps), its one host,
-    /// and its client secret bound as the cell's.
+    /// client id, the secret's store name and the Jira skill's access and
+    /// services files filled in), loads: its two accesses and its services,
+    /// Jira and Confluence, as the files name them, no revocation (Atlassian
+    /// documents none for its apps), its one host, and its client secret
+    /// bound as the cell's. Confluence alone, read only, asks for its own
+    /// scopes and the ones no service names.
     #[test]
     fn the_example_atlassian_connect_loads_once_uncommented() {
         let root = devstack::repo_root();
         let example = fs::read_to_string(root.join("deploy/example.jsonc")).unwrap();
         let access = fs::read_to_string(root.join("templates/skills/skills/productivity/jira-finite/references/atlassian-access.json")).unwrap();
+        let services = fs::read_to_string(root.join("templates/skills/skills/productivity/jira-finite/references/atlassian-services.json")).unwrap();
         let start = example.find(r#"{ "name": "atlassian""#).expect("the example's atlassian row");
         let row = &example[start..start + example[start..].find(r#""env": ["ATLASSIAN_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
         let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
-        let open = open.replace("<the client secret's store name>", "fragment-atlassian-oauth-secret").replace("<the app's client id>", "atlassian-client").replace("<the Jira skill's references/atlassian-access.json>", &access);
+        let open = open.replace("<the client secret's store name>", "fragment-atlassian-oauth-secret").replace("<the app's client id>", "atlassian-client").replace("<the Jira skill's references/atlassian-access.json>", &access).replace("<the Jira skill's references/atlassian-services.json>", &services);
         let dir = root.join("target/xtask-tests/atlassian-connect");
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("deploy.jsonc");
@@ -2138,6 +2141,10 @@ mod tests {
         assert_eq!((o.client_id.as_str(), o.revoke.as_deref(), p.hosts.as_slice()), ("atlassian-client", None, &["api.atlassian.com".to_string()][..]));
         assert_eq!(o.authorize, "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent");
         assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Read, fragment_core::catalog::ConnectionAccess::Write]);
+        let ids: Vec<&str> = o.services.iter().flatten().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["jira", "confluence"], "its services, as the skill's file names them");
+        let confluence_read = fragment_core::connection_signin::scopes_asked(o, fragment_core::catalog::ConnectionAccess::Read, Some(&["confluence".to_string()])).unwrap();
+        assert_eq!(confluence_read, ["read:page:confluence", "read:space:confluence", "search:confluence", "read:me", "offline_access"]);
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_ATLASSIAN".into(), "fragment-atlassian-oauth-secret")));
     }
 
