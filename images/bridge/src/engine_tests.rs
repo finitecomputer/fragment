@@ -4406,6 +4406,41 @@ fn turns_in_its_simplex_chat_are_its_owners_phone() {
     assert!(!in_chat(&mut e, "talk--k3x9", 5, "npub1paul", json!({ "text": "after the unlink" }), T0 + 6).expect("a turn").simplex);
 }
 
+/// Goal (Paul, 2026-11-11: their app shows the agent working): what an
+/// agent works on in its SimpleX chat is the seq of each message there its
+/// turns run on, from its claim to its end: one queued behind it, one
+/// waiting on its owner's answer, one in another chat, and any while
+/// unlinked, none. Replay: the same state, the same answer.
+#[test]
+fn what_an_agent_works_on_in_its_simplex_chat() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let phone = |text: &str| records::relayed_message(text, &a, records::VIA_SIMPLEX, &[]);
+    assert!(e.working(&a.fragment).is_empty(), "unlinked: nothing");
+    relaying(&mut e, &[&a]);
+    let first = started(&said(&mut e, &a, &v, 1, &a.identity, phone("first"), T0)).expect("a turn");
+    assert_eq!(e.working(&a.fragment), BTreeSet::from([1]), "its claim answered: working on it");
+    assert_eq!(e.working(&a.fragment), BTreeSet::from([1]), "asked again: the same");
+    assert!(started(&said(&mut e, &a, &v, 2, &a.identity, phone("second"), T0 + 1)).is_none(), "queued behind the first");
+    assert_eq!(e.working(&a.fragment), BTreeSet::from([1]), "a queued one is no work yet");
+    let s = ev(&mut e, Event::End { turn: first.turn.clone(), outcome: Outcome::Idle }, T0 + 2);
+    let second = started(&s).expect("the second runs once the first ends");
+    assert_eq!(e.working(&a.fragment), BTreeSet::from([2]));
+    // ended with no reply (an error): no more
+    ev(&mut e, Event::End { turn: second.turn.clone(), outcome: Outcome::Error("it broke".into()) }, T0 + 3);
+    assert!(e.working(&a.fragment).is_empty(), "ended either way: nothing");
+    // another chat's turn is none of its phone's
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "other--k3x9".into(), record: rec(1, "npub1paul", json!({ "text": "elsewhere" })), view: Some(v.clone()), since: 0 }, T0 + 4);
+    assert!(started(&answered(&mut e, s, T0 + 4)).is_some(), "a turn elsewhere");
+    assert!(e.working(&a.fragment).is_empty(), "not in its SimpleX chat");
+    // running in it, then unlinked: nothing (no link to show it on)
+    started(&said(&mut e, &a, &v, 3, &a.identity, phone("third"), T0 + 5)).expect("a turn");
+    assert_eq!(e.working(&a.fragment), BTreeSet::from([3]));
+    e.step(Input::Relaying(BTreeMap::new()), T0 + 6);
+    assert!(e.working(&a.fragment).is_empty(), "unlinked: nothing");
+}
+
 /// Goal: a turn writes nothing of SimpleX into the state: a computer
 /// without SimpleX keeps its `state.json` as it was, and so does one with.
 #[test]

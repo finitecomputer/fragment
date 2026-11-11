@@ -237,9 +237,13 @@ pub enum Msg {
     /// The agent's reply to a message relayed from SimpleX, posted: to
     /// its owner's app, its text, then its files (copied, `outgoing`).
     Reply { agent: String, text: String, files: Vec<Outgoing> },
-    /// A message of its owner's, of this item, is on their chat (`ok`), or
-    /// was refused there (its poster's word).
-    Delivered { agent: String, item: i64, ok: bool },
+    /// A message of its owner's, of this item, is on their chat (`ok`, as
+    /// `seq` when this life posted it), or was refused there (its poster's
+    /// word).
+    Delivered { agent: String, item: i64, ok: bool, seq: Option<u64> },
+    /// What the agent works on in its SimpleX chat now: the seqs there its
+    /// running turns answer (the engine's `working`).
+    Working { agent: String, seqs: BTreeSet<u64> },
     /// Its SimpleX chat's name is someone else's (`ensure_chat`): another is
     /// chosen.
     ChatTaken { agent: String, chat: String },
@@ -300,6 +304,13 @@ impl Handle {
     /// page (the platform closed its door as it made it).
     pub async fn unlink(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
         self.answered(|reply| Msg::Unlink { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await
+    }
+
+    /// What `agent` works on in its SimpleX chat now (the engine's
+    /// `working`), for its link to show on its owner's messages. False when
+    /// the manager could not take it (the driver says it again).
+    pub fn working(&self, agent: &str, seqs: BTreeSet<u64>) -> bool {
+        self.tx.try_send(Msg::Working { agent: agent.to_string(), seqs }).is_ok()
     }
 
     /// What `agent` posted that its owner's SimpleX app is to get too: its
@@ -806,6 +817,9 @@ struct Slot {
     /// The link ticket taken last, its registration at the platform under
     /// way: only it installs its key (`want`).
     linking: Option<String>,
+    /// What its agent works on in its SimpleX chat, as the engine said last
+    /// (`Msg::Working`): the seqs its link shows working (`Link::react`).
+    working: BTreeSet<u64>,
 }
 
 impl Slot {
@@ -943,7 +957,18 @@ impl Manager {
                     self.send_file(&agent, o);
                 }
             }
-            Msg::Delivered { agent, item, ok } => self.delivered(&agent, item, ok),
+            Msg::Delivered { agent, item, ok, seq } => {
+                if let Some(seq) = seq.filter(|_| ok && item > 0) {
+                    self.apply(&agent, Input::Posted { seq, item });
+                }
+                self.delivered(&agent, item, ok)
+            }
+            Msg::Working { agent, seqs } => {
+                if let Some(s) = self.slots.get_mut(&agent) {
+                    s.working = seqs;
+                    self.react(&agent);
+                }
+            }
             Msg::ChatTaken { agent, chat } => {
                 if let Some(s) = self.slots.get_mut(&agent).filter(|s| s.saved.chat.as_deref() == Some(chat.as_str())) {
                     crate::ev!("simplex.chat_taken", { "agent": agent, "chat": chat });
@@ -1085,6 +1110,7 @@ impl Manager {
                 door,
                 session: None,
                 linking: None,
+                working: BTreeSet::new(),
             });
         }
         self.computer = Some(computer);
@@ -1919,7 +1945,12 @@ impl Manager {
     fn apply(&mut self, f: &str, input: Input<'_>) {
         let Some(s) = self.slots.get_mut(f) else { return };
         let before = s.saved.clone();
-        let actions = s.saved.link.apply(input);
+        let mut actions = s.saved.link.apply(input);
+        // what it shows working follows each change (a start, a ratchet in
+        // step again, a message posted), asked only of a core that runs
+        if s.up && s.core.is_some() {
+            actions.extend(s.saved.link.react(&s.working));
+        }
         // a link let go sends nothing more: its uploads' copies go with it
         if s.saved.link.phase == Phase::Off && !s.saved.sending.is_empty() {
             for sending in std::mem::take(&mut s.saved.sending).into_values() {
@@ -1943,6 +1974,23 @@ impl Manager {
             self.act(f, a);
         }
         self.publish_relaying();
+    }
+
+    /// What its agent works on, as the engine says it now, shown on its
+    /// owner's messages (`Link::react`) while its core runs; else at its
+    /// next start (`apply`).
+    fn react(&mut self, f: &str) {
+        let Some(s) = self.slots.get_mut(f).filter(|s| s.up && s.core.is_some()) else { return };
+        let before = s.saved.link.reacted.clone();
+        let actions = s.saved.link.react(&s.working);
+        if s.saved.link.reacted != before {
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+            }
+        }
+        for a in actions {
+            self.act(f, a);
+        }
     }
 
     fn act(&mut self, f: &str, a: Action) {
@@ -2178,13 +2226,14 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
         let body = records::relayed_message(&text, &agent, records::VIA_SIMPLEX, &[]);
         let id = records::relayed_id(&agent.fragment, &p.inbound.id);
         let files: Vec<LocalFile> = p.file.iter().cloned().collect();
-        match crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, Some(&p.door), crate::limits::POST_TRIES_MAX, stop.clone()).await {
+        let (sent, seq) = crate::driver::post_seq(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, Some(&p.door), crate::limits::POST_TRIES_MAX, stop.clone()).await;
+        match sent {
             crate::driver::Sent::Stopped => return,
             // its file kept: the message is read again at the next start's
             // catch-up (by the same id), and carried then if it can be
             crate::driver::Sent::Refused => {
                 crate::ev!("simplex.unposted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
-                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: false }).await;
+                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: false, seq: None }).await;
                 if !ensure_until(&api, &agent, &chat, &manager, &stop).await {
                     return;
                 }
@@ -2194,7 +2243,7 @@ async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Pos
                 for f in &files {
                     let _ = tokio::fs::remove_file(&f.path).await;
                 }
-                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: true }).await;
+                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: true, seq }).await;
             }
         }
     }
@@ -2228,6 +2277,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::SendFile { .. } => "send_file",
         Cmd::CancelSend { .. } => "cancel_send",
         Cmd::Profile { .. } => "profile",
+        Cmd::React { .. } => "react",
     }
 }
 
@@ -3197,6 +3247,7 @@ mod tests {
             door: None,
             session: None,
             linking: None,
+            working: BTreeSet::new(),
         }
     }
 
@@ -3417,6 +3468,7 @@ mod tests {
             door: None,
             session: None,
             linking: None,
+            working: BTreeSet::new(),
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
@@ -3564,6 +3616,7 @@ mod tests {
             door: None,
             session: None,
             linking: None,
+            working: BTreeSet::new(),
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeMap::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
