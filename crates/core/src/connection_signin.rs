@@ -265,13 +265,33 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
         None => requested.to_vec(),
         Some(s) => {
             let s = s.as_str().filter(|s| s.len() <= SCOPES_MAX * (SCOPE_MAX_BYTES + 1)).ok_or(Invalid)?;
-            bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?
+            spelled_as_asked(bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?, requested)
         }
     };
     if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
         return Err(Refused::NoScopes);
     }
     Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
+}
+
+/// A grant's scopes, each spelled as its row asked for it where the
+/// provider answered it another way: without regard to case, or by the last
+/// segment of a scope asked for as a URL (Microsoft may answer
+/// `https://graph.microsoft.com/Mail.Read` as `Mail.Read`, or lower case).
+/// A scope asked for no way stays as answered, and one answered twice so is
+/// kept once. Whatever reads the grant after (its import, `missing`,
+/// `access_of`) reads the row's own spelling.
+fn spelled_as_asked(granted: Vec<String>, requested: &[String]) -> Vec<String> {
+    let short = |r: &str| r.contains("://").then(|| r.rsplit('/').next().unwrap_or(r)).map(str::to_string);
+    let mut spelled: Vec<String> = vec![];
+    for g in granted {
+        let asked = requested.iter().find(|r| r.eq_ignore_ascii_case(&g) || short(r).is_some_and(|s| s.eq_ignore_ascii_case(&g)));
+        let s = asked.cloned().unwrap_or(g);
+        if !spelled.contains(&s) {
+            spelled.push(s);
+        }
+    }
+    spelled
 }
 
 /// What a connection's row asks for that its grant lacks, in the row's
@@ -872,6 +892,20 @@ mod tests {
         }
         // offline_access with signing in alone is no grant of anything
         assert_eq!(tokens(&granting("openid offline_access"), &o.access.write.scopes).err(), Some(Refused::NoScopes));
+        // Microsoft may answer its Graph scopes by their short names, or in
+        // another case: read in the row's spelling, they connect the same
+        let read = &o.access.read.as_ref().unwrap().scopes;
+        let short = answer(&[]);
+        for scope in ["openid profile email User.Read Mail.Read Calendars.Read Files.Read Contacts.Read", "openid profile email https://graph.microsoft.com/user.read https://graph.microsoft.com/mail.read https://graph.microsoft.com/calendars.read https://graph.microsoft.com/files.read https://graph.microsoft.com/contacts.read", "openid profile email User.Read https://graph.microsoft.com/Mail.Read mail.read Calendars.Read Files.Read Contacts.Read"] {
+            let mut a = short.clone();
+            a["scope"] = json!(scope);
+            let granted = tokens(&a, read).expect(scope);
+            assert_eq!((access_of(&o, &granted.scopes), missing(read, &granted.scopes)), (Some(ConnectionAccess::Read), vec![]), "{scope}");
+            assert!(granted.scopes.iter().all(|s| ["openid", "profile", "email"].contains(&s.as_str()) || read.contains(s)), "{scope}: {:?}", granted.scopes);
+        }
+        let mut wrote = short.clone();
+        wrote["scope"] = json!("openid Mail.Read mail.send");
+        assert_eq!(tokens(&wrote, &o.access.write.scopes).map(|t| access_of(&o, &t.scopes)).ok().flatten(), Some(ConnectionAccess::Write), "a write scope by its short name is read and write");
     }
 
     /// Services: a connect asks for the picked ones' scopes of its access,

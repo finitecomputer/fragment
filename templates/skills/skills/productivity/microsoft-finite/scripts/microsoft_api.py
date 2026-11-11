@@ -80,7 +80,7 @@ def token():
 def call(method, path, body=None, query=None):
     """`method` `path` (from /v1.0/ or /beta/) on Microsoft Graph, its answer
     read as JSON (none for 202 or 204)."""
-    if not re.match(r"^/(v1\.0|beta)/[A-Za-z0-9/_\-.:'()=,!$@~%]*$", path) or ".." in path:
+    if not re.match(r"^/(v1\.0|beta)/[A-Za-z0-9/_\-.:'()=,!$@~%]*$", path) or any(seg in (".", "..") for seg in path.split("/")):
         raise GraphError(0, "bad_path", "a path on Microsoft Graph, from /v1.0/ or /beta/ (e.g. /v1.0/me/mailFolders)")
     url = GRAPH + path + (("?" + urllib.parse.urlencode(query, quote_via=urllib.parse.quote)) if query else "")
     data = None if body is None else json.dumps(body).encode("utf-8")
@@ -138,7 +138,9 @@ def mail_list(args):
     folder = checked(args.folder, FOLDER, "folder")
     query = {"$top": bounded(args.max), "$select": MESSAGE_FIELDS, "$orderby": "receivedDateTime desc"}
     if args.unread:
-        query["$filter"] = "isRead eq false"
+        # Graph takes $orderby beside $filter only where the ordered property
+        # comes first in the filter (else InefficientFilter)
+        query["$filter"] = "receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false"
     out(call("GET", f"/v1.0/me/mailFolders/{folder}/messages", query=query).get("value", []))
 
 
