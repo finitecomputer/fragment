@@ -4410,12 +4410,12 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     let one = b.eval(
         page,
         &format!(
-            "[...document.querySelectorAll('{row} .provider-account-row')].map((a) => [a.querySelector('.provider-account')?.textContent, a.dataset.state, a.querySelector('.provider-missing')?.textContent ?? null, a.querySelector('[data-action=reconnect]')?.textContent ?? null, a.querySelector('[data-action=disconnect]')?.textContent ?? null]).concat([[document.querySelector('{row} [data-action=add-account]')?.textContent ?? null, document.querySelectorAll('{row} select').length]])"
+            "[...document.querySelectorAll('{row} .provider-account-row')].map((a) => [a.querySelector('.provider-account')?.textContent, a.dataset.state, a.querySelector('.provider-missing')?.textContent ?? null, a.querySelector('[data-action=reconnect]')?.textContent ?? null, a.querySelector('[data-action=disconnect]')?.textContent ?? null]).concat([[document.querySelector('{row} [data-action=add-account]')?.textContent ?? null, document.querySelectorAll('{row} select').length, document.querySelectorAll('{row} [data-action=add-account]').length, document.querySelectorAll('{row} .provider-access, {row} [data-action=allow-changes]').length]])"
         ),
     )?;
     s.ok(
-        "a connection that takes several accounts lists each in its row: its label, state, what it was not allowed with a Reconnect to add, and its own Disconnect; the head offers Add another; with one account, no agent is asked which",
-        shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0]]),
+        "a connection that takes several accounts lists each in its row: its label, state, what it was not allowed with a Reconnect to add, and its own Disconnect; the head offers one Add another (its provider has no read-only scope: one access, none said, no Allow changes); with one account, no agent is asked which",
+        shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0, 1, 0]]),
         &one,
     );
     sheet_of(b, page, &row)?;

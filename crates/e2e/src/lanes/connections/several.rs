@@ -112,7 +112,9 @@ pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "a first account connects as with one: Pipes' compatibility connection, named by the provider account's own id (its ID token's sub), listed with its label and scopes",
         ok(&first) && row["state"] == "connected" && row["accountsMax"] == SEVERAL_MAX && accounts.len() == 1 && accounts[0]["account"] == "work-a@oauth.test"
-            && accounts[0]["missing"] == json!([]) && held.len() == 1 && held[0].compatibility && held[0].identifier.as_deref() == Some("work-a") && row["account"] == "work-a@oauth.test",
+            && accounts[0]["missing"] == json!([]) && held.len() == 1 && held[0].compatibility && held[0].identifier.as_deref() == Some("work-a") && row["account"] == "work-a@oauth.test"
+            // read and write alone: no access said, of the row or the account
+            && row.get("access").is_none() && accounts[0].get("access").is_none(),
         json!({ "row": row, "held": format!("{held:?}") }),
     );
     let work = ids(&accounts)[0].clone();
