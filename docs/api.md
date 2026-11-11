@@ -2060,7 +2060,7 @@ docs/computers.md's; these routes are its owner's. A view is
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on. One gone or not on it: the view, unchanged |
 | `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}` | its owner | `{account: "<id>" \| null}` → the view: which of the owner's accounts at a several-account connection the agent uses (`null`, the oldest connected). Not theirs 404; another provider, or no `account`, 400 |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers the agent may have swapped in; `null` every one its owner has (decision 44). One not offered, or none named, 400 |
-| `POST /api/computers/{id}/agents/{fragment}/door` | its owner | `{door, act: "link" \| "unlink"}` → a ticket (An agent's doors). `door` a connector's id (else 400; `simplex` today); a link of one the deployment does not allow 403. Anyone else 404; an agent not on this computer 403 |
+| `POST /api/computers/{id}/agents/{fragment}/door` | its owner | `{door, act: "link" \| "unlink" \| "adopt"}` → a ticket (An agent's doors). `door` a connector's id (else 400; `simplex` today); a link of one the deployment does not allow 403. Anyone else 404; an agent not on this computer 403 |
 | `GET /api/computers/{id}/uses` | its owner | → `ComputerUses {computer, month, uses: [{provider, agent, calls, micros}]}`: this UTC month's calls through its swap a provider answered (under 500), and their charge (an operator key's; others 0). Thirteen months kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same for that month; not a month 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) signing a browser in to the computer's origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`). `path` (default `/`) starts with `/`, at most 512 visible characters, with no `//`, `#`, `\`, `.` or `..` segment, else 400 |
@@ -2103,16 +2103,19 @@ What comes through one speaks for its owner, so only the owner opens one,
 and the agent itself, whose tools act with its key, can neither open one
 nor speak through one (`fragment_core::door`):
 
-- **A ticket** starts a link or an unlink, made only by its owner (the
-  route above): `{door, act, agent, computer, nonce, exp, sig}`, `sig` the
-  agent fragment's key's BIP-340 signature of the SHA-256 of `fragment
+- **A ticket** starts a link, an unlink, or an adoption, made only by its
+  owner (the route above). An adoption (`adopt`) is a link to the
+  conversation their old finite.computer agent had with them, set aside
+  from its move's stage (docs/bridge.md, "SimpleX"); it opens the door as
+  a link does. The ticket is `{door, act, agent, computer, nonce, exp,
+  sig}`, `sig` the agent fragment's key's BIP-340 signature of the SHA-256 of `fragment
   door ticket 1\n<door>\n<act>\n<agent>\n<computer>\n<nonce>\n<exp>`, for
   ten minutes. The computer's bridge checks it with that key and takes each
   once. An unlink's closes the door as it is made.
-- **A link's ticket is redeemed once**, by the computer's guest: `POST
-  /api/computer/door {agent, door, nonce, key}` (docs/computers.md)
-  registers `key` (64 hex), the door's public key. Only the link ticket made
-  last, within its ten minutes, is taken; anything else is 403. An agent
+- **A link's or an adoption's ticket is redeemed once**, by the
+  computer's guest: `POST /api/computer/door {agent, door, nonce, key}`
+  (docs/computers.md) registers `key` (64 hex), the door's public key. Only
+  the link or adoption ticket made last, within its ten minutes, is taken; anything else is 403. An agent
   has one such door: a link redeemed replaces the one open.
 - **A relayed record** (`relayed` in its body: docs/chat-records.md, "A
   relayed message") `{via, for, agent, at, sig}` is taken only from an
