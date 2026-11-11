@@ -52,6 +52,9 @@ pub const PART_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const PART_MIN_BYTES: u64 = 5 * 1024 * 1024;
 /// Parts of one stage, at most (R2's): 640 GB at `PART_MAX_BYTES`.
 pub const PARTS_MAX: u32 = 10_000;
+/// Why staff withdrew a move (`AdminAct`'s `why`), in bytes: a line the
+/// will-not-move list shows, never empty.
+pub const WHY_MAX_BYTES: usize = 200;
 
 /// Whether `id` is an old agent's id (`OLD_ID_MAX_BYTES`).
 pub fn valid_old(id: &str) -> bool {
@@ -703,10 +706,14 @@ pub struct OfferYes {
 // ---- The operators' routes (`/api/admin/migrations`; not on the wire)
 
 /// `POST /api/admin/migrations/{old}`: staff's act on one move: `op`
-/// `retry`, `restart-old`, `retire` or `withdraw` (another is 400).
+/// `retry`, `restart-old`, `retire`, `withdraw` or `include` (another is
+/// 400). `withdraw` says `why` (1 to `WHY_MAX_BYTES`), and takes an old
+/// agent no roster has listed yet; `include` takes back staff's withdrawal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminAct {
     pub op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 /// `GET /api/admin/migrations[?after=<old>]`: every move, by old id, a
@@ -745,6 +752,10 @@ pub struct AdminMove {
     /// When its stage was written, while it is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_ms: Option<i64>,
+    /// Why staff withdrew it, while they keep it out: the will-not-move
+    /// list is the moves that have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 #[cfg(test)]

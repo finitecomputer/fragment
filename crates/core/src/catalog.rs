@@ -759,7 +759,7 @@ impl Catalog {
     /// of its own (`vault::row`), for one request's swap: their names are
     /// none of the catalog's (`vault::name_ok`).
     pub fn with(&self, vault: Vec<Provider>) -> Catalog {
-        assert!(vault.iter().all(|v| self.get(&v.name).is_none()), "a vault's secret is named apart from the catalog's providers");
+        assert!(vault.iter().all(|v| v.kind == Kind::Own && self.named(&v.name, false).is_none()), "a vault's secret is an own key, named apart from the catalog's keys");
         Catalog { providers: self.providers.iter().cloned().chain(vault).collect() }
     }
 
@@ -769,6 +769,15 @@ impl Catalog {
 
     pub fn get(&self, name: &str) -> Option<&Provider> {
         self.providers.iter().find(|p| p.name == name)
+    }
+
+    /// The row a placeholder naming `name` is for: a connection's (`fcx_`,
+    /// `connection`) or a key's (`fck_`). A person's Vault secret, a key,
+    /// may share a connection's name (`vault::name_ok`; a connection the
+    /// deployment offers after its person named a secret so), and each
+    /// placeholder still names one row.
+    pub fn named(&self, name: &str, connection: bool) -> Option<&Provider> {
+        self.providers.iter().find(|p| p.name == name && (p.kind == Kind::Connection) == connection)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1087,6 +1096,22 @@ mod tests {
         let mut g = google();
         g["connection_oauth"] = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "scopes": ["mail.read"] });
         assert!(matches!(parse(json!([g])), Err(CatalogError::Shape(_))), "one list of scopes for both is a row of before: refused, never read as either");
+    }
+
+    /// A person's Vault secret (an own key) may share a connection's name,
+    /// each placeholder naming its kind's row; a key's name is the
+    /// catalog's alone.
+    #[test]
+    fn a_vault_secret_may_share_a_connections_name_and_never_a_keys() {
+        let c = parse(json!([google(), { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["PERPLEXITY_API_KEY"] }])).unwrap();
+        let bearer = Placement::Header { name: "authorization".into(), format: "Bearer {}".into() };
+        let with = c.with(vec![crate::vault::row("google", vec!["api.vault.test".into()], bearer.clone())]);
+        assert_eq!(with.named("google", true).map(|p| p.hosts.clone()), Some(vec!["gmail.googleapis.com".to_string(), "www.googleapis.com".to_string()]), "the connection's");
+        assert_eq!(with.named("google", false).map(|p| p.hosts.clone()), Some(vec!["api.vault.test".to_string()]), "the Vault's");
+        assert_eq!((c.named("google", false), c.named("perplexity", true)), (None, None), "no row of the other kind");
+        assert_eq!(c.named("perplexity", false).map(|p| p.kind), Some(Kind::Operator));
+        let key = crate::vault::row("perplexity", vec!["api.vault.test".into()], bearer);
+        assert!(std::panic::catch_unwind(|| c.with(vec![key])).is_err(), "a key's name is never a Vault's");
     }
 
     /// Several accounts: a connection whose callback imports them (its

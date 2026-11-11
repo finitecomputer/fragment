@@ -769,6 +769,35 @@ impl Api {
         self.head_of(req, &route).await
     }
 
+    /// `GET /api/migrations/stages/{stage}/zip`, bytes `from` to `to`
+    /// (inclusive), as `agent`: its own stage, which the platform answers
+    /// only while its move imports (docs/migrations.md). The bytes, and the
+    /// zip's whole size (its `content-range`): at most `to - from + 1`
+    /// bytes, read within `HTTP_TIMEOUT_MS`.
+    pub async fn stage_range(&self, agent: &str, stage: &str, from: u64, to: u64) -> Result<(Bytes, u64), ApiError> {
+        assert!(to >= from && to - from < 64 << 20, "a stage's range is bounded");
+        let ok = !stage.is_empty() && stage.len() <= 96 && stage.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+        if !ok {
+            return Err(ApiError::Decode(format!("{stage:?} is not a stage's id")));
+        }
+        let route = format!("/api/migrations/stages/{stage}/zip");
+        let req = Request::builder().method(Method::GET).uri(self.base.url(&route)).header("host", self.base.authority()).header(AGENT_HEADER, agent).header("range", format!("bytes={from}-{to}"));
+        let req = req.body(whole(Bytes::new())).map_err(|e| ApiError::Transport(e.to_string()))?;
+        let res = self.head_of(req, &route).await?;
+        let total = res.headers().get("content-range").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit_once('/')).and_then(|(_, t)| t.parse::<u64>().ok());
+        let total = match (res.status(), total) {
+            (StatusCode::PARTIAL_CONTENT, Some(t)) => t,
+            _ => return Err(ApiError::Decode(format!("{route}: a range answered without its place in the whole"))),
+        };
+        let max = usize::try_from(to - from + 1).expect("bounded above");
+        let read = tokio::time::timeout(Duration::from_millis(limits::HTTP_TIMEOUT_MS), Limited::new(res.into_body(), max).collect()).await;
+        match read {
+            Ok(Ok(b)) => Ok((b.to_bytes(), total)),
+            Ok(Err(e)) => Err(ApiError::Transport(e.to_string())),
+            Err(_) => Err(ApiError::Transport(format!("{route}: its bytes did not come in {} ms", limits::HTTP_TIMEOUT_MS))),
+        }
+    }
+
     /// `GET /api/f/{name}/files`: the files at main.
     pub async fn files(&self, agent: &str, fragment: &str) -> Result<Vec<FileEntry>, ApiError> {
         #[derive(Deserialize)]

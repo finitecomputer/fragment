@@ -798,6 +798,7 @@ impl Browser {
             "Enter" => 13,
             "Escape" => 27,
             "Tab" => 9,
+            " " => 32,
             "ArrowLeft" => 37,
             "ArrowUp" => 38,
             "ArrowRight" => 39,
@@ -805,10 +806,11 @@ impl Browser {
             _ => bail!("no key code for {key}"),
         };
         for kind in ["keyDown", "keyUp"] {
-            let mut event = json!({ "type": kind, "key": key, "code": key, "windowsVirtualKeyCode": code, "modifiers": if shift { 8 } else { 0 } });
-            // a key that types: Enter's keydown carries its character
-            if kind == "keyDown" && key == "Enter" {
-                event["text"] = json!("\r");
+            let named = if key == " " { "Space" } else { key };
+            let mut event = json!({ "type": kind, "key": key, "code": named, "windowsVirtualKeyCode": code, "modifiers": if shift { 8 } else { 0 } });
+            // a key that types: Enter's and Space's keydown carry their character
+            if kind == "keyDown" && (key == "Enter" || key == " ") {
+                event["text"] = json!(if key == "Enter" { "\r" } else { " " });
             }
             self.send("Input.dispatchKeyEvent", event, Some(&page.session))?;
         }

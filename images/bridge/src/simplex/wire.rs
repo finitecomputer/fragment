@@ -19,6 +19,13 @@ pub type ContactId = i64;
 pub type ConnId = i64;
 /// A file's id in the core's own database (`fileId`).
 pub type FileId = i64;
+/// A group's id in the core's own database (`groupId`).
+pub type GroupId = i64;
+/// A user's id in the core's own database (`userId`).
+pub type UserId = i64;
+/// Contacts or groups one list read takes, at most; past it the rest are
+/// not read (an adopted identity's leftovers: `link::LEFTOVERS_MAX`).
+pub const LIST_MAX: usize = 1_024;
 
 /// A frame from the core, at most (a chat's last items, each with its
 /// contact's profile, come to a few KB each).
@@ -112,6 +119,23 @@ pub enum Cmd {
     /// or `userProfileNoChange` for the name it holds. `name` is one
     /// `name_ok` takes.
     Profile { name: String },
+    /// The active user (`/u`): an adopted identity's, read before its
+    /// contacts and groups are listed.
+    User,
+    /// Starts a core run with `-m` (maintenance) without subscribing to
+    /// anything (`/_start main=off`): nothing arrives while it is read.
+    StartQuiet,
+    /// The user's contacts, each with its name (`/_contacts <user>`).
+    Contacts { user: UserId },
+    /// The user's groups (`/_groups <user>`).
+    Groups { user: UserId },
+    /// Leave a group, its members told (`/_leave #<group>`).
+    LeaveGroup { group: GroupId },
+    /// A group deleted here, after leaving it (`/_delete #<group> full notify=on`).
+    DeleteGroup { group: GroupId },
+    /// The user's contact address deleted (`/delete_address`): no one
+    /// connects through it again.
+    DeleteAddress,
 }
 
 /// A display name the core takes as it is: one `valid_name` leaves as it
@@ -256,6 +280,25 @@ impl Cmd {
                 assert!(name_ok(name), "a profile's name the core takes as it is");
                 format!("/p '{name}'")
             }
+            Cmd::User => "/u".into(),
+            Cmd::StartQuiet => "/_start main=off".into(),
+            Cmd::Contacts { user } => {
+                assert!(*user > 0, "a list names its user");
+                format!("/_contacts {user}")
+            }
+            Cmd::Groups { user } => {
+                assert!(*user > 0, "a list names its user");
+                format!("/_groups {user}")
+            }
+            Cmd::LeaveGroup { group } => {
+                assert!(*group > 0, "a leave names a group");
+                format!("/_leave #{group}")
+            }
+            Cmd::DeleteGroup { group } => {
+                assert!(*group > 0, "a delete names a group");
+                format!("/_delete #{group} full notify=on")
+            }
+            Cmd::DeleteAddress => "/delete_address".into(),
         }
     }
 
@@ -356,6 +399,27 @@ pub enum Resp {
     /// and whether that changed it (`userProfileUpdated`, sent on to its
     /// contacts) or it was the name already (`userProfileNoChange`).
     Profile { name: String, changed: bool },
+    /// The active user (`activeUser`).
+    User { id: UserId },
+    /// The user's contacts, each with its name as `Connected` reads it
+    /// (`contactsList`), at most `LIST_MAX`.
+    Contacts(Vec<(ContactId, String)>),
+    /// The user's groups (`groupsList`), at most `LIST_MAX`.
+    Groups(Vec<GroupId>),
+    /// The user left a group (`leftMemberUser`).
+    GroupLeft { group: GroupId },
+    /// A group deleted here (`groupDeletedUser`).
+    GroupDeleted { group: GroupId },
+    /// The user's contact address deleted (`userContactLinkDeleted`).
+    AddressDeleted,
+    /// Another client took the contact's queues (`contactAnotherClient`):
+    /// a core run elsewhere on a copy of these databases (an old agent
+    /// started again after its conversation moved: FIN-483). This core
+    /// hears nothing more on them until it subscribes again.
+    AnotherClient { contact: ContactId },
+    /// A connection's subscription ended (`subscriptionEnd`), the contact's
+    /// when it names one (another client subscribed to its queue).
+    SubscriptionEnd { contact: Option<ContactId> },
     /// A command failed (`chatCmdError`), or the core reports an error of
     /// its own (`chatError`): what it said, cut.
     Error { what: String },
@@ -533,6 +597,21 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
             let name = p["displayName"].as_str().ok_or_else(|| shape("a profile with no name"))?;
             Resp::Profile { name: cut(name, NAME_MAX_BYTES).into(), changed }
         }
+        "activeUser" => Resp::User { id: id(&r["user"]["userId"], "a user with no id")? },
+        "contactsList" => {
+            let cs = r["contacts"].as_array().ok_or_else(|| shape("contacts with no list"))?;
+            let read = |c: &Value| Ok((id(&c["contactId"], "a contact with no id")?, cut(c["profile"]["displayName"].as_str().unwrap_or(""), NAME_MAX_BYTES).to_string()));
+            Resp::Contacts(cs.iter().take(LIST_MAX).map(read).collect::<Result<_, WireError>>()?)
+        }
+        "groupsList" => {
+            let gs = r["groups"].as_array().ok_or_else(|| shape("groups with no list"))?;
+            Resp::Groups(gs.iter().take(LIST_MAX).map(|g| id(&g["groupId"], "a group with no id")).collect::<Result<_, WireError>>()?)
+        }
+        "leftMemberUser" => Resp::GroupLeft { group: id(&r["groupInfo"]["groupId"], "a leave with no group")? },
+        "groupDeletedUser" => Resp::GroupDeleted { group: id(&r["groupInfo"]["groupId"], "a delete with no group")? },
+        "userContactLinkDeleted" => Resp::AddressDeleted,
+        "contactAnotherClient" => Resp::AnotherClient { contact: id(&r["contact"]["contactId"], "another client of no contact")? },
+        "subscriptionEnd" => Resp::SubscriptionEnd { contact: r["connectionEntity"]["contact"]["contactId"].as_i64().filter(|n| *n > 0) },
         "chatCmdError" | "chatError" => Resp::Error { what: error_of(&r["chatError"]) },
         other => Resp::Other(cut(other, 64).into()),
     })
@@ -698,6 +777,33 @@ mod tests {
         assert_eq!(fixture("profileNoChange"), Resp::Profile { name: "Waffle Bot".into(), changed: false });
         assert_eq!(fixture("invalidDisplayName"), Resp::Error { what: "error invalidDisplayName".into() });
         assert!(matches!(parse(r#"{"resp":{"type":"userProfileUpdated","toProfile":{}}}"#), Err(WireError::Shape(_))), "a profile with no name");
+        // an adopted identity's maintenance read and its leftovers let go:
+        // the shapes v7.0.3 sent the lab (an old v7.0.2 bot's databases,
+        // 2026-11-10), trimmed to what is read
+        let user = r#"{"corrId":"1","resp":{"type":"activeUser","user":{"userId":1,"localDisplayName":"FiniteAgent","profile":{"displayName":"FiniteAgent"}}}}"#;
+        assert_eq!(parse(user).expect("a frame").resp, Resp::User { id: 1 });
+        let contacts = r#"{"corrId":"2","resp":{"type":"contactsList","user":{"userId":1},"contacts":[{"contactId":3,"localDisplayName":"phone","profile":{"displayName":"phone"}},{"contactId":4,"localDisplayName":"friend","profile":{"displayName":"friend"}}]}}"#;
+        assert_eq!(parse(contacts).expect("a frame").resp, Resp::Contacts(vec![(3, "phone".into()), (4, "friend".into())]));
+        let groups = r#"{"corrId":"3","resp":{"type":"groupsList","user":{"userId":1},"groups":[{"groupId":1,"localDisplayName":"team","membership":{"memberRole":"member"}}]}}"#;
+        assert_eq!(parse(groups).expect("a frame").resp, Resp::Groups(vec![1]));
+        let left = r#"{"corrId":"4","resp":{"type":"leftMemberUser","user":{"userId":1},"groupInfo":{"groupId":1}}}"#;
+        assert_eq!(parse(left).expect("a frame").resp, Resp::GroupLeft { group: 1 });
+        let gone = r#"{"corrId":"5","resp":{"type":"groupDeletedUser","user":{"userId":1},"groupInfo":{"groupId":1}}}"#;
+        assert_eq!(parse(gone).expect("a frame").resp, Resp::GroupDeleted { group: 1 });
+        assert_eq!(parse(r#"{"corrId":"6","resp":{"type":"userContactLinkDeleted","user":{"userId":1}}}"#).expect("a frame").resp, Resp::AddressDeleted);
+        let none = r#"{"corrId":"7","resp":{"type":"chatCmdError","chatError":{"type":"errorStore","storeError":{"type":"userContactLinkNotFound"}}}}"#;
+        assert_eq!(parse(none).expect("a frame").resp, Resp::Error { what: "errorStore userContactLinkNotFound".into() });
+        assert!(matches!(parse(r#"{"resp":{"type":"contactsList","contacts":[{"contactId":0}]}}"#), Err(WireError::Shape(_))), "a contact with no id");
+        let many = json!({ "resp": { "type": "groupsList", "groups": (1..=LIST_MAX as i64 + 5).map(|g| json!({ "groupId": g })).collect::<Vec<_>>() } });
+        assert!(matches!(parse(&many.to_string()).expect("a frame").resp, Resp::Groups(g) if g.len() == LIST_MAX), "a list is bounded");
+        // FIN-483: an old core run again on a copy of the databases; v7.0.3
+        // said these to the lab's (2026-11-10), trimmed to what is read
+        let another = r#"{"resp":{"type":"contactAnotherClient","user":{"userId":1},"contact":{"contactId":3,"localDisplayName":"phone","activeConn":{"connId":2}}}}"#;
+        assert_eq!(parse(another).expect("a frame").resp, Resp::AnotherClient { contact: 3 });
+        let address = r#"{"resp":{"type":"subscriptionEnd","user":{"userId":1},"connectionEntity":{"type":"userContactConnection","entityConnection":{"connId":1},"userContact":{"userContactLinkId":1}}}}"#;
+        assert_eq!(parse(address).expect("a frame").resp, Resp::SubscriptionEnd { contact: None });
+        let direct = r#"{"resp":{"type":"subscriptionEnd","connectionEntity":{"type":"rcvDirectMsgConnection","entityConnection":{"connId":2},"contact":{"contactId":3}}}}"#;
+        assert_eq!(parse(direct).expect("a frame").resp, Resp::SubscriptionEnd { contact: Some(3) });
     }
 
     /// Goal: a command's line is what the lab's core took.
@@ -739,6 +845,14 @@ mod tests {
         // a profile's name, quoted: one with a space reads whole
         assert_eq!(Cmd::Profile { name: "Waffle Bot".into() }.line(), "/p 'Waffle Bot'");
         assert_eq!(Cmd::Profile { name: "Waffle".into() }.line(), "/p 'Waffle'");
+        // an adopted identity's read and its leftovers (the lab took each)
+        assert_eq!(Cmd::User.line(), "/u");
+        assert_eq!(Cmd::StartQuiet.line(), "/_start main=off");
+        assert_eq!(Cmd::Contacts { user: 1 }.line(), "/_contacts 1");
+        assert_eq!(Cmd::Groups { user: 1 }.line(), "/_groups 1");
+        assert_eq!(Cmd::LeaveGroup { group: 2 }.line(), "/_leave #2");
+        assert_eq!(Cmd::DeleteGroup { group: 2 }.line(), "/_delete #2 full notify=on");
+        assert_eq!(Cmd::DeleteAddress.line(), "/delete_address");
     }
 
     /// Goal: `valid_name` is the core's `mkValidName`, by the core's own

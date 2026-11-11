@@ -720,7 +720,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with `input` and `output`. A channel's run whose channel the asker may not read (or no longer declared) withholds `input` and `error` (`withheld: true`). `output` is the app's own answer, shown to viewers whatever it copied |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
-| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, nextAt?}], paused}` |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
@@ -1893,7 +1893,7 @@ included, is 403. No answer names a value.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/vault` | a person | → `SecretList {secrets: [{name, hosts, place, agents, setAt}]}`, by name |
-| `PUT /api/vault/{secret}` | a person | `PutSecret {value, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog provider's. `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets (400 past it); anything else wrong 400, nothing written |
+| `PUT /api/vault/{secret}` | a person | `PutSecret {value, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog key's (a connection's name may be one: its placeholder is `fcx_`, the secret's `fck_`). `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets (400 past it); anything else wrong 400, nothing written |
 | `DELETE /api/vault/{secret}` | a person | → `SecretRemoved {name, removed}` |
 
 ## The shell
@@ -1904,7 +1904,7 @@ is what other parties rely on.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `/settings`, `/apps`, `/history`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
+| `GET /`, `/settings`, `/apps`, `/history`, `/schedules`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
 | `GET /about`, `/privacy`, `/terms` | static pages, for anyone |
 | `GET /admin` | the operators' page (Operators: the admin) |
 | `GET /share/<name>` | the share sheet (Sharing) |
@@ -2034,7 +2034,7 @@ machine behind them, are docs/migrations.md. Without the deployment's
 | `GET /api/migrations/stages/{stage}/zip` | the same | the zip; `Range` → 206 |
 | `POST /api/migrations/stages/{stage}/done` | the same | `StageDone {ok, report_sha256?, why?}` → `MoveAt {state}` |
 | `GET /api/admin/migrations` | an operator | → `AdminMoves {moves, next?}` (`?after=<old>`) |
-| `POST /api/admin/migrations/{old}` | an operator | `AdminAct {op}` (`retry`, `restart-old`, `retire`, `withdraw`) → `AdminMove` |
+| `POST /api/admin/migrations/{old}` | an operator | `AdminAct {op, why?}` (`retry`, `restart-old`, `retire`, `withdraw` with its `why`, `include`) → `AdminMove`, or `null` once gone |
 
 ## Computers (docs/computers.md)
 
@@ -2060,7 +2060,7 @@ docs/computers.md's; these routes are its owner's. A view is
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on. One gone or not on it: the view, unchanged |
 | `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}` | its owner | `{account: "<id>" \| null}` → the view: which of the owner's accounts at a several-account connection the agent uses (`null`, the oldest connected). Not theirs 404; another provider, or no `account`, 400 |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers the agent may have swapped in; `null` every one its owner has (decision 44). One not offered, or none named, 400 |
-| `POST /api/computers/{id}/agents/{fragment}/door` | its owner | `{door, act: "link" \| "unlink"}` → a ticket (An agent's doors). `door` a connector's id (else 400; `simplex` today); a link of one the deployment does not allow 403. Anyone else 404; an agent not on this computer 403 |
+| `POST /api/computers/{id}/agents/{fragment}/door` | its owner | `{door, act: "link" \| "unlink" \| "adopt"}` → a ticket (An agent's doors). `door` a connector's id (else 400; `simplex` today); a link of one the deployment does not allow 403. Anyone else 404; an agent not on this computer 403 |
 | `GET /api/computers/{id}/uses` | its owner | → `ComputerUses {computer, month, uses: [{provider, agent, calls, micros}]}`: this UTC month's calls through its swap a provider answered (under 500), and their charge (an operator key's; others 0). Thirteen months kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same for that month; not a month 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) signing a browser in to the computer's origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`). `path` (default `/`) starts with `/`, at most 512 visible characters, with no `//`, `#`, `\`, `.` or `..` segment, else 400 |
@@ -2103,16 +2103,19 @@ What comes through one speaks for its owner, so only the owner opens one,
 and the agent itself, whose tools act with its key, can neither open one
 nor speak through one (`fragment_core::door`):
 
-- **A ticket** starts a link or an unlink, made only by its owner (the
-  route above): `{door, act, agent, computer, nonce, exp, sig}`, `sig` the
-  agent fragment's key's BIP-340 signature of the SHA-256 of `fragment
+- **A ticket** starts a link, an unlink, or an adoption, made only by its
+  owner (the route above). An adoption (`adopt`) is a link to the
+  conversation their old finite.computer agent had with them, set aside
+  from its move's stage (docs/bridge.md, "SimpleX"); it opens the door as
+  a link does. The ticket is `{door, act, agent, computer, nonce, exp,
+  sig}`, `sig` the agent fragment's key's BIP-340 signature of the SHA-256 of `fragment
   door ticket 1\n<door>\n<act>\n<agent>\n<computer>\n<nonce>\n<exp>`, for
   ten minutes. The computer's bridge checks it with that key and takes each
   once. An unlink's closes the door as it is made.
-- **A link's ticket is redeemed once**, by the computer's guest: `POST
-  /api/computer/door {agent, door, nonce, key}` (docs/computers.md)
-  registers `key` (64 hex), the door's public key. Only the link ticket made
-  last, within its ten minutes, is taken; anything else is 403. An agent
+- **A link's or an adoption's ticket is redeemed once**, by the
+  computer's guest: `POST /api/computer/door {agent, door, nonce, key}`
+  (docs/computers.md) registers `key` (64 hex), the door's public key. Only
+  the link or adoption ticket made last, within its ten minutes, is taken; anything else is 403. An agent
   has one such door: a link redeemed replaces the one open.
 - **A relayed record** (`relayed` in its body: docs/chat-records.md, "A
   relayed message") `{via, for, agent, at, sig}` is taken only from an
