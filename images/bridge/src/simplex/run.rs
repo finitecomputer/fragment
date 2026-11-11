@@ -386,10 +386,14 @@ impl Handle {
     pub async fn set_aside_first(&self, agent: &str, stage: &str) {
         let t0 = Instant::now();
         let (reply, ended) = oneshot::channel();
-        if self.tx.send(Msg::Staged { agent: agent.to_string(), stage: stage.to_string(), reply }).await.is_err() {
-            return;
-        }
-        let waited = tokio::time::timeout(Duration::from_millis(SET_ASIDE_WAIT_MS), ended).await.is_ok();
+        // the bound holds the ask too (Codex's review): a manager whose
+        // inbox stays full never holds the routine past it
+        let asked = async {
+            if self.tx.send(Msg::Staged { agent: agent.to_string(), stage: stage.to_string(), reply }).await.is_ok() {
+                let _ = ended.await;
+            }
+        };
+        let waited = tokio::time::timeout(Duration::from_millis(SET_ASIDE_WAIT_MS), asked).await.is_ok();
         crate::ev!("simplex.routine_released", { "agent": agent, "stage": stage, "waitedMs": t0.elapsed().as_millis() as u64, "timedOut": !waited });
     }
 
