@@ -15,8 +15,10 @@
 //!                    and text on real models (xtask/src/dev_agent.rs);
 //!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
 //!                    docs/self-host.md, seam 1): no computers, no cards,
-//!                    the secrets in .dev.vars behind the cell's stand-ins
-//!                    for the store's bindings; FRAGMENT_MODELS_FILE and
+//!                    the secrets behind the cell's stand-ins for the
+//!                    store's bindings, in .dev.vars or, with
+//!                    FRAGMENT_SECRETS_BACKEND=openbao, in OpenBao on :8802
+//!                    (seam 12); FRAGMENT_MODELS_FILE and
 //!                    FRAGMENT_MODEL_KEY_FILE put the text tiers on this
 //!                    machine's own models (seam 3)
 //!   try <template> [name]
@@ -154,6 +156,9 @@ const DEV_MAIL_PORT: u16 = 8798;
 /// The Stripe fake (docs/billing.md): dev never charges a card; its
 /// Checkout is a page with a Pay button.
 const DEV_STRIPE_PORT: u16 = 8800;
+/// OpenBao, on loopback, when the cell's secrets are its (on celld,
+/// `FRAGMENT_SECRETS_BACKEND=openbao`: `dev_openbao`).
+const DEV_OPENBAO_PORT: u16 = 8802;
 const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
@@ -305,6 +310,9 @@ fn dev(args: &[String]) -> Result<()> {
     let operator = devstack::dev_secret("operator-key", || fragment_nip98::Keys::generate().secret_hex())?;
     let operator = fragment_nip98::Keys::from_secret_hex(operator.trim()).with_context(|| format!("{} holds an operator key (64 hex)", operator_file.display()))?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    // the cell's own secrets: wrangler's local store, or on celld the
+    // stand-ins' variables or OpenBao behind them (docs/self-host.md, seam 12)
+    let openbao = dev_openbao(celld.is_some(), clean, DEV_OPENBAO_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
     stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
@@ -377,13 +385,16 @@ fn dev(args: &[String]) -> Result<()> {
         // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
         connectors: celld.as_ref().map(|_| devstack::celld::connectors()),
         // wrangler's local store under cell/.wrangler/state; celld has none,
-        // and the cell's stand-ins read .dev.vars (seam 12)
-        secrets: match celld {
-            None => devstack::Secrets::Store,
-            Some(_) => devstack::Secrets::Shim,
+        // and the cell's stand-ins read .dev.vars or OpenBao (seam 12)
+        secrets: match (&celld, &openbao) {
+            (None, _) => devstack::Secrets::Store,
+            (Some(_), None) => devstack::Secrets::Shim,
+            (Some(_), Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
         },
     };
     fleet.configure(&tools, &devstack::cell_dir())?;
+    // the cell's token, renewed while the stack runs (each start renews it too)
+    let _renewer = openbao.as_ref().map(|(bao, _)| devstack::openbao::Renewer::start(bao.target(), devstack::openbao::RENEW_EVERY));
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         listener: devstack::hold_port(DEV_PORT)?,
@@ -414,6 +425,17 @@ fn dev(args: &[String]) -> Result<()> {
         },
     }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
+    match &openbao {
+        Some((bao, took)) => println!(
+            "  secrets:      OpenBao {} at {} on loopback (ready in {took:.1?}; its state {}, its log {})",
+            devstack::openbao::OPENBAO_VERSION,
+            bao.target().addr,
+            bao.layout().dir.display(),
+            bao.layout().log().display()
+        ),
+        None if celld.is_some() => println!("  secrets:      the cell's variables (.dev.vars; FRAGMENT_SECRETS_BACKEND=openbao for OpenBao)"),
+        None => println!("  secrets:      wrangler's local Secrets Store"),
+    }
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     if workos_fake.is_some() {
@@ -443,6 +465,35 @@ fn dev(args: &[String]) -> Result<()> {
         println!("removed {} containers the dev node left", removed.containers);
     }
     Ok(())
+}
+
+/// The dev stack's OpenBao (docs/self-host.md, seam 12), when the cell's
+/// secrets are its: on celld, `FRAGMENT_SECRETS_BACKEND` is `vars` (the
+/// stand-ins' variables, the default) or `openbao`; on wrangler, which has
+/// a Secrets Store of its own, unset. The pinned OpenBao (or
+/// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`, its state in
+/// `target/devstack/openbao-<port>` (cleared by `--clean`, after which
+/// every secret is seeded again). With it, how long its start took.
+fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
+    let var = std::env::var("FRAGMENT_SECRETS_BACKEND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if !celld {
+        if let Some(v) = var {
+            bail!("FRAGMENT_SECRETS_BACKEND={v} is celld's: wrangler dev has a Secrets Store of its own (drop it, or add --runtime celld)");
+        }
+        return Ok(None);
+    }
+    match var.as_deref().unwrap_or("vars") {
+        "vars" => return Ok(None),
+        "openbao" => {}
+        other => bail!("FRAGMENT_SECRETS_BACKEND is vars or openbao, not {other:?}"),
+    }
+    let dir = devstack::repo_root().join(format!("target/devstack/openbao-{port}"));
+    if clean && dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+    }
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir, port, audit: false };
+    Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
 }
 
 /// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
