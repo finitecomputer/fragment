@@ -823,8 +823,9 @@ pub fn brain_release(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     let wait = Duration::from_secs(30);
-    // its tree drawn: the page's scripts, the search box's among them, have run
-    let shown = chrome.until(&tab, "document.getElementById('tree')?.textContent.includes('garden') && document.getElementById('reader')?.textContent.includes('Each folder here is a wiki')", wait);
+    // its tree and its graph drawn (a brain opens on its graph, files.graph):
+    // the page's scripts, the search box's among them, have run
+    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && !!document.querySelector('#graph .node[data-path=\"{TOMATOES}\"]')"), wait);
     chrome.eval(&tab, &format!("(() => {{ const q = document.getElementById('q'); q.value = {}; q.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()", serde_json::to_string(TOMATO_QUESTION)?))?;
     let listed = chrome.until(&tab, "document.querySelector('.hit .hit-title')?.textContent === 'Tomatoes'", wait);
     let _ = chrome.screenshot(&tab, &shots.join("search.png"));
