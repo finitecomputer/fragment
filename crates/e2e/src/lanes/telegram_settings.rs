@@ -15,8 +15,9 @@
 //!   that keeps no third-party cookie, as Safari 18.5–26.1), the dialog
 //!   opens that setup page in a tab.
 //! - `from_settings`: an agent with no Telegram chat, Set up makes one,
-//!   bound as its door, and its setup in the dialog, step by step: the
-//!   token, connected, the pairing link, the account that answered it
+//!   bound as its door, and its setup in the dialog, step by step: the bot
+//!   its owner's Vault holds for it (moved from finite.computer, FIN-463
+//!   F11) offered and used, connected, the pairing link, the account that answered it
 //!   confirmed, done; its row then Open; its owner's message from Telegram
 //!   reaches the agent.
 //! - `set_up_offered`: the chat lane's Claude Code agent, its row and its
@@ -48,6 +49,9 @@ const PAUL: i64 = 424_242;
 /// The setup page's frame, as its URL names it.
 const SETUP: &str = "setup.html";
 const WAIT: Duration = Duration::from_secs(30);
+/// The setup page's token step, and its offer of a bot its owner's Vault holds.
+const TOKEN_LINE: &str = "Make a bot with @BotFather, then paste its token.";
+const VAULT_LINE: &str = "Your bot is ready to connect.";
 
 /// Who and what the checks are of.
 pub(super) struct Connector<'a> {
@@ -237,7 +241,7 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
 
     // reconnecting: the token pasted again (the bot stopped, say)
     let before = state(api, c, name);
-    let asks = press(&mut b, "New token") && until_line(s, &mut b, "Make a bot with @BotFather, then paste its token.");
+    let asks = press(&mut b, "New token") && until_line(s, &mut b, TOKEN_LINE);
     shoot(&mut b, &page, &shots, "a3-reconnect-token", None)?;
     let pasted = to_fake(&mut b, &c.tg.url) && paste(&mut b, c.token);
     let back = until_line(s, &mut b, &connected);
@@ -300,7 +304,8 @@ pub(super) fn after_a_release(s: &mut Suite, api: &Api, c: &Connector<'_>, name:
 /// bot's token. `who` names the agent in the first check; `shots`, where
 /// each step's screenshots go (none: none taken). Answers the page and the
 /// chat Set up made.
-fn first_set_up(s: &mut Suite, b: &mut Browser, api: &Api, owner: &Keys, agent: &str, who: &str, shots: Option<&Path>) -> Result<(Page, String)> {
+#[allow(clippy::too_many_arguments)]
+fn first_set_up(s: &mut Suite, b: &mut Browser, api: &Api, owner: &Keys, agent: &str, who: &str, shots: Option<&Path>, asks: &str) -> Result<(Page, String)> {
     let session = api.sign_in(&Api::email_of(owner))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let (page, seen) = settings(s, b, api, agent, &["Set up"])?;
@@ -318,12 +323,12 @@ fn first_set_up(s: &mut Suite, b: &mut Browser, api: &Api, owner: &Keys, agent: 
     // Set up: a connector made, bound as its door, its setup in the dialog
     let dialog = set_up(s, b, &page, agent)?;
     let name = dialog["fragment"].as_str().unwrap_or("").to_string();
-    let asks = until_line(s, b, "Make a bot with @BotFather, then paste its token.");
+    let asks = until_line(s, b, asks);
     let bound = api.signed(owner, "GET", &format!("/api/f/{name}/door"), None)?;
     let listed = api.signed(owner, "GET", "/api/fragments", None)?.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
     let one = telegrams();
     s.ok(
-        "its Set up makes one Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot's token",
+        "its Set up makes one Telegram chat, bound as its agent's door, and opens its setup page in the dialog, asking for the bot",
         !name.is_empty() && asks && bound.body["bound"] == json!({ "door": "telegram", "agent": agent }) && listed["title"] == "Telegram" && listed["kind"] == "chat" && one == 1,
         json!({ "dialog": dialog, "bound": bound.body, "listed": listed, "telegram_chats": one }),
     );
@@ -343,7 +348,7 @@ pub(super) fn set_up_offered(s: &mut Suite, api: &Api, owner: &Keys, agent: &str
         s.ok("Chrome is installed for Settings' Telegram (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    let (page, _) = first_set_up(s, &mut b, api, owner, agent, "a Claude Code agent", None)?;
+    let (page, _) = first_set_up(s, &mut b, api, owner, agent, "a Claude Code agent", None, TOKEN_LINE)?;
     b.close(page)?;
     Ok(())
 }
@@ -357,19 +362,37 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
     };
     let shots = s.scratch.join(dir);
     std::fs::create_dir_all(&shots)?;
-    let (page, name) = first_set_up(s, &mut b, api, c.owner, c.agent, "an agent", Some(&shots))?;
+    // its bot moved to its owner's Vault from finite.computer (FIN-463 F11),
+    // bound to this agent toward api.telegram.org; and another agent's,
+    // which is not this agent's to offer
+    let vault = |name: &str, agent: &str| api.signed(c.owner, "PUT", &format!("/api/vault/{name}"), Some(&json!({ "value": c.token, "hosts": ["api.telegram.org"], "agents": [agent] })));
+    let (moved, others) = (vault("telegram-moved", c.agent)?, vault("telegram-other", "other--x7k2")?);
+    anyhow::ensure!(moved.status == 200 && others.status == 200, "its owner's Vault holds a bot: {moved} {others}");
+    let (page, name) = first_set_up(s, &mut b, api, c.owner, c.agent, "an agent", Some(&shots), VAULT_LINE)?;
+    let src = b.eval(&page, "document.querySelector('dialog.connector-setup iframe')?.src ?? ''")?;
+    let said = framed(&mut b, SAID);
+    s.ok(
+        "with a bot in its owner's Vault for this agent, its setup offers that bot first (that one, not another agent's), or another",
+        said["buttons"] == json!(["Use it", "Use another bot"]) && src.as_str().is_some_and(|u| u.contains("vault%3Dtelegram-moved")),
+        json!({ "said": said, "src": src }),
+    );
+    b.color_scheme(&page, "dark")?;
+    shoot(&mut b, &page, &shots, "b2-vault-dark", None)?;
+    b.color_scheme(&page, "light")?;
 
-    // the token: connected
-    let pasted = to_fake(&mut b, &c.tg.url) && paste(&mut b, c.token);
+    // Use it: the Vault's token moved into the chat, and connected
+    let used = to_fake(&mut b, &c.tg.url) && press(&mut b, "Use it");
     let connected = until_line(s, &mut b, &format!("Connected as @{BOT_USERNAME}."));
     let said = framed(&mut b, SAID);
     let inbox = format!("{}/api/f/{name}/inbox", api.base);
     let webhook = c.tg.webhook();
     let secret = webhook.as_ref().filter(|(url, _)| *url == inbox).map(|(_, secret)| secret.clone()).unwrap_or_default();
+    let left: Vec<String> = api.signed(c.owner, "GET", "/api/vault", None)?.body["secrets"].as_array().map(|l| l.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let kept = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "its token pasted there connects the bot: its webhook is this chat's inbox, with a secret of the page's making",
-        pasted && connected && said["buttons"] == json!(["Pair your Telegram", "New token"]) && secret.len() == 64,
-        json!({ "said": said, "webhook": webhook }),
+        "Use it moves the bot's token from the Vault into this chat (gone from the Vault, kept here) and connects it: its webhook is this chat's inbox, with a secret of the page's making",
+        used && connected && said["buttons"] == json!(["Pair your Telegram", "New token"]) && secret.len() == 64 && left == ["telegram-other"] && kept.text.contains("TELEGRAM_BOT_TOKEN"),
+        json!({ "said": said, "webhook": webhook, "vault": left, "secrets": kept.body }),
     );
     shoot(&mut b, &page, &shots, "b3-connected", None)?;
 

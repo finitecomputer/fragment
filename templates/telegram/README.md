@@ -35,6 +35,14 @@ where that frame can't sign in, in a tab.
   Telegram's header (`fragment.json` `inbox`); only its owner may set it,
   so no one else can forge a delivery. One bot's token in two connectors:
   the second `connect` takes the bot's webhook from the first.
+- **A bot from its owner's Vault** (FIN-463 F11: a finite.computer
+  agent's bot, moved there on its owner's Yes): when the Vault holds a
+  secret bound to this agent toward `api.telegram.org` alone, Settings
+  names it to the setup page (`setup.html?vault=<name>`), which offers
+  it before the paste: Use it moves it here as `TELEGRAM_BOT_TOKEN`
+  (`{fromVault}`: gone from the Vault, kept here), then the same webhook
+  secret and `connect`. So the same bot talks in the same Telegram chat;
+  pairing is still its one Start tap. Use another bot asks for a token.
 - **Reconnecting** (the bot stopped, or another bot): Settings, Set up,
   New token, and the token pasted again. The webhook's secret is kept, so
   Telegram's deliveries still come in while a token it refused is put
