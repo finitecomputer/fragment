@@ -946,7 +946,7 @@ struct Doors<'a> {
 /// agent, which joins as a viewer); then a direct message from the paired
 /// account reaches the agent as its owner's (asked as them), and the
 /// agent's reply goes back to Telegram, its interim words not, its file
-/// named. Only its owner's words are its owner's: the agent, acting for its
+/// named, the bot typing there while it works. Only its owner's words are its owner's: the agent, acting for its
 /// owner, sets none of its secrets, writes it no page, gets no token to
 /// push its code, and shares it no way (visibility, invite, share link),
 /// as it still shares its owner's other fragments; a delivery without the webhook's secret, a stranger's
@@ -1073,6 +1073,21 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
     let named = s.eventually(wake, || sent("could not be attached").is_some());
     s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+    // while its agent works on a message from Telegram (a slow tool call),
+    // Telegram shows the bot typing, and no longer once its answer went
+    let relay = ran(&deliver(Telegram::message(14, PAUL, "Paul", "tool please, slowly"), Some(HOOK))?);
+    let answered = s.eventually(wake, || sent("tool please, slowly").is_some());
+    let typing = super::jobs::settle(api, c.owner, &name, relay["output"]["typing"].as_i64().unwrap_or(0), &["succeeded", "held"], wake);
+    let answer = tg.sent().iter().position(|m| m["chat_id"] == PAUL && m["text"].as_str().is_some_and(|t| t.contains("tool please, slowly")));
+    let actions: Vec<Value> = tg.actions().into_iter().filter(|a| a["chat_id"] == PAUL).collect();
+    s.ok(
+        "its agent working on a message from Telegram shows the bot typing there until its answer goes, and not after",
+        answered
+            && typing["status"] == "succeeded"
+            && typing["output"]["why"] == "answered"
+            && answer.is_some_and(|at| actions.iter().any(|a| a["after"] == at) && actions.iter().all(|a| a["action"] == "typing" && a["after"].as_u64().is_some_and(|n| n <= at as u64))),
+        json!({ "relay": relay, "typing": typing, "answer": answer, "actions": actions, "sent": tg.sent() }),
+    );
 
     // only its owner edits it: the agent, acting for its owner, sets none of
     // its secrets (it would know the webhook's and forge a delivery), writes

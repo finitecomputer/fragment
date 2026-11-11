@@ -58,7 +58,12 @@ where that frame can't sign in, in a tab.
   door, while it runs this template unforked and the deployment allows
   `telegram`. `mirror` sends each reply an agent posts here (not its
   interim words) to the paired chat, in at most four messages, while the
-  door is open. Unlinked, or turned off by the deployment, nothing is
+  door is open. While the agent works on a message relayed from Telegram,
+  `typing` shows the bot typing there (Bot API `sendChatAction`, which
+  Telegram shows for five seconds at most, so it is sent again every four)
+  until `mirror` sends the agent's answer, a newer message takes over, or
+  about five minutes pass: a turn that ends with no answer there (an
+  error, a card, silence) shows it to that cap. Unlinked, or turned off by the deployment, nothing is
   relayed or sent (the inbox still keeps what Telegram delivers, as any
   inbox does); unlinked, Telegram is told so, and the agent stays a
   viewer of the chat, its words there going nowhere else.

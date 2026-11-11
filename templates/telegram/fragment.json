@@ -22,7 +22,11 @@
     "propose": { "kind": "mutation", "input": { "type": "object", "required": ["nonce", "user", "chat", "name"], "properties": { "nonce": { "type": "string" }, "user": { "type": "integer" }, "chat": { "type": "integer" }, "name": { "type": "string" } } } },
     "seen": { "kind": "mutation", "input": { "type": "object", "required": ["update"], "properties": { "update": { "type": "integer" } } } },
     "route": { "kind": "query", "role": "editor" },
+    "owe": { "kind": "mutation" },
+    "owed": { "kind": "query", "role": "editor", "input": { "type": "object", "required": ["id"], "properties": { "id": { "type": "integer" } } } },
+    "answered": { "kind": "mutation" },
     "intake": { "kind": "job" },
+    "typing": { "kind": "job" },
     "mirror": { "kind": "job" }
   },
   "triggers": [
