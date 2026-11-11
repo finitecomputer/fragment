@@ -359,8 +359,10 @@ impl Plan {
             if (p.kind == Kind::Connection) != f.placeholder.connection {
                 return Err(SwapError::WrongKind { placeholder: text, kind: p.kind });
             }
-            if !p.hosts.iter().any(|h| h == host) {
-                return Err(SwapError::WrongHost { placeholder: text, host: host.to_string(), hosts: p.hosts.clone() });
+            // a host under a connection's account host is planned here; the
+            // computer holds it to the account's own (`AccountHost::of_metadata`)
+            if p.takes(host).is_none() {
+                return Err(SwapError::WrongHost { placeholder: text, host: host.to_string(), hosts: p.where_taken() });
             }
             if !p.placements.iter().any(|pl| f.at.allowed_by(pl)) {
                 return Err(SwapError::WrongPlace { placeholder: text, at: f.at.describe(), places: p.placements.iter().map(Placement::describe).collect() });
@@ -597,6 +599,29 @@ mod tests {
         assert!(Plan::of(&[], None, &format!("/bot{}/send", p.text()), &c, "api.perplexity.ai").unwrap().is_empty());
         let path = Plan::of(&[], None, &format!("/{}/send", p.text()), &c, "api.perplexity.ai");
         assert!(matches!(path, Err(SwapError::WrongPlace { .. })), "no credential goes in a path: {path:?}");
+    }
+
+    /// A connection's account host: a request to one of its named hosts, or
+    /// to a host under its suffix, is planned (the computer then holds the
+    /// latter to the account's own host); one to a host beside the suffix
+    /// is refused, naming where the placeholder goes, the glob among them.
+    #[test]
+    fn an_account_hosts_suffix_is_planned_and_nothing_beside_it() {
+        let c = Catalog::parse(
+            &json!([{ "name": "salesforce", "kind": "connection", "hosts": ["login.salesforce.com"], "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
+                      "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["SALESFORCE_ACCESS_TOKEN"] }])
+            .to_string(),
+        )
+        .unwrap();
+        let p = ph(Kind::Connection, "salesforce", "juniper--k3x9");
+        let headers = h(&[("authorization", &format!("Bearer {}", p.text()))]);
+        for host in ["login.salesforce.com", "acme.my.salesforce.com", "acme--uat.sandbox.my.salesforce.com"] {
+            assert_eq!(Plan::of(&headers, None, "/services/data", &c, host).unwrap().wanted, vec![p.clone()], "{host}");
+        }
+        for host in ["my.salesforce.com", "acme.my.salesforce.com.evil.test", "evil.test", "acmemy.salesforce.com"] {
+            let e = Plan::of(&headers, None, "/", &c, host).unwrap_err();
+            assert!(matches!(e, SwapError::WrongHost { .. }) && e.to_string().contains("is for login.salesforce.com, *.my.salesforce.com, not"), "{host}: {e}");
+        }
     }
 
     /// Query, valid and invalid: the parameter's value is the secret,

@@ -159,6 +159,9 @@ pub struct Tokens {
     /// endpoint named none (`expires_at`).
     pub expires_in: Option<u32>,
     scopes: Vec<String>,
+    /// What Pipes keeps of the grant's answer, on an import that makes an
+    /// account (`import_metadata`, `kept`).
+    metadata: Option<Value>,
 }
 
 /// Why a token endpoint's answer is not imported.
@@ -195,7 +198,7 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
     if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
         return Err(Refused::NoScopes);
     }
-    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
+    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes, metadata: None })
 }
 
 /// What a connection's row asks for that its grant lacks, in the row's
@@ -215,6 +218,18 @@ pub fn pipes_scopes(account: &Value) -> Option<Vec<String>> {
 }
 
 impl Tokens {
+    /// These tokens, with what Pipes is to keep of their answer
+    /// (`import_metadata`) when an import makes their account.
+    pub fn keeping(self, metadata: Option<Value>) -> Tokens {
+        Tokens { metadata, ..self }
+    }
+
+    /// What Pipes is to keep of their answer, on an import that makes an
+    /// account (WorkOS takes `metadata` on create alone).
+    pub fn metadata(&self) -> Option<&Value> {
+        self.metadata.as_ref()
+    }
+
     /// When the access token expires, for Pipes (`import_body`), given the
     /// time now: its lifetime from now, or, where the token endpoint named
     /// none, now, so Pipes refreshes it before its first use.
@@ -363,6 +378,18 @@ pub fn account_label(answer: &Value, client_id: &str) -> Option<String> {
 /// it (`connection_accounts::import_of`). None: no ID token, or no `sub`.
 pub fn account_identifier(answer: &Value, client_id: &str) -> Option<String> {
     id_claims(answer, client_id)?["sub"].as_str().filter(|s| crate::connection_accounts::identifier_ok(s)).map(str::to_string)
+}
+
+/// What Pipes keeps of a grant's answer for a connection's account host
+/// (WorkOS' import `metadata`): the field its row names (Salesforce's
+/// `instance_url`), when it names a host under the row's suffix
+/// (`AccountHost::of_metadata`). None: it names none such, and the account
+/// gets its host from Pipes' next refresh, if any.
+pub fn import_metadata(answer: &Value, a: &catalog::AccountHost) -> Option<Value> {
+    a.of_metadata(answer)?;
+    let mut m = serde_json::Map::new();
+    m.insert(a.metadata.clone(), answer[&a.metadata].clone());
+    Some(Value::Object(m))
 }
 
 /// The claims of the ID token beside a grant, when it names this client
@@ -717,6 +744,31 @@ mod tests {
         assert_eq!(tokens(&omitted, &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone()), Ok(json!(requested)), "RFC 6749: an omitted scope is the one requested");
     }
 
+    /// A connection's account host: the field of the grant's answer its
+    /// row names (Salesforce's `instance_url`) is what Pipes keeps, when it
+    /// names a host under the suffix; anything else of the answer, and a
+    /// field naming another host, is never sent. Tokens carry it unchanged.
+    #[test]
+    fn what_pipes_keeps_of_a_grant_is_its_account_host_alone() {
+        let a = catalog::AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let mut answer = granting("api refresh_token");
+        answer["instance_url"] = json!("https://acme.my.salesforce.com");
+        answer["id"] = json!("https://login.salesforce.com/id/00D000000000001/005000000000001");
+        answer["signature"] = json!("c2lnbmF0dXJl");
+        assert_eq!(import_metadata(&answer, &a), Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        for elsewhere in [json!("https://evil.test"), json!("http://acme.my.salesforce.com"), json!(7)] {
+            answer["instance_url"] = elsewhere.clone();
+            assert_eq!(import_metadata(&answer, &a), None, "{elsewhere}");
+        }
+        answer.as_object_mut().unwrap().remove("instance_url");
+        assert_eq!(import_metadata(&answer, &a), None, "none named");
+        let requested = vec!["api".to_string(), "refresh_token".to_string()];
+        let kept = tokens(&granting("api refresh_token"), &requested).unwrap().keeping(Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert_eq!(kept.metadata(), Some(&json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert!(kept.import_body("2026-11-10T00:00:00Z", None).get("metadata").is_none(), "the body an update sends too names none");
+        assert_eq!(tokens(&granting("api"), &requested).unwrap().metadata(), None);
+    }
+
     /// A token endpoint that names no `expires_in` (RFC 6749 §5.1 only
     /// recommends it; Salesforce's never does) leaves the grant's lifetime
     /// unknown: it is imported as expired already, so Pipes refreshes it
@@ -739,6 +791,35 @@ mod tests {
         let known = tokens(&named, &requested).expect("a grant naming its lifetime");
         assert_eq!(known.expires_in, Some(3600));
         assert_eq!(known.expires_at(now), crate::export::rfc3339(now + 3_600_000));
+    }
+
+    /// Salesforce's row (deploy/example.jsonc) and its token endpoint's
+    /// answer as Salesforce documents it (help.salesforce.com,
+    /// remoteaccess_oauth_web_server_flow, read 2026-11-10): no
+    /// `expires_in`, the scopes granted space-separated, its org's
+    /// `instance_url`, and an ID token for this client. It connects: Pipes
+    /// gets it expired (to refresh first) and keeps its org's host, its
+    /// label the ID token's verified email, and nothing it asked for missing.
+    #[test]
+    fn salesforces_answer_connects_expired_keeping_its_orgs_host() {
+        let requested: Vec<String> = ["api", "refresh_token", "openid", "email"].map(String::from).to_vec();
+        let a = catalog::AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let mut answer = id_token(json!({ "aud": "client", "sub": "https://login.salesforce.com/id/00D000000000001EAA/005000000000001AAA", "email": "ada@acme.com", "email_verified": true }));
+        for (k, v) in [("access_token", json!("00D000000000001!AQ0AQ")), ("refresh_token", json!("5Aep861.refresh")), ("signature", json!("c2lnbmF0dXJl")), ("scope", json!("refresh_token openid api email")),
+                       ("instance_url", json!("https://acme.my.salesforce.com")), ("id", json!("https://login.salesforce.com/id/00D000000000001EAA/005000000000001AAA")), ("token_type", json!("Bearer")), ("issued_at", json!("1793000000000"))] {
+            answer[k] = v;
+        }
+        let granted = tokens(&answer, &requested).expect("Salesforce's documented answer");
+        assert_eq!(granted.expires_in, None);
+        assert_eq!(granted.expires_at(1_793_000_000_000), crate::export::rfc3339(1_793_000_000_000), "expired as it lands");
+        assert!(missing(&requested, &pipes_scopes(&json!({ "scopes": granted.import_body("x", None)["scopes"] })).unwrap()).is_empty());
+        assert_eq!(import_metadata(&answer, &a), Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert_eq!(account_label(&answer, "client").as_deref(), Some("ada@acme.com"));
+        // no read-only scope: read and write alone, and no access to tell
+        let access = catalog::Access { read: None, write: Grant { scopes: requested.clone() } };
+        let o = ConnectionOAuth { authorize: "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent".into(), exchange: "https://login.salesforce.com/services/oauth2/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        assert_eq!((o.access.offered(), access_of(&o, &granted.scopes)), (vec![ConnectionAccess::Write], None));
     }
 
     #[test]

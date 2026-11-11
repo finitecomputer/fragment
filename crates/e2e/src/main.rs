@@ -255,6 +255,14 @@ pub const SEVERAL: &str = "e2e-several";
 pub const SEVERAL_MAX: u8 = 3;
 pub const SEVERAL_HOST: &str = "several.test";
 pub const SEVERAL_ENV: &str = "E2E_SEVERAL_TOKEN";
+/// A connection whose accounts each live at a host of their own (its row's
+/// `account_host`, as Salesforce's orgs do), through the WorkOS fake's
+/// stand-in provider: its named host, and the stand-in's suffix
+/// (`fragment_fakes::workos::ACCOUNT_HOSTS_UNDER`), each account's own host
+/// the one its Pipes metadata names.
+pub const ORG_CONNECTION: &str = "e2e-org";
+pub const ORG_CONNECTION_HOST: &str = "login.org.test";
+pub const ORG_CONNECTION_ENV: &str = "E2E_ORG_TOKEN";
 pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
@@ -787,13 +795,14 @@ impl Suite {
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
                 rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
                 rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().one_access_connection_oauth(), "accounts_max": SEVERAL_MAX }));
+                rows.as_array_mut().expect("catalog").push(json!({ "name": ORG_CONNECTION, "kind": "connection", "hosts": [ORG_CONNECTION_HOST], "account_host": { "metadata": "instance_url", "under": fragment_fakes::workos::ACCOUNT_HOSTS_UNDER }, "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [ORG_CONNECTION_ENV], "connection_oauth": self.workos.node().connection_oauth() }));
                 if self.shape == Shape::OneKeyMore {
                     rows.as_array_mut().expect("catalog").push(added_key_row());
                 }
                 rows.to_string()
             }),
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
-            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into())],
+            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state

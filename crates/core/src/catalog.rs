@@ -22,7 +22,11 @@
 //!   an agent (its `agent.json`'s `model`);
 //! - a note (`note`): a line settings' Connections shows people under the
 //!   provider's name (a provider still reviewing the platform's sign-in,
-//!   say).
+//!   say);
+//! - a connection's account host (`account_host`): where each account
+//!   lives at a host of its own under the provider's (a Salesforce org at
+//!   its My Domain), the suffix those hosts are under and the Pipes
+//!   metadata field naming each account's, to which alone its token goes.
 //!
 //! Adding a provider is a catalog row (and, for a connection, the provider
 //! enabled in the WorkOS environment): nothing in code names one.
@@ -187,6 +191,71 @@ pub struct ConnectionOAuth {
     pub revoke: Option<String>,
 }
 
+/// A connection whose accounts each live at a host of their own under its
+/// provider's (a Salesforce org at its My Domain, `acme.my.salesforce.com`):
+/// beside its named `hosts`, its token goes to a host under `under` only
+/// when that is the host the account's Pipes metadata names (`metadata`,
+/// Salesforce's `instance_url`, which Pipes keeps from the provider's token
+/// answers). A suffix's hosts are many owners' (anyone may make a free
+/// Salesforce org), so the suffix alone never lets a token go. On the wire:
+/// `{"metadata": "instance_url", "under": "my.salesforce.com"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountHost {
+    pub metadata: String,
+    pub under: String,
+}
+
+/// A metadata field's name, at most.
+pub const METADATA_NAME_MAX_BYTES: usize = 64;
+
+impl AccountHost {
+    /// Whether `host` is under it: a host name of one label or more, then
+    /// `.under`.
+    pub fn covers(&self, host: &str) -> bool {
+        valid_host(host) && host.strip_suffix(self.under.as_str()).is_some_and(|rest| rest.len() > 1 && rest.ends_with('.'))
+    }
+
+    /// The egress intercept that catches its hosts: `*.under`.
+    pub fn glob(&self) -> String {
+        format!("*.{}", self.under)
+    }
+
+    /// The host an account's Pipes metadata names: its field's URL's host,
+    /// when the URL is https on its own port and names no user, and the
+    /// host is under it. None otherwise: that account's token goes to no
+    /// host under it.
+    pub fn of_metadata(&self, metadata: &serde_json::Value) -> Option<String> {
+        let url = url::Url::parse(metadata.get(&self.metadata)?.as_str()?).ok()?;
+        if url.scheme() != "https" || url.port().is_some() || !url.username().is_empty() || url.password().is_some() {
+            return None;
+        }
+        let host = url.host_str()?;
+        self.covers(host).then(|| host.to_string())
+    }
+}
+
+fn check_account_host(a: &AccountHost) -> Result<(), String> {
+    if !valid_host(&a.under) {
+        return Err(format!("{:?} is not a lower-case host name to be under", a.under));
+    }
+    let named = (1..=METADATA_NAME_MAX_BYTES).contains(&a.metadata.len()) && a.metadata.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if !named {
+        return Err(format!("{:?} is not a metadata field's name (^[a-z0-9_]{{1,{METADATA_NAME_MAX_BYTES}}}$)", a.metadata));
+    }
+    Ok(())
+}
+
+/// How a provider takes a request's host (`Provider::takes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Takes<'a> {
+    /// One of its named hosts.
+    Named,
+    /// A host under its account host's suffix: its token goes there only
+    /// if the account's metadata names it (`AccountHost::of_metadata`).
+    Account(&'a AccountHost),
+}
+
 /// A connection's accesses, each what its authorization asks for: read and
 /// write, and, where its provider's OAuth has a read-only scope, read only.
 /// Read and write then asks for at least one scope read only does not
@@ -273,6 +342,10 @@ pub struct Provider {
     /// is the compatibility connection's, as before the field was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts_max: Option<u8>,
+    /// A connection's accounts' own hosts (`AccountHost`): absent, its
+    /// token goes to its named hosts alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_host: Option<AccountHost>,
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
@@ -294,6 +367,21 @@ impl Provider {
     /// the compatibility connection's.
     pub fn several(&self) -> bool {
         self.accounts_max() > 1
+    }
+
+    /// Whether a request to `host` may carry its credential, and how: one
+    /// of its named hosts, or a host under its account host's suffix.
+    pub fn takes(&self, host: &str) -> Option<Takes<'_>> {
+        if self.hosts.iter().any(|h| h == host) {
+            return Some(Takes::Named);
+        }
+        self.account_host.as_ref().filter(|a| a.covers(host)).map(Takes::Account)
+    }
+
+    /// Where its credential may go, as a refusal names it: its hosts, and
+    /// its account host's glob.
+    pub fn where_taken(&self) -> Vec<String> {
+        self.hosts.iter().cloned().chain(self.account_host.as_ref().map(AccountHost::glob)).collect()
     }
 }
 
@@ -333,6 +421,9 @@ pub enum CatalogError {
     /// `accounts_max` out of 1 to `ACCOUNTS_MAX`, or on a row that is no
     /// connection with `connection_oauth`.
     Accounts { provider: String, why: String },
+    /// An account host on a row that is no connection, or one whose suffix
+    /// is no host name or whose metadata field is no name.
+    AccountHost { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -352,6 +443,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::Models { provider, why } => write!(f, "{provider}'s models: {why}"),
             CatalogError::Note { provider, why } => write!(f, "{provider}'s note: {why}"),
             CatalogError::Accounts { provider, why } => write!(f, "{provider}'s accounts_max: {why}"),
+            CatalogError::AccountHost { provider, why } => write!(f, "{provider}'s account_host: {why}"),
         }
     }
 }
@@ -643,6 +735,22 @@ impl Catalog {
                     return Err(CatalogError::Accounts { provider, why: "only a connection with connection_oauth connects several accounts: they are imported by its callback".into() });
                 }
             }
+            if let Some(a) = &p.account_host {
+                if p.kind != Kind::Connection {
+                    return Err(CatalogError::AccountHost { provider, why: format!("a {} has no accounts: only a connection does", p.kind.name()) });
+                }
+                check_account_host(a).map_err(|why| CatalogError::AccountHost { provider: provider.clone(), why })?;
+                // a named host under the suffix would take any account's
+                // token, whatever its metadata names: never
+                if let Some(h) = p.hosts.iter().find(|h| a.covers(h)) {
+                    return Err(CatalogError::AccountHost { provider, why: format!("{h} is under {}: an account's own host there is its metadata's to name, never the row's", a.under) });
+                }
+                // a reconnect of one of several updates it, which can't
+                // carry metadata (`keys::pipes_import` replaces the one)
+                if p.several() {
+                    return Err(CatalogError::AccountHost { provider, why: "an account host's connection connects one account".into() });
+                }
+            }
         }
         Ok(Catalog { providers: rows })
     }
@@ -676,12 +784,21 @@ impl Catalog {
         self.providers.is_empty()
     }
 
-    /// Every host any provider names, each once: what the swap intercepts.
+    /// Every host any provider names, each once.
     pub fn hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self.providers.iter().flat_map(|p| p.hosts.iter().cloned()).collect();
         hosts.sort_unstable();
         hosts.dedup();
         hosts
+    }
+
+    /// What the swap intercepts, each once: every named host, and each
+    /// account host's glob (`*.under`).
+    pub fn intercepts(&self) -> Vec<String> {
+        let mut caught: Vec<String> = self.providers.iter().flat_map(Provider::where_taken).collect();
+        caught.sort_unstable();
+        caught.dedup();
+        caught
     }
 
     /// Every environment variable any provider names: what a guest may be
@@ -882,6 +999,75 @@ mod tests {
         let mut key = router();
         key["note"] = json!("Your OpenRouter credit pays.");
         assert!(parse(json!([key])).is_ok(), "an own key's too");
+    }
+
+    fn org() -> serde_json::Value {
+        json!({
+            "name": "salesforce", "kind": "connection", "hosts": ["login.salesforce.com"],
+            "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
+            "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+            "env": ["SALESFORCE_ACCESS_TOKEN"],
+        })
+    }
+
+    /// An account's own host: a connection may name the suffix its
+    /// accounts' hosts are under and the Pipes metadata field naming each
+    /// one's. It takes its named hosts as before, a host under the suffix
+    /// only as an account's (`Takes::Account`, which the computer holds to
+    /// the account's own), and nothing beside the suffix; the egress
+    /// catches the suffix's glob. A row without it reads and writes as
+    /// before.
+    #[test]
+    fn an_account_host_is_a_connections_under_its_suffix() {
+        let c = parse(json!([google(), org()])).unwrap();
+        let p = c.get("salesforce").unwrap();
+        let a = p.account_host.as_ref().unwrap();
+        assert_eq!(p.takes("login.salesforce.com"), Some(Takes::Named));
+        for host in ["acme.my.salesforce.com", "acme--uat.sandbox.my.salesforce.com", "x.develop.my.salesforce.com"] {
+            assert_eq!(p.takes(host), Some(Takes::Account(a)), "{host}");
+        }
+        for host in ["my.salesforce.com", "evilmy.salesforce.com", "acme.my.salesforce.com.evil.test", "acme.my.salesforce.co", "ACME.my.salesforce.com", ".my.salesforce.com", "acme..my.salesforce.com", "acme.my.site.com", "login.salesforce.com.evil.test", ""] {
+            assert_eq!(p.takes(host), None, "{host:?}");
+        }
+        assert_eq!(c.get("google").unwrap().takes("acme.my.salesforce.com"), None, "another row's suffix is not google's");
+        assert_eq!(c.get("google").unwrap().takes("www.googleapis.com"), Some(Takes::Named));
+        assert_eq!(c.intercepts(), vec!["*.my.salesforce.com", "gmail.googleapis.com", "login.salesforce.com", "www.googleapis.com"]);
+        assert_eq!(c.hosts(), vec!["gmail.googleapis.com", "login.salesforce.com", "www.googleapis.com"], "a named host is never a glob");
+        assert_eq!(Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap(), c, "the wire form reads back");
+        assert!(!serde_json::to_string(c.get("google").unwrap()).unwrap().contains("account_host"), "a row without it writes as before");
+        let with = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut o = org();
+            f(&mut o);
+            parse(json!([o]))
+        };
+        assert!(matches!(with(&|o| o["kind"] = json!("own")), Err(CatalogError::AccountHost { .. })), "a connection's alone");
+        for under in [json!("com"), json!("*.my.salesforce.com"), json!("My.Salesforce.com"), json!("")] {
+            assert!(matches!(with(&|o| o["account_host"]["under"] = under.clone()), Err(CatalogError::AccountHost { .. })), "{under}");
+        }
+        for field in [json!(""), json!("instance url"), json!("Instance_URL"), json!("x".repeat(65))] {
+            assert!(matches!(with(&|o| o["account_host"]["metadata"] = field.clone()), Err(CatalogError::AccountHost { .. })), "{field}");
+        }
+        assert!(matches!(with(&|o| o["account_host"]["more"] = json!(1)), Err(CatalogError::Shape(_))));
+        assert!(matches!(with(&|o| o["hosts"] = json!(["login.salesforce.com", "acme.my.salesforce.com"])), Err(CatalogError::AccountHost { .. })), "a named host under the suffix would skip its account's check");
+        assert!(matches!(with(&|o| o["accounts_max"] = json!(2)), Err(CatalogError::AccountHost { .. }) | Err(CatalogError::Accounts { .. })), "one account: a reconnect of one of several can't carry metadata");
+        assert!(matches!(with(&|o| o["account_host"]["under"] = json!(7)), Err(CatalogError::Shape(_))));
+    }
+
+    /// The host an account's Pipes metadata names: its field's https URL's
+    /// host, under the suffix; never another scheme, a port, a user, or a
+    /// host beside the suffix.
+    #[test]
+    fn an_accounts_host_is_its_metadatas_https_host_under_the_suffix() {
+        let a = AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let of = |v: serde_json::Value| a.of_metadata(&json!({ "instance_url": v }));
+        assert_eq!(of(json!("https://acme.my.salesforce.com")).as_deref(), Some("acme.my.salesforce.com"));
+        assert_eq!(of(json!("https://acme.my.salesforce.com/")).as_deref(), Some("acme.my.salesforce.com"), "a trailing slash");
+        assert_eq!(of(json!("https://ACME.my.salesforce.com:443/")).as_deref(), Some("acme.my.salesforce.com"), "as a URL reads it");
+        for bad in [json!("http://acme.my.salesforce.com"), json!("https://acme.my.salesforce.com:8443"), json!("https://u:p@acme.my.salesforce.com"), json!("https://evil.test"), json!("https://my.salesforce.com"), json!("https://acme.my.salesforce.com.evil.test"), json!("acme.my.salesforce.com"), json!(""), json!(7), json!(null)] {
+            assert_eq!(of(bad.clone()), None, "{bad}");
+        }
+        assert_eq!(a.of_metadata(&json!({})), None);
+        assert_eq!(a.of_metadata(&json!(null)), None);
     }
 
     /// A connection's authorization names what each access asks for, read

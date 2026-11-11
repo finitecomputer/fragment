@@ -48,7 +48,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use fragment_core::catalog::{self, Kind};
+use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::key_hour;
 use fragment_core::computer::{
     alive, disk_of_df, reads_disk_after, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
@@ -1315,12 +1315,13 @@ impl ComputerCell {
         self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])
     }
 
-    /// The hosts the swap intercepts: every provider's in the catalog, and
-    /// each its agents' Vault secrets go to (`vault_usable`).
+    /// The hosts the swap intercepts: every provider's in the catalog (an
+    /// account host's as its glob, `*.under`), and each its agents' Vault
+    /// secrets go to (`vault_usable`).
     async fn swap_hosts(&self) -> CellResult<Vec<String>> {
         let fragments: Vec<String> = self.agents()?.into_iter().map(|a| a.fragment).collect();
         let usable = self.vault_usable(&fragments).await;
-        let mut hosts = self.cfg.providers.hosts();
+        let mut hosts = self.cfg.providers.intercepts();
         hosts.extend(usable.into_iter().flat_map(|u| u.2));
         hosts.sort_unstable();
         hosts.dedup();
@@ -1353,7 +1354,7 @@ impl ComputerCell {
         if vault_hosts.iter().all(|h| hosts.contains(h)) {
             return;
         }
-        hosts.extend(self.cfg.providers.hosts());
+        hosts.extend(self.cfg.providers.intercepts());
         hosts.extend(vault_hosts);
         hosts.sort_unstable();
         hosts.dedup();
@@ -3148,8 +3149,8 @@ impl ComputerCell {
         for p in &b.placeholders {
             // a key's name no catalog key has is its agent's person's Vault's to answer
             if let Some(provider) = self.cfg.providers.named(&p.provider, p.connection) {
-                if !provider.hosts.contains(&b.host) {
-                    return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {}", provider.name, provider.hosts.join(", "), b.host)));
+                if provider.takes(&b.host).is_none() {
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {}", provider.name, provider.where_taken().join(", "), b.host)));
                 }
             }
             let named = swap::agent_of(&keys, &id, &fragments, &p.provider, &p.tag).ok_or_else(|| {
@@ -3185,7 +3186,14 @@ impl ComputerCell {
                 ));
             }
             let secret = match provider.kind {
-                Kind::Connection => self.connection_token(&owner, &provider.name, agent).await?,
+                Kind::Connection => {
+                    // a host under its account host: the account's own alone
+                    let at = match provider.takes(&b.host) {
+                        Some(Takes::Account(a)) => Some((a, b.host.as_str())),
+                        _ => None,
+                    };
+                    self.connection_token(&owner, &provider.name, agent, at).await?
+                }
                 // its call is held to its owner's cap on the key here, gated on
                 // their standing and charged after (`egress_swap`)
                 Kind::Operator => {
@@ -3230,7 +3238,12 @@ impl ComputerCell {
     /// several accounts there, it is the token of the one `agent` uses: its
     /// pick, else the default (`connection_accounts::chosen`), named to
     /// Pipes by its id; only an account the owner's list named is ever named.
-    async fn connection_token(&self, owner: &str, provider: &str, agent: &str) -> CellResult<String> {
+    /// `at`, a request to a host under the row's account host: the token is
+    /// Pipes' credential's, and only if the metadata Pipes keeps of the
+    /// account names that very host (`AccountHost::of_metadata`): a host
+    /// under the suffix is anyone's (a Salesforce org anyone makes), so a
+    /// token goes to its own account's alone.
+    async fn connection_token(&self, owner: &str, provider: &str, agent: &str, at: Option<(&AccountHost, &str)>) -> CellResult<String> {
         // only one its states say is connected, as the guest's view lists
         // them: one its owner disconnected stays refused, whatever Pipes
         // may hold for it since (an import landed late: registry/
@@ -3252,7 +3265,11 @@ impl ComputerCell {
             false => None,
         };
         let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user, account.as_deref()).await?;
+        let api = &self.cfg.workos()?.api;
+        let (status, answer) = match at {
+            None => crate::keys::pipes_token(&self.env, api, provider, &user, account.as_deref()).await?,
+            Some(_) => crate::keys::pipes_credential(&self.env, api, provider, &user, account.as_deref()).await?,
+        };
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
@@ -3269,10 +3286,21 @@ impl ComputerCell {
             }
             return Err(CellError::new(ErrorCode::NotConnected, why));
         }
-        let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
+        let token = match at {
+            None => answer["access_token"]["access_token"].as_str(),
+            Some(_) => answer["credential"]["value"].as_str(),
+        };
+        let token = token.filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
         match &account {
             Some(id) => self.note_account(provider, id, ProviderState::Connected),
             None => self.note_state(provider, ProviderState::Connected),
+        }
+        if let Some((a, host)) = at {
+            match a.of_metadata(&answer["credential"]["metadata"]) {
+                Some(its) if its == host => {}
+                Some(its) => return Err(CellError::new(ErrorCode::Forbidden, format!("this {provider} account is at {its}, not {host}: send its calls there"))),
+                None => return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS names no host under {} for this {provider} account: connect {provider} again", a.under))),
+            }
         }
         Ok(token.to_string())
     }

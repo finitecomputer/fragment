@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Nineteen skills. Nine are Fragment platform contracts:
+Twenty skills. Ten are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -45,6 +45,7 @@ Nineteen skills. Nine are Fragment platform contracts:
 | brain-finite | The brain template's files, search and wiki contract |
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
 | linear-finite | Connected Linear access through per-agent placeholders; no API key or local OAuth |
+| salesforce-finite | Connected Salesforce access through per-agent placeholders, to the connected org's own host alone; no session id or local OAuth |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
