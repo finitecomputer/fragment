@@ -53,6 +53,16 @@ as read only: a provider that keeps what was granted before (Google's
 `include_granted_scopes`) would keep the write scopes through a
 reconnect, and the account would still say read and write.
 
+Some providers' OAuth has no read-only scope: Salesforce's `api` is
+everything its user may do through the API. Such a row names read and
+write alone (`access.write`, no `read`): Settings offers one Connect and
+says no access, and `POST …/authorize` refuses `read` (400). The platform
+does not mimic a read only the provider lacks. What its agents may do is
+the provider account's own permissions, so a person who wants them to do
+less connects as an account that may do less: a dedicated user (a service
+account) with only the permissions they mean to give. The row's note says
+so.
+
 ## Partial grants
 
 A person may untick permissions on the provider's consent screen. A

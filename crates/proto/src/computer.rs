@@ -251,10 +251,17 @@ pub struct ProviderView {
     /// What a connection's account lets the person's agents do, as its
     /// grant holds it (`connection_signin::access_of`): what they picked
     /// as they connected it, or read only where they left every write
-    /// scope unticked. None when `granted` is, or its row names no
-    /// `connection_oauth`.
+    /// scope unticked. None when `granted` is, its row names no
+    /// `connection_oauth`, or it offers read and write alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<ConnectionAccess>,
+    /// The accesses a person may pick as they connect a connection, read
+    /// only first: both where its provider has a read-only scope, read and
+    /// write alone where it has none (then `access` is none: what its agents
+    /// may do is the account's own permissions at the provider). None for
+    /// another kind, or a connection with no `connection_oauth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accesses: Option<Vec<ConnectionAccess>>,
     /// The deployment's note on it (its catalog row's `note`), which
     /// settings shows under its name, connected or not: plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
