@@ -34,6 +34,13 @@
 //! the stand-in OAuth provider (`POST /test-oauth/revoke token=`, a token
 //! Pipes handed out).
 //!
+//! The stand-in provider has a second client (`BASIC_CLIENT`), one that
+//! authenticates with HTTP Basic alone (RFC 6749 §2.3.1), as Zoom's and
+//! Airtable's do: its code is exchanged at `/test-oauth/basic/token` and
+//! its grant revoked at `/test-oauth/basic/revoke`, each refusing a
+//! request without its `Authorization: Basic` header (401
+//! `invalid_client`), or one that also names the client in its body.
+//!
 //! The stand-in provider's consent grants what it was asked for, or, as a
 //! person who unticks boxes on Google's consent screen, only those of the
 //! asked-for scopes its `grant` names (a test's, on the authorize URL).
@@ -108,7 +115,8 @@ struct State {
     /// Connected accounts' states read (each with no token).
     states_read: u64,
     /// Independent OAuth provider boundary for browser-bound Pipes tests.
-    oauth_codes: HashMap<String, (String, String, String, String)>,
+    /// code → (challenge, callback, scopes granted, account, client id).
+    oauth_codes: HashMap<String, (String, String, String, String, String)>,
     oauth_grants: HashMap<String, (String, String)>,
     oauth_exchanges: usize,
     imports: Vec<(String, String, String)>,
@@ -442,6 +450,18 @@ pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
 /// What it asks for as read and write: read only's, and sending mail.
 pub const CONNECTION_WRITE_SCOPES: [&str; 4] = ["mail.read", "files.read", "mail.send", "openid"];
 
+/// The stand-in provider's client that authenticates with HTTP Basic, and
+/// never in a request's body: its id and its secret.
+pub const BASIC_CLIENT: (&str, &str) = ("mock-basic-client", "mock-basic-secret");
+
+/// Whether `req` authenticates as the stand-in provider's Basic client:
+/// its `Authorization` header alone (RFC 6749 §2.3.1), with neither its id
+/// nor its secret in the form beside it.
+fn basic_client(req: &Request, form: &HashMap<String, String>) -> bool {
+    let expected = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", BASIC_CLIENT.0, BASIC_CLIENT.1)));
+    req.header("authorization") == Some(expected.as_str()) && !form.contains_key("client_id") && !form.contains_key("client_secret")
+}
+
 /// The suffix the stand-in provider's accounts' own hosts are under: its
 /// token answer names `https://<account>.<this>` (`instance_url`), as
 /// Salesforce's names its org's.
@@ -451,6 +471,19 @@ impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
         let access = json!({ "read": { "scopes": CONNECTION_SCOPES }, "write": { "scopes": CONNECTION_WRITE_SCOPES } });
         json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "access": access, "revoke": format!("{}/test-oauth/revoke", self.url) })
+    }
+
+    /// The stand-in provider's connection through its client that
+    /// authenticates with HTTP Basic (`BASIC_CLIENT`, its row's
+    /// `client_auth`): the same consent, its own token and revocation
+    /// endpoints.
+    pub fn basic_connection_oauth(&self) -> Value {
+        let mut o = self.connection_oauth();
+        o["client_id"] = BASIC_CLIENT.0.into();
+        o["client_auth"] = "basic".into();
+        o["exchange"] = format!("{}/test-oauth/basic/token", self.url).into();
+        o["revoke"] = format!("{}/test-oauth/basic/revoke", self.url).into();
+        o
     }
 
     /// The stand-in provider's connection as a provider with no read-only
@@ -603,7 +636,7 @@ impl WorkOs {
         let handler: Handler = Arc::new(move |req: &Request| {
             let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
             match (req.method.as_str(), req.path.as_str()) {
-                ("POST", "/test-oauth/token") => {
+                ("POST", "/test-oauth/token" | "/test-oauth/basic/token") => {
                     let code = url::form_urlencoded::parse(&req.body).find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()).unwrap_or_default();
                     gated.pass(&[Gate::Exchange, Gate::ExchangeOf(code)]);
                 }
@@ -613,7 +646,7 @@ impl WorkOs {
             let mut s = st.lock().expect("workos state");
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/test-oauth/authorize") => {
-                    if q("client_id") != "mock-connection-client" || q("response_type") != "code" || q("code_challenge_method") != "S256" { return problem(400, "invalid_request", "OAuth parameters"); }
+                    if !["mock-connection-client", BASIC_CLIENT.0].contains(&q("client_id").as_str()) || q("response_type") != "code" || q("code_challenge_method") != "S256" { return problem(400, "invalid_request", "OAuth parameters"); }
                     let Ok(mut back) = url::Url::parse(&q("redirect_uri")) else { return problem(400, "invalid_request", "callback"); };
                     if q("decline") != "yes" {
                         let code = s.next("oauth_code");
@@ -626,20 +659,28 @@ impl WorkOs {
                         // `you`, as a person pressing Connect on the dev stack
                         // names none (their account `you@oauth.test`)
                         let account = Some(q("account")).filter(|a| !a.is_empty()).unwrap_or_else(|| "you".into());
-                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, account));
+                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, account, q("client_id")));
                         back.query_pairs_mut().append_pair("code", &code);
                     }
                     back.query_pairs_mut().append_pair("state", &q("state"));
                     redirect(back.as_str())
                 }
-                ("POST", "/test-oauth/token") => {
+                ("POST", path @ ("/test-oauth/token" | "/test-oauth/basic/token")) => {
                     s.oauth_exchanges += 1;
                     let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body).into_owned().collect();
                     let f = |k: &str| form.get(k).map(String::as_str).unwrap_or("");
-                    let Some((challenge, callback, scopes, account)) = s.oauth_codes.remove(f("code")) else { return problem(400, "invalid_grant", "code"); };
+                    // the Basic client's endpoint: its header, before anything of the code is read
+                    let basic = path == "/test-oauth/basic/token";
+                    if basic && !basic_client(req, &form) { return problem(401, "invalid_client", "this client authenticates with HTTP Basic alone"); }
+                    let Some((challenge, callback, scopes, account, client)) = s.oauth_codes.remove(f("code")) else { return problem(400, "invalid_grant", "code"); };
                     use sha2::Digest;
                     let actual = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(f("code_verifier").as_bytes()));
-                    if challenge != actual || callback != f("redirect_uri") || f("client_id") != "mock-connection-client" || f("client_secret") != "mock-connection-secret" || f("grant_type") != "authorization_code" {
+                    // a code is its client's: exchanged as that client authenticates, at its endpoint
+                    let authenticated = match basic {
+                        true => client == BASIC_CLIENT.0,
+                        false => client == "mock-connection-client" && f("client_id") == "mock-connection-client" && f("client_secret") == "mock-connection-secret",
+                    };
+                    if challenge != actual || callback != f("redirect_uri") || !authenticated || f("grant_type") != "authorization_code" {
                         return problem(400, "invalid_grant", "binding");
                     }
                     let access = s.next("mock_access");
@@ -651,7 +692,7 @@ impl WorkOs {
                     // email, for this client
                     if scopes.split(' ').any(|s| s == "openid") && !std::mem::take(&mut s.omit_id_token) {
                         let b64 = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
-                        let claims = json!({ "iss": "https://oauth.test", "aud": "mock-connection-client", "sub": account, "email": format!("{account}@oauth.test"), "email_verified": true });
+                        let claims = json!({ "iss": "https://oauth.test", "aud": client, "sub": account, "email": format!("{account}@oauth.test"), "email_verified": true });
                         grant["id_token"] = format!("{}.{}.fake", b64(json!({ "alg": "none", "typ": "JWT" })), b64(claims)).into();
                     }
                     if std::mem::take(&mut s.omit_expires_in) {
@@ -661,9 +702,11 @@ impl WorkOs {
                     Response::json(200, &grant)
                 }
                 // RFC 7009 as Google answers it: a token Pipes or the provider handed out, or 400
-                ("POST", "/test-oauth/revoke") => {
+                ("POST", path @ ("/test-oauth/revoke" | "/test-oauth/basic/revoke")) => {
                     if std::mem::take(&mut s.fail_revoke) { return problem(503, "unavailable", "test revocation failure"); }
                     let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body).into_owned().collect();
+                    // the Basic client's: as Zoom's, which refuses a revocation its client does not authenticate
+                    if path == "/test-oauth/basic/revoke" && !basic_client(req, &form) { return problem(401, "invalid_client", "this client authenticates with HTTP Basic alone"); }
                     let token = form.get("token").cloned().unwrap_or_default();
                     let ours = s.tokens.values().flatten().any(|t| *t == token) || s.oauth_grants.contains_key(&token);
                     if form.len() != 1 || !ours { return problem(400, "invalid_token", "not a token handed out here"); }

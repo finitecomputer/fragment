@@ -361,23 +361,28 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
 
 /// Standard OAuth code exchange. Called only by the Registry after consuming
 /// the browser/session/provider-bound transaction. No redirects, retries or
-/// response-body diagnostics: these messages carry credentials.
+/// response-body diagnostics: these messages carry credentials. Its client
+/// authenticates as its row says (`ClientAuth`): its secret in the form, or
+/// in an HTTP Basic header.
 pub(super) async fn connection_exchange(env: &Env, provider: &str, o: &fragment_core::catalog::ConnectionOAuth, callback: &str, code: &str, verifier: &str) -> CellResult<(u16, Value)> {
     let cfg = Config::from_env(env);
     if !o.exchange.starts_with("https://") && !cfg.egress_local { return Err(CellError::host("a local OAuth endpoint is disabled on this fleet")); }
     let secret = required(env, &store::connection_secret(provider)).await?;
     let form = fragment_core::connection_signin::exchange_form(o, callback, code, verifier, &secret);
-    confidential_request(&o.exchange, Method::Post, "application/x-www-form-urlencoded", None, &form).await
+    let authorization = fragment_core::connection_signin::client_authorization(o, &secret);
+    confidential_request(&o.exchange, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), &form).await
 }
 
-async fn confidential_request(url: &str, method: Method, content_type: &str, bearer: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
+/// A request that carries a credential, with `authorization` as its
+/// header of that name (a bearer key, or a client's HTTP Basic).
+async fn confidential_request(url: &str, method: Method, content_type: &str, authorization: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
     let headers = Headers::new();
     headers.set("content-type", content_type)?;
     // its answer is read as JSON: said so, since a token endpoint may pick
     // its answer's format by `Accept` (Salesforce's answers JSON, XML or a
     // form)
     headers.set("accept", "application/json")?;
-    if let Some(key) = bearer { headers.set("authorization", &format!("Bearer {key}"))?; }
+    if let Some(a) = authorization { headers.set("authorization", a)?; }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(body.into()));
     let req = Request::new_with_init(url, &init)?;
@@ -404,7 +409,7 @@ async fn confidential_request(url: &str, method: Method, content_type: &str, bea
 pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>, several: Option<(&Import, Option<&str>)>) -> CellResult<Imported> {
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
-    let key = required(env, store::WORKOS_KEY).await?;
+    let authorization = format!("Bearer {}", required(env, store::WORKOS_KEY).await?);
     let expires_at = tokens.expires_at(js::now_ms());
     let mut body = tokens.import_body(&expires_at, account);
     let import = match several {
@@ -424,8 +429,8 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
     let create = body.to_string();
     let url = format!("{api}/user_management/users/{user}/connected_accounts/{provider}");
     let (status, answer) = match import {
-        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&key), &update).await?,
-        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&key), &create).await?,
+        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&authorization), &update).await?,
+        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&authorization), &create).await?,
     };
     Ok(match (import, imported(status, &answer)) {
         // one there already, of an account host: replaced, never updated,
@@ -435,12 +440,12 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
         // connects again
         (Import::Compatibility, Imported::Conflict) if replace => {
             pipes_delete(env, api, provider, user, None).await?;
-            match imported(confidential_request(&url, Method::Post, "application/json", Some(&key), &create).await?.0, &Value::Null) {
+            match imported(confidential_request(&url, Method::Post, "application/json", Some(&authorization), &create).await?.0, &Value::Null) {
                 i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
                 _ => Imported::Refused,
             }
         }
-        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &update).await?.0, &Value::Null) {
+        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&authorization), &update).await?.0, &Value::Null) {
             i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
             _ => Imported::Refused,
         },
@@ -475,13 +480,21 @@ pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str, acco
     }
 }
 
-/// A connection's grant revoked at its provider (RFC 7009) with `form`
-/// (`connection_signin::revoke_form`: an access token Pipes just minted
-/// for it, or one a fenced callback was given): whether the provider says
-/// so (200). No redirects or retries, and nothing of its answer is kept:
-/// the request carries a credential.
-pub async fn connection_revoke(revoke: &str, form: &str) -> CellResult<bool> {
-    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", None, form).await?.0 == 200)
+/// A connection's grant revoked at its provider (RFC 7009), at its row's
+/// `revoke`, with `form` (`connection_signin::revoke_form`: an access
+/// token Pipes just minted for it, or one a fenced callback was given):
+/// whether the provider says so (200; a row that names no `revoke` asks
+/// nothing). A row whose client authenticates with HTTP Basic does so
+/// here too (RFC 7009 §2.1; Zoom's refuses a revocation that does not),
+/// which is all its secret is read for. No redirects or retries, and
+/// nothing of its answer is kept: the request carries a credential.
+pub async fn connection_revoke(env: &Env, provider: &str, o: &fragment_core::catalog::ConnectionOAuth, form: &str) -> CellResult<bool> {
+    let Some(revoke) = o.revoke.as_deref() else { return Ok(false) };
+    let authorization = match o.client_auth {
+        fragment_core::catalog::ClientAuth::Basic => fragment_core::connection_signin::client_authorization(o, &required(env, &store::connection_secret(provider)).await?),
+        fragment_core::catalog::ClientAuth::Post => None,
+    };
+    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), form).await?.0 == 200)
 }
 
 /// Whether the deployment binds the operator's key `name`

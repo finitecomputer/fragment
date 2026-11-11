@@ -432,8 +432,8 @@ fn callback_url(cfg: &Config, provider: &str) -> String {
 /// whether the provider confirmed the revoke.
 async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&ConnectionOAuth>, user: &str, account: Option<&str>) -> CellResult<bool> {
     let api = &cfg.workos()?.api;
-    let revoked = match o.and_then(|o| o.revoke.as_deref()) {
-        Some(revoke) => match revoke_grant(env, cfg, api, provider, user, account, revoke).await {
+    let revoked = match o.filter(|o| o.revoke.is_some()) {
+        Some(o) => match revoke_grant(env, cfg, api, provider, user, account, o).await {
             Ok(r) => r,
             Err(e) => {
                 console_error!("{}", json!({ "connection-disconnect": provider, "not-revoked": e.message }));
@@ -447,16 +447,18 @@ async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&Connecti
 }
 
 /// The grant behind `user`'s account at `provider` (of several, the one
-/// `account` names), revoked with an access token Pipes mints for it (one
-/// Pipes refuses, the account inactive or gone, has no grant left to
-/// revoke here).
-async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, account: Option<&str>, revoke: &str) -> CellResult<bool> {
+/// `account` names), revoked at its row's `revoke` with an access token
+/// Pipes mints for it (one Pipes refuses, the account inactive or gone,
+/// has no grant left to revoke here), its client authenticating as its
+/// row says (`keys::connection_revoke`).
+async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, account: Option<&str>, o: &ConnectionOAuth) -> CellResult<bool> {
+    let Some(revoke) = o.revoke.as_deref() else { return Ok(false) };
     reachable(cfg, revoke)?;
     let (status, answer) = crate::keys::pipes_token(env, api, provider, user, account).await?;
     let Some(token) = (status == 200 && answer["active"] == true).then(|| answer["access_token"]["access_token"].as_str()).flatten().filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
-    crate::keys::connection_revoke(revoke, &fragment_core::connection_signin::revoke_form(token)).await
+    crate::keys::connection_revoke(env, provider, o, &fragment_core::connection_signin::revoke_form(token)).await
 }
 
 /// The person's computer told their connections' states after a

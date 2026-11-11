@@ -189,6 +189,36 @@ pub struct ConnectionOAuth {
     /// deletes the account at Pipes and the grant stays at the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoke: Option<String>,
+    /// How its client authenticates to `exchange` and `revoke`
+    /// (`ClientAuth`): absent, its id and secret in the code exchange's
+    /// body.
+    #[serde(default, skip_serializing_if = "ClientAuth::is_post")]
+    pub client_auth: ClientAuth,
+}
+
+/// How a connection's client authenticates to its provider (RFC 6749
+/// §2.3.1), under the names OAuth's metadata gives the two
+/// (`client_secret_post`, `client_secret_basic`). On the wire: `"post"`
+/// (a row that names none) or `"basic"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuth {
+    /// Its id and secret in the code exchange's form, and nothing at a
+    /// revocation (Google's, Linear's and Salesforce's take the token
+    /// alone).
+    #[default]
+    Post,
+    /// HTTP Basic, its id and secret in the `Authorization` header of the
+    /// code exchange and of a revocation, and in neither's body: what
+    /// Zoom's, Airtable's, Xero's and Notion's token endpoints ask
+    /// (`connection_signin::client_authorization`).
+    Basic,
+}
+
+impl ClientAuth {
+    fn is_post(&self) -> bool {
+        *self == ClientAuth::Post
+    }
 }
 
 /// A connection whose accounts each live at a host of their own under its
