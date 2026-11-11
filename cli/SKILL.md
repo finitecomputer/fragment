@@ -73,6 +73,7 @@ fragment create <label> --template todo          # no folder: blank|todo|inbox|c
 fragment write <name> site/index.html --from index.html     # one text file to main
 fragment deploy <name>                           # main goes live: the site and the app
 fragment mcp <name> [--write]                    # its described operations as an MCP server's tools
+fragment acp <agent>                             # their agent as an ACP agent, over stdio (T3 Code, Zed)
 fragment search "what was decided" --in a,b     # fragments' indexes, by words and meaning, as one (a reader's)
 fragment agent <agent> --name Frank --picture frank.jpg   # an agent's name and picture (an agent: its own, no <agent>)
 ```
