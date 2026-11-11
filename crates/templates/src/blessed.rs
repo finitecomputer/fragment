@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(data("brain").iter().map(|f| f.path).collect::<Vec<_>>(), ["AGENTS.md", "index.md"], "its guide and its front page");
         let m = manifest("brain", &bytes_of(brain, manifest_file("brain").unwrap())).unwrap();
         assert_eq!(m.kind(), fragment_proto::FragmentKind::Brain);
-        assert_eq!(m.files, Some(fragment_core::manifest::FilesDecl { page: true, home: None, status: Some("index_status".into()) }), "its page is the files view");
+        assert_eq!(m.files, Some(fragment_core::manifest::FilesDecl { page: true, home: None, status: Some("index_status".into()), graph: true }), "its page is the files view");
         let on: Vec<&str> = m.triggers.iter().filter(|t| t.run == "changed").map(|t| t.on.parts().0).collect();
         assert_eq!(on, ["files", "installed", "woke"], "its index kept as main moves, a release installs, and someone comes back");
         let files = code_files("brain").unwrap().expect("a brain carries code");

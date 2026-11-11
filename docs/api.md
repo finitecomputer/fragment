@@ -1003,10 +1003,12 @@ agent, or carrying code, keeps the last good code and says to fork it.
   triggered run started, or that run did not succeed, with none queued or
   running; its input `{}`, its run's `via` `woke`).
 - `files` (optional, FIN-372): `{"page": true, "home": <path>, "status":
-  <query>}`, each optional. `page`: the fragment's page (`/`) is the files
-  view (`__files`), with its Open Graph tags. `home`: the content file it
-  opens first. `status`: a query it declares, whose answer's `line` (text)
-  and `busy` the view shows as a status line, asking again while busy.
+  <query>, "graph": true}`, each optional. `page`: the fragment's page (`/`)
+  is the files view (`__files`), with its Open Graph tags. `home`: the
+  content file it opens first. `status`: a query it declares, whose
+  answer's `line` (text) and `busy` the view shows as a status line, asking
+  again while busy. `graph`: with no file named, the view opens on its
+  graph (below), over `home`.
   Unknown keys are refused at deploy; a fragment on a blessed template
   declares none (its template's applies).
 - `immutable` (optional, FIN-391): at most `IMMUTABLE_MAX` paths under
@@ -1710,7 +1712,7 @@ fragment's, `/api/…` included.
 | `__fragment.css` | the platform's stylesheet (below) |
 | `__markdown.js` | a module: `markdown(text, options)` → a DocumentFragment, `inline(parent, text, options)`; markdown to DOM only (HTML in the text is text; nesting stops at 32). Options: `resolve(target, kind)` → `{href, path?}` or null, `image(src, kind)` → `{src, href?}` or null, `code(text, lang)`, `breaks`; links stay http(s), mailto or relative, pictures http(s) or relative |
 | `__people?id=…&id=…` | anyone who may see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for at most 64 identities: `email` only between members (decision 48); `picture` an absolute platform URL; an agent's `fragment`, its label as `name`, its `title` and `picture` (An agent's name and picture); an unknown id left out |
-| `__files` | the files view (`__files.js`, `__files.css`), titled by `meta.title`; asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}], searchable?, home?, status?}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data; `searchable: true` when the fragment has a search index; `home` and `status` its manifest's `files`). With no file named it opens `home`, else `README.md` at the root when it says more than headings, else `index.md` at the root, else the first markdown file by path. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
+| `__files` | the files view (`__files.js`, `__files.css`), titled by `meta.title`; asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}], searchable?, home?, status?, graph?}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data; `searchable: true` when the fragment has a search index; `home`, `status` and `graph` its manifest's `files`). With no file named it opens its graph when `graph`, else `home`, else `README.md` at the root when it says more than headings, else `index.md` at the root, else the first markdown file by path. Its graph (`#graph`, `#graph/<path>` with a page chosen) draws the markdown pages (at most 2000, each under 256 KiB) and the links between them, as its reader resolves them, read from each page at its version; a page chosen there is previewed with what it links to and what links to it, and a page read lists what links to it below it. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
 | `POST __search` | its own index, from its page: `application/json` `Query` → `Found`, as `POST /api/f/{name}/search` (viewers and up, the share link too; the asker pays for the question's embedding, an anonymous one is searched by its words) |
 | `__live` | WebSocket, anyone who may see the fragment (below); its accept's waits in `Server-Timing`: `identity`, `accept` |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
