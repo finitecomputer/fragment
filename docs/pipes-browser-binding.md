@@ -24,7 +24,9 @@ back to WorkOS's own authorize URL. The routes are docs/api.md's
 - **Tokens** go from the provider's token endpoint straight to Pipes'
   import for that subject: never to the browser, never kept by Fragment,
   never retried. An import whose outcome is unknown consumes the attempt;
-  the person connects again.
+  the person connects again. A grant whose answer names no `expires_in`
+  (Salesforce's never does) is imported as expired, so Pipes refreshes it
+  before its first use.
 - **The OAuth client** must be the one the deployment's WorkOS
   integration uses, or Pipes cannot refresh. Its secret is a store
   secret (docs/secrets.md).
