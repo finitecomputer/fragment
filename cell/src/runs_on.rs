@@ -170,8 +170,8 @@ impl FragmentCell {
             // its face (kind, title, picture), for whatever names it: an
             // agent shows by its fragment's (share.rs, `name_agents`)
             "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Value>(&f).ok()).unwrap_or(Value::Null)),
-            // its reach and whether it is shared beyond its owner and their
-            // agents, for an operator's census (reach.rs): no names
+            // its reach and whether its link opens it, for an operator's
+            // census (reach.rs): no names
             "reach" => Ok(json!({ "kind": self.kind()?, "reach": self.reaches()?, "beyond": self.sharing_counts()?.beyond() })),
             "identity" => {
                 let body: Value = crate::json_body(body)?;
@@ -196,22 +196,25 @@ impl FragmentCell {
                     return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner opens or closes its door"));
                 }
                 self.assigned_to(text("computer"))?;
+                // an adoption (FIN-463: its owner keeps their SimpleX chat with
+                // their old agent) opens the door as a link does
                 let act = match text("act") {
                     "link" => door::Act::Link,
                     "unlink" => door::Act::Unlink,
-                    _ => return Err(CellError::invalid("act: link or unlink")),
+                    "adopt" => door::Act::Adopt,
+                    _ => return Err(CellError::invalid("act: link, unlink or adopt")),
                 };
-                self.door_allowed(text("door"), if act == door::Act::Link { Action::Link } else { Action::Unlink })?;
-                // a door is reach: none while the agent is shared beyond its
-                // owner and their agents (reach.rs); an unlink always closes
-                if act == door::Act::Link {
+                self.door_allowed(text("door"), if act.opens() { Action::Link } else { Action::Unlink })?;
+                // a door is reach: none while the agent's link opens it
+                // (reach.rs); an unlink always closes
+                if act.opens() {
                     self.reach_while_private()?;
                 }
                 let nonce = hex::encode(js::random_bytes::<16>());
                 let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
                 assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
                 match act {
-                    door::Act::Link => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
+                    door::Act::Link | door::Act::Adopt => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
                     // closed the moment its owner asks: its door signs nothing more
                     door::Act::Unlink => {
                         self.del_meta(MetaKey::DoorTicket)?;
@@ -241,7 +244,7 @@ impl FragmentCell {
                 if was != door || nonce.is_empty() || nonce != text("nonce") || exp < js::now_ms() {
                     return Err(CellError::new(ErrorCode::Forbidden, "that ticket is not the link its owner started last, or it is past its time: they start one from Settings"));
                 }
-                // shared since its ticket was made: no door (reach.rs)
+                // opened by its link since its ticket was made: no door (reach.rs)
                 self.reach_while_private()?;
                 self.del_meta(MetaKey::DoorTicket)?;
                 self.set_meta(MetaKey::Door, &format!("{door} {key}"))?;

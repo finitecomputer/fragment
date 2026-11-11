@@ -1148,12 +1148,12 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
-A fragment holding a secret (or a door) stays its owner's and their own
-agents' for now: make it private first (`fragment visibility my-thing
-members`, no one else in it, no invite waiting), and while it holds one
-it gets no share link, no one else, and no invite (403
-`private_while_reaching`; a secret on a shared one is 403
-`unshare_first`).
+A fragment holding a secret (or a door) has no share link and is not
+public for now: make it members only first (`fragment visibility
+my-thing members`), and while it holds one it gets no link and is not
+made public (403 `private_while_reaching`; a secret on one its link
+opens is 403 `unshare_first`). People you add by name, at any role, are
+fine, and they can use its keys.
 
 ## Rules of the road
 
@@ -1223,7 +1223,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
-fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many shared beyond (counts only)
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many open by link or public (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]
@@ -1236,6 +1236,9 @@ fragment operator log [--before N] [--key-file F]
 fragment operator credit <org> <usd> --why W --id REF [--key-file F]
 fragment operator budget <org> <usd> [--id I] [--key-file F]
 fragment operator payer <org> <email|npub> [--id I] [--key-file F]
+fragment operator moves [--withdrawn] [--key-file F]   # the finite.computer move; --withdrawn: the will-not-move list, each with its why
+fragment operator withdraw <old> --why W [--key-file F]   # keep an old agent out of the move (ahead of the roster too)
+fragment operator include <old> [--key-file F]   # take a withdrawal back
 ```
 
 `fragment operator …` is the deployment's operators' alone: each signs

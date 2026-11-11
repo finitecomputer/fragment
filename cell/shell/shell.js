@@ -16,6 +16,7 @@ import { icon } from "./icons.js";
 import { appArt, openIconSheet } from "./app-icon.js";
 import { createAppsPage } from "./apps-page.js";
 import { createHistoryPage } from "./history-page.js";
+import { createSchedulesPage } from "./schedules-page.js";
 import { createMovePage } from "./move-page.js";
 import { createTitles } from "./fragment-title.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
@@ -987,6 +988,7 @@ function openChat(name, push = true, path = null) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveHistory();
+  leaveSchedules();
   leaveMove();
   $("frames").hidden = false;
   state.current = name;
@@ -1489,6 +1491,7 @@ function showMaking(identity, name, by) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveHistory();
+  leaveSchedules();
   leaveMove();
   $("frames").hidden = false;
   for (const frame of state.frames.values()) {
@@ -1543,11 +1546,12 @@ function stepMaking(event) {
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
 function restoreView({ page, current }) {
-  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY, Move: MOVE }[page] ?? "/";
+  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY, Schedules: SCHEDULES, Move: MOVE }[page] ?? "/";
   if (location.pathname !== path) history.replaceState(null, "", path);
   if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (page === "Apps") openApps(false);
   else if (page === "History") openHistory(false);
+  else if (page === "Schedules") openSchedules(false);
   else if (page === "Move") openMove(false);
   else if (byName(current)) openChat(current, false);
   else {
@@ -1779,12 +1783,14 @@ function computerIs(v) {
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
-// its apps, `/history` every chat they have had, `/welcome` a new person's
+// its apps, `/history` every chat they have had, `/schedules` every
+// scheduled job of theirs, `/welcome` a new person's
 // welcome; each view says so in the address, so a reload or a link stays
 // put ----
 const SETTINGS = "/settings";
 const APPS = "/apps";
 const HISTORY = "/history";
+const SCHEDULES = "/schedules";
 const WELCOME = "/welcome";
 const MOVE = "/move";
 function at(path) {
@@ -1795,6 +1801,7 @@ addEventListener("popstate", () => {
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
   else if (shown && location.pathname === HISTORY) openHistory(false);
+  else if (shown && location.pathname === SCHEDULES) openSchedules(false);
   else if (shown && location.pathname === MOVE) openMove(false);
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
   else startOrWait();
@@ -1828,6 +1835,7 @@ function openApps(push = true) {
   $("frames").hidden = true;
   $("settings-page").hidden = true;
   leaveHistory();
+  leaveSchedules();
   leaveMove();
   $("apps-page").hidden = false;
   renderHeading();
@@ -1861,6 +1869,7 @@ function openHistory(push = true) {
   $("frames").hidden = true;
   $("settings-page").hidden = true;
   leaveApps();
+  leaveSchedules();
   leaveMove();
   $("history-page").hidden = false;
   renderHeading();
@@ -1874,6 +1883,35 @@ function leaveHistory() {
   historyPage.close();
 }
 $("history-link").onclick = () => openHistory();
+
+// ---- the Schedules page (schedules-page.js): every scheduled job across
+// the person's own fragments, read-only, in the work area as History is ----
+const schedulesPage = createSchedulesPage($("schedules-page"), {
+  api, el, seg, art: (name) => iconOf(name), named, fragments: () => state.fragments, openApp, leaveSidebar,
+});
+function openSchedules(push = true) {
+  if (push) at(SCHEDULES);
+  if (state.page !== "Schedules") newView();
+  hideNotice();
+  state.page = "Schedules";
+  $("layout").classList.add("settings-view");
+  $("frames").hidden = true;
+  $("settings-page").hidden = true;
+  leaveApps();
+  leaveHistory();
+  leaveMove();
+  $("schedules-page").hidden = false;
+  renderHeading();
+  renderChats();
+  leaveSidebar();
+  schedulesPage.open();
+}
+// a chat, settings, apps or History in its place
+function leaveSchedules() {
+  $("schedules-page").hidden = true;
+  schedulesPage.close();
+}
+$("schedules-link").onclick = () => openSchedules();
 
 // ---- the move's page (move-page.js, FIN-463): a person's old
 // finite.computer agents, which to bring over, and where each move is, in
@@ -1894,6 +1932,7 @@ function openMove(push = true) {
   $("settings-page").hidden = true;
   leaveApps();
   leaveHistory();
+  leaveSchedules();
   $("move-page").hidden = false;
   renderComputer();
   renderHeading();
@@ -1923,6 +1962,7 @@ const settings = createSettings({
       $("frames").hidden = true;
       leaveApps();
       leaveHistory();
+      leaveSchedules();
       leaveMove();
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
@@ -2165,13 +2205,14 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && [SETTINGS, APPS, HISTORY, MOVE].includes(location.pathname);
+  const settings = !open && [SETTINGS, APPS, HISTORY, SCHEDULES, MOVE].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
   else if (settings && location.pathname === HISTORY) openHistory(false);
+  else if (settings && location.pathname === SCHEDULES) openSchedules(false);
   else if (settings && location.pathname === MOVE) openMove(false);
   else if (settings) await openSettings(false);
   else if (pick) openChat(pick);

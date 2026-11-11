@@ -159,8 +159,13 @@ fn bounded(scopes: Vec<String>) -> Option<Vec<String>> {
 pub struct Tokens {
     access: String,
     refresh: String,
-    pub expires_in: u32,
+    /// The access token's lifetime in seconds; None where the token
+    /// endpoint named none (`expires_at`).
+    pub expires_in: Option<u32>,
     scopes: Vec<String>,
+    /// What Pipes keeps of the grant's answer, on an import that makes an
+    /// account (`import_metadata`, `kept`).
+    metadata: Option<Value>,
 }
 
 /// Why a token endpoint's answer is not imported.
@@ -196,7 +201,12 @@ pub fn tokens_of(answer: &Value, requested: &[String], named: &[String]) -> Resu
     let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     if !answer["token_type"].as_str().ok_or(Invalid)?.eq_ignore_ascii_case("bearer") { return Err(Invalid); }
-    let expires_in = answer["expires_in"].as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32;
+    // RFC 6749 §5.1 only recommends `expires_in` (Salesforce never names
+    // it); named, it must be a lifetime
+    let expires_in = match answer.get("expires_in") {
+        None => None,
+        Some(s) => Some(s.as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32),
+    };
     // RFC 6749: omitted scope means the requested scope. A partial grant is
     // kept: the person may untick what they will not allow (Google's
     // granular consent), and Pipes holds exactly what the provider granted.
@@ -210,7 +220,7 @@ pub fn tokens_of(answer: &Value, requested: &[String], named: &[String]) -> Resu
     if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
         return Err(Refused::NoScopes);
     }
-    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
+    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes, metadata: None })
 }
 
 /// A grant's scopes, each spelled as its row names it (`named`: the row's
@@ -262,6 +272,25 @@ pub fn pipes_scopes(account: &Value) -> Option<Vec<String>> {
 }
 
 impl Tokens {
+    /// These tokens, with what Pipes is to keep of their answer
+    /// (`import_metadata`) when an import makes their account.
+    pub fn keeping(self, metadata: Option<Value>) -> Tokens {
+        Tokens { metadata, ..self }
+    }
+
+    /// What Pipes is to keep of their answer, on an import that makes an
+    /// account (WorkOS takes `metadata` on create alone).
+    pub fn metadata(&self) -> Option<&Value> {
+        self.metadata.as_ref()
+    }
+
+    /// When the access token expires, for Pipes (`import_body`), given the
+    /// time now: its lifetime from now, or, where the token endpoint named
+    /// none, now, so Pipes refreshes it before its first use.
+    pub fn expires_at(&self, now_ms: i64) -> String {
+        crate::export::rfc3339(now_ms + i64::from(self.expires_in.unwrap_or(0)) * 1000)
+    }
+
     /// WorkOS's documented connected-account import/update body. `account`
     /// is its label (`account_label`); `null` clears an earlier account's
     /// on an update.
@@ -403,6 +432,18 @@ pub fn account_label(answer: &Value, client_id: &str) -> Option<String> {
 /// it (`connection_accounts::import_of`). None: no ID token, or no `sub`.
 pub fn account_identifier(answer: &Value, client_id: &str) -> Option<String> {
     id_claims(answer, client_id)?["sub"].as_str().filter(|s| crate::connection_accounts::identifier_ok(s)).map(str::to_string)
+}
+
+/// What Pipes keeps of a grant's answer for a connection's account host
+/// (WorkOS' import `metadata`): the field its row names (Salesforce's
+/// `instance_url`), when it names a host under the row's suffix
+/// (`AccountHost::of_metadata`). None: it names none such, and the account
+/// gets its host from Pipes' next refresh, if any.
+pub fn import_metadata(answer: &Value, a: &catalog::AccountHost) -> Option<Value> {
+    a.of_metadata(answer)?;
+    let mut m = serde_json::Map::new();
+    m.insert(a.metadata.clone(), answer[&a.metadata].clone());
+    Some(Value::Object(m))
 }
 
 /// The claims of the ID token beside a grant, when it names this client
@@ -740,14 +781,14 @@ mod tests {
         let scopes = |scope: &str| tokens(&granting(scope), &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone());
         assert_eq!(scopes("openid mail.read"), Ok(json!(["openid", "mail.read"])), "a partial grant, recorded as the provider answered it");
         assert_eq!(scopes("files.read"), Ok(json!(["files.read"])), "with no sign-in scope at all");
-        for field in ["access_token", "refresh_token", "expires_in", "token_type"] {
+        for field in ["access_token", "refresh_token", "token_type"] {
             let mut bad = good.clone();
             bad.as_object_mut().unwrap().remove(field);
             assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "missing {field}");
         }
         let too_long = format!("mail.read {}", "s".repeat(SCOPE_MAX_BYTES + 1));
         let too_many = vec!["mail.read"; SCOPES_MAX + 1].join(" ");
-        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
+        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("expires_in", json!(null)), ("expires_in", json!("3600")), ("expires_in", json!(3600.5)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
             let mut bad = good.clone();
             bad[field] = value;
             assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "invalid {field}");
@@ -755,6 +796,84 @@ mod tests {
         let mut omitted = good;
         omitted.as_object_mut().unwrap().remove("scope");
         assert_eq!(tokens(&omitted, &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone()), Ok(json!(requested)), "RFC 6749: an omitted scope is the one requested");
+    }
+
+    /// A connection's account host: the field of the grant's answer its
+    /// row names (Salesforce's `instance_url`) is what Pipes keeps, when it
+    /// names a host under the suffix; anything else of the answer, and a
+    /// field naming another host, is never sent. Tokens carry it unchanged.
+    #[test]
+    fn what_pipes_keeps_of_a_grant_is_its_account_host_alone() {
+        let a = catalog::AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let mut answer = granting("api refresh_token");
+        answer["instance_url"] = json!("https://acme.my.salesforce.com");
+        answer["id"] = json!("https://login.salesforce.com/id/00D000000000001/005000000000001");
+        answer["signature"] = json!("c2lnbmF0dXJl");
+        assert_eq!(import_metadata(&answer, &a), Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        for elsewhere in [json!("https://evil.test"), json!("http://acme.my.salesforce.com"), json!(7)] {
+            answer["instance_url"] = elsewhere.clone();
+            assert_eq!(import_metadata(&answer, &a), None, "{elsewhere}");
+        }
+        answer.as_object_mut().unwrap().remove("instance_url");
+        assert_eq!(import_metadata(&answer, &a), None, "none named");
+        let requested = vec!["api".to_string(), "refresh_token".to_string()];
+        let kept = tokens(&granting("api refresh_token"), &requested).unwrap().keeping(Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert_eq!(kept.metadata(), Some(&json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert!(kept.import_body("2026-11-10T00:00:00Z", None).get("metadata").is_none(), "the body an update sends too names none");
+        assert_eq!(tokens(&granting("api"), &requested).unwrap().metadata(), None);
+    }
+
+    /// A token endpoint that names no `expires_in` (RFC 6749 §5.1 only
+    /// recommends it; Salesforce's never does) leaves the grant's lifetime
+    /// unknown: it is imported as expired already, so Pipes refreshes it
+    /// before its first use, on a first connect (WorkOS: an access token, a
+    /// refresh token and `expires_at`) and a reconnect alike (an update
+    /// replaces both, the earlier grant's included). A grant that names
+    /// one keeps it, as before.
+    #[test]
+    fn a_grant_of_unknown_lifetime_is_imported_expired() {
+        let requested = requested();
+        let named = granting(&requested.join(" "));
+        let mut unnamed = named.clone();
+        unnamed.as_object_mut().unwrap().remove("expires_in");
+        let now = 1_793_000_000_000;
+        let unknown = tokens(&unnamed, &requested).expect("a grant with no lifetime named");
+        assert_eq!(unknown.expires_in, None);
+        assert_eq!(unknown.expires_at(now), crate::export::rfc3339(now), "expired as it lands");
+        let body = unknown.import_body(&unknown.expires_at(now), None);
+        assert_eq!((body["access_token"].as_str(), body["refresh_token"].as_str(), body["state"].as_str()), (Some("mock-access"), Some("mock-refresh"), Some("connected")));
+        let known = tokens(&named, &requested).expect("a grant naming its lifetime");
+        assert_eq!(known.expires_in, Some(3600));
+        assert_eq!(known.expires_at(now), crate::export::rfc3339(now + 3_600_000));
+    }
+
+    /// Salesforce's row (deploy/example.jsonc) and its token endpoint's
+    /// answer as Salesforce documents it (help.salesforce.com,
+    /// remoteaccess_oauth_web_server_flow, read 2026-11-10): no
+    /// `expires_in`, the scopes granted space-separated, its org's
+    /// `instance_url`, and an ID token for this client. It connects: Pipes
+    /// gets it expired (to refresh first) and keeps its org's host, its
+    /// label the ID token's verified email, and nothing it asked for missing.
+    #[test]
+    fn salesforces_answer_connects_expired_keeping_its_orgs_host() {
+        let requested: Vec<String> = ["api", "refresh_token", "openid", "email"].map(String::from).to_vec();
+        let a = catalog::AccountHost { metadata: "instance_url".into(), under: "my.salesforce.com".into() };
+        let mut answer = id_token(json!({ "aud": "client", "sub": "https://login.salesforce.com/id/00D000000000001EAA/005000000000001AAA", "email": "ada@acme.com", "email_verified": true }));
+        for (k, v) in [("access_token", json!("00D000000000001!AQ0AQ")), ("refresh_token", json!("5Aep861.refresh")), ("signature", json!("c2lnbmF0dXJl")), ("scope", json!("refresh_token openid api email")),
+                       ("instance_url", json!("https://acme.my.salesforce.com")), ("id", json!("https://login.salesforce.com/id/00D000000000001EAA/005000000000001AAA")), ("token_type", json!("Bearer")), ("issued_at", json!("1793000000000"))] {
+            answer[k] = v;
+        }
+        let granted = tokens(&answer, &requested).expect("Salesforce's documented answer");
+        assert_eq!(granted.expires_in, None);
+        assert_eq!(granted.expires_at(1_793_000_000_000), crate::export::rfc3339(1_793_000_000_000), "expired as it lands");
+        assert!(missing(&requested, &pipes_scopes(&json!({ "scopes": granted.import_body("x", None)["scopes"] })).unwrap()).is_empty());
+        assert_eq!(import_metadata(&answer, &a), Some(json!({ "instance_url": "https://acme.my.salesforce.com" })));
+        assert_eq!(account_label(&answer, "client").as_deref(), Some("ada@acme.com"));
+        // no read-only scope: read and write alone, and no access to tell
+        let access = catalog::Access { read: None, write: Grant { scopes: requested.clone() } };
+        let o = ConnectionOAuth { authorize: "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent".into(), exchange: "https://login.salesforce.com/services/oauth2/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        assert_eq!((o.access.offered(), access_of(&o, &granted.scopes)), (vec![ConnectionAccess::Write], None));
     }
 
     #[test]
@@ -898,5 +1017,41 @@ mod tests {
         let prompts: Vec<String> = u.query_pairs().filter(|(k, _)| k == "prompt").map(|(_, v)| v.into_owned()).collect();
         assert_eq!(prompts, ["select_account consent"]);
         assert_eq!(u.query_pairs().filter(|(k, v)| k == "include_granted_scopes" && v == "true").count(), 1);
+    }
+
+    /// Linear's row (deploy/example.jsonc): Linear's authorize takes its
+    /// scopes comma-separated and always grants `read` beside them, so the
+    /// row asks for `write` alone, one scope either way; its answer names
+    /// both, space-separated (linear.app/developers/oauth-2-0-authentication,
+    /// read 2026-11-10), and nothing is missing. An answer naming its scopes
+    /// as a list (Linear's apps made before December 2023) is refused, never
+    /// read as a grant of nothing.
+    #[test]
+    fn a_grant_of_more_than_was_asked_connects_with_nothing_missing() {
+        let linear = |scope: &str| Grant { scopes: vec![scope.into()] };
+        let access = catalog::Access { read: Some(linear("read")), write: linear("write") };
+        let o = ConnectionOAuth { authorize: "https://linear.app/oauth/authorize?actor=user&prompt=consent".into(), exchange: "https://api.linear.app/oauth/token".into(), client_id: "client".into(), access, revoke: Some("https://api.linear.app/oauth/revoke".into()) };
+        assert!(check(&o).is_ok());
+        let asked = |access: ConnectionAccess| -> Vec<(String, String)> {
+            url::Url::parse(&authorize_url(&o, o.access.of(access).unwrap(), "https://platform.example/api/connections/linear/callback", "challenge", "state")).unwrap().query_pairs().into_owned().collect()
+        };
+        for (access, scope) in [(ConnectionAccess::Read, "read"), (ConnectionAccess::Write, "write")] {
+            let query = asked(access);
+            assert!(query.contains(&("scope".into(), scope.into())) && query.contains(&("actor".into(), "user".into())) && query.contains(&("prompt".into(), "consent".into())), "{access:?}: {query:?}");
+        }
+        let answer = json!({ "access_token": "mock-access", "token_type": "Bearer", "expires_in": 86399, "scope": "read write", "refresh_token": "mock-refresh" });
+        let requested = &o.access.write.scopes;
+        let granted = tokens(&answer, requested).expect("Linear's documented answer");
+        assert_eq!(granted.import_body("2026-11-10T00:00:00Z", None)["scopes"], json!(["read", "write"]), "Pipes holds what Linear granted");
+        assert!(missing(requested, &granted.scopes).is_empty());
+        assert_eq!(access_of(&o, &granted.scopes), Some(ConnectionAccess::Write));
+        let mut read = answer.clone();
+        read["scope"] = json!("read");
+        let read_scopes = &o.access.read.as_ref().unwrap().scopes;
+        let read_only = tokens(&read, read_scopes).expect("a read-only grant");
+        assert_eq!((access_of(&o, &read_only.scopes), missing(read_scopes, &read_only.scopes)), (Some(ConnectionAccess::Read), vec![]), "read only, as picked, nothing missing");
+        let mut listed = answer;
+        listed["scope"] = json!(["read", "write"]);
+        assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
     }
 }

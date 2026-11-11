@@ -283,7 +283,12 @@
   // (`fragment_core::own_signin`); its `models` are what their agents may
   // run on, paid by their account at the provider. Any row may carry a
   // `note`, which settings' Connections shows under its name, connected or
-  // not: plain text, one line, at most 280 characters (google's, below).
+  // not: plain text, one line, at most 280 characters (google's, below). A
+  // connection whose accounts each live at a host of their own (Salesforce's
+  // orgs) names `"account_host": {"metadata": "instance_url", "under":
+  // "my.salesforce.com"}`: its token also goes to a host under `under`, but
+  // only the one its account's Pipes metadata names (docs/computers.md,
+  // "An account's own host").
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
@@ -316,6 +321,21 @@
       // absent, one, as before
       // "accounts_max": 5,
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
+    // The person's Linear workspace, as Google is: Pipes' `linear`
+    // provider, connected through the browser once its OAuth app's secret
+    // is in the store (the app Pipes' Linear integration uses, with the
+    // platform's callback beside Pipes'). Linear grants `read` beside
+    // whatever is asked and takes its scopes comma-separated, so each
+    // access asks for one: `read` read only, `write` read and write;
+    // `actor=user` acts as the person.
+    { "name": "linear", "kind": "connection",
+      "hosts": ["api.linear.app", "uploads.linear.app"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://linear.app/oauth/authorize?actor=user&prompt=consent",
+      //   "exchange": "https://api.linear.app/oauth/token", "revoke": "https://api.linear.app/oauth/revoke",
+      //   "client_id": "<the app's client id>", "access": { "read": { "scopes": ["read"] }, "write": { "scopes": ["write"] } } },
+      "env": ["LINEAR_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },
@@ -348,6 +368,28 @@
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
       "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" },
+    // The person's Salesforce org (a production org; a sandbox is Pipes'
+    // `salesforce-test`, a row of its own), as Google is: Pipes'
+    // `salesforce` provider, connected through the browser once its External
+    // Client App's secret is in the store (the app Pipes' Salesforce
+    // integration uses, with the platform's callback beside Pipes', PKCE on).
+    // Its token goes to login.salesforce.com (the identity a helper learns
+    // its org's host from) and to the org's own host, as Pipes' metadata
+    // names it (`account_host`). Salesforce's answer names no `expires_in`:
+    // its grant lands expired, and Pipes refreshes it first. Its scopes reach
+    // all the signed-in user may do (Salesforce has no read-only one), so it
+    // offers read and write alone, and its note says how to limit that: the
+    // user's own permissions.
+    { "name": "salesforce", "kind": "connection",
+      "hosts": ["login.salesforce.com"],
+      "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "note": "Your agents can do anything the Salesforce user you sign in as can. To limit them, sign in as a dedicated integration user with only the permissions they need.",
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent",
+      //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
+      //   "client_id": "<the app's consumer key>", "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
+      "env": ["SALESFORCE_ACCESS_TOKEN"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key
     // pasted), and paid by their OpenRouter credit, never metered here. An

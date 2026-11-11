@@ -35,6 +35,18 @@ where that frame can't sign in, in a tab.
   Telegram's header (`fragment.json` `inbox`); only its owner may set it,
   so no one else can forge a delivery. One bot's token in two connectors:
   the second `connect` takes the bot's webhook from the first.
+- **A bot from its owner's Vault** (FIN-463 F11: a finite.computer
+  agent's bot, moved there on its owner's Yes): when the Vault holds a
+  secret bound to this agent toward `api.telegram.org` alone, Settings
+  names it to the setup page (`setup.html?vault=<name>`), which offers
+  it before the paste: Use it moves it here as `TELEGRAM_BOT_TOKEN`
+  (`{fromVault}`: gone from the Vault, kept here) and `connect`s, the
+  webhook's secret written first. It says so first (`hold`: `state`'s
+  `held`), so a try cut short anywhere (the move's answer lost, the
+  connect not sent) is offered again, the dialog reopened too, and goes
+  on from the token kept here (a Vault that no longer holds it, 404, is
+  one moved already). So the same bot talks in the same Telegram chat;
+  pairing is still its one Start tap. Use another bot asks for a token.
 - **Reconnecting** (the bot stopped, or another bot): Settings, Set up,
   New token, and the token pasted again. The webhook's secret is kept, so
   Telegram's deliveries still come in while a token it refused is put
@@ -58,7 +70,12 @@ where that frame can't sign in, in a tab.
   door, while it runs this template unforked and the deployment allows
   `telegram`. `mirror` sends each reply an agent posts here (not its
   interim words) to the paired chat, in at most four messages, while the
-  door is open. Unlinked, or turned off by the deployment, nothing is
+  door is open. While the agent works on a message relayed from Telegram,
+  `typing` shows the bot typing there (Bot API `sendChatAction`, which
+  Telegram shows for five seconds at most, so it is sent again every four)
+  until `mirror` sends the agent's answer, a newer message takes over, or
+  about five minutes pass: a turn that ends with no answer there (an
+  error, a card, silence) shows it to that cap. Unlinked, or turned off by the deployment, nothing is
   relayed or sent (the inbox still keeps what Telegram delivers, as any
   inbox does); unlinked, Telegram is told so, and the agent stays a
   viewer of the chat, its words there going nowhere else.

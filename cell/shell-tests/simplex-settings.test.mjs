@@ -139,3 +139,39 @@ test("nor does a SimpleX ticket that comes after a Telegram Set up pressed since
   await simplex;
   assert.deepEqual(w.shown(), [["Telegram", "maple--a1b2", "connector-setup-frame", "/auth/frame?name=maple-telegram--g7h8&return=/setup.html"]]);
 });
+
+// FIN-463: the link page asks for an adoption's ticket (its owner keeps
+// their SimpleX chat with their old agent): the platform's `adopt`, and its
+// home where it was; an unlink's still takes its home back to its chat
+test("an adoption's ask is answered with an adopt ticket, its home left be", async () => {
+  let heard = null;
+  globalThis.addEventListener = (type, fn) => {
+    if (type === "message") heard = fn;
+  };
+  globalThis.removeEventListener = () => {};
+  const source = { posted: [], postMessage(m, origin) { this.posted.push([m, origin]); } };
+  const frame = { contentWindow: source, dataset: { simplex: "maple--a1b2", src: "https://c-robin-6080.example/p/6080/simplex/?agent=maple--a1b2" } };
+  globalThis.document = { querySelector: () => null, querySelectorAll: (sel) => (sel === "iframe[data-simplex]" ? [frame] : []), body: { append() {} } };
+  const asked = [];
+  const homes = [];
+  const api = async (method, path, body) => {
+    asked.push([method, path, body]);
+    return { door: "simplex", act: body.act, agent: "maple--a1b2", nonce: "0f".repeat(16) };
+  };
+  createSimplex({
+    api, el: () => ({}), section: () => ({}), actionLine: () => ({}), named: (n) => n, seg: (s) => s,
+    computer: () => ({ computer: "c-robin", simplex: true, alwaysOn: true, agents: AGENTS }), getSeat: () => null, titleOf: (a) => a,
+    frameOf: () => ({}), pressSetup: () => {}, openSetup: () => {}, simplexChatOf: () => null, openChat: () => {}, notice: () => {},
+    setHome: async (agent, home) => homes.push([agent, home]),
+  });
+  const ask = (m) => heard({ data: { fragment: "simplex", agent: "maple--a1b2", ...m }, source, origin: "https://c-robin-6080.example" });
+  await ask({ want: "adopt" });
+  assert.deepEqual(asked.at(-1), ["POST", "/api/computers/c-robin/agents/maple--a1b2/door", { door: "simplex", act: "adopt" }]);
+  assert.equal(source.posted.at(-1)[0].ticket.act, "adopt");
+  assert.equal(source.posted.at(-1)[0].for, "adopt");
+  assert.deepEqual(homes, [], "an adoption leaves its home where it is");
+  await ask({ want: "unlink" });
+  assert.deepEqual(homes, [["maple--a1b2", false]], "an unlink takes it back to its chat");
+  await ask({ want: "keep" });
+  assert.equal(asked.length, 2, "no other ask is answered");
+});

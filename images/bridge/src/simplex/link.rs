@@ -42,17 +42,33 @@
 //!   crash, a refusal) is read again. Forwarding is idempotent, so this
 //!   costs reads. An anchor the core no longer has ends the scan with what
 //!   it read.
+//! - **Working.** While the agent's turn runs on one of its owner's
+//!   messages (the engine's `working`, by its seq in their SimpleX chat),
+//!   the link puts `wire::WORKING` on that message in their app, and takes
+//!   it off when the turn ends, however it ends (`react`). It knows a
+//!   message's seq from its post (`Input::Posted`, the newest
+//!   `POSTED_KEPT`), and keeps the messages it reacted to, so a later
+//!   start takes off what an earlier one left on. A refusal (reactions
+//!   off, or a ratchet out of step) is no one's to hear: it shows nothing.
 //! - **A reply the core will not send now** waits in the outbox until the
 //!   ratchet is `ok`. Failed syncs keep replies held too. Restarts and timer
 //!   ticks (`Resync`) read `/_info` before retrying: a forced sync replaces
 //!   its private keys even during negotiation, breaking the keys already
 //!   queued on SMP when the peer is away (the offline-phone lab).
+//! - **An adopted identity** (FIN-463: the owner's SimpleX conversation with
+//!   their old finite.computer agent, carried over): its databases become
+//!   the core's, and `Input::Adopt` binds the link to the owner's contact
+//!   there, marks what that chat already held as delivered (its newest
+//!   item, read before anything new could arrive), so no old message is
+//!   carried as new, and keeps what else the old agent had (other
+//!   contacts, groups, its contact address) as `leftovers`, let go at each
+//!   start until the core says each is gone.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use super::wire::{self, Cmd, ConnId, ContactId, Content, FileRef, Resp, SyncStatus};
+use super::wire::{self, Cmd, ConnId, ContactId, Content, FileRef, GroupId, Resp, SyncStatus};
 
 /// The newest items a start reads back, to forward what a killed core
 /// committed but never announced.
@@ -62,6 +78,24 @@ pub const SCAN_MAX: usize = 8 * CATCHUP_ITEMS as usize;
 /// Parts of replies held while the ratchet synchronizes, at most; past it
 /// the oldest go (and are counted).
 pub const OUTBOX_MAX: usize = 32;
+/// The owner's messages whose seq on their chat the link keeps (the
+/// newest): past a chat's turns, the one running and the 16 queued.
+pub const POSTED_KEPT: usize = 32;
+/// Items with `wire::WORKING` on, or not yet answered taken off, at most.
+pub const REACTED_MAX: usize = 2 * POSTED_KEPT;
+/// Reactions asked of the core and not yet answered, at most: the rest as
+/// each is answered (or not sent), so the link's other commands (a start's
+/// catch-up, an adoption's leftovers) keep their room in what the core's
+/// writer holds (`run::WRITER_MAX`) however many are owed.
+pub const REACT_ASKED: usize = 4;
+/// What an adoption lets go, at most (`Link::leftovers`): past it, another
+/// contact is still let go the moment it writes or connects.
+pub const LEFTOVERS_MAX: usize = 256;
+/// Leftovers asked of the core at once, at most: a start asks its catch-up
+/// first, then these, and each one settled asks the next, so its commands
+/// never pass what the core's writer holds (`run::WRITER_MAX`).
+pub const LEFTOVERS_ASKED: usize = 16;
+const _: () = assert!(LEFTOVERS_ASKED + 8 < 64, "a start's asks fit in what the core's writer holds (run::WRITER_MAX)");
 
 /// Where the link is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,12 +141,85 @@ pub struct Link {
     /// A start's catch-up, under way: in no file, and in no comparison.
     #[serde(skip)]
     pub scan: Scan,
+    /// The owner's messages posted on their chat, each `(seq, item)`: its
+    /// seq there and the core's item, the newest `POSTED_KEPT`, oldest
+    /// first. A rollback takes them back with the database, whose item ids
+    /// it may reuse.
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub posted: VecDeque<(u64, i64)>,
+    /// The items the link put `wire::WORKING` on and the core has not
+    /// answered taking off: kept across a removal lost with its core (or
+    /// never sent), so it is asked again until the core answers it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reacted: Vec<i64>,
+    /// Of those, the ones whose taking off is asked of this core and not
+    /// answered yet (not asked twice): in no file, and in no comparison.
+    #[serde(skip)]
+    pub taking_off: Asked,
+    /// Of those, the ones whose putting on is asked of this core and not
+    /// answered yet: with `taking_off`, at most `REACT_ASKED` under way.
+    #[serde(skip)]
+    pub putting_on: Asked,
     /// What an unlink still has the core let go (the contact, told, or an
     /// unused invitation): asked again at each start until it is done, so
     /// an unlink while the core cannot run (under a hold, not always on)
     /// is finished when it next does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<Cleanup>,
+    /// What an adopted identity held besides its owner, still to let go
+    /// (`Input::Adopt`): asked at each start until the core says each is
+    /// gone, or refuses it for good. At most `LEFTOVERS_MAX`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leftovers: Vec<Leftover>,
+    /// Leftovers this start's core refused for now: each frees its place
+    /// in the batch asked for the next (asked again at the next start).
+    #[serde(skip)]
+    pub refused: Refused,
+}
+
+/// A count of this life's alone: in no file, and in no comparison (as
+/// `Scan`), so a link's state compares by what its file holds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Refused(pub usize);
+
+impl PartialEq for Refused {
+    fn eq(&self, _: &Refused) -> bool {
+        true
+    }
+}
+
+impl Eq for Refused {}
+
+/// What an adopted identity held besides its owner's contact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Leftover {
+    /// Another contact: deleted, told so.
+    Contact(ContactId),
+    /// A group: left (its members told), then deleted here.
+    Group(GroupId),
+    /// A group left, still to delete here.
+    LeftGroup(GroupId),
+    /// Its contact address: deleted, so no one connects through it again.
+    Address,
+}
+
+impl Leftover {
+    fn cmd(self) -> Cmd {
+        match self {
+            Leftover::Contact(contact) => Cmd::Delete { contact, notify: true },
+            Leftover::Group(group) => Cmd::LeaveGroup { group },
+            Leftover::LeftGroup(group) => Cmd::DeleteGroup { group },
+            Leftover::Address => Cmd::DeleteAddress,
+        }
+    }
+}
+
+/// Whether a refusal may pass (its agent or its database failed): then it
+/// is asked again at the next start. Any other (the store has no such
+/// thing, the chat will not) is for good.
+fn transient(what: &str) -> bool {
+    what.starts_with("errorAgent") || what.starts_with("errorDatabase")
 }
 
 /// What an unlink has the core let go.
@@ -155,6 +262,19 @@ impl PartialEq for Scan {
 
 impl Eq for Scan {}
 
+/// Items whose reaction's removal is asked of the running core and not yet
+/// answered. Transient: a core's start asks again for any still on.
+#[derive(Debug, Clone, Default)]
+pub struct Asked(pub BTreeSet<i64>);
+
+impl PartialEq for Asked {
+    fn eq(&self, _: &Asked) -> bool {
+        true
+    }
+}
+
+impl Eq for Asked {}
+
 /// What reaches the link.
 #[derive(Debug, Clone, Copy)]
 pub enum Input<'a> {
@@ -175,6 +295,26 @@ pub enum Input<'a> {
     Delivered(i64),
     /// A sync still waits for `ok`: read the core's state before retrying.
     Resync,
+    /// Its owner kept their SimpleX chat with their old agent: its
+    /// identity is the core's now, and `owner` their contact there, by
+    /// `name`; `newest` the newest item that chat held as it was read,
+    /// before anything new could arrive (a core that subscribed nothing);
+    /// `leftovers` what else it held. Taken only while off.
+    Adopt { owner: ContactId, name: &'a str, newest: i64, leftovers: &'a [Leftover] },
+    /// Its core is stopped to start again (another client took its queues):
+    /// replies wait in the outbox until the next start reads it in step,
+    /// as through a sync, rather than go to no core.
+    Restarting,
+    /// The owner's message of this item was posted on their chat as `seq`.
+    Posted { seq: u64, item: i64 },
+    /// The core answered putting `WORKING` on this item (`on`) or taking
+    /// it off: done, or refused (on or off already, the item gone,
+    /// reactions off). A removal answered either way is none to ask again;
+    /// a putting on refused is settled by its removal's answer.
+    Reacted { item: i64, on: bool },
+    /// That was not sent (no core, or one not taking commands): asked
+    /// again at the next `react`.
+    NotReacted { item: i64, on: bool },
 }
 
 /// What the link asks for.
@@ -216,6 +356,9 @@ pub struct Inbound {
 pub enum Notice {
     /// The link is bound to their SimpleX contact, by its name.
     Linked { name: String },
+    /// The link is bound to their contact of an adopted identity: the
+    /// conversation they had with their old agent goes on.
+    Adopted { name: String },
     /// Another contact connected or wrote, and was deleted.
     Refused,
     /// The link went back in time, or found its encryption out of step: a
@@ -228,6 +371,10 @@ pub enum Notice {
     Unlinked { by_them: bool },
     /// The core refused something the link asked, saying `what`.
     Failed { what: String },
+    /// Another client took the bound contact's queues (FIN-483: a core run
+    /// elsewhere on a copy of these databases): this core is deaf to them
+    /// until it subscribes again, so it is started again.
+    Taken,
 }
 
 impl Link {
@@ -254,7 +401,24 @@ impl Link {
                 // its answer, when it comes, is an invitation no one wants
                 Phase::Asking | Phase::Off => {}
             },
+            Input::Adopt { owner, name, newest, leftovers } => {
+                if self.phase == Phase::Off && self.cleanup.is_none() {
+                    self.let_go();
+                    self.phase = Phase::Linked { contact: owner, name: wire::cut(name, wire::NAME_MAX_BYTES).to_string() };
+                    self.delivered = newest.max(0);
+                    self.leftovers.clear();
+                    for l in leftovers.iter().filter(|l| **l != Leftover::Contact(owner)).take(LEFTOVERS_MAX) {
+                        if !self.leftovers.contains(l) {
+                            self.leftovers.push(*l);
+                        }
+                    }
+                    out.extend([Action::Tell(Notice::Adopted { name: wire::cut(name, wire::NAME_MAX_BYTES).to_string() }), Action::Save]);
+                }
+            }
             Input::Started { rollback } => {
+                // what the last core never answered is asked of this one
+                self.taking_off.0.clear();
+                self.putting_on.0.clear();
                 // an unlink the last life could not finish, first
                 out.extend(self.cleanup.map(|c| Action::Ask(c.cmd())));
                 match &self.phase {
@@ -283,6 +447,10 @@ impl Link {
                         out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
                     }
                 }
+                // then what an adoption still lets go, a batch at a time,
+                // after the catch-up, so no flood of them crowds it out
+                self.refused = Refused(0);
+                out.extend(self.leftovers.iter().take(LEFTOVERS_ASKED).map(|l| Action::Ask(l.cmd())));
             }
             Input::Said(resp) => self.said(resp, &mut out),
             Input::Failed { cmd, what } => {
@@ -300,6 +468,37 @@ impl Link {
                     // gone already, or not the core's to let go: not asked again
                     Cmd::Delete { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => self.cleanup = None,
                     Cmd::DeleteConn { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => self.cleanup = None,
+                    // an adoption's leftover: asked again at the next start
+                    // while the refusal may pass; a leave refused for good
+                    // goes on to the group's delete; anything else, settled
+                    Cmd::Delete { contact, .. } if self.leftovers.contains(&Leftover::Contact(*contact)) => {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::Contact(*contact), &mut out);
+                        } else {
+                            self.settle(Leftover::Contact(*contact), None, &mut out);
+                        }
+                    }
+                    Cmd::LeaveGroup { group } if self.leftovers.contains(&Leftover::Group(*group)) => {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::Group(*group), &mut out);
+                        } else {
+                            self.settle(Leftover::Group(*group), Some(Leftover::LeftGroup(*group)), &mut out);
+                        }
+                    }
+                    Cmd::DeleteGroup { group } if self.leftovers.contains(&Leftover::LeftGroup(*group)) => {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::LeftGroup(*group), &mut out);
+                        } else {
+                            self.settle(Leftover::LeftGroup(*group), None, &mut out);
+                        }
+                    }
+                    Cmd::DeleteAddress if self.leftovers.contains(&Leftover::Address) => {
+                        if transient(&what) {
+                            self.refused_for_now(Leftover::Address, &mut out);
+                        } else {
+                            self.settle(Leftover::Address, None, &mut out);
+                        }
+                    }
                     // not sent now (a ratchet mid-sync refuses sends): it
                     // waits, and what comes after it, until the ratchet is
                     // ok or the next start
@@ -311,9 +510,38 @@ impl Link {
                     _ => {}
                 }
             }
+            Input::Reacted { item, on: false } => {
+                self.reacted.retain(|i| *i != item);
+                self.taking_off.0.remove(&item);
+            }
+            Input::Reacted { item, on: true } => {
+                self.putting_on.0.remove(&item);
+            }
+            Input::NotReacted { item, on: false } => {
+                self.taking_off.0.remove(&item);
+            }
+            Input::NotReacted { item, on: true } => {
+                if self.putting_on.0.remove(&item) {
+                    self.reacted.retain(|i| *i != item);
+                }
+            }
+            Input::Posted { seq, item } => {
+                if self.contact().is_some() && item > 0 {
+                    self.posted.retain(|(s, i)| *s != seq && *i != item);
+                    if self.posted.len() == POSTED_KEPT {
+                        self.posted.pop_front();
+                    }
+                    self.posted.push_back((seq, item));
+                }
+            }
             Input::Delivered(item) => {
                 if self.contact().is_some() && !self.scan.running {
                     self.delivered = self.delivered.max(item);
+                }
+            }
+            Input::Restarting => {
+                if self.contact().is_some() {
+                    self.syncing = true;
                 }
             }
             Input::Resync => {
@@ -356,6 +584,7 @@ impl Link {
                 Phase::Linked { contact: linked, .. } if linked == contact => {}
                 _ => out.extend([Action::Ask(Cmd::Delete { contact: *contact, notify: false }), Action::Tell(Notice::Refused)]),
             },
+            Resp::AnotherClient { contact } | Resp::SubscriptionEnd { contact: Some(contact) } if self.linked_to(*contact) => out.push(Action::Tell(Notice::Taken)),
             Resp::Items(items) => self.items(items, out),
             Resp::Page(items) => self.page(items, out),
             Resp::Sync { contact, status } if self.linked_to(*contact) => match status {
@@ -400,10 +629,26 @@ impl Link {
                 self.cleanup = None;
                 out.push(Action::Save);
             }
+            // an adoption's leftovers, let go
+            Resp::Deleted { contact, .. } if self.leftovers.contains(&Leftover::Contact(*contact)) => self.settle(Leftover::Contact(*contact), None, out),
+            Resp::GroupLeft { group } if self.leftovers.contains(&Leftover::Group(*group)) => self.settle(Leftover::Group(*group), Some(Leftover::LeftGroup(*group)), out),
+            Resp::GroupDeleted { group } => {
+                for l in [Leftover::Group(*group), Leftover::LeftGroup(*group)] {
+                    if self.leftovers.contains(&l) {
+                        self.settle(l, None, out);
+                    }
+                }
+            }
+            Resp::AddressDeleted if self.leftovers.contains(&Leftover::Address) => self.settle(Leftover::Address, None, out),
             // a file's own events are the bridge's to act on (it receives the
             // file a forwarded message carries), never the link's, as is the
             // agent's profile (its name)
             Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::ContactInfo { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            // an adopted identity's read (the bridge's, before it adopts), and
+            // what is not one of its leftovers
+            Resp::User { .. } | Resp::Contacts(_) | Resp::Groups(_) | Resp::GroupLeft { .. } | Resp::AddressDeleted => {}
+            // another contact's queues, or a connection of no contact's (its address)
+            Resp::AnotherClient { .. } | Resp::SubscriptionEnd { .. } => {}
         }
     }
 
@@ -471,6 +716,45 @@ impl Link {
         }
     }
 
+    /// A leftover gone (or refused for good), and what comes after it
+    /// (a group left: its delete), asked at once.
+    fn settle(&mut self, done: Leftover, then: Option<Leftover>, out: &mut Vec<Action>) {
+        let Some(at) = self.leftovers.iter().position(|l| *l == done) else { return };
+        match then.filter(|n| !self.leftovers.contains(n)) {
+            // its next step in its place, asked now
+            Some(next) => {
+                self.leftovers[at] = next;
+                out.push(Action::Ask(next.cmd()));
+            }
+            None => {
+                self.leftovers.remove(at);
+                // one of the batch asked is done: the next not yet asked
+                let window = LEFTOVERS_ASKED + self.refused.0;
+                if at < window {
+                    if let Some(next) = self.leftovers.get(window - 1) {
+                        out.push(Action::Ask(next.cmd()));
+                    }
+                }
+            }
+        }
+        out.push(Action::Save);
+    }
+
+    /// A leftover of the batch asked, refused for now: kept, to be asked
+    /// again at the next start, its place in the batch given to the next
+    /// not yet asked (Codex's review: refusals that may pass would
+    /// otherwise hold every place, and the rest wait for a restart). Each
+    /// is asked once a start, so a network that is down asks no more.
+    fn refused_for_now(&mut self, l: Leftover, out: &mut Vec<Action>) {
+        let window = LEFTOVERS_ASKED + self.refused.0;
+        if self.leftovers.iter().position(|x| *x == l).is_some_and(|at| at < window) {
+            self.refused.0 += 1;
+            if let Some(next) = self.leftovers.get(window) {
+                out.push(Action::Ask(next.cmd()));
+            }
+        }
+    }
+
     /// A part held until the ratchet is in step; past `OUTBOX_MAX` the
     /// oldest goes, counted.
     fn hold(&mut self, part: String) {
@@ -505,11 +789,54 @@ impl Link {
         }
     }
 
+    /// What shows the agent working (`wire::WORKING`) on its owner's
+    /// messages, made what `working` says: the `chat` seqs of the messages
+    /// its turns run on now (the engine's `working`). Taken off each it no
+    /// longer works on, put on each it now does; nothing while the ratchet
+    /// is out of step (its sends are refused), and again once it is. Asked
+    /// only of a running core (the manager's), so what it asks is sent.
+    /// The same `working` again asks nothing.
+    pub fn react(&mut self, working: &BTreeSet<u64>) -> Vec<Action> {
+        let mut out = vec![];
+        let Phase::Linked { contact, .. } = self.phase else { return out };
+        if self.syncing {
+            return out;
+        }
+        let wanted: Vec<i64> = self.posted.iter().filter(|(seq, _)| working.contains(seq)).map(|(_, item)| *item).collect();
+        let under_way = |l: &Link| l.taking_off.0.len() + l.putting_on.0.len();
+        // off: kept as on until the core answers it (`Reacted`), asked once a
+        // core, and not while its putting on is under way
+        let off: Vec<i64> = self.reacted.iter().filter(|i| !wanted.contains(i) && !self.taking_off.0.contains(i) && !self.putting_on.0.contains(i)).copied().collect();
+        for item in off {
+            if under_way(self) < REACT_ASKED {
+                self.taking_off.0.insert(item);
+                out.push(Action::Ask(Cmd::React { contact, item, on: false }));
+            }
+        }
+        // on: one whose removal is not answered yet goes on again once it is;
+        // past `REACTED_MAX` not yet taken off (a core not answering), none:
+        // it shows nothing rather than grow
+        for item in wanted {
+            if under_way(self) < REACT_ASKED && !self.reacted.contains(&item) && self.reacted.len() < REACTED_MAX {
+                self.putting_on.0.insert(item);
+                self.reacted.push(item);
+                out.push(Action::Ask(Cmd::React { contact, item, on: true }));
+            }
+        }
+        self.check();
+        out
+    }
+
+
     /// A contact bound or let go: nothing of the last one's waits.
     fn let_go(&mut self) {
         self.syncing = false;
         self.forced = false;
         self.outbox.clear();
+        self.posted.clear();
+        self.reacted.clear();
+        self.taking_off.0.clear();
+        self.putting_on.0.clear();
         self.delivered = 0;
         self.scan.items.clear();
         self.scan.running = false;
@@ -533,6 +860,14 @@ impl Link {
         assert!(linked || (!self.syncing && self.outbox.is_empty()), "only a bound link syncs or holds replies");
         assert!(self.syncing || !self.forced, "a forced sync is one under way");
         assert!(self.outbox.len() <= OUTBOX_MAX, "the outbox is bounded");
+        assert!(linked || (self.posted.is_empty() && self.reacted.is_empty()), "only a bound link keeps its owner's messages");
+        // (an item it reacted to may have aged out of `posted` since: the
+        // next `react` takes it off)
+        assert!(self.posted.len() <= POSTED_KEPT && self.reacted.len() <= REACTED_MAX, "what it keeps of its owner's messages is bounded");
+        assert!(self.taking_off.0.iter().chain(&self.putting_on.0).all(|i| self.reacted.contains(i)), "only what is on is being taken off or put on");
+        assert!(self.taking_off.0.is_disjoint(&self.putting_on.0) && self.taking_off.0.len() + self.putting_on.0.len() <= REACT_ASKED, "a bounded number under way, each one way");
+        assert!(self.leftovers.len() <= LEFTOVERS_MAX, "an adoption's leftovers are bounded");
+        assert!(self.contact().is_none_or(|c| !self.leftovers.contains(&Leftover::Contact(c))), "the bound contact is never let go as a leftover");
     }
 
     /// The link as written beside the core's database.
@@ -546,7 +881,8 @@ impl Link {
     pub fn from_json(text: &str) -> Result<Link, String> {
         let link: Link = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let linked = matches!(link.phase, Phase::Linked { .. });
-        if !(linked || (!link.syncing && link.outbox.is_empty())) || link.outbox.len() > OUTBOX_MAX || (link.forced && !link.syncing) {
+        let owner_left = link.contact().is_some_and(|c| link.leftovers.contains(&Leftover::Contact(c)));
+        if !(linked || (!link.syncing && link.outbox.is_empty())) || link.outbox.len() > OUTBOX_MAX || (link.forced && !link.syncing) || link.leftovers.len() > LEFTOVERS_MAX || owner_left {
             return Err("a link that contradicts itself".into());
         }
         Ok(link)
@@ -582,6 +918,121 @@ mod tests {
 
     fn sends(actions: &[Action]) -> Vec<String> {
         actions.iter().filter_map(|a| if let Action::Ask(Cmd::Send { text, .. }) = a { Some(text.clone()) } else { None }).collect()
+    }
+
+    fn reactions(actions: &[Action]) -> Vec<(i64, bool)> {
+        actions.iter().filter_map(|a| if let Action::Ask(Cmd::React { contact: 3, item, on }) = a { Some((*item, *on)) } else { None }).collect()
+    }
+
+    /// Each reaction asked, answered by the core as done.
+    fn answer(link: &mut Link, asked: &[Action]) -> Vec<(i64, bool)> {
+        let r = reactions(asked);
+        for (item, on) in &r {
+            link.apply(Input::Reacted { item: *item, on: *on });
+        }
+        r
+    }
+
+    /// Goal (Paul, 2026-11-11): while its agent works on its owner's
+    /// message, its app shows `WORKING` on it, and not once the turn ends,
+    /// however it ends. Replay: the same working set again asks nothing,
+    /// and a message posted again is one. A removal is kept until the core
+    /// answers it (Codex's review: else one lost with its core leaves 🚀
+    /// for good): asked once of a core, again when it was not sent, and of
+    /// the next core when the last never answered. At most `REACT_ASKED`
+    /// are under way, however many are owed (Codex's second round: the
+    /// core's writer keeps room for the rest). A ratchet out of step shows
+    /// nothing until it is in step. An unlink keeps nothing; what it keeps
+    /// is bounded.
+    #[test]
+    fn its_owners_message_shows_the_agent_working_while_its_turn_runs() {
+        let mut link = linked();
+        let none = BTreeSet::new();
+        let on = |seqs: &[u64]| -> BTreeSet<u64> { seqs.iter().copied().collect() };
+        assert!(link.react(&on(&[7])).is_empty(), "a seq it was never told of: nothing");
+        link.apply(Input::Posted { seq: 7, item: 41 });
+        link.apply(Input::Posted { seq: 7, item: 41 });
+        link.apply(Input::Posted { seq: 9, item: 44 });
+        assert_eq!(link.posted, VecDeque::from([(7, 41), (9, 44)]), "posted again: one");
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "its turn runs: on");
+        assert!(link.react(&on(&[7])).is_empty(), "the same again: nothing");
+        let asked = link.react(&on(&[9]));
+        assert_eq!(reactions(&asked), vec![(41, false), (44, true)], "the next one's turn: off the first, on the next");
+        // unanswered: still on, and not asked twice of this core
+        assert_eq!(link.reacted, vec![41, 44]);
+        assert!(link.react(&on(&[9])).is_empty(), "under way: not asked again");
+        answer(&mut link, &asked);
+        assert_eq!(link.reacted, vec![44], "answered: off");
+        // ended, its removal lost with its core: kept in its file, asked of the next core
+        assert_eq!(reactions(&link.react(&none)), vec![(44, false)]);
+        let mut back = Link::from_json(&link.to_json()).expect("its file reads back");
+        assert_eq!(back.reacted, vec![44], "kept in its file until answered");
+        back.apply(Input::Started { rollback: false });
+        assert_eq!(reactions(&back.react(&none)), vec![(44, false)], "the next life's core is asked again");
+        link.apply(Input::Started { rollback: false });
+        assert_eq!(reactions(&link.react(&none)), vec![(44, false)], "and so is a core started again");
+        // not sent (a core not taking commands): asked again at the next react
+        link.apply(Input::NotReacted { item: 44, on: false });
+        let asked = link.react(&none);
+        assert_eq!(answer(&mut link, &asked), vec![(44, false)], "not sent: asked again");
+        assert!(link.reacted.is_empty() && link.react(&none).is_empty(), "answered: nothing on, nothing asked");
+        // a putting on not sent: not on, asked again
+        assert_eq!(reactions(&link.react(&on(&[7]))), vec![(41, true)]);
+        link.apply(Input::NotReacted { item: 41, on: true });
+        assert!(link.reacted.is_empty(), "not sent: not on");
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "asked again");
+        // its removal wanted while its putting on is under way, and back: each waits for the other
+        let asked = link.react(&none);
+        assert_eq!(reactions(&asked), vec![(41, false)]);
+        assert!(link.react(&on(&[7])).is_empty(), "its removal under way: wait for it");
+        answer(&mut link, &asked);
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "answered: on again");
+        let asked = link.react(&none);
+        answer(&mut link, &asked);
+        assert!(link.reacted.is_empty());
+        // a ratchet out of step: nothing, until it is in step
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
+        assert!(link.react(&on(&[7])).is_empty(), "syncing: nothing sent");
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "in step: on");
+        // bounded: the oldest goes, and one it reacted to that went comes off
+        for n in 0..POSTED_KEPT as u64 {
+            link.apply(Input::Posted { seq: 100 + n, item: 100 + n as i64 });
+        }
+        assert!(link.posted.len() == POSTED_KEPT && !link.posted.contains(&(7, 41)), "the oldest went");
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, false)], "aged out: off");
+        // many owed: at most REACT_ASKED under way, the next as each is answered
+        let all: BTreeSet<u64> = (100..100 + POSTED_KEPT as u64).collect();
+        let asked = link.react(&all);
+        assert_eq!(reactions(&asked).len(), REACT_ASKED);
+        assert!(link.react(&all).is_empty(), "none more until one is answered");
+        link.apply(Input::Reacted { item: 100, on: true });
+        assert_eq!(reactions(&link.react(&all)).len(), 1, "one answered: one more");
+        // answered as they come: all on
+        loop {
+            let pending: Vec<(i64, bool)> = link.putting_on.0.iter().map(|i| (*i, true)).collect();
+            for (item, on) in pending {
+                link.apply(Input::Reacted { item, on });
+            }
+            if link.react(&all).is_empty() && link.putting_on.0.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(link.reacted.len(), POSTED_KEPT, "all on, a few at a time");
+        // a core that answers nothing: no more than REACT_ASKED asked of it
+        assert_eq!(reactions(&link.react(&none)).len(), REACT_ASKED);
+        assert!(link.react(&none).is_empty(), "nothing more of a core that does not answer");
+        // unlinked: nothing kept, and nothing asked
+        link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: true }));
+        assert!(link.posted.is_empty() && link.reacted.is_empty() && link.taking_off.0.is_empty() && link.putting_on.0.is_empty());
+        assert!(link.react(&on(&[131])).is_empty(), "unlinked: nothing");
+        link.apply(Input::Posted { seq: 200, item: 1 });
+        assert!(link.posted.is_empty(), "unlinked: nothing kept");
     }
 
     /// Goal (valid): the owner links, writes and is answered; each message
@@ -857,6 +1308,33 @@ mod tests {
         }
     }
 
+    /// Goal (FIN-483): another client on the bound contact's queues is told,
+    /// so its core subscribes again; another contact's, or the address's,
+    /// moves nothing.
+    #[test]
+    fn another_client_on_its_queues_is_told() {
+        let mut link = linked();
+        assert_eq!(link.apply(Input::Said(&Resp::AnotherClient { contact: 3 })), vec![Action::Tell(Notice::Taken)]);
+        assert_eq!(link.apply(Input::Said(&Resp::SubscriptionEnd { contact: Some(3) })), vec![Action::Tell(Notice::Taken)]);
+        for r in [Resp::AnotherClient { contact: 9 }, Resp::SubscriptionEnd { contact: Some(9) }, Resp::SubscriptionEnd { contact: None }] {
+            assert!(link.apply(Input::Said(&r)).is_empty(), "{r:?}");
+        }
+        assert!(Link::default().apply(Input::Said(&Resp::AnotherClient { contact: 3 })).is_empty(), "not linked");
+        assert_eq!(link.contact(), Some(3), "still bound");
+        // Codex's review: a reply while its core starts again waits for it,
+        // across a restart of the bridge too, and goes once it is in step
+        link.apply(Input::Restarting);
+        assert!(link.apply(Input::Reply("answered meanwhile")).is_empty(), "held, not sent to no core");
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(link.apply(Input::Started { rollback: false })[0], Action::Ask(Cmd::ContactInfo { contact: 3 }));
+        let ok = link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok }));
+        assert_eq!(sends(&ok), vec!["answered meanwhile"]);
+        assert!(!link.syncing);
+        let mut off = Link::default();
+        off.apply(Input::Restarting);
+        assert!(!off.syncing, "nothing bound, nothing held");
+    }
+
     /// Goal: the outbox is bounded: past it the oldest parts go, counted.
     #[test]
     fn the_outbox_is_bounded() {
@@ -934,6 +1412,148 @@ mod tests {
         assert_eq!(Link::from_json(r#"{"phase":"off"}"#), Ok(Link::default()));
         assert_eq!(linked().to_json(), r#"{"phase":"linked","contact":3,"name":"paul","syncing":false,"forced":false,"outbox":[],"dropped":0}"#);
         assert!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","forced":true}"#).is_err(), "forced, but no sync under way");
+    }
+
+    /// An adoption as the bridge makes it: the owner is contact 3, its chat
+    /// held items up to 40, and the old agent had a friend (4), a group (1)
+    /// and an address.
+    fn adopted() -> Link {
+        let mut link = Link::default();
+        let leftovers = [Leftover::Contact(4), Leftover::Contact(3), Leftover::Group(1), Leftover::Address, Leftover::Contact(4)];
+        let a = link.apply(Input::Adopt { owner: 3, name: "phone", newest: 40, leftovers: &leftovers });
+        assert_eq!(a, vec![Action::Tell(Notice::Adopted { name: "phone".into() }), Action::Save]);
+        link
+    }
+
+    /// Goal (FIN-463, valid): an adopted identity binds its owner's contact,
+    /// what that chat already held is delivered (no old message carried as
+    /// new), what arrived after it is carried, and the rest it held is let
+    /// go at the start: the friend told, the group left then deleted, the
+    /// address deleted. Never the owner.
+    #[test]
+    fn an_adoption_binds_the_owner_and_carries_only_whats_new() {
+        let mut link = adopted();
+        assert_eq!((link.contact(), link.delivered), (Some(3), 40));
+        assert_eq!(link.leftovers, vec![Leftover::Contact(4), Leftover::Group(1), Leftover::Address], "the owner never, each once");
+        let started = link.apply(Input::Started { rollback: false });
+        assert_eq!(
+            started,
+            vec![
+                Action::Ask(Cmd::ContactInfo { contact: 3 }),
+                Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None }),
+                Action::Ask(Cmd::Delete { contact: 4, notify: true }),
+                Action::Ask(Cmd::LeaveGroup { group: 1 }),
+                Action::Ask(Cmd::DeleteAddress),
+            ],
+            "its catch-up first"
+        );
+        // its catch-up: 9..=40 is the old conversation, 41 and 42 came while it moved
+        let item = |id: i64| Item { id, shared: Some(format!("m{id}")), ..msg(3, None, &format!("text {id}")) };
+        let page = Resp::Page((11..=42).map(item).collect());
+        let got = link.apply(Input::Said(&page));
+        assert_eq!(forwards(&got), vec![("m41".into(), "text 41".into()), ("m42".into(), "text 42".into())], "only what came after the read");
+        // the leftovers go as the core answers
+        assert_eq!(link.apply(Input::Said(&Resp::Deleted { contact: 4, by_them: false })), vec![Action::Save]);
+        assert_eq!(link.apply(Input::Said(&Resp::GroupLeft { group: 1 })), vec![Action::Ask(Cmd::DeleteGroup { group: 1 }), Action::Save]);
+        assert_eq!(link.apply(Input::Said(&Resp::GroupDeleted { group: 1 })), vec![Action::Save]);
+        assert_eq!(link.apply(Input::Said(&Resp::AddressDeleted)), vec![Action::Save]);
+        assert!(link.leftovers.is_empty());
+        assert_eq!(link.contact(), Some(3), "the owner stays bound");
+        assert!(!link.apply(Input::Started { rollback: false }).iter().any(|a| matches!(a, Action::Ask(Cmd::Delete { .. } | Cmd::LeaveGroup { .. } | Cmd::DeleteAddress))), "nothing left to let go");
+    }
+
+    /// Goal (Codex's review): an identity with many leftovers never crowds
+    /// out its start's catch-up: that is asked first, then a batch of
+    /// leftovers within what the core's writer holds, each one settled
+    /// asking the next, until every one was asked.
+    #[test]
+    fn many_leftovers_are_asked_a_batch_at_a_time() {
+        let many: Vec<Leftover> = (10..10 + 200).map(Leftover::Contact).collect();
+        let mut link = Link::default();
+        link.apply(Input::Adopt { owner: 3, name: "p", newest: 0, leftovers: &many });
+        let started = link.apply(Input::Started { rollback: false });
+        assert_eq!(started[..2], [Action::Ask(Cmd::ContactInfo { contact: 3 }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
+        assert_eq!(started.len(), 2 + LEFTOVERS_ASKED, "a batch, within the writer's room (64)");
+        let mut asked: Vec<i64> = started.iter().filter_map(|a| if let Action::Ask(Cmd::Delete { contact, .. }) = a { Some(*contact) } else { None }).collect();
+        let mut pending: std::collections::VecDeque<i64> = asked.iter().copied().collect();
+        // bounded: each answer settles one
+        while let Some(c) = pending.pop_front() {
+            let next = link.apply(Input::Said(&Resp::Deleted { contact: c, by_them: false }));
+            let more: Vec<i64> = next.iter().filter_map(|a| if let Action::Ask(Cmd::Delete { contact, .. }) = a { Some(*contact) } else { None }).collect();
+            assert!(more.len() <= 1, "one for one");
+            pending.extend(&more);
+            asked.extend(more);
+        }
+        asked.sort();
+        assert_eq!(asked, (10..210).collect::<Vec<_>>(), "every one asked, once");
+        assert!(link.leftovers.is_empty());
+        // Codex's second look: refusals that may pass give their places on,
+        // so every one is asked once this start, the address too; those
+        // refused are asked again at the next
+        let mut many: Vec<Leftover> = (10..10 + 40).map(Leftover::Contact).collect();
+        many.push(Leftover::Address);
+        let mut link = Link::default();
+        link.apply(Input::Adopt { owner: 3, name: "p", newest: 0, leftovers: &many });
+        let ask_of = |a: &Action| match a {
+            Action::Ask(Cmd::Delete { contact, .. }) => Some(Leftover::Contact(*contact)),
+            Action::Ask(Cmd::DeleteAddress) => Some(Leftover::Address),
+            _ => None,
+        };
+        let mut pending: std::collections::VecDeque<Leftover> = link.apply(Input::Started { rollback: false }).iter().filter_map(ask_of).collect();
+        let mut asked = vec![];
+        // bounded: each answer asks at most one more, each once
+        while let Some(l) = pending.pop_front() {
+            asked.push(l);
+            let cmd = match l {
+                Leftover::Contact(contact) => Cmd::Delete { contact, notify: true },
+                _ => Cmd::DeleteAddress,
+            };
+            let next = link.apply(Input::Failed { cmd: &cmd, what: "errorAgent BROKER TIMEOUT" });
+            assert!(next.len() <= 1, "one for one");
+            pending.extend(next.iter().filter_map(ask_of));
+        }
+        assert_eq!(asked.len(), 41, "every one asked once this start, never twice");
+        assert!(asked.contains(&Leftover::Address));
+        assert_eq!(link.leftovers.len(), 41, "all kept, for the next start");
+        assert_eq!(link.apply(Input::Started { rollback: false }).iter().filter_map(ask_of).count(), LEFTOVERS_ASKED, "a batch again at the next start");
+    }
+
+    /// Goal (replay, restart): an adoption is taken once and only while
+    /// off; its leftovers survive a restart and are asked again while the
+    /// core's refusal may pass; one refused for good is settled; a leave
+    /// refused for good goes on to the group's delete.
+    #[test]
+    fn an_adoption_is_once_and_its_leftovers_outlive_restarts() {
+        let mut link = adopted();
+        assert!(link.apply(Input::Adopt { owner: 9, name: "eve", newest: 1, leftovers: &[] }).is_empty(), "bound already: a second adoption does nothing");
+        assert_eq!(link.contact(), Some(3));
+        for busy in [linked(), { let mut l = Link::default(); invited(&mut l); l }, { let mut l = linked(); l.apply(Input::Unlink); l }] {
+            let mut busy = busy;
+            let before = busy.clone();
+            assert!(busy.apply(Input::Adopt { owner: 9, name: "eve", newest: 1, leftovers: &[] }).is_empty(), "only while off, with nothing left to finish");
+            assert_eq!(busy, before);
+        }
+        link.apply(Input::Started { rollback: false });
+        let flaky = link.apply(Input::Failed { cmd: &Cmd::Delete { contact: 4, notify: true }, what: "errorAgent BROKER TIMEOUT" });
+        assert!(flaky.is_empty() && link.leftovers.contains(&Leftover::Contact(4)), "a refusal that may pass waits for the next start");
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(link.leftovers.len(), 3);
+        let again = link.apply(Input::Started { rollback: false });
+        assert_eq!(again.iter().filter(|a| matches!(a, Action::Ask(Cmd::Delete { contact: 4, .. }))).count(), 1, "asked again at the next start");
+        link.apply(Input::Failed { cmd: &Cmd::Delete { contact: 4, notify: true }, what: "errorStore contactNotFound" });
+        let left = link.apply(Input::Failed { cmd: &Cmd::LeaveGroup { group: 1 }, what: "errorChat groupMemberUserRemoved" });
+        assert_eq!(left, vec![Action::Ask(Cmd::DeleteGroup { group: 1 }), Action::Save], "a leave refused for good: the group deleted");
+        link.apply(Input::Failed { cmd: &Cmd::DeleteGroup { group: 1 }, what: "errorStore groupNotFound" });
+        link.apply(Input::Failed { cmd: &Cmd::DeleteAddress, what: "errorStore userContactLinkNotFound" });
+        assert!(link.leftovers.is_empty());
+        // an unlink after an adoption is any unlink; a file naming the owner as a leftover is refused
+        assert!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","leftovers":[{"contact":3}]}"#).is_err());
+        assert_eq!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","leftovers":[{"contact":4},{"group":1},"address"]}"#).map(|l| l.leftovers), Ok(vec![Leftover::Contact(4), Leftover::Group(1), Leftover::Address]));
+        // bounded
+        let many: Vec<Leftover> = (10..10 + LEFTOVERS_MAX as i64 + 9).map(Leftover::Contact).collect();
+        let mut big = Link::default();
+        big.apply(Input::Adopt { owner: 3, name: "p", newest: 0, leftovers: &many });
+        assert_eq!(big.leftovers.len(), LEFTOVERS_MAX);
     }
 
     /// Goal: whatever arrives in whatever order, the link never contradicts

@@ -13,7 +13,10 @@
 //! `Move::values`): no reader of its own in the cell's Wasm.
 //! Removable with the move (docs/technical-debt-ledger.md).
 
-use fragment_proto::migrations::{command_id, stage_id, stage_prefix, Command, CommandKind, HeldReason, Mark, MoveState, Phase, Report, StageDone, ATTEMPTS_MAX};
+use fragment_proto::migrations::{
+    command_id, stage_id, stage_prefix, Command, CommandKind, Handoff, Has, HeldReason, Mark, MoveState, Phase, Report, SecretKind, StageDone, ATTEMPTS_MAX, HANDOFF_VALUE_MAX_BYTES, TEXT_MAX_BYTES, WHY_MAX_BYTES,
+};
+use fragment_proto::vault::{Place, PutSecret};
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::Value;
 
@@ -63,7 +66,10 @@ pub fn comp_grant_id(person: &str) -> String {
 /// The routine that starts a stage's import, on its new agent's own
 /// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;
 /// docs/chat-records.md, "A routine"). Its person's answers join it with
-/// the page that asks them (F6).
+/// the page that asks them (F6). The computer's bridge reads its stage
+/// back from these words, to set its SimpleX identity aside before the
+/// import ends the stage (images/bridge/src/simplex/stage.rs, `of_routine`):
+/// a change of words is a change there too.
 pub fn routine_text(stage: &str) -> String {
     format!("Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage {stage}.")
 }
@@ -141,13 +147,18 @@ pub struct Move {
     pub expires_ms: Option<i64>,
     /// Withdrawn by staff: a roster that lists it again leaves it so.
     pub by_staff: bool,
+    /// Why staff withdrew it, while they keep it out (`withdraw`).
+    pub why: Option<String>,
+    /// Missing from the last roster (or listed by none yet): staff's
+    /// withdrawal taken back leaves it withdrawn, the roster's (`include`).
+    pub dropped: bool,
 }
 
 /// A move's columns in the object's `moves` table, in order: the last,
 /// its deadline, derived from the rest (`Move::deadline`), for the alarm
 /// to find it by.
-pub const COLUMNS: [&str; 20] = [
-    "old", "workos_id", "state", "reason", "held_from", "phase", "attempt", "agent", "command", "seq", "since_ms", "progress_ms", "staged_ms", "routine_ms", "routines", "opened", "expires_ms", "by_staff", "generation", "deadline_ms",
+pub const COLUMNS: [&str; 22] = [
+    "old", "workos_id", "state", "reason", "held_from", "phase", "attempt", "agent", "command", "seq", "since_ms", "progress_ms", "staged_ms", "routine_ms", "routines", "opened", "expires_ms", "by_staff", "generation", "why", "dropped", "deadline_ms",
 ];
 
 /// A column's value, as SQLite takes it.
@@ -184,6 +195,8 @@ impl Move {
             opt_int(self.expires_ms),
             Col::Int(i64::from(self.by_staff)),
             Col::Int(i64::from(self.generation)),
+            opt_text(self.why.as_deref()),
+            Col::Int(i64::from(self.dropped)),
             opt_int(self.deadline()),
         ]
     }
@@ -222,6 +235,8 @@ impl Move {
             expires_ms: int("expires_ms"),
             by_staff: int("by_staff") == Some(1),
             generation: int("generation").and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+            why: text("why").map(str::to_string),
+            dropped: int("dropped") == Some(1),
         })
     }
 }
@@ -235,6 +250,9 @@ pub enum Effect {
     /// Delete this stage's objects (`stage_prefix`): its routes already
     /// refuse, as the move no longer names it.
     Sweep { prefix: String },
+    /// Delete its row: staff withdrew it ahead of any roster, and took that
+    /// back (`include`).
+    Forget,
 }
 
 /// A change: the move after it, and its effects.
@@ -257,6 +275,11 @@ pub enum Refused {
     NoStage,
     /// An event that does not fit its command (400).
     Unfit(&'static str),
+    /// A withdrawal's why, empty or over `WHY_MAX_BYTES` (400).
+    Why,
+    /// Its old agent may be stopped or retired: a person's Yes, or the
+    /// cutoff, began its move (409).
+    Begun,
 }
 
 impl Refused {
@@ -267,6 +290,8 @@ impl Refused {
             Refused::NotYours => "only the agent this move is bound to".into(),
             Refused::NoStage => "no such stage: another attempt's, or none".into(),
             Refused::Unfit(why) => (*why).into(),
+            Refused::Why => format!("a withdrawal says why, in 1 to {WHY_MAX_BYTES} bytes"),
+            Refused::Begun => "its move began (its person said Yes, or the cutoff took it): its old agent may be stopped or retired, so it is not offered again; bring it over by hand".into(),
         }
     }
 }
@@ -297,7 +322,21 @@ impl Move {
             expires_ms: None,
             by_staff: false,
             generation: 0,
+            why: None,
+            dropped: false,
         }
+    }
+
+    /// A row for an old agent no roster has listed yet, for staff to
+    /// withdraw ahead of it (`withdraw`): no person, and missing from the
+    /// roster. A roster that lists it fills in its person (`relisted`).
+    pub fn unlisted(old: &str, now: i64) -> Move {
+        Move { state: MoveState::Withdrawn, dropped: true, ..Move::listed(old, "", false, now) }
+    }
+
+    /// Whether a roster ever listed it: its person is the roster's.
+    pub fn rostered(&self) -> bool {
+        !self.workos_id.is_empty()
     }
 
     /// Its current command's id, while it has one.
@@ -322,6 +361,19 @@ impl Move {
             },
             secrets: vec![],
         })
+    }
+
+    /// The secrets its current command hands to its person's Vault: on a
+    /// person's Yes (a phase 1 `stop_and_stage`, bound to their agent),
+    /// every kind its old agent has, with no question of its own (the
+    /// Vault is theirs, and nothing uses an entry until they set
+    /// something up); none otherwise.
+    pub fn secrets(&self, has: &Has) -> Vec<SecretKind> {
+        if self.command != Some(Act::StopAndStage) || self.phase != Phase::P1 || self.agent.is_none() {
+            return vec![];
+        }
+        let held = [has.telegram, has.openrouter, has.nostr];
+        SecretKind::ALL.into_iter().zip(held).filter_map(|(k, h)| h.then_some(k)).collect()
     }
 
     /// Its current attempt's stage id and prefix (none before an attempt).
@@ -490,14 +542,28 @@ pub fn bind(m: &Move, now: i64) -> Option<Step> {
 }
 
 /// Missing from a roster: withdrawn, if its person never said Yes. A
-/// command it holds (a restart) stays.
+/// command it holds (a restart) stays. One staff withdrew stays theirs,
+/// marked dropped (`include` leaves it withdrawn).
 pub fn withdrawn(m: &Move, now: i64) -> Option<Step> {
-    m.unasked().then(|| Step { to: m.moved(MoveState::Withdrawn, now), effects: vec![] })
+    let to = match m.state {
+        _ if m.unasked() => m.moved(MoveState::Withdrawn, now),
+        MoveState::Withdrawn if m.by_staff && !m.dropped => m.clone(),
+        _ => return None,
+    };
+    Some(Step { to: Move { dropped: true, ..to }, effects: vec![] })
 }
 
-/// Listed again after a roster withdrew it (not staff): offered again.
-pub fn relisted(m: &Move, bound: bool, now: i64) -> Option<Step> {
-    (m.state == MoveState::Withdrawn && !m.by_staff).then(|| Step { to: m.moved(if bound { MoveState::Open } else { MoveState::Listed }, now), effects: vec![] })
+/// Listed again (by `workos_id`'s roster row) after a roster withdrew it:
+/// offered again. One staff withdrew stays withdrawn, no longer dropped,
+/// and one withdrawn ahead of any roster takes its person from it.
+pub fn relisted(m: &Move, workos_id: &str, bound: bool, now: i64) -> Option<Step> {
+    let to = match (m.state, m.by_staff) {
+        (MoveState::Withdrawn, false) => m.moved(if bound { MoveState::Open } else { MoveState::Listed }, now),
+        (MoveState::Withdrawn, true) if m.dropped => m.clone(),
+        _ => return None,
+    };
+    let workos_id = if m.rostered() { m.workos_id.clone() } else { workos_id.to_string() };
+    Some(Step { to: Move { workos_id, dropped: false, ..to }, effects: vec![] })
 }
 
 // ---- its person's answers
@@ -607,6 +673,79 @@ pub fn report(m: &Move, r: &Report, now: i64) -> Outcome {
         (Act::Restart, "restarted" | "failed") => step(Move { command: None, seq: 0, ..taken }),
         _ => unfit,
     }
+}
+
+// ---- the mover's hand-off of an old agent's secrets (F11)
+
+/// A hand-off's kinds, within its bounds: its command's id at most
+/// `TEXT_MAX_BYTES`, 1 to 3 items, each kind once, each value 1 to
+/// `HANDOFF_VALUE_MAX_BYTES`. Says nothing of a value.
+pub fn handoff_kinds(h: &Handoff) -> Result<Vec<SecretKind>, Refused> {
+    let command_ok = !h.command.is_empty() && h.command.len() <= TEXT_MAX_BYTES && h.command.bytes().all(|b| b.is_ascii_graphic());
+    if !command_ok || h.items.is_empty() || h.items.len() > SecretKind::ALL.len() {
+        return Err(Refused::Unfit("a hand-off names its command and 1 to 3 secrets"));
+    }
+    if h.items.iter().any(|i| i.value.is_empty() || i.value.len() > HANDOFF_VALUE_MAX_BYTES) {
+        return Err(Refused::Unfit("a secret's value is 1 to 4096 bytes"));
+    }
+    let kinds: Vec<SecretKind> = h.items.iter().map(|i| i.kind).collect();
+    if kinds.iter().enumerate().any(|(n, k)| kinds[..n].contains(k)) {
+        return Err(Refused::Unfit("a hand-off names each kind once"));
+    }
+    Ok(kinds)
+}
+
+/// Whether the mover may hand off `kinds` of `m`'s old agent for
+/// `command`: its current command (409 otherwise), whose `secrets` name
+/// each (400), while its old agent is being stopped or staged (409).
+pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Result<(), Refused> {
+    if m.command_id().as_deref() != Some(command) {
+        return Err(Refused::Stale);
+    }
+    let asked = m.secrets(has);
+    if !kinds.iter().all(|k| asked.contains(k)) {
+        return Err(Refused::Unfit("a hand-off names only the secrets its command asks for"));
+    }
+    match m.state {
+        MoveState::Asked | MoveState::Staging => Ok(()),
+        s => Err(Refused::NotNow(s)),
+    }
+}
+
+/// A secret handed off, as its person's Vault keeps it: its name there,
+/// bound to the new agent's fragment, toward the hosts its kind goes to.
+/// `None`: a Nostr key that is not one (the Vault takes no other value).
+///
+/// - Telegram's token, toward `api.telegram.org`: moved from there into
+///   the new agent's Telegram connector by Settings (`fromVault`).
+/// - OpenRouter's key, toward `openrouter.ai`.
+/// - The Nostr key, as 64 hex, to sign with (NIP-98) and with no host
+///   yet: kept, never sent, until something its person sets up asks for
+///   one.
+///
+/// Its name is its kind's and the agent's, at most 32 bytes:
+/// `telegram-<fragment>` whole when it fits; otherwise the label cut short
+/// and the first 6 hex of the fragment name's SHA-256 beside it
+/// (`telegram-<label…>-<hash>--<suffix>`), so two of a person's agents
+/// whose cut names would meet do not share one. The Vault refuses a
+/// hand-off a name another agent's secret holds, should two meet anyway.
+pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(String, PutSecret)> {
+    let (word, hosts, place, value) = match kind {
+        SecretKind::TelegramBotToken => ("telegram", vec!["api.telegram.org".to_string()], Place::default(), value.to_string()),
+        SecretKind::OpenrouterKey => ("openrouter", vec!["openrouter.ai".to_string()], Place::default(), value.to_string()),
+        SecretKind::NostrNsec => ("nostr", vec![], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
+    };
+    let (label, suffix) = fragment_proto::split_fragment_name(fragment)?;
+    let whole = format!("{word}-{fragment}");
+    let name = if whole.len() <= 32 {
+        whole
+    } else {
+        let hash = &crate::blob::sha256_hex(fragment.as_bytes())[..6];
+        let room = 32 - word.len() - 1 - 1 - hash.len() - 2 - suffix.len();
+        let label = label[..label.len().min(room)].trim_end_matches('-');
+        format!("{word}-{label}-{hash}--{suffix}")
+    };
+    Some((name, PutSecret { value, hosts, place, agents: vec![fragment.to_string()] }))
 }
 
 // ---- the mover's upload
@@ -805,17 +944,49 @@ pub fn retire(m: &Move, now: i64) -> Outcome {
     }
 }
 
-/// Out of the move by staff: offered no more, whatever a roster says.
-pub fn withdraw(m: &Move, now: i64) -> Outcome {
+/// Out of the move by staff, saying why: offered no more, never archived,
+/// whatever a roster says (the will-not-move list). A held move has no
+/// command left; a restart pending stays, so its old agent still starts.
+/// The same why again changes nothing; another replaces it.
+pub fn withdraw(m: &Move, why: &str, now: i64) -> Outcome {
+    let why = why.trim();
+    if why.is_empty() || why.len() > WHY_MAX_BYTES {
+        return Err(Refused::Why);
+    }
     match m.state {
-        MoveState::Withdrawn if m.by_staff => Ok(None),
+        MoveState::Withdrawn if m.by_staff && m.why.as_deref() == Some(why) => Ok(None),
+        MoveState::Withdrawn if m.by_staff => step(Move { why: Some(why.into()), ..m.clone() }),
         MoveState::Listed | MoveState::Open | MoveState::Later | MoveState::Never | MoveState::Held | MoveState::Withdrawn => {
             let mut effects = vec![];
-            let to = Move { by_staff: true, command: None, seq: 0, ..m.clone().swept(&mut effects).moved(MoveState::Withdrawn, now) };
+            let to = Move { by_staff: true, why: Some(why.into()), ..m.clone().swept(&mut effects).moved(MoveState::Withdrawn, now) };
             Ok(Some(Step { to, effects }))
         }
         s => Err(Refused::NotNow(s)),
     }
+}
+
+/// Staff's withdrawal taken back: offered again, `open` for a person here
+/// (`bound`), else `listed`. A row withdrawn ahead of any roster is
+/// forgotten; one a roster dropped stays withdrawn, the roster's, until a
+/// roster lists it. Anything else is not staff's to take back: nothing.
+/// One whose move began (a Yes binds its agent; the cutoff makes it phase
+/// 2) is refused: its old agent may be stopped or retired, and a phase 2
+/// stage is the only copy left, which an offer's Yes would stage afresh.
+pub fn include(m: &Move, bound: bool, now: i64) -> Outcome {
+    if m.state != MoveState::Withdrawn || !m.by_staff {
+        return Ok(None);
+    }
+    if m.agent.is_some() || m.phase == Phase::P2 {
+        return Err(Refused::Begun);
+    }
+    if !m.rostered() {
+        return Ok(Some(Step { to: m.clone(), effects: vec![Effect::Forget] }));
+    }
+    let to = match m.dropped {
+        true => m.clone(),
+        false => m.moved(if bound { MoveState::Open } else { MoveState::Listed }, now),
+    };
+    step(Move { by_staff: false, why: None, ..to })
 }
 
 // ---- what its person is told (F4)
@@ -877,6 +1048,7 @@ mod tests {
 
     const T0: i64 = 1_800_000_000_000;
     const AGENT: &str = "npub1agent";
+    const WHY: &str = "a staff test account";
 
     /// Stored and read back: a restarted object's move, from its columns
     /// as SQLite answers them.
@@ -936,6 +1108,14 @@ mod tests {
 
     fn ok() -> StageDone {
         StageDone { ok: true, report_sha256: None, why: None }
+    }
+
+    /// Goal: the routine's words are the ones the computer's bridge reads
+    /// its stage from (images/bridge/src/simplex/stage.rs tests the same
+    /// sentence), so its SimpleX identity is set aside before the stage ends.
+    #[test]
+    fn the_routine_names_its_stage_as_the_bridge_reads_it() {
+        assert_eq!(routine_text("u_0a-9Z.p1.2"), "Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage u_0a-9Z.p1.2.");
     }
 
     #[test]
@@ -1178,11 +1358,11 @@ mod tests {
         assert_eq!((ret.state, ret.command), (MoveState::Retiring, Some(Act::Retire(Mark::Migrated))));
         assert_eq!(retire(&open_move(), T0), Err(Refused::NotNow(MoveState::Open)));
         // withdraw: out, and a roster leaves it out
-        let w = to(withdraw(&held, T0 + 6));
+        let w = to(withdraw(&held, WHY, T0 + 6));
         assert_eq!((w.state, w.by_staff, w.command), (MoveState::Withdrawn, true, None));
-        assert_eq!(withdraw(&w, T0), Ok(None), "replay");
-        assert_eq!(relisted(&restarted(&w), true, T0), None);
-        assert_eq!(withdraw(&staging(), T0), Err(Refused::NotNow(MoveState::Staging)), "in flight: restart it first");
+        assert_eq!(withdraw(&w, WHY, T0), Ok(None), "replay");
+        assert_eq!(relisted(&restarted(&w), "user_1", true, T0), None);
+        assert_eq!(withdraw(&staging(), WHY, T0), Err(Refused::NotNow(MoveState::Staging)), "in flight: restart it first");
     }
 
     #[test]
@@ -1192,13 +1372,105 @@ mod tests {
         assert_eq!((w.state, w.by_staff), (MoveState::Withdrawn, false));
         assert_eq!(withdrawn(&w, T0), None, "replay");
         assert_eq!(withdrawn(&staging(), T0), None, "in flight: untouched");
-        assert_eq!(relisted(&restarted(&w), true, T0).expect("again").to.state, MoveState::Open);
-        assert_eq!(relisted(&w, false, T0).expect("again").to.state, MoveState::Listed);
-        assert_eq!(relisted(&m, true, T0), None, "only a withdrawn one");
+        assert_eq!(relisted(&restarted(&w), "user_1", true, T0).expect("again").to.state, MoveState::Open);
+        assert_eq!(relisted(&w, "user_1", false, T0).expect("again").to.state, MoveState::Listed);
+        assert_eq!(relisted(&m, "user_1", true, T0), None, "only a withdrawn one");
         // a restart pending stays through it, so the old agent still restarts
         let mut pending = open_move();
         pending.command = Some(Act::Restart);
         assert_eq!(withdrawn(&pending, T0).unwrap().to.command, Some(Act::Restart));
+    }
+
+    /// The will-not-move list: staff withdraw an old agent no roster has
+    /// listed yet; a roster that lists it then fills in its person and
+    /// leaves it withdrawn, offered to no one, the cutoff passing it by.
+    #[test]
+    fn staff_withdraw_ahead_of_the_roster_and_it_stays_out() {
+        let w = to(withdraw(&Move::unlisted("prj_9", T0), WHY, T0));
+        assert_eq!((w.state, w.by_staff, w.why.as_deref(), w.dropped, w.rostered()), (MoveState::Withdrawn, true, Some(WHY), true, false));
+        assert_eq!(w.command(), None, "the mover is told nothing");
+        let w = restarted(&w);
+        // a roster lists it: its person filled in, still withdrawn
+        let listed = relisted(&w, "user_9", true, T0 + 1).expect("its person filled in").to;
+        assert_eq!((listed.state, listed.by_staff, listed.workos_id.as_str(), listed.dropped, listed.why.as_deref()), (MoveState::Withdrawn, true, "user_9", false, Some(WHY)));
+        assert_eq!(relisted(&listed, "user_9", true, T0 + 2), None, "replay");
+        assert_eq!(bind(&listed, T0 + 2), None, "never offered");
+        // the person's answers and the cutoff pass it by
+        for answer in [later(&listed, T0), never(&listed, T0), ask_again(&listed, T0), yes(&listed, AGENT, T0)] {
+            assert_eq!(answer, Err(Refused::NotNow(MoveState::Withdrawn)));
+        }
+        assert_eq!(cutoff(&listed, T0, T0 + 3), None, "never archived");
+        // a roster that drops it, and one that lists it again: withdrawn throughout
+        let dropped = withdrawn(&restarted(&listed), T0 + 4).expect("dropped").to;
+        assert_eq!((dropped.state, dropped.by_staff, dropped.dropped), (MoveState::Withdrawn, true, true));
+        assert_eq!(withdrawn(&dropped, T0 + 5), None, "replay");
+        let back = relisted(&dropped, "user_9", false, T0 + 6).expect("listed again").to;
+        assert_eq!((back.state, back.by_staff, back.dropped, back.workos_id.as_str()), (MoveState::Withdrawn, true, false, "user_9"));
+        // a roster never changes whose it is once it named them
+        assert_eq!(relisted(&dropped, "user_other", false, T0 + 6).expect("listed again").to.workos_id, "user_9");
+    }
+
+    /// `include` takes back staff's withdrawal alone: offered again (open
+    /// for a person here, else listed); a row withdrawn ahead of any roster
+    /// forgotten; one a roster dropped left withdrawn, the roster's.
+    #[test]
+    fn include_takes_back_staffs_withdrawal_alone() {
+        // ahead of any roster: forgotten
+        let ahead = to(withdraw(&Move::unlisted("prj_9", T0), WHY, T0));
+        let gone = include(&restarted(&ahead), false, T0 + 1).expect("taken").expect("a change");
+        assert_eq!(gone.effects, vec![Effect::Forget]);
+        // listed, open, said Never, its old agent given back: open for a person here, else listed
+        let never_m = to(never(&open_move(), T0));
+        let restarting = restart_old(&staging(), T0).unwrap().unwrap().to;
+        let given_back = to(report(&restarting, &report_on(&restarting, 1, "restarted"), T0));
+        for from in [Move::listed("prj_1", "user_1", false, T0), open_move(), never_m, given_back] {
+            let w = to(withdraw(&from, WHY, T0 + 1));
+            for (bound, state) in [(true, MoveState::Open), (false, MoveState::Listed)] {
+                let back = to(include(&restarted(&w), bound, T0 + 2));
+                assert_eq!((back.state, back.by_staff, back.why.as_deref(), back.since_ms), (state, false, None, T0 + 2), "from {:?}", from.state);
+                assert_eq!(include(&back, bound, T0 + 3), Ok(None), "replay");
+            }
+        }
+        // a roster dropped it, before staff's withdrawal or after: withdrawn still, the roster's
+        let roster_first = to(withdraw(&withdrawn(&open_move(), T0).unwrap().to, WHY, T0 + 1));
+        let staff_first = withdrawn(&to(withdraw(&open_move(), WHY, T0)), T0 + 1).unwrap().to;
+        for w in [roster_first, staff_first] {
+            let back = to(include(&restarted(&w), true, T0 + 2));
+            assert_eq!((back.state, back.by_staff, back.why.as_deref()), (MoveState::Withdrawn, false, None));
+            assert_eq!(include(&back, true, T0 + 3), Ok(None), "the roster's withdrawal is not staff's to take back");
+            // and a roster that lists it offers it again
+            assert_eq!(relisted(&back, "user_1", true, T0 + 4).expect("again").to.state, MoveState::Open);
+        }
+        // nothing to take back: in flight, or never withdrawn
+        assert_eq!(include(&staging(), true, T0), Ok(None));
+        assert_eq!(include(&open_move(), true, T0), Ok(None));
+    }
+
+    #[test]
+    fn a_withdrawal_says_why_in_bounds() {
+        let m = open_move();
+        for bad in ["", "   ", &"x".repeat(WHY_MAX_BYTES + 1)] {
+            assert_eq!(withdraw(&m, bad, T0), Err(Refused::Why), "{bad:?}");
+        }
+        let longest = "y".repeat(WHY_MAX_BYTES);
+        assert_eq!(to(withdraw(&m, &longest, T0)).why, Some(longest));
+        let w = to(withdraw(&m, "  trimmed  ", T0));
+        assert_eq!(w.why.as_deref(), Some("trimmed"));
+        // the same why again changes nothing; a new one replaces it
+        assert_eq!(withdraw(&w, "trimmed", T0 + 1), Ok(None), "replay");
+        let again = to(withdraw(&w, "another reason", T0 + 2));
+        assert_eq!((again.why.as_deref(), again.since_ms), (Some("another reason"), T0));
+        assert_eq!(withdraw(&staging(), "", T0), Err(Refused::Why), "a why is checked first");
+    }
+
+    /// A restart pending (staff gave the old agent back) survives staff's
+    /// withdrawal: the old agent still starts again.
+    #[test]
+    fn staffs_withdrawal_keeps_a_restart_pending() {
+        let back = restart_old(&staging(), T0 + 2).unwrap().unwrap().to;
+        let w = to(withdraw(&back, WHY, T0 + 3));
+        assert_eq!((w.state, w.command), (MoveState::Withdrawn, Some(Act::Restart)));
+        assert_eq!(w.command_id().as_deref(), Some("prj_1:1:restart"));
     }
 
     #[test]
@@ -1303,9 +1575,32 @@ mod tests {
         let held = to(done(&late, AGENT, "o.p2.1", &failed, cut + 11));
         let retired = retire(&held, cut + 12).unwrap().unwrap();
         assert_eq!((retired.effects.as_slice(), retired.to.staged_ms), (&[][..], Some(cut + 2)), "kept after staff's retire");
-        let withdrawn = withdraw(&held, cut + 12).unwrap().unwrap();
+        let withdrawn = withdraw(&held, WHY, cut + 12).unwrap().unwrap();
         assert_eq!((withdrawn.effects.as_slice(), withdrawn.to.deadline()), (&[][..], Some(expiry)), "kept after staff's withdrawal");
         assert_eq!(tick(&withdrawn.to, expiry).expect("its expiry").effects, vec![Effect::Sweep { prefix: "p2/o/1/".into() }]);
+        // and staff's include leaves it so: its old agent is retired, its
+        // stage the only copy (an offer's Yes would stage it afresh)
+        assert_eq!(include(&restarted(&withdrawn.to), true, cut + 13), Err(Refused::Begun));
+    }
+
+    /// A move withdrawn after its person said Yes (held), or once the cutoff
+    /// took it, is not offered again by `include`: its old agent may be
+    /// stopped or retired, and a Yes would stage it afresh.
+    #[test]
+    fn include_refuses_a_move_whose_old_agent_was_stopped() {
+        let held = tick(&to(yes(&open_move(), AGENT, T0)), T0 + STOP_MS).unwrap().to;
+        let w = to(withdraw(&held, WHY, T0 + 1));
+        assert_eq!(include(&restarted(&w), true, T0 + 2), Err(Refused::Begun));
+        let cut = T0 + 10;
+        let archiving = cutoff(&open_move(), cut, cut).unwrap().to;
+        // never stopped, attempt after attempt: held, archive_failed
+        let mut held_archive = archiving;
+        while held_archive.state != MoveState::Held {
+            held_archive = tick(&held_archive, held_archive.deadline().unwrap()).unwrap().to;
+        }
+        let at = held_archive.since_ms;
+        let w = to(withdraw(&held_archive, WHY, at + 1));
+        assert_eq!(include(&w, false, at + 2), Err(Refused::Begun));
     }
 
     /// Each routine a stage's imports send has a key of its own: the once
@@ -1467,5 +1762,78 @@ mod tests {
         let held = tick(&asked, T0 + STOP_MS).expect("held").to;
         assert_eq!((held.state, said(&held, "Ada").as_str()), (MoveState::Held, "Paused: someone from Finite will look at it and be in touch."));
         assert_eq!(said(&restarted(&held), "Ada"), said(&held, "Ada"), "restart");
+    }
+
+    /// Goal: a person's Yes hands every secret its old agent has to their
+    /// Vault (F11), only for that command, while it stops or stages, and
+    /// each into an entry bound to the new agent toward its kind's hosts.
+    #[test]
+    fn a_yes_hands_off_the_old_agents_secrets() {
+        use fragment_proto::migrations::HandoffItem;
+        let all = Has { telegram: true, openrouter: true, nostr: true };
+        let some = Has { telegram: true, openrouter: false, nostr: false };
+        let asked = to(yes(&open_move(), AGENT, T0));
+        // valid: every kind it has, on its command, while asked or staging
+        assert_eq!(asked.secrets(&all), SecretKind::ALL.to_vec());
+        assert_eq!(asked.secrets(&some), vec![SecretKind::TelegramBotToken]);
+        let cmd = asked.command_id().unwrap();
+        assert_eq!(handoff(&asked, &cmd, &all, &SecretKind::ALL), Ok(()));
+        let s = staging();
+        assert_eq!(handoff(&restarted(&s), &s.command_id().unwrap(), &some, &[SecretKind::TelegramBotToken]), Ok(()), "staging, restarted");
+        // invalid: a kind it has not, another command, a move past staging
+        assert_eq!(handoff(&s, &s.command_id().unwrap(), &some, &[SecretKind::OpenrouterKey]), Err(Refused::Unfit("a hand-off names only the secrets its command asks for")));
+        assert_eq!(handoff(&s, "prj_1:2:stop_and_stage", &all, &[SecretKind::NostrNsec]), Err(Refused::Stale));
+        let i = importing();
+        assert_eq!(handoff(&i, &cmd, &all, &[SecretKind::NostrNsec]), Err(Refused::Stale), "staged: its command is done");
+        // none without a Yes: phase 2's stop_and_stage, an unasked move, staff's restart
+        let p2 = cutoff(&Move::listed("o", "u", false, T0), T0, T0).unwrap().to;
+        assert_eq!(p2.secrets(&all), vec![]);
+        assert!(handoff(&p2, &p2.command_id().unwrap(), &all, &[SecretKind::NostrNsec]).is_err());
+        assert_eq!(open_move().secrets(&all), vec![]);
+        // its bounds: each kind once, 1 to 3, a value 1 to 4096 bytes
+        let item = |kind, value: &str| HandoffItem { kind, value: value.into() };
+        let h = |items| Handoff { command: cmd.clone(), items };
+        assert_eq!(handoff_kinds(&h(vec![item(SecretKind::NostrNsec, "x"), item(SecretKind::TelegramBotToken, "y")])), Ok(vec![SecretKind::NostrNsec, SecretKind::TelegramBotToken]));
+        assert!(handoff_kinds(&h(vec![])).is_err());
+        assert!(handoff_kinds(&h(vec![item(SecretKind::NostrNsec, "x"), item(SecretKind::NostrNsec, "y")])).is_err());
+        assert!(handoff_kinds(&h(vec![item(SecretKind::OpenrouterKey, "")])).is_err());
+        assert!(handoff_kinds(&h(vec![item(SecretKind::OpenrouterKey, &"k".repeat(HANDOFF_VALUE_MAX_BYTES + 1))])).is_err());
+        assert!(handoff_kinds(&Handoff { command: "c".repeat(TEXT_MAX_BYTES + 1), items: vec![item(SecretKind::NostrNsec, "x")] }).is_err());
+        assert!(handoff_kinds(&Handoff { command: format!("{cmd}\nnostr_nsec"), items: vec![item(SecretKind::NostrNsec, "x")] }).is_err(), "one line");
+    }
+
+    #[test]
+    fn each_kind_is_a_vault_entry_of_the_new_agent() {
+        use crate::catalog::Catalog;
+        let (name, put) = vault_secret(SecretKind::TelegramBotToken, "kestrel--x7k2", "123:abc").unwrap();
+        assert_eq!((name.as_str(), put.hosts.as_slice(), put.agents.as_slice(), put.value.as_str()), ("telegram-kestrel--x7k2", &["api.telegram.org".to_string()][..], &["kestrel--x7k2".to_string()][..], "123:abc"));
+        let (name, put) = vault_secret(SecretKind::OpenrouterKey, "kestrel--x7k2", "sk-or-1").unwrap();
+        assert_eq!((name.as_str(), put.hosts.as_slice()), ("openrouter-kestrel--x7k2", &["openrouter.ai".to_string()][..]));
+        // NIP-19's example key: kept as hex, to sign with, sent nowhere
+        let nsec = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+        let hex = "67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa";
+        let (name, put) = vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", nsec).unwrap();
+        assert_eq!((name.as_str(), put.value.as_str(), put.hosts.len(), put.place.sign.as_deref()), ("nostr-kestrel--x7k2", hex, 0, Some("nip98")));
+        assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", hex).unwrap().1.value, hex, "hex too");
+        assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", "nsec1nope"), None, "not a key");
+        // a long label is cut short to fit a name, beside its whole name's
+        // hash: two agents whose cut labels meet still have names of their own
+        let (alpha, beta) = ("abcdefghijklmnop-alpha--x7k2", "abcdefghijklmnop-beta--x7k2");
+        for kind in SecretKind::ALL {
+            let value = if kind == SecretKind::NostrNsec { nsec } else { "tok-123" };
+            let (a, b) = (vault_secret(kind, alpha, value).unwrap().0, vault_secret(kind, beta, value).unwrap().0);
+            assert!(a != b && a.len() <= 32 && b.len() <= 32, "{a} {b}");
+        }
+        // every entry passes the Vault's rules
+        let long = format!("{}--x7k2", "a".repeat(20) + "-b");
+        let catalog = Catalog::default();
+        for kind in SecretKind::ALL {
+            let value = if kind == SecretKind::NostrNsec { nsec } else { "tok-123" };
+            for fragment in ["kestrel--x7k2", long.as_str()] {
+                let (name, put) = vault_secret(kind, fragment, value).unwrap();
+                assert!(name.len() <= 32 && name.ends_with("--x7k2"), "{name}");
+                crate::vault::check(&name, &put, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+        }
     }
 }

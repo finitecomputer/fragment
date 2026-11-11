@@ -144,6 +144,8 @@
   let epoch = 0;
   // an unlink asked to be sure of, in its own step (no browser dialog in a frame)
   let unlinking = false;
+  // a new chat chosen over the one staged by its move: this page's alone
+  let fresh = false;
   async function act(want, extra) {
     unlinking = false;
     epoch++;
@@ -181,7 +183,7 @@
   function schedule() {
     clearTimeout(timer);
     // while a link is being made or shown, its use is seen at once
-    const soon = view && (view.phase === "asking" || view.phase === "inviting");
+    const soon = view && (view.phase === "asking" || view.phase === "inviting" || view.phase === "adopting");
     timer = setTimeout(refresh, soon ? 2000 : 10000);
   }
 
@@ -196,9 +198,16 @@
     }
     // what went wrong, and where reminders go when that wasn't saved
     const why = () => [view.why, homeNote].filter(Boolean).map((t) => el("p", "error", t));
+    // its owner's SimpleX chat with their old agent, staged by its move:
+    // kept only while the computer stays on (FIN-463)
+    if (!view.alwaysOn && view.staged) return say(el("p", null, "Your SimpleX chat came over from finite.computer. You can keep it once your computer stays on."));
     if (!view.alwaysOn) return say(el("p", null, view.why || "SimpleX works while your computer stays on."));
     switch (view.phase) {
       case "off": {
+        // its owner's chat with their old agent: kept, or a new link instead
+        if (view.staged && !fresh) {
+          return say(el("p", "now", "Your SimpleX chat came over from finite.computer."), row(button("Keep my SimpleX chat", "", () => act("adopt")), button("Start a new chat", "quiet", () => { fresh = true; render(); })), ...why());
+        }
         // asked once, as the link starts: yes unless unticked
         const choice = el("label", "choice");
         const box = el("input");
@@ -209,6 +218,8 @@
         choice.append(box, `Send ${name}'s reminders here`);
         return say(el("p", "now", `Link ${name} to SimpleX Chat on your phone.`), choice, row(button("Link SimpleX", "", () => act("link", { home }))), ...why());
       }
+      case "adopting":
+        return say(el("p", "now", "Keeping your SimpleX chat…"), ...why());
       case "asking": {
         // stuck (SimpleX would not start, or stopped too often): its way on
         const stuck = view.why ? [row(button("Try again", "", () => act("link")), button("Cancel", "quiet", () => act("unlink")))] : [];

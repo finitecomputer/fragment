@@ -534,8 +534,8 @@ enum OperatorCmd {
         key_file: Option<PathBuf>,
     },
     /// FIN-352's census: of everyone's fragments, how many of each kind
-    /// hold a key or a door, and how many of those are shared beyond their
-    /// owner and their agents. Counts only, no names
+    /// hold a key or a door, and how many of those are open by their link
+    /// or public. Counts only, no names
     Reach {
         #[arg(long)]
         key_file: Option<PathBuf>,
@@ -662,6 +662,56 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// The finite.computer move's old agents (FIN-463), each by its old id:
+    /// its state, whose it is, and staff's why. --withdrawn lists the
+    /// will-not-move list alone: the moves staff withdrew
+    Moves {
+        #[arg(long)]
+        withdrawn: bool,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Keep an old agent out of the move, saying why: never offered, never
+    /// archived at the cutoff, whatever the roster says. An old id no
+    /// roster has listed yet is kept out ahead of it
+    Withdraw {
+        old: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Take back staff's withdrawal of an old agent: offered again. One
+    /// withdrawn ahead of any roster is forgotten; one the roster dropped
+    /// stays withdrawn until a roster lists it
+    Include {
+        old: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+}
+
+/// Pages of moves `fragment operator moves` reads at most (100 a page).
+const MOVES_PAGES_MAX: usize = 100;
+
+/// One move as `fragment operator moves` prints it.
+fn move_line(m: &Value) -> String {
+    let or_dash = |k: &str| m[k].as_str().filter(|v| !v.is_empty()).unwrap_or("-").to_string();
+    let state = match m["reason"].as_str() {
+        Some(reason) => format!("{} ({reason})", or_dash("state")),
+        None => or_dash("state"),
+    };
+    let why = m["why"].as_str().map(|w| format!("  withdrawn by staff: {w}")).unwrap_or_default();
+    format!("{}  {state}  {}  {}{why}", or_dash("old"), or_dash("workos_id"), or_dash("person"))
+}
+
+/// Staff's act on one move (`AdminAct`): the move after it, or null when
+/// it is gone.
+fn move_act(c: &api::Client, old: &str, op: &str, why: Option<String>) -> Result<Value> {
+    if !fragment_proto::migrations::valid_old(old) {
+        return Err(usage(format!("{old:?} is no old agent's id: 1 to 64 of A-Z, a-z, 0-9, _ and -")));
+    }
+    admin_answer(c, c.post_json(&format!("/api/admin/migrations/{old}"), &fragment_proto::migrations::AdminAct { op: op.into(), why })?)
 }
 
 /// An org's id as an operator names it: `org-…`, or its ledger's name
@@ -1511,7 +1561,7 @@ fn run(cli: Cli) -> Result<()> {
             let say = |m: &std::collections::BTreeMap<String, u64>| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ") };
             println!("{people} people, {owned} fragments owned ({unanswered} did not answer)");
             println!("with a key or a door: {}", say(&reaching));
-            println!("of those, shared beyond their owner and their agents: {}", say(&beyond));
+            println!("of those, open by link or public: {}", say(&beyond));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
@@ -1714,6 +1764,49 @@ fn run(cli: Cli) -> Result<()> {
             let v = admin_answer(&c, c.post_json(&format!("/api/admin/orgs/{org}/payer"), &json!({ "id": id, "person": person }))?)?;
             json_exit(j, &v);
             println!("{org}'s credit is invoiced to {} ({})", v["email"].as_str().unwrap_or("?"), v["person"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Moves { withdrawn, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let mut moves = vec![];
+            let mut after = String::new();
+            for _ in 0..MOVES_PAGES_MAX {
+                let v = admin_answer(&c, c.get(&format!("/api/admin/migrations?after={}", api::encode_q(&after)))?)?;
+                moves.extend(v["moves"].as_array().into_iter().flatten().filter(|m| !withdrawn || m["why"].is_string()).cloned());
+                match v["next"].as_str() {
+                    Some(next) => after = next.to_string(),
+                    None => {
+                        after.clear();
+                        break;
+                    }
+                }
+            }
+            if !after.is_empty() {
+                return Err(anyhow!("more than {MOVES_PAGES_MAX} pages of moves: read them with --json from the route, a page at a time"));
+            }
+            json_exit(j, &json!({ "moves": moves }));
+            for m in &moves {
+                println!("{}", move_line(m));
+            }
+            println!("{} {}", moves.len(), if withdrawn { "withdrawn by staff" } else { "moves" });
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Withdraw { old, why, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "withdraw", Some(why))?;
+            json_exit(j, &v);
+            println!("{}", move_line(&v));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Include { old, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "include", None)?;
+            json_exit(j, &v);
+            match v["state"].as_str() {
+                None => println!("{old}: withdrawn ahead of any roster, now forgotten"),
+                Some("withdrawn") if v["why"].is_null() => println!("{}  (the roster dropped it: offered again once a roster lists it)", move_line(&v)),
+                Some(_) => println!("{}", move_line(&v)),
+            }
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::Log { before, key_file } } => {

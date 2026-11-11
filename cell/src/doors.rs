@@ -228,8 +228,8 @@ impl FragmentCell {
             let as_owner = self.as_owner()?;
             self.set_member(&as_owner, &identity, SetRole { role: Role::Viewer }).await?;
         }
-        // a door is reach: none while it is shared beyond its owner and
-        // their agents (reach.rs), decided again in the binding's own turn
+        // a door is reach: none while its link opens it (reach.rs), decided
+        // again in the binding's own turn
         self.reach_while_private()?;
         let b = Binding { door, agent: agent.into(), identity };
         self.set_meta(MetaKey::DoorActor, &b.stored())?;
