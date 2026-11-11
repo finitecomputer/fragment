@@ -127,7 +127,7 @@ impl RegistryCell {
         // held to a pick's shape as the route held it (1 to 16 ids, each
         // once), whatever the row says it is
         let picked = match &pending.services {
-            Some(text) => match serde_json::from_str::<serde_json::Value>(text).map(|v| connection_signin::services_asked(&serde_json::json!({ "services": v }))) {
+            Some(text) => match crate::json_text::<serde_json::Value>(text).map(|v| connection_signin::services_asked(&serde_json::json!({ "services": v }))) {
                 Ok(Ok(Some(ids))) => Some(ids),
                 _ => return Ok(NotUnderWay),
             },
