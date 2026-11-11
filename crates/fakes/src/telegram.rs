@@ -1,9 +1,10 @@
 //! Telegram's Bot API, for the Telegram connector's lane (templates/telegram):
-//! `getMe`, `setWebhook` and `sendMessage` at `/bot<token>/<method>`, each
-//! refused (401) for any token but its bot's. It keeps the webhook its bot
-//! was given (its URL and `secret_token`: a lane delivers updates there as
-//! Telegram would, the secret in its header), and records each message the
-//! bot sent.
+//! `getMe`, `setWebhook`, `sendMessage` and `sendChatAction` at
+//! `/bot<token>/<method>`, each refused (401) for any token but its bot's.
+//! It keeps the webhook its bot was given (its URL and `secret_token`: a
+//! lane delivers updates there as Telegram would, the secret in its
+//! header), and records each message the bot sent and each chat action,
+//! with how many messages it had sent before it.
 
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +22,9 @@ struct World {
     webhook: Option<(String, String)>,
     /// What the bot sent: `{chat_id, text}`.
     sent: Vec<Value>,
+    /// Its chat actions: `{chat_id, action, after}`, `after` how many
+    /// messages it had sent before it.
+    actions: Vec<Value>,
 }
 
 pub struct Telegram {
@@ -60,6 +64,12 @@ impl Telegram {
                     world.sent.push(sent);
                     answer(json!({ "message_id": world.sent.len() }))
                 }
+                "sendChatAction" => {
+                    let mut world = w.lock().expect("telegram");
+                    let after = world.sent.len();
+                    world.actions.push(json!({ "chat_id": body["chat_id"], "action": body["action"], "after": after }));
+                    answer(json!(true))
+                }
                 _ => Response::json(404, &json!({ "ok": false, "description": "Not Found" })),
             }
         });
@@ -75,6 +85,11 @@ impl Telegram {
     /// What the bot sent, in order.
     pub fn sent(&self) -> Vec<Value> {
         self.world.lock().expect("telegram").sent.clone()
+    }
+
+    /// Its chat actions, in order: `{chat_id, action, after}`.
+    pub fn actions(&self) -> Vec<Value> {
+        self.world.lock().expect("telegram").actions.clone()
     }
 
     /// A direct message, as an update: `text` from user `from`, in its
