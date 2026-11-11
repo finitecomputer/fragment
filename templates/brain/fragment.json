@@ -49,7 +49,7 @@
     }
   },
   "triggers": [{ "files": "**", "run": "changed" }, { "installed": true, "run": "changed" }, { "woke": true, "run": "changed" }],
-  "files": { "page": true, "status": "index_status" },
+  "files": { "page": true, "status": "index_status", "graph": true },
   "meta": {
     "title": "Brain",
     "description": "A knowledge base your agents keep: wikis of sources and pages, searched by words and meaning, shared with whoever you add."

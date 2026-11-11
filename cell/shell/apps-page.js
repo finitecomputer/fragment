@@ -1,10 +1,12 @@
-// The Apps page (`/apps`): every fragment in the
-// person's list but their chats, agents and skills (apps, brains, a kind
-// this page does not know), and any that reaches their accounts (a
-// connector's chat), each with what they may change of it here, as the
-// server says it is:
+// The Apps page (`/apps`) and the Brains page (`/brains`): every fragment
+// in the person's list but their chats, agents and skills (apps, brains, a
+// kind this page does not know), and any that reaches their accounts (a
+// connector's chat), each on its shelf (`shelfOf`: a brain on Brains, the
+// rest on Apps), with what they may change of it here, as the server says
+// it is:
 // - Dock: whether their own dock shows it (`PUT /api/fragments/{name}/dock`),
-//   an app's or a brain's; the switch moves only once the list says so.
+//   an app's or a brain's; the switch moves only once the list says so. A
+//   brain on its own page is on the dock all the same until taken off.
 // - New preview: its card shot again (`POST /api/f/{name}/card`), an
 //   editor's; "Taking a new preview…" until the shot's report comes
 //   (status's `page.at`), then the card read again.
@@ -28,7 +30,6 @@
 import { activity } from "./activity.js";
 import { createIconEditor } from "./app-icon.js";
 
-const KIND = { brain: "Brain", other: "Other" };
 const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
@@ -40,6 +41,17 @@ const dockable = (f) => f.kind === "app" || f.kind === "brain";
 // agent with a door (its SimpleX link) is not: that door is opened and
 // closed in Settings, from its own page (Alex on #918).
 export const listed = (f) => (f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills" && f.kind !== "sessions") || (f.kind === "chat" && f.sharing?.reach === true);
+// The two pages of what is listed: a brain is a knowledge base, not a tool,
+// so it is kept on a page of its own; everything else is an app. One
+// module, so both pages act on a row the same way. `ask`, each visit's
+// kind (asks.js); `noun`, what a row is called.
+export const SHELVES = {
+  apps: { title: "Apps", noun: "app", empty: "No apps yet.", ask: "apps" },
+  brains: { title: "Brains", noun: "brain", empty: "No brains yet. Ask your agent to start one.", ask: "brains" },
+};
+export const shelfOf = (f) => (f.kind === "brain" ? "brains" : "apps");
+// what a row is, said beside it where its page's title does not say so
+const kindWord = (f) => (f.kind === "app" || f.kind === "brain" ? "" : "Other");
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
@@ -134,17 +146,21 @@ export function createCards({ rows, visit, shown, draw, fetch = (url, options) =
   };
 }
 
-export function createAppsPage(page, h) {
-  // a visit of the page (its open, its close) is an ask (asks.js `apps`):
-  // what answers for an earlier visit changes nothing
+export function createAppsPage(page, h, shelf = "apps") {
+  if (!SHELVES[shelf]) throw new RangeError(`no shelf ${shelf}`);
+  const { title, noun, empty, ask } = SHELVES[shelf];
+  // what this page lists: the list's, on its shelf
+  const onShelf = (f) => listed(f) && shelfOf(f) === shelf;
+  // a visit of the page (its open, its close) is an ask (asks.js `apps`,
+  // `brains`): what answers for an earlier visit changes nothing
   const { asks } = h;
   // per app: an action in flight ("dock", "card", "archive"), what the
   // last one said (a refusal, or a preview still being taken), and its card
   const busy = new Map();
   const said = new Map();
   const cards = createCards({
-    rows: () => h.state.fragments.filter((f) => listed(f) && dockable(f)),
-    visit: () => asks.now("apps"),
+    rows: () => h.state.fragments.filter((f) => onShelf(f) && dockable(f)),
+    visit: () => asks.now(ask),
     shown: () => shown,
     draw: () => render(),
   });
@@ -182,8 +198,8 @@ export function createAppsPage(page, h) {
   };
 
   async function loadAddresses(force = false) {
-    const mine = asks.now("apps");
-    const rows = h.state.fragments.filter(listed);
+    const mine = asks.now(ask);
+    const rows = h.state.fragments.filter(onShelf);
     // The server supplies the actual scheme, suffix and preview mark.
     // Eight at a time, rather than one request per app all at once.
     for (let offset = 0; offset < rows.length; offset += 8) {
@@ -214,8 +230,8 @@ export function createAppsPage(page, h) {
   }
   // Each app's reach, eight at a time.
   async function loadReach() {
-    const mine = asks.now("apps");
-    const rows = h.state.fragments.filter((f) => listed(f) && edits(f));
+    const mine = asks.now(ask);
+    const rows = h.state.fragments.filter((f) => onShelf(f) && edits(f));
     for (let offset = 0; offset < rows.length; offset += 8) {
       await Promise.all(rows.slice(offset, offset + 8).map(async (f) => {
         const read = await readReach(f);
@@ -317,7 +333,7 @@ export function createAppsPage(page, h) {
   }
 
   async function loadAccess() {
-    const mine = asks.now("apps");
+    const mine = asks.now(ask);
     const request = ++accessRead;
     const fingerprint = sharingOf();
     const next = await h.api("GET", "/api/access").catch((e) => ({ error: e.message }));
@@ -327,7 +343,7 @@ export function createAppsPage(page, h) {
     return true;
   }
   // what the list says of who is in each of theirs: a change asks again
-  const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => listed(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
+  const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => onShelf(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
 
   // who may open one of the person's own, at a glance
   function whoLine(f) {
@@ -369,7 +385,7 @@ export function createAppsPage(page, h) {
     // given it since the page was read shows
     const f = h.state.fragments.find((x) => x.name === name);
     if (expanded.get(name) === "reach" && f) {
-      const mine = asks.now("apps");
+      const mine = asks.now(ask);
       readReach(f).then((read) => {
         if (!asks.current(mine)) return;
         reach.set(name, read);
@@ -407,7 +423,7 @@ export function createAppsPage(page, h) {
     input.value = edit.draft;
     input.maxLength = 120;
     input.required = true;
-    input.setAttribute("aria-label", "App name");
+    input.setAttribute("aria-label", `${noun[0].toUpperCase()}${noun.slice(1)} name`);
     input.disabled = edit.saving;
     input.oninput = () => { edit.draft = input.value; };
     const cancel = button("Cancel", "rename-cancel", () => { editing.delete(name); render(); }, edit.saving);
@@ -457,7 +473,7 @@ export function createAppsPage(page, h) {
       url.rel = "noopener";
       text.append(url);
     }
-    const about = [KIND[f.kind] ?? (f.kind === "app" ? "" : KIND.other), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
+    const about = [kindWord(f), owns(f) ? "" : `Shared with you · ${ROLE[f.role] ?? f.role}`].filter(Boolean).join(" · ");
     if (about) text.append(h.el("span", "app-row-meta", about));
     if (owns(f)) text.append(whoLine(f));
     const reachSaid = reaches(f) && reachLine(f);
@@ -598,7 +614,7 @@ export function createAppsPage(page, h) {
     const message = h.el("p", "app-address-said");
     message.setAttribute("role", "status");
     form.append(field, claim);
-    box.append(form, h.el("p", "muted app-address-note", "First come, first served. This address stays with this app."), message);
+    box.append(form, h.el("p", "muted app-address-note", `First come, first served. This address stays with this ${noun}.`), message);
     form.onsubmit = async (event) => {
       event.preventDefault();
       if (claim.disabled) return;
@@ -678,7 +694,7 @@ export function createAppsPage(page, h) {
 
   function render() {
     if (!shown) return;
-    const all = h.state.fragments.filter(listed);
+    const all = h.state.fragments.filter(onShelf);
     const live = all.filter((f) => !f.archived);
     const archived = all.filter((f) => f.archived);
     let list = page.querySelector(".apps-list");
@@ -686,7 +702,7 @@ export function createAppsPage(page, h) {
     if (!list) {
       const wrap = h.el("div", "apps-layout");
       const head = h.el("header", "apps-intro");
-      head.append(h.el("h1", null, "Apps"));
+      head.append(h.el("h1", null, title));
       list = h.el("div", "apps-list");
       folded = h.el("details", "apps-archived");
       folded.append(h.el("summary"), h.el("div", "apps-list"));
@@ -696,7 +712,7 @@ export function createAppsPage(page, h) {
     if (access?.error && !page.querySelector(".apps-access-failed")) list.before(h.el("p", "settings-warning apps-access-failed", `Who has access did not load: ${access.error}`));
     if (!access?.error) page.querySelector(".apps-access-failed")?.remove();
     place(list, live.map(row));
-    if (!live.length) list.replaceChildren(h.el("p", "muted apps-empty", "No apps yet."));
+    if (!live.length) list.replaceChildren(h.el("p", "muted apps-empty", empty));
     folded.hidden = !archived.length;
     folded.querySelector("summary").textContent = `Archived (${archived.length})`;
     place(folded.querySelector(".apps-list"), archived.map(row));
@@ -736,7 +752,7 @@ export function createAppsPage(page, h) {
   // a shot asked for: waited for by its report (status's `page.at` from
   // when it was wanted on), then its card read again
   async function newPreview(name) {
-    const mine = asks.now("apps");
+    const mine = asks.now(ask);
     const operation = beginBusy(name, "card");
     say(name, "");
     render();
@@ -773,7 +789,7 @@ export function createAppsPage(page, h) {
     // shown at `/apps`: the list as it is, who has access, and each card
     async open() {
       shown = true;
-      asks.ask("apps");
+      asks.ask(ask);
       // preview presentation is a visit's; a Dock or archive mutation is
       // still the one server write this app may have in flight
       for (const [name, operation] of busy) if (operation.kind === "card") busy.delete(name);
@@ -790,7 +806,7 @@ export function createAppsPage(page, h) {
     },
     close() {
       shown = false;
-      asks.ask("apps");
+      asks.ask(ask);
       cards.closed();
       shots.clear();
       for (const editor of iconEditors.values()) editor.dispose();
