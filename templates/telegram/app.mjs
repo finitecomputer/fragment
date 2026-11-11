@@ -93,7 +93,9 @@ export class App extends DurableObject {
     // `answered`: the attempts `connect` answered lately (each a page's own
     // word), so a page that asked sees its own answer come, the same bot's
     // token again included, whatever other connects answered meanwhile
-    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, answered: this.get("answered") ?? [] };
+    // `held`: its owner took the bot their Vault held for this chat
+    // (`hold`), and it has not connected since
+    return { bot: bot ? { username: bot.username } : null, error: this.get("error"), paired: paired ? { name: paired.name } : null, pairing, answered: this.get("answered") ?? [], held: this.get("held") === true };
   }
 
   async connect({ platform, api = TELEGRAM, attempt } = {}, job) {
@@ -133,6 +135,16 @@ export class App extends DurableObject {
     }
     this.put("bot", { id: bot.id, username: String(bot.username).slice(0, 64) });
     this.put("api", api);
+    this.put("held", null);
+    return { ok: true };
+  }
+
+  // its owner takes the bot their Vault holds for this chat (setup.js),
+  // said before the token moves here: a page that lost the move's answer,
+  // or one opened again, offers that bot again until it connects
+  hold(_, call) {
+    if (call.agent) throw new Error("its owner sets it up, in person");
+    this.put("held", true);
     return { ok: true };
   }
 

@@ -915,7 +915,15 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
   }
   // the connector bound as `agent`'s Telegram door, if any
   const boundOf = (agent) => [...(doors ?? [])].find(([, b]) => b?.door === DOOR && b.agent === agent)?.[0] ?? null;
-  const openConnector = (pressed, name, agent) => openSetup({ pressed, src: framed(name, SETUP), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  // its setup page, offering the bot token its owner's Vault holds for
+  // `agent` (a bot moved from finite.computer, FIN-463 F11): a secret bound
+  // to it toward api.telegram.org alone. A Vault not read offers none
+  async function openConnector(pressed, name, agent) {
+    const vault = await api("GET", "/api/vault").then((v) => v.secrets ?? [], () => []);
+    const bot = vault.find((v) => v.hosts?.length === 1 && v.hosts[0] === "api.telegram.org" && v.agents?.includes(agent));
+    const src = bot ? `${SETUP}?vault=${encodeURIComponent(bot.name)}` : SETUP;
+    openSetup({ pressed, src: framed(name, src), name, agent, title: TITLE, onClose: () => refreshTelegram(true) });
+  }
   // Its binding, as `POST …/door` answers or, its answer lost, as its door
   // reads: the binding to `agent`; a refusal, or no binding, throws (the
   // connector deleted), and so do a read that fails and a binding to
@@ -945,7 +953,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       if (!(await readTelegram())) throw new Error("Couldn't read your Telegram chats. Try again.");
       const connector = boundOf(agent);
       if (connector) {
-        openConnector(pressed, connector, agent);
+        await openConnector(pressed, connector, agent);
         return;
       }
       made = await api("POST", "/api/fragments", { label: connectorLabel(agent, DOOR), template: DOOR });
@@ -956,7 +964,7 @@ export function createTelegram({ api, el, section, actionLine, named, seg, compu
       doors.set(made.name, { door: door.door, agent: door.agent });
       // the list read first, so its chat is under its agent as its setup opens
       await load().catch(() => {});
-      openConnector(pressed, made.name, agent);
+      await openConnector(pressed, made.name, agent);
     } catch (e) {
       if (made && !e.keep) {
         bound.delete(made.name);
