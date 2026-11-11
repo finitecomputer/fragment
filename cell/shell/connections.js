@@ -81,13 +81,22 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     };
     return go;
   }
+  // The accesses a connection offers (`accesses`): read only and read and
+  // write, or, where its provider has no read-only scope, read and write
+  // alone, the account's own permissions its limit.
+  const offered = (p) => p.accesses ?? ["read", "write"];
+  // an account's access to connect it again with: its own, else the one
+  // its row offers, else read only (the lesser)
+  const accessFor = (p, access) => access ?? (offered(p).length === 1 ? offered(p)[0] : "read");
   // A connect for each access the person may pick, read only and read and
   // write (the platform never picks for them): `verb` and the access in
-  // words, each its own press (its window opened by that press). `body` as
-  // `connectButton`'s; each button's `data-access` is its access.
+  // words, each its own press (its window opened by that press); of a row
+  // that offers one, one press, `verb` alone. `body` as `connectButton`'s;
+  // each button's `data-access` is its access.
   function accessButtons(p, verb, said, body = {}, action = "connect") {
-    return ["read", "write"].map((access) => {
-      const go = connectButton(p, `${verb} ${ACCESS[access]}`, said, { ...body, access });
+    const accesses = offered(p);
+    return accesses.map((access) => {
+      const go = connectButton(p, accesses.length > 1 ? `${verb} ${ACCESS[access]}` : verb, said, { ...body, access });
       go.dataset.action = action;
       go.dataset.access = access;
       return go;
@@ -173,7 +182,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       // connected again as it was, or, its access unknown, as the person picks
       if (a.state !== "connected") actions.append(...(a.access ? [connectButton(p, "Connect again", said, { account: a.id, access: a.access })] : accessButtons(p, "Connect again", said, { account: a.id })));
       if (a.state === "connected" && a.missing?.length) {
-        const again = connectButton(p, "Reconnect to add", said, { account: a.id, access: a.access ?? "read" });
+        const again = connectButton(p, "Reconnect to add", said, { account: a.id, access: accessFor(p, a.access) });
         again.dataset.action = "reconnect";
         actions.append(again);
         details.push(notAllowed(a.missing));
@@ -392,7 +401,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     // what the person left unticked when they connected it: a reconnect
     // asks for it again (the provider keeps what they allowed before)
     if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
-      const again = connectButton(p, "Reconnect to add", said, { access: p.access ?? "read" });
+      const again = connectButton(p, "Reconnect to add", said, { access: accessFor(p, p.access) });
       again.dataset.action = "reconnect";
       actions.append(again);
       details.push(notAllowed(p.missing), said);

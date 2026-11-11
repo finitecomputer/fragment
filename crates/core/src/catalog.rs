@@ -187,24 +187,34 @@ pub struct ConnectionOAuth {
     pub revoke: Option<String>,
 }
 
-/// A connection's two accesses, each what its authorization asks for: read
-/// only, and read and write. Read and write asks for at least one scope
-/// read only does not (`connection_signin::check`), which is how a grant
-/// is told apart (`connection_signin::access_of`).
+/// A connection's accesses, each what its authorization asks for: read and
+/// write, and, where its provider's OAuth has a read-only scope, read only.
+/// Read and write then asks for at least one scope read only does not
+/// (`connection_signin::check`), which is how a grant is told apart
+/// (`connection_signin::access_of`). Where it has none (Salesforce's `api`
+/// is all its user may do), the row names read and write alone: there is
+/// nothing to pick, and what an account may do is its provider user's
+/// permissions (docs/pipes-browser-binding.md, Access).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Access {
-    pub read: Grant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<Grant>,
     pub write: Grant,
 }
 
 impl Access {
-    /// What `access` asks for.
-    pub fn of(&self, access: ConnectionAccess) -> &Grant {
+    /// What `access` asks for: none where the row offers no such access.
+    pub fn of(&self, access: ConnectionAccess) -> Option<&Grant> {
         match access {
-            ConnectionAccess::Read => &self.read,
-            ConnectionAccess::Write => &self.write,
+            ConnectionAccess::Read => self.read.as_ref(),
+            ConnectionAccess::Write => Some(&self.write),
         }
+    }
+
+    /// The accesses a person may pick as they connect, read only first.
+    pub fn offered(&self) -> Vec<ConnectionAccess> {
+        self.read.iter().map(|_| ConnectionAccess::Read).chain([ConnectionAccess::Write]).collect()
     }
 }
 
@@ -877,9 +887,15 @@ mod tests {
         };
         let c = oauth(json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.read", "mail.send"] } })).unwrap();
         let o = c.get("google").unwrap().connection_oauth.as_ref().unwrap();
-        assert_eq!((o.access.of(ConnectionAccess::Read).scopes.as_slice(), o.access.of(ConnectionAccess::Write).scopes.as_slice()), (&["mail.read".to_string()][..], &["mail.read".to_string(), "mail.send".to_string()][..]));
+        assert_eq!((o.access.of(ConnectionAccess::Read).unwrap().scopes.as_slice(), o.access.of(ConnectionAccess::Write).unwrap().scopes.as_slice()), (&["mail.read".to_string()][..], &["mail.read".to_string(), "mail.send".to_string()][..]));
+        assert_eq!(o.access.offered(), [ConnectionAccess::Read, ConnectionAccess::Write]);
+        // a provider with no read-only scope: read and write alone
+        let one = oauth(json!({ "write": { "scopes": ["api", "refresh_token"] } })).unwrap();
+        let o = one.get("google").unwrap().connection_oauth.as_ref().unwrap();
+        assert_eq!((o.access.of(ConnectionAccess::Read), o.access.offered()), (None, vec![ConnectionAccess::Write]));
+        assert_eq!(Catalog::parse(&serde_json::to_string(one.providers()).unwrap()).unwrap(), one, "it reads back, naming no read");
         assert_eq!(Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap(), c, "the wire form reads back");
-        for bad in [json!({ "read": { "scopes": ["mail.read"] } }), json!({ "write": { "scopes": ["mail.read"] } }), json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.read"] } }), json!({ "read": { "scopes": [] }, "write": { "scopes": ["mail.send"] } }), json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.send"] }, "admin": { "scopes": ["all"] } }), json!({ "read": { "scopes": ["mail.read"], "extra": 1 }, "write": { "scopes": ["mail.send"] } })] {
+        for bad in [json!({ "read": { "scopes": ["mail.read"] } }), json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.read"] } }), json!({ "read": { "scopes": [] }, "write": { "scopes": ["mail.send"] } }), json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.send"] }, "admin": { "scopes": ["all"] } }), json!({ "read": { "scopes": ["mail.read"], "extra": 1 }, "write": { "scopes": ["mail.send"] } })] {
             assert!(matches!(oauth(bad.clone()), Err(CatalogError::OAuth { .. }) | Err(CatalogError::Shape(_))), "{bad}");
         }
         let mut g = google();

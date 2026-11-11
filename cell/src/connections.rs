@@ -253,6 +253,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     granted: account.and_then(|a| a.scopes.clone()),
                     missing: account.and_then(|a| missing(p.connection_oauth.as_ref(), a)),
                     access: account.and_then(|a| access(p.connection_oauth.as_ref(), a)),
+                    accesses: p.connection_oauth.as_ref().map(|o| o.access.offered()),
                     note: p.note.clone(),
                     accounts: p.several().then(|| {
                         held.iter()
@@ -295,6 +296,9 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             let session = crate::auth::platform_session_token(req, url)?.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in before connecting"))?;
             let asked: Value = if body.iter().all(u8::is_ascii_whitespace) { Value::Null } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
             let (intent, access) = Intent::asked(&asked).map_err(CellError::invalid)?;
+            // an access its row offers: read only is none where the provider
+            // has no read-only scope (the account's own permissions are the limit)
+            let grant = o.access.of(access).ok_or_else(|| CellError::invalid(format!("{provider} offers read and write alone: its provider has no read-only access, so what your agents may do is what the account you sign in as may (connect it with {{\"access\": \"write\"}})")))?;
             if intent != Intent::Connect {
                 if !p.several() {
                     return Err(CellError::invalid(format!("{provider} connects one account here: connect it with no body")));
@@ -313,7 +317,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             }
             let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string(), intent, access }).await?;
             if !roundtrip::valid_state(&begun.state) || !own_signin::valid_token(&begun.challenge) { return Err(CellError::host("invalid connection challenge")); }
-            let to = fragment_core::connection_signin::authorize_url(o, access, &callback_url(cfg, provider), &begun.challenge, &begun.state);
+            let to = fragment_core::connection_signin::authorize_url(o, grant, &callback_url(cfg, provider), &begun.challenge, &begun.state);
             let mut resp = json_response(&json!({ "provider": provider, "url": to }))?;
             resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::Connection, &begun.state, url))?;
             Ok(resp)
@@ -403,14 +407,16 @@ fn reachable(cfg: &Config, url: &str) -> CellResult<()> {
 /// What `account`'s grant lets its agents do (`connection_signin::access_of`;
 /// none said where Pipes names no scopes, or the row has no authorization).
 fn access(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<ConnectionAccess> {
-    o.zip(account.scopes.as_deref()).map(|(o, granted)| fragment_core::connection_signin::access_of(o, granted))
+    o.zip(account.scopes.as_deref()).and_then(|(o, granted)| fragment_core::connection_signin::access_of(o, granted))
 }
 
 /// What `account`'s access asks for that the person did not allow it (none
-/// said where Pipes names no scopes, or the row asks for none).
+/// said where Pipes names no scopes, or the row asks for none): of read and
+/// write where the row names it alone.
 fn missing(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<Vec<String>> {
-    let access = access(o, account)?;
-    o.zip(account.scopes.as_deref()).map(|(o, granted)| fragment_core::connection_signin::missing(&o.access.of(access).scopes, granted))
+    let (o, granted) = o.zip(account.scopes.as_deref())?;
+    let grant = access(Some(o), account).and_then(|a| o.access.of(a)).unwrap_or(&o.access.write);
+    Some(fragment_core::connection_signin::missing(&grant.scopes, granted))
 }
 
 /// Where the provider sends the person's browser back.

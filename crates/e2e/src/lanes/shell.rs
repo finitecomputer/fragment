@@ -4415,7 +4415,7 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     )?;
     s.ok(
         "a connection that takes several accounts lists each in its row: its label, state, what it was not allowed with a Reconnect to add, and its own Disconnect; the head offers Add another; with one account, no agent is asked which",
-        shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account read only", 0]]),
+        shown && one == json!([["work@oauth.test", "connected", "Not allowed: files.read", "Reconnect to add", "Disconnect"], ["Add another E2e Several account", 0]]),
         &one,
     );
     sheet_of(b, page, &row)?;

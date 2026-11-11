@@ -120,7 +120,9 @@ impl RegistryCell {
         // granted, and one of signing in alone gives their agents nothing,
         // and is said so
         let Some(access) = fragment_proto::computer::ConnectionAccess::of_word(&pending.access) else { return Ok(NotUnderWay) };
-        let tokens = match connection_signin::tokens(&answer, &o.access.of(access).scopes) {
+        // an access its row no longer offers (read only, gone since) finishes nothing
+        let Some(grant) = o.access.of(access) else { return Ok(NotUnderWay) };
+        let tokens = match connection_signin::tokens(&answer, &grant.scopes) {
             Ok(tokens) => tokens,
             Err(connection_signin::Refused::NoScopes) => return Ok(NoScopes),
             Err(connection_signin::Refused::Invalid) => return Ok(Failed),
