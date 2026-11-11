@@ -1594,6 +1594,7 @@ impl FragmentCell {
                 let mut v = serde_json::to_value(&t).expect("a trigger serializes");
                 v["paused"] = json!(paused.contains(&t.run));
                 if let TriggerOn::Cron(expr) = &t.on {
+                    v["said"] = json!(fragment_core::schedule::said(expr));
                     if let Some(at) = next.get(&(t.run.clone(), expr.clone())) {
                         v["nextAt"] = json!(at);
                     }

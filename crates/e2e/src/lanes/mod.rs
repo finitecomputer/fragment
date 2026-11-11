@@ -50,6 +50,7 @@ mod notes;
 mod orgs;
 mod plane;
 mod posts;
+mod schedules;
 mod restart;
 mod sessions;
 mod share;
@@ -132,6 +133,7 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     sessions::sessions,
     sessions::sessions_ui,
+    schedules::schedules_ui,
     home::home,
     notes::notes,
     brain::brain,
@@ -207,7 +209,7 @@ pub const SHARDS: [&[&str]; 5] = [
         "live", "routes", "cli", "browser", "jobs", "triggers", "sessions", "home", "brain", "brain-release", "doc", "slides", "board", "export", "search", "search-across",
         "sync", "migrations", "capability-cost", "share", "isolation", "push", "blobs", "trials", "transcribe",
     ],
-    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "ai", "admin", "shell", "chat", "chat-history"],
+    &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
         "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
         "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
