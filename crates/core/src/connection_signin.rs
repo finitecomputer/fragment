@@ -927,4 +927,49 @@ mod tests {
         listed["scope"] = json!(["read", "write"]);
         assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
     }
+
+    /// HubSpot's row (deploy/example.jsonc) and its token endpoint's answer
+    /// as HubSpot documents it (developers.hubspot.com, Manage OAuth access
+    /// tokens with the 2026-09 API, read 2026-11-11): `bearer` in lower case,
+    /// a 30-minute token, the account's `hub_id`, and its scopes as a list
+    /// named `scopes`, never `scope`. Its authorize takes no fixed parameter,
+    /// and each access asks for its own scopes, space-separated. An answer
+    /// naming no `scope` is a grant of what was asked (RFC 6749 §5.1), so it
+    /// connects read only or read and write as picked, with nothing missing
+    /// and no account label (HubSpot answers no ID token).
+    #[test]
+    fn hubspots_answer_lists_its_scopes_and_is_a_grant_of_what_was_asked() {
+        let read = ["oauth", "crm.objects.contacts.read", "crm.objects.companies.read", "crm.objects.deals.read", "crm.objects.tickets.read", "crm.objects.owners.read"];
+        let write = ["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write", "crm.objects.companies.read", "crm.objects.companies.write", "crm.objects.deals.read", "crm.objects.deals.write", "crm.objects.tickets.read", "crm.objects.tickets.write", "crm.objects.owners.read"];
+        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let access = catalog::Access { read: Some(grant(&read)), write: grant(&write) };
+        let o = ConnectionOAuth { authorize: "https://app.hubspot.com/oauth/authorize".into(), exchange: "https://api.hubapi.com/oauth/2026-09/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        let callback = "https://platform.example/api/connections/hubspot/callback";
+        let answer = json!({ "token_type": "bearer", "refresh_token": "na1-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "access_token": "CIrToaiiMhIHAAEAQAAAARiO1ooBIOP0sgEokuLtAEaOaTFnToZ3VjUbtl46MAAAAEAAAAAgAAAAAAAAAAAACAAAAAAAOABAAAAAAAAAAAAAAAQAkIUVrptEzQ4hQHP89Eoahkq-p7dVIAWgBgAA", "hub_id": 1234567, "scopes": [], "expires_in": 1800 });
+        let now = 1_793_000_000_000;
+        for (access, scopes) in [(ConnectionAccess::Read, &read[..]), (ConnectionAccess::Write, &write[..])] {
+            let requested = &o.access.of(access).unwrap().scopes;
+            let u = url::Url::parse(&authorize_url(&o, o.access.of(access).unwrap(), callback, "challenge", "state")).unwrap();
+            assert_eq!((u.host_str(), u.path()), (Some("app.hubspot.com"), "/oauth/authorize"));
+            let query: Vec<(String, String)> = u.query_pairs().into_owned().collect();
+            assert_eq!(query.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method"], "{access:?}");
+            assert!(query.contains(&("scope".into(), scopes.join(" "))) && query.contains(&("code_challenge_method".into(), "S256".into())), "{access:?}: {query:?}");
+            let mut a = answer.clone();
+            a["scopes"] = json!(scopes);
+            let granted = tokens(&a, requested).expect("HubSpot's documented answer");
+            assert_eq!((granted.expires_in, granted.expires_at(now)), (Some(1800), crate::export::rfc3339(now + 1_800_000)));
+            let body = granted.import_body(&granted.expires_at(now), None);
+            assert_eq!((body["access_token"].as_str(), body["refresh_token"].as_str()), (a["access_token"].as_str(), Some("na1-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")));
+            assert_eq!(body["scopes"], json!(scopes), "{access:?}: Pipes holds what was asked");
+            assert_eq!((access_of(&o, &granted.scopes), missing(requested, &granted.scopes)), (Some(access), vec![]), "{access:?}: as picked, nothing missing");
+            assert_eq!(account_label(&a, "client"), None, "no ID token, no label");
+        }
+        // its `scopes` is not RFC 6749's `scope`, and is not read: HubSpot
+        // grants every scope its install URL asks for, or installs nothing,
+        // so the grant is what was asked whatever the list says
+        let mut listed = answer;
+        listed["scopes"] = json!(["oauth"]);
+        assert_eq!(tokens(&listed, &o.access.write.scopes).map(|t| access_of(&o, &t.scopes)).ok().flatten(), Some(ConnectionAccess::Write));
+    }
 }

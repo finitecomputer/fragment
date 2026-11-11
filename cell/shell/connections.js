@@ -37,6 +37,17 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     calendar: "Calendar",
     "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
+    // HubSpot's (`oauth` is every HubSpot app's)
+    oauth: "Basic access",
+    "crm.objects.contacts.read": "Contacts (read)",
+    "crm.objects.contacts.write": "Contacts (manage)",
+    "crm.objects.companies.read": "Companies (read)",
+    "crm.objects.companies.write": "Companies (manage)",
+    "crm.objects.deals.read": "Deals (read)",
+    "crm.objects.deals.write": "Deals (manage)",
+    "crm.objects.tickets.read": "Tickets (read)",
+    "crm.objects.tickets.write": "Tickets (manage)",
+    "crm.objects.owners.read": "Owners (read)",
   };
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said

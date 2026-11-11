@@ -1981,15 +1981,15 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            // the example offers Linear beside Google, and Salesforce; the hosted e2e's preview, not yet
+            // the example offers Linear beside Google, and Salesforce and HubSpot; the hosted e2e's preview, not yet
             let example = file == "deploy/example.jsonc";
             let connections: &[&str] = if example { &["google", "linear"] } else { &["google"] };
-            let orgs: &[&str] = if example { &["salesforce"] } else { &[] };
+            let crms: &[&str] = if example { &["salesforce", "hubspot"] } else { &[] };
             let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"]
                 .into_iter()
                 .chain(connections.iter().copied())
                 .chain(["perplexity", "google-places", "xai", "elevenlabs"])
-                .chain(orgs.iter().copied())
+                .chain(crms.iter().copied())
                 .chain(["openrouter"])
                 .collect();
             assert_eq!(names, expected, "{file}");
@@ -2054,6 +2054,39 @@ mod tests {
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_SALESFORCE".into(), "fragment-salesforce-oauth-secret")));
     }
 
+    /// The example's HubSpot row, its commented connect uncommented (a
+    /// client id and the secret's store name filled in), loads: read only
+    /// asks for HubSpot's `.read` scopes, read and write adds a `.write` one
+    /// beside each object's; no revocation (HubSpot's is not RFC 7009's);
+    /// one API host, its note, and its client secret bound as the cell's.
+    #[test]
+    fn the_example_hubspot_connect_loads_once_uncommented() {
+        use fragment_core::catalog::ConnectionAccess;
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "hubspot""#).expect("the example's hubspot row");
+        let row = &example[start..start + example[start..].find(r#""env": ["HUBSPOT_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-hubspot-oauth-secret").replace("<the app's client id>", "hubspot-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/hubspot-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("hubspot").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        assert_eq!((o.client_id.as_str(), o.authorize.as_str(), o.exchange.as_str(), o.revoke.as_deref()), ("hubspot-client", "https://app.hubspot.com/oauth/authorize", "https://api.hubapi.com/oauth/2026-09/token", None));
+        assert_eq!(p.hosts, ["api.hubapi.com"]);
+        assert_eq!(o.access.offered(), [ConnectionAccess::Read, ConnectionAccess::Write]);
+        let read = &o.access.of(ConnectionAccess::Read).unwrap().scopes;
+        let write = &o.access.write.scopes;
+        assert!(read.iter().all(|s| s == "oauth" || s.ends_with(".read")) && read.iter().all(|s| write.contains(s)), "read only asks for reading alone, and read and write for it too: {read:?}");
+        let added: Vec<&str> = write.iter().filter(|s| !read.contains(s)).map(String::as_str).collect();
+        assert_eq!(added, ["crm.objects.contacts.write", "crm.objects.companies.write", "crm.objects.deals.write", "crm.objects.tickets.write"], "read and write adds a write scope for each object it reads");
+        assert!(p.note.as_deref().is_some_and(|n| n.contains("super admin") && n.contains("whole account")), "Settings says who may connect it, and what it reaches: {:?}", p.note);
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_HUBSPOT".into(), "fragment-hubspot-oauth-secret")));
+    }
+
     /// A provider's note: the example's (its google row's, commented out)
     /// loads once uncommented and is kept as written; one over its 280
     /// characters is refused at load, naming its row.
@@ -2074,7 +2107,7 @@ mod tests {
         let d = with(note).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
-        assert!(catalog.providers().iter().filter(|p| !["google", "salesforce"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Salesforce's");
+        assert!(catalog.providers().iter().filter(|p| !["google", "salesforce", "hubspot"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Salesforce's and HubSpot's");
         let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
         let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");
