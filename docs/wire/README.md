@@ -165,7 +165,15 @@ A fragment's live socket: records as they are appended, presence, drafts and que
 
 ### migrations
 
-The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, and a new agent's stage. Removable, with the move.
+The move of finite.computer's agents (docs/migrations.md): the mover's roster, mailbox and reports, a person's answers to the offer to bring an old agent over, and a new agent's stage. Removable, with the move.
+
+#### `migrations.again`
+
+`POST /api/migrations/offers/{old}/ask-again`: The person's Ask again, after a Never: their old agent's offer is asked again now.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`MoveAt`](#moveat)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
 #### `migrations.complete`
 
@@ -185,6 +193,14 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: [`MoveAt`](#moveat)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
+#### `migrations.later`
+
+`POST /api/migrations/offers/{old}/later`: The person's Not now: their old agent's offer is asked again after a day.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`MoveAt`](#moveat)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
 #### `migrations.mailbox`
 
 `GET /api/migrations/mover/mailbox`: What the mover is told to do, oldest first: each command stays until a report on it is taken.
@@ -192,6 +208,22 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Credentials: NIP-98
 - Answer: [`Mailbox`](#mailbox)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.never`
+
+`POST /api/migrations/offers/{old}/never`: The person's Never: their old agent's offer is asked no more, until they ask again.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`MoveAt`](#moveat)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `migrations.offers`
+
+`GET /api/migrations/offers`: The signer's old finite.computer agents, each where its move is, in the server's words.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`Offers`](#offers)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
 
 #### `migrations.open`
 
@@ -236,6 +268,23 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Body: [`Roster`](#roster)
 - Answer: [`RosterTaken`](#rostertaken)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
+
+#### `migrations.visit`
+
+`POST /api/migrations/offers`: The signer opens the move: bound to their old agents by the WorkOS user they sign in as, and given its comp once (a month's seat and its credit). Then their old agents, as GET answers them.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`Offers`](#offers)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
+
+#### `migrations.yes`
+
+`POST /api/migrations/offers/{old}/yes`: The person's Yes, bound to a new agent of their own: the old agent is stopped and its stage made, which the new agent imports.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`OfferYes`](#offeryes)
+- Answer: [`MoveAt`](#moveat)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
 
 #### `migrations.zip`
 
@@ -708,6 +757,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 | `actions` | `array` of [`NoticeAction`](#noticeaction) | required | What the person may do about it; the first is the main one. |
 | `detail` | `string` or `null` | optional | The platform's own words, small, for whoever helps (why a start failed, as it said it). |
 | `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
+| `image` | `string` or `null` | optional | A picture beside its words (an agent's): a platform path, read with the person's own credential. A client from before it shows none. |
 | `kind` | `string` | required | What it is about (`key_paused`), for tests and logs. No client reads it to decide what to draw. |
 | `level` | [`NoticeLevel`](#noticelevel) | required |  |
 | `mustAnswer` | `boolean` | optional | It must be answered (FIN-458): a client shows it alone, over everything, until one of its actions goes through, and the read after no longer has it. The first such in the list first: its owner lists its own oldest first. A client from before it shows it as any other. |
@@ -739,6 +789,35 @@ out. `GET /api/notices`: the signer's notices, the most pressing first.
 | field | type | | |
 | --- | --- | --- | --- |
 | `notices` | `array` of [`Notice`](#notice) | required |  |
+
+### `Offer`
+
+out. One old agent of the person's, and where its move is.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agent` | `string` or `null` | optional | The new agent it is brought into, after Yes. |
+| `image` | `string` or `null` | optional | Its picture, a platform path (`…/offers/{old}/picture`), when the roster has one. |
+| `name` | `string` | required | Its name on finite.computer. |
+| `old` | `string` | required |  |
+| `said` | `string` | required | Where it is, in the server's words. |
+| `state` | [`MoveState`](#movestate) | required |  |
+
+### `OfferYes`
+
+in. `POST /api/migrations/offers/{old}/yes`: the person's Yes, bound to a new agent of their own, which the move's stage is imported into.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `agent` | `string` | required | The new agent: its identity's id or npub. |
+
+### `Offers`
+
+out. `GET /api/migrations/offers` (`POST`: the person opens the move, and is given its comp once): the person's old agents, each where its move is, in the server's words. `/move` draws them.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `offers` | `array` of [`Offer`](#offer) | required |  |
 
 ### `OldBrain`
 

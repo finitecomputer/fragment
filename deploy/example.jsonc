@@ -313,7 +313,7 @@
       // "key": "<the client secret's store name>",
       // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
       //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
-      //   "client_id": "<the client's id>", "scopes": <the Google skill's references/google-workspace-scopes.json> },
+      //   "client_id": "<the client's id>", "access": <the Google skill's references/google-workspace-access.json> },
       // several Google accounts a person (personal and work), each agent
       // using the one picked for it in Settings, once WorkOS has enabled
       // additional connections and a release that knows the field is
@@ -342,8 +342,9 @@
     // its org's host from) and to the org's own host, as Pipes' metadata
     // names it (`account_host`). Salesforce's answer names no `expires_in`:
     // its grant lands expired, and Pipes refreshes it first. Its scopes reach
-    // all the signed-in user may do (Salesforce has no narrower one), so its
-    // note says how to limit that.
+    // all the signed-in user may do (Salesforce has no read-only one), so it
+    // offers read and write alone, and its note says how to limit that: the
+    // user's own permissions.
     { "name": "salesforce", "kind": "connection",
       "hosts": ["login.salesforce.com"],
       "account_host": { "metadata": "instance_url", "under": "my.salesforce.com" },
@@ -352,7 +353,7 @@
       // "key": "<the client secret's store name>",
       // "connection_oauth": { "authorize": "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent",
       //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
-      //   "client_id": "<the app's consumer key>", "scopes": ["api", "refresh_token", "openid", "email"] },
+      //   "client_id": "<the app's consumer key>", "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
       "env": ["SALESFORCE_ACCESS_TOKEN"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key

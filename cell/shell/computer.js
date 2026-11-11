@@ -21,6 +21,21 @@ export function untilSaid(u, now) {
   return `${u.said} in ${h} h${minutes % 60 ? ` ${minutes % 60} min` : ""}.`;
 }
 
+// A platform path's image (a notice's `image`) on `img`: read as the shell
+// reads the API, with its header (the session's cookie alone is no caller
+// for `/api/…`), and shown from its bytes; one that won't load goes.
+export function platformImage(img, path) {
+  img.dataset.src = path;
+  if (!globalThis.location || typeof fetch !== "function") return;
+  fetch(path, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" })
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    .then((b) => {
+      img.onload = () => URL.revokeObjectURL(img.src);
+      img.src = URL.createObjectURL(b);
+    })
+    .catch(() => img.remove?.());
+}
+
 export function createComputer({ api, el, seg, named, section, line, actionLine, computer, notices, agents, computerFailed, setupPending, made, computerIs, openScreen, markOffer, reads, load, openPage, timers = globalThis, now = () => Date.now() }) {
   // ---- the computer: awake while the person is here, and its updates ----
   let woke = 0;
@@ -181,15 +196,26 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     if (failed.has(n.id)) copy.append(el("p", null, failed.get(n.id).said));
     if (n.detail) copy.append(el("p", "notice-detail", n.detail));
     (n.actions ?? []).forEach((a, i) => actions.append(actionOf(n, a, i === 0)));
+    // its picture (an agent's), a platform path; one that won't load goes
+    if (n.image) {
+      const pic = el("img", "notice-image");
+      pic.alt = "";
+      platformImage(pic, n.image);
+      row.append(pic);
+    }
     row.append(copy, actions);
     return row;
   }
   function actionOf(n, a, main) {
     if (a.open) {
-      const link = el("a", null, a.label);
+      const link = el("a", main ? "primary" : null, a.label);
       link.href = a.open;
-      link.target = "_blank";
-      link.rel = "noopener";
+      // a page of the platform's own opens here (`/move`), any other apart
+      const here = globalThis.location?.origin;
+      if (!here || new URL(a.open, here).origin !== here) {
+        link.target = "_blank";
+        link.rel = "noopener";
+      }
       link.dataset.answer = `open ${a.open}`;
       return link;
     }
@@ -333,9 +359,21 @@ export function createComputer({ api, el, seg, named, section, line, actionLine,
     const rows = [...[...own, ...(restart ? ["restart"] : [])].map(pageRow), ...told.filter((n) => !n.mustAnswer).map(noticeRow), ...refusals];
     box.replaceChildren(...rows);
     box.hidden = !rows.length;
-    drawAsked(told.find((n) => n.mustAnswer), own);
+    drawAsked(told.find((n) => n.mustAnswer && !answeredHere(n)), own);
     countdown();
     paintSettings();
+  }
+  // On the platform's page one of its answers opens (the move's `/move`),
+  // a notice that must be answered is answered there: its cover stands
+  // aside while that page shows, and is back on any other.
+  function answeredHere(n) {
+    const here = globalThis.location;
+    if (!here) return false;
+    return (n.actions ?? []).some((a) => {
+      if (!a.open) return false;
+      const to = new URL(a.open, here.href);
+      return to.origin === here.origin && to.pathname === here.pathname;
+    });
   }
   // One that must be answered (`mustAnswer`) shows alone, over everything,
   // a guest's welcome too (`#must-answer`, a modal dialog: the page behind

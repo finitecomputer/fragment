@@ -287,11 +287,11 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     // through its callback, as a person connects: one org, then another;
     // an account there already is made again, its host the new grant's
     let session = api.sign_in(&email)?;
-    let first = connected_as(api, &session, ORG_CONNECTION, json!({}), "acme")?;
+    let first = connected_as(api, &session, ORG_CONNECTION, json!({ "access": "write" }), "acme")?;
     let at_first = say(s, 169, &fetch(s, &own))?;
     let first_swapped = swapped_at(s, &own);
     let rival = format!("rival.{under}");
-    let second = connected_as(api, &session, ORG_CONNECTION, json!({}), "rival")?;
+    let second = connected_as(api, &session, ORG_CONNECTION, json!({ "access": "write" }), "rival")?;
     let at_second = say(s, 170, &fetch(s, &rival))?;
     let second_swapped = swapped_at(s, &rival);
     let seen_before = s.upstream.seen().len();

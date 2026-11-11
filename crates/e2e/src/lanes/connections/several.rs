@@ -53,6 +53,12 @@ fn connect(api: &Api, session: &str, body: Value, account: &str, grant: Option<&
 /// A connect as `connect`, up to its callback: the authorize answer, and
 /// where the browser goes back with its cookie (none: refused).
 fn prepared(api: &Api, session: &str, body: Value, account: &str, grant: Option<&str>) -> Result<(Reply, Option<(String, String)>)> {
+    // the one access the row offers (read and write: its provider has no
+    // read-only scope), unless the body names another
+    let mut body = body;
+    if body.get("access").is_none() {
+        body["access"] = "write".into();
+    }
     let r = shell(api, session, "POST", &format!("/api/connections/{SEVERAL}/authorize"), Some(&body))?;
     if r.status != 200 {
         return Ok((r, None));
@@ -83,12 +89,22 @@ fn ids(accounts: &[Value]) -> Vec<String> {
 pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
     let email = "several-a@e2e.test";
     let a = api.sign_in(email)?;
-    let add = || json!({ "add": true });
+    let add = || json!({ "add": true, "access": "write" });
 
     // a row of one account takes neither
     let one = shell(api, &a, "POST", "/api/connections/e2e-oauth/authorize", Some(&add()))?;
     let one_off = shell(api, &a, "DELETE", "/api/connections/e2e-oauth?account=data_installation_1", None)?;
     s.ok("a row of one account refuses another account, or one named, before any provider is asked", one.status == 400 && one_off.status == 400, format!("{one}; {one_off}"));
+    // a provider with no read-only scope: read and write alone, and no
+    // access said of its accounts (the account's permissions are its limit)
+    let read_only = shell(api, &a, "POST", &format!("/api/connections/{SEVERAL}/authorize"), Some(&json!({ "access": "read" })))?;
+    let (_, offered) = listed(api, &a)?;
+    let both = shell(api, &a, "GET", "/api/connections", None)?.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == "e2e-oauth")).map(|p| p["accesses"].clone()).unwrap_or_default();
+    s.ok(
+        "a connection whose provider has no read-only scope offers read and write alone: read only is refused before any provider is asked, and its row lists one access; a row of both lists both",
+        read_only.status == 400 && offered["accesses"] == json!(["write"]) && both == json!(["read", "write"]),
+        json!({ "readOnly": read_only.status, "offered": offered["accesses"], "both": both }),
+    );
 
     let first = connect(api, &a, json!({}), "work-a", None)?;
     let (accounts, row) = listed(api, &a)?;
@@ -336,7 +352,7 @@ fn raced(s: &mut Suite, api: &Api) -> Result<()> {
         });
         Ok((a?, b?, waited))
     };
-    let add = || json!({ "add": true });
+    let add = || json!({ "add": true, "access": "write" });
     let (_, x) = prepared(api, &one, add(), "d-two", None)?;
     let (_, y) = prepared(api, &two, add(), "d-two", None)?;
     let (a, b, waited) = together(s, x.context("first")?, y.context("second")?)?;
@@ -368,7 +384,7 @@ fn outlasted(s: &mut Suite, api: &Api) -> Result<()> {
     let first = connect(api, &one, json!({}), "g-one", None)?;
     anyhow::ensure!(ok(&first), "connect g's first account");
     let wait = std::time::Duration::from_secs(20);
-    let add = || json!({ "add": true });
+    let add = || json!({ "add": true, "access": "write" });
     let state_of = |r: &Reply| reqwest::Url::parse(r.body["url"].as_str().unwrap_or_default()).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned())).unwrap_or_default();
     // the first held at its import, the second past its exchange and its
     // checks, waiting its turn; then `meanwhile`, then the first let go

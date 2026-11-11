@@ -309,13 +309,13 @@ fn unread_and_seen(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
 
 /// A watch socket of a person's list, past its `hello`; or why not (the
 /// refusal's status is in it).
-fn watching(socket: Result<Socket>) -> Result<Socket, String> {
+pub(crate) fn watching(socket: Result<Socket>) -> Result<Socket, String> {
     socket.and_then(|mut w| w.expect("hello").map(|_| w)).map_err(|e| format!("{e:#}"))
 }
 
 /// The next frame a watch socket was sent, or why none came (its read
 /// waits 5 s: a change reaches it in the request that made it).
-fn told(w: &mut Result<Socket, String>) -> Value {
+pub(crate) fn told(w: &mut Result<Socket, String>) -> Value {
     match w {
         Ok(w) => w.next().unwrap_or_else(|e| json!(format!("{e:#}"))),
         Err(why) => json!(why.clone()),
@@ -2234,7 +2234,7 @@ fn invite_must(s: &Suite, api: &Api, sharer: &fragment_nip98::Keys, email: &str,
 /// What the page shows of a notice that must be answered: whether it is
 /// open, its id and words, whether it covers the whole page (what is at
 /// its middle is in it), and the band's rows.
-const MUST_ANSWER_SEEN: &str = "(() => { const d = document.getElementById('must-answer'); const r = d.getBoundingClientRect(); const at = document.elementFromPoint(innerWidth / 2, innerHeight / 2); \
+pub(crate) const MUST_ANSWER_SEEN: &str = "(() => { const d = document.getElementById('must-answer'); const r = d.getBoundingClientRect(); const at = document.elementFromPoint(innerWidth / 2, innerHeight / 2); \
     return { open: d.open, id: d.dataset.id ?? null, words: d.innerText, covers: d.open && r.width >= innerWidth - 1 && r.height >= innerHeight - 1 && d.contains(at), \
     band: [...document.querySelectorAll('#computer-notices .computer-notice')].map((n) => n.dataset.id ?? n.dataset.kind) }; })()";
 
@@ -4325,8 +4325,41 @@ fn partial_grant_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
         came_back && connected && whole && s.workos.scopes(email, PARTIAL) == ["mail.read", "files.read", "openid"],
         json!({ "cameBack": came_back, "connected": connected, "whole": whole, "scopes": s.workos.scopes(email, PARTIAL) }),
     );
-    let off = shell(api, session, "DELETE", &format!("/api/connections/{PARTIAL}"), None, &[])?;
-    anyhow::ensure!(off.status == 200, "disconnect {PARTIAL} after its checks: {off}");
+    access_ui(s, api, b, page, session, email, PARTIAL)
+}
+
+/// A connection's access in its sheet (docs/pipes-browser-binding.md,
+/// Access): connected read only, it says so and offers Allow changes,
+/// which goes through the provider's page asking for read and write; then
+/// it says read and write and how to go back, and offers it no more; not
+/// connected, a connect for each access, the person's to pick. `provider`
+/// is connected read only, all of it granted, and is disconnected again
+/// for the checks after.
+fn access_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, email: &str, provider: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("#settings-connections [data-provider={provider:?}]");
+    let said = b.eval(page, &format!("[document.querySelector('{row} .provider-access')?.textContent ?? null, document.querySelector('{row} [data-action=allow-changes]')?.textContent ?? null, document.querySelector('{row} .provider-access-how')?.textContent ?? null]"))?;
+    sheet_of(b, page, &row)?;
+    let (came_back, connected) = connected_in_window(s, b, page, &format!("{row} [data-action=allow-changes]"), provider)?;
+    b.reload(page)?;
+    let changed = b.until(page, &format!("document.querySelector('{row} .provider-access')?.dataset.access === 'write' && !document.querySelector('{row} [data-action=allow-changes]') && !!document.querySelector('{row} .provider-access-how')"), wait);
+    let now = b.eval(page, &format!("[document.querySelector('{row} .provider-access')?.textContent ?? null, document.querySelector('{row} .provider-access-how')?.textContent ?? null]"))?;
+    s.ok(
+        "connected read only, a connection says so and offers Allow changes, which asks for read and write through the provider's page; then it says read and write, and how to make it read only again, and offers no Allow changes",
+        said == json!(["Read only", "Allow changes", null]) && came_back && connected && changed && s.workos.scopes(email, provider) == ["mail.read", "files.read", "mail.send", "openid"]
+            && now == json!(["Read and write", "To make it read only again, disconnect it, then connect it read only."]),
+        json!({ "before": said, "cameBack": came_back, "connected": connected, "after": now, "scopes": s.workos.scopes(email, provider) }),
+    );
+    let off = shell(api, session, "DELETE", &format!("/api/connections/{provider}"), None, &[])?;
+    anyhow::ensure!(off.status == 200, "disconnect {provider} after its checks: {off}");
+    b.reload(page)?;
+    let offered = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_connected' && document.querySelectorAll('{row} [data-action=connect]').length === 2"), wait);
+    let buttons = b.eval(page, &format!("[...document.querySelectorAll('{row} [data-action=connect]')].map((b) => [b.dataset.access, b.textContent])"))?;
+    s.ok(
+        "not connected, a connection offers a connect for each access, read only and read and write: the person picks, never the platform",
+        offered && buttons == json!([["read", "Connect read only"], ["write", "Connect read and write"]]),
+        &buttons,
+    );
     Ok(())
 }
 

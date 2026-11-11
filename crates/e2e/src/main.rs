@@ -248,7 +248,9 @@ pub fn added_key_row() -> Value {
 }
 /// A connection a person connects several accounts at (its row's
 /// `accounts_max`), through the WorkOS fake's stand-in provider as
-/// `e2e-oauth` is, which stays one account a person: both paths run.
+/// `e2e-oauth` is, which stays one account a person: both paths run. It
+/// offers read and write alone, as a provider with no read-only scope does
+/// (`one_access_connection_oauth`), and `e2e-oauth` both accesses.
 pub const SEVERAL: &str = "e2e-several";
 pub const SEVERAL_MAX: u8 = 3;
 pub const SEVERAL_HOST: &str = "several.test";
@@ -792,7 +794,7 @@ impl Suite {
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
                 rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
-                rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().connection_oauth(), "accounts_max": SEVERAL_MAX }));
+                rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().one_access_connection_oauth(), "accounts_max": SEVERAL_MAX }));
                 rows.as_array_mut().expect("catalog").push(json!({ "name": ORG_CONNECTION, "kind": "connection", "hosts": [ORG_CONNECTION_HOST], "account_host": { "metadata": "instance_url", "under": fragment_fakes::workos::ACCOUNT_HOSTS_UNDER }, "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [ORG_CONNECTION_ENV], "connection_oauth": self.workos.node().connection_oauth() }));
                 if self.shape == Shape::OneKeyMore {
                     rows.as_array_mut().expect("catalog").push(added_key_row());

@@ -621,7 +621,8 @@ provider's own hosts.
   deploy/example.jsonc has the platform's. Connecting one is
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
-  its person allowed.
+  its person allowed: read only or read and write, as they picked, and
+  of those what they left ticked.
 - **A placeholder** is `fcx_<provider>_<tag>` for a connection and
   `fck_<provider>_<tag>` for a key, its tag a MAC of (computer, agent
   fragment, provider) under a key only the platform holds (`swap`). It

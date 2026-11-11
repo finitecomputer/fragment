@@ -1760,7 +1760,7 @@ mod tests {
         d.providers.push(serde_json::json!({
             "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
             "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
-            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "scopes": ["scope"] },
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "access": { "read": { "scopes": ["scope.readonly"] }, "write": { "scopes": ["scope"] } } },
             "key": "fragment-google-oauth-secret"
         }));
         let (catalog, _) = catalog_of(&d).unwrap();
@@ -2015,7 +2015,8 @@ mod tests {
         let (catalog, _) = catalog_of(&d).unwrap();
         let p = catalog.get("salesforce").expect("its row");
         let o = p.connection_oauth.as_ref().expect("its connect");
-        assert_eq!((o.client_id.as_str(), o.scopes.join(" "), o.revoke.as_deref()), ("salesforce-client", "api refresh_token openid email".to_string(), Some("https://login.salesforce.com/services/oauth2/revoke")));
+        assert_eq!((o.client_id.as_str(), o.access.write.scopes.join(" "), o.revoke.as_deref()), ("salesforce-client", "api refresh_token openid email".to_string(), Some("https://login.salesforce.com/services/oauth2/revoke")));
+        assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Write], "Salesforce has no read-only scope: read and write alone, the user's permissions its limit");
         assert_eq!(p.account_host.as_ref().map(|a| (a.metadata.as_str(), a.under.as_str())), Some(("instance_url", "my.salesforce.com")));
         assert!(p.note.as_deref().is_some_and(|n| n.contains("dedicated integration user")), "Settings says how to limit what agents may do: {:?}", p.note);
         assert!(catalog.intercepts().contains(&"*.my.salesforce.com".to_string()));
