@@ -1188,6 +1188,58 @@ async fn a_routine_with_no_chat_runs_at_home() {
     });
 }
 
+/// Goal (FIN-463, FIN-488; Paul's order of 2026-11-10): a move's
+/// routine reaches the agent only once its stage's SimpleX files are set
+/// aside, so the import it starts cannot end the stage first. Here the
+/// agent says `done` the instant its turn is claimed (the fake refuses the
+/// stage's reads from then on), and the platform answers each read late:
+/// the files are kept whole all the same, and the routine still runs.
+#[tokio::test]
+async fn a_moves_routine_waits_for_its_simplex_to_be_set_aside() {
+    use fragment_bridge::simplex::{run, stage};
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let dir = support::dir("move-routine-simplex");
+    // the stage, as the mover writes it (Python's zipfile: deflated, zip64)
+    let src = dir.join("stage-src");
+    std::fs::create_dir_all(&src).expect("a folder");
+    let mut chat = b"SQLite format 3\0".to_vec();
+    let mut x: u64 = 0x5eed;
+    chat.extend((0..6_000_000).map(|_| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x as u8
+    }));
+    let agent_db = [b"SQLite format 3\0".as_slice(), &[7u8; 50_000]].concat();
+    for (name, bytes) in [("chat", &chat[..]), ("agent", &agent_db[..]), ("owner", br#"{"contact":3}"#.as_slice()), ("notes", b"# notes".as_slice())] {
+        std::fs::write(src.join(name), bytes).expect("written");
+    }
+    let zip = dir.join("stage.zip");
+    let script = "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:\n    for a in sys.argv[2:]:\n        s, n = a.split('=', 1)\n        with open(s, 'rb') as f, z.open(n, 'w', force_zip64=True) as w:\n            w.write(f.read())\n";
+    let entries = [("notes", "workspace/notes.md"), ("chat", stage::CHAT), ("agent", stage::AGENT), ("owner", stage::OWNER)].map(|(f, n)| format!("{}={n}", src.join(f).display()));
+    assert!(std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&zip).args(&entries).status().expect("python3 runs").success());
+    let zip = bytes::Bytes::from(std::fs::read(&zip).expect("its zip"));
+    fake.with(|w| {
+        w.stages.insert("old1.p1.1".into(), ("juniper--k3x9".into(), zip));
+        w.stage_read_ms = 150;
+        w.done_on_claim = Some("old1.p1.1".into());
+    });
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.simplex = Some(run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+    let bridge = support::start(cfg, support::script());
+    following(&fake, 2).await;
+    let words = "Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage old1.p1.1.";
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": words })));
+    fake.until(WAIT * 2, "the routine run", |w| !replies(w, &own).is_empty()).await;
+    bridge.stop().await;
+    assert!(fake.with(|w| !w.stages.contains_key("old1.p1.1")), "the agent said done as its turn was claimed");
+    let at = dir.join("simplex").join("juniper--k3x9");
+    assert_eq!(stage::ready(&at), Some(stage::Staged { stage: "old1.p1.1".into(), owner: 3 }), "set aside before the routine reached it");
+    assert_eq!(std::fs::read(at.join("staged/sx_chat.db")).expect("kept"), chat, "whole");
+    assert_eq!(std::fs::read(at.join("staged/sx_agent.db")).expect("kept"), agent_db);
+}
+
 /// Goal (Alex's review of #620): a routine whose home is its SimpleX chat,
 /// named by its link and not made yet (its making refused for now, or a
 /// restart between its naming and its making), waits for it: it is neither

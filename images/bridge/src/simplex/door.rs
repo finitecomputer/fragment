@@ -41,7 +41,8 @@ pub const KEY_FILE: &str = "door.key";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ticket {
     pub door: String,
-    /// `link` or `unlink`.
+    /// `link`, `unlink`, or `adopt` (its owner keeps their SimpleX chat
+    /// with their old agent: `stage`).
     pub act: String,
     pub agent: String,
     pub computer: String,
@@ -78,7 +79,7 @@ impl Ticket {
     /// line break, so its digest reads one way only.
     fn well_formed(&self) -> bool {
         let computer = self.computer.strip_prefix("computer:").is_some_and(|h| !h.is_empty() && h.len() <= 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-        self.door == DOOR && matches!(self.act.as_str(), "link" | "unlink") && super::run::dir_name_ok(&self.agent) && computer && hex_of(&self.nonce, 32) && self.exp > 0 && hex_of(&self.sig, 128)
+        self.door == DOOR && matches!(self.act.as_str(), "link" | "unlink" | "adopt") && super::run::dir_name_ok(&self.agent) && computer && hex_of(&self.nonce, 32) && self.exp > 0 && hex_of(&self.sig, 128)
     }
 
     /// What its signature signs (fragment_core::door::Ticket::digest).
@@ -230,6 +231,7 @@ mod tests {
     // crates/core/src/door.rs's vectors: the platform computes these too
     const TICKET_DIGEST: &str = "fc329f82d4dd4f6c73aaf32e55e0863b13a5de24b9b64ad7e3f2897e985d11e7";
     const RECORD_DIGEST: &str = "6f579428588821dc78f7f0ed9ea310980bafd4857b900ce164c03e732ccb48f4";
+    const ADOPT_DIGEST: &str = "d4e45efd715720407801163b884480a90be37f9c66a9ac103edba3bf28391e9f";
     const TICKET_SIG: &str = "979566bc3f8beebe92cd33addd30ba2852132ce15b7b57088ac95075433a192795e10ede4bcdc1ef45605ba0967481c4390f1027b223b5f8c1e131c8cee4f57b";
     const NOW: i64 = 1_790_000_000_000;
 
@@ -266,6 +268,13 @@ mod tests {
         assert!(ok(&Ticket { sig: stranger.sign(&ticket().digest()), ..ticket() }).is_err(), "signed by another key (the agent's tools hold none of its fragment's)");
         assert!(ok(&Ticket { nonce: "1f".repeat(16), ..ticket() }).is_err(), "its fields changed under its signature");
         assert!(check(&ticket(), "unlink", "juniper--k3x9", "computer:00aa", &key, NOW).is_err(), "a link's ticket starts no unlink");
+        assert!(check(&ticket(), "adopt", "juniper--k3x9", "computer:00aa", &key, NOW).is_err(), "nor an adoption");
+        let adopt = Ticket { act: "adopt".into(), ..ticket() };
+        let adopt = Ticket { sig: agent_key().sign(&adopt.digest()), ..adopt };
+        assert_eq!(crate::records::hex(&adopt.digest()), ADOPT_DIGEST, "the platform's digest of it (crates/core/src/door.rs)");
+        assert_eq!(check(&adopt, "adopt", "juniper--k3x9", "computer:00aa", &key, NOW), Ok(()), "an adoption's, signed");
+        assert!(check(&adopt, "link", "juniper--k3x9", "computer:00aa", &key, NOW).is_err(), "starts no link");
+        assert!(check(&Ticket { act: "adopt ".into(), ..adopt.clone() }, "adopt ", "juniper--k3x9", "computer:00aa", &key, NOW).is_err(), "no other act");
         assert!(check(&ticket(), "link", "maple--k3x9", "computer:00aa", &key, NOW).is_err(), "another agent's");
         assert!(check(&ticket(), "link", "juniper--k3x9", "computer:00bb", &key, NOW).is_err(), "another computer's");
         assert!(check(&ticket(), "link", "juniper--k3x9", "computer:00aa", &key, 1_790_000_600_001).is_err(), "past its time");

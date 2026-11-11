@@ -13,7 +13,8 @@
     "agent/agentd/**",
     "agent/client.sqlite3*",
     "agent/simplex/**",
-    "**/pairing/*-approved.json"
+    "**/pairing/*-approved.json",
+    ".finite-stage/**"
   ],
   "attention": [
     "fsite", "fbrain", "finitebrain", "finite.site", "finite sites", "finite brain", "finite chat",
