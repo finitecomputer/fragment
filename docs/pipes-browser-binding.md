@@ -90,7 +90,14 @@ it as another path. The platform enforces it, not the provider:
   provider, not an account.
 
 A row's paths are its operator's to keep to resources that only read: the
-platform holds read only to what the row names, and no further.
+platform holds read only to what the row names, and no further. What a
+provider itself runs on a read is the provider's: a Salesforce org's own
+Apex behind an external object's queries, or a connected-app plugin on
+`userinfo`, and a query that asks to be tracked as a view (SOQL `FOR
+VIEW`, SOSL `UPDATE TRACKING`), which the swap does not read (its query is
+the provider's language). So platform-kept read only refuses the
+provider's write APIs; a guarantee is the provider's own, a user whose
+permissions only read.
 
 ## Partial grants
 
