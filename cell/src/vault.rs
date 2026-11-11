@@ -129,8 +129,8 @@ fn op_path(op: &str, name: &str) -> CellResult<String> {
 /// /api/vault/{name}`; set again, it is replaced whole. The seam for the
 /// platform's own code (FIN-463's hand-off): its answer is the `Secret`
 /// set, as JSON, never its value.
-pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &RawValue) -> CellResult<Vec<u8>> {
-    ask(env, person, &op_path("put", name)?, Some(put)).await
+pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &impl Serialize) -> CellResult<Vec<u8>> {
+    crate::routed::ask_bytes(env, "VAULT", person, &op_path("put", name)?, put).await
 }
 
 /// What a move reads of a kept `Secret`: where it goes.

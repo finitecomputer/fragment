@@ -658,7 +658,9 @@ unfinished design, not debt.
   `fragment_core::migrations`, the `STAGE` R2 bucket and its lifecycle
   rules in `xtask deploy`, the stage's reads (one zip by ranges; no
   mount), the mover's npub in the config (`migrations.mover`; it signs
-  with its own key, so fragment holds no secret for it), the e2e lane `move` and the fake mover;
+  with its own key, so fragment holds no secret for it), the secrets
+  hand-off (F11: the Vault entries it made are their person's, and stay),
+  the e2e lane `move` and the fake mover;
   and, from its other PRs, the page `/move`, the welcome's slot, the
   notices owner, the sign-in call (`signin.rs`), `Source::Stage` and
   `fragment stage` in the CLI, the `finite-computer` layout and profile

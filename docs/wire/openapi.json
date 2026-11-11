@@ -190,7 +190,7 @@
           },
           "secrets": {
             "default": [],
-            "description": "`stop_and_stage`: the secrets to hand on (none until the vault: FIN-466).",
+            "description": "`stop_and_stage` after a person's Yes (phase 1): the secrets the\nold agent has (the roster's `has`), each to hand to its person's\nVault (`POST …/agents/{old}/secrets`) once it is stopped. None in\nphase 2: no one said Yes.",
             "items": {
               "$ref": "#/components/schemas/SecretKind"
             },
@@ -623,6 +623,60 @@
         ],
         "type": "object",
         "x-fragment-direction": "out"
+      },
+      "HandedOff": {
+        "description": "Its answer: the kinds its person's Vault took. One the Vault refused\n(its rules: a value it does not take, or a Vault full) is left out, and\nstays on the old platform. The same command again answers the same,\nand puts nothing.",
+        "properties": {
+          "handed": {
+            "items": {
+              "$ref": "#/components/schemas/SecretKind"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "handed"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Handoff": {
+        "additionalProperties": false,
+        "description": "`POST /api/migrations/mover/agents/{old}/secrets` (F11): the old\nagent's secrets, read once it is stopped, for the `stop_and_stage`\nthat `command` names (its `secrets`, each kind once, a value at most\n`HANDOFF_VALUE_MAX_BYTES`). Each goes into its person's Vault within\nthe call, and is never stored, logged or echoed on the way. Its\n`Debug` is derived, as the wire's checker needs, and prints its values:\nnothing formats one.",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HandoffItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "command",
+          "items"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "HandoffItem": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/SecretKind"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "value"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
       },
       "Has": {
         "description": "Which secrets it holds (never their values).",
@@ -2727,22 +2781,26 @@
         "x-fragment-direction": "out"
       },
       "SecretKind": {
-        "description": "A secret an old agent holds that its person may bring (FIN-466's vault;\nnot handed on yet).",
+        "description": "A secret an old agent holds that its person's Yes brings to their\nVault (FIN-466), each kind an entry there (`fragment_core::migrations::vault_secret`).",
         "oneOf": [
           {
             "enum": [
-              "telegram_bot_token",
               "openrouter_key"
             ],
             "type": "string"
           },
           {
+            "const": "telegram_bot_token",
+            "description": "Its Telegram bot's token: the same bot, moved to the new agent's\nTelegram connector from Settings.",
+            "type": "string"
+          },
+          {
             "const": "nostr_nsec",
-            "description": "The old agent's Nostr key: it signs for the old platform's services alone.",
+            "description": "The old agent's Nostr key, an `nsec` (or 64 hex): kept, never sent.",
             "type": "string"
           }
         ],
-        "x-fragment-direction": "out"
+        "x-fragment-direction": "both"
       },
       "SecretList": {
         "description": "`GET /api/vault`: the person's secrets, by name.",
@@ -4754,6 +4812,157 @@
           }
         ],
         "summary": "What happened on an old agent's current command: a stale command's report is 409 and changes nothing.",
+        "tags": [
+          "migrations"
+        ]
+      }
+    },
+    "/api/migrations/mover/agents/{old}/secrets": {
+      "post": {
+        "operationId": "migrations.secrets",
+        "parameters": [
+          {
+            "description": "The old agent's id (Core's project id).",
+            "in": "path",
+            "name": "old",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Handoff"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandedOff"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          }
+        ],
+        "summary": "The old agent's secrets, read once it is stopped, each into its person's Vault within the call: only for its current stop_and_stage's kinds. The same command again puts nothing.",
         "tags": [
           "migrations"
         ]

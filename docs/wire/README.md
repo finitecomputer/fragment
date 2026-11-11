@@ -269,6 +269,15 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 - Answer: [`RosterTaken`](#rostertaken)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
 
+#### `migrations.secrets`
+
+`POST /api/migrations/mover/agents/{old}/secrets`: The old agent's secrets, read once it is stopped, each into its person's Vault within the call: only for its current stop_and_stage's kinds. The same command again puts nothing.
+
+- Credentials: NIP-98
+- Body: [`Handoff`](#handoff)
+- Answer: [`HandedOff`](#handedoff)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
 #### `migrations.visit`
 
 `POST /api/migrations/offers`: The signer opens the move: bound to their old agents by the WorkOS user they sign in as, and given its comp once (a month's seat and its credit). Then their old agents, as GET answers them.
@@ -394,7 +403,7 @@ out. One thing to do to one old agent, flat: its `kind`, and the fields that kin
 | `kind` | [`CommandKind`](#commandkind) | required |  |
 | `old` | `string` | required |  |
 | `phase` | [`Phase`](#phase) or `null` | optional | `stop_and_stage`: its phase. |
-| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage`: the secrets to hand on (none until the vault: FIN-466). |
+| `secrets` | `array` of [`SecretKind`](#secretkind) | optional | `stop_and_stage` after a person's Yes (phase 1): the secrets the old agent has (the roster's `has`), each to hand to its person's Vault (`POST …/agents/{old}/secrets`) once it is stopped. None in phase 2: no one said Yes. |
 | `stage` | `string` or `null` | optional | `stop_and_stage`: the stage to upload (`stage_id`). |
 
 ### `CommandKind`
@@ -486,6 +495,32 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `urls` | [`Urls`](#urls) | required |  |
 | `viewToken` | `string` or `null` | required | The share link's token: its owner's alone (and their agent's, sharing for them, but on a connector), as the share sheet shows it. A member does not share by link: they ask its owner. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
+
+### `HandedOff`
+
+out. Its answer: the kinds its person's Vault took. One the Vault refused (its rules: a value it does not take, or a Vault full) is left out, and stays on the old platform. The same command again answers the same, and puts nothing.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `handed` | `array` of [`SecretKind`](#secretkind) | required |  |
+
+### `Handoff`
+
+in, closed. `POST /api/migrations/mover/agents/{old}/secrets` (F11): the old agent's secrets, read once it is stopped, for the `stop_and_stage` that `command` names (its `secrets`, each kind once, a value at most `HANDOFF_VALUE_MAX_BYTES`). Each goes into its person's Vault within the call, and is never stored, logged or echoed on the way. Its `Debug` is derived, as the wire's checker needs, and prints its values: nothing formats one.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `command` | `string` | required |  |
+| `items` | `array` of [`HandoffItem`](#handoffitem) | required |  |
+
+### `HandoffItem`
+
+in, closed. 
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `kind` | [`SecretKind`](#secretkind) | required |  |
+| `value` | `string` | required |  |
 
 ### `Has`
 
@@ -1073,9 +1108,9 @@ out. A secret as its person reads it: everything but its value.
 
 ### `SecretKind`
 
-out. A secret an old agent holds that its person may bring (FIN-466's vault; not handed on yet).
+both. A secret an old agent holds that its person's Yes brings to their Vault (FIN-466), each kind an entry there (`fragment_core::migrations::vault_secret`).
 
-Values: `telegram_bot_token`, `openrouter_key`, `nostr_nsec`.
+Values: `openrouter_key`, `telegram_bot_token`, `nostr_nsec`.
 
 ### `SecretList`
 

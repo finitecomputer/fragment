@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use fragment_nip98::Keys;
-use fragment_proto::migrations::{Command, CommandKind, LeftBehind, Mailbox, Manifest, Phase, Report, Roster, STAGE_FORMAT};
+use fragment_proto::migrations::{Command, CommandKind, Handoff, HandoffItem, LeftBehind, Mailbox, Manifest, Phase, Report, Roster, STAGE_FORMAT};
 use serde_json::Value;
 use sha2::Digest;
 
@@ -49,13 +49,16 @@ pub struct Mover {
     zip: Mutex<(Vec<u8>, usize)>,
     /// The last `seq` reported on each command.
     seqs: Mutex<BTreeMap<String, u64>>,
+    /// The old agents' secrets it hands off once it stopped one, each
+    /// kind its command asks for (none by default: it hands off nothing).
+    secrets: Mutex<Vec<HandoffItem>>,
 }
 
 impl Mover {
     pub fn new(base: &str, keys: Keys) -> Mover {
         let zip = fixture_zip(64 * 1024);
         let part = zip.len();
-        Mover { keys, base: base.trim_end_matches('/').to_string(), http: reqwest::blocking::Client::new(), script: Mutex::new(Script::Done), zip: Mutex::new((zip, part)), seqs: Mutex::default() }
+        Mover { keys, base: base.trim_end_matches('/').to_string(), http: reqwest::blocking::Client::new(), script: Mutex::new(Script::Done), zip: Mutex::new((zip, part)), seqs: Mutex::default(), secrets: Mutex::default() }
     }
 
     /// The key's npub: what the deployment's `migrations.mover` names.
@@ -132,6 +135,17 @@ impl Mover {
         self.call("POST", &format!("/api/migrations/mover/agents/{old}/report"), Some(&serde_json::to_value(&r)?))
     }
 
+    /// The secrets the next stops hand off (each kind its command asks for).
+    pub fn secrets(&self, items: Vec<HandoffItem>) {
+        *self.secrets.lock().expect("the mover's secrets") = items;
+    }
+
+    /// Hands `items` off for `command` (the real mover's after its stop).
+    pub fn hand_off(&self, old: &str, command: &str, items: Vec<HandoffItem>) -> Result<Answered> {
+        let h = Handoff { command: command.into(), items };
+        self.call("POST", &format!("/api/migrations/mover/agents/{old}/secrets"), Some(&serde_json::to_value(&h)?))
+    }
+
     /// Part `n` of `stage`'s zip, its hash in its signed URL.
     pub fn put_part(&self, stage: &str, n: u32, bytes: &[u8]) -> Result<Answered> {
         let sha = hex::encode(sha2::Sha256::digest(bytes));
@@ -204,6 +218,10 @@ impl Mover {
             match c.kind {
                 CommandKind::StopAndStage => {
                     answers.push(self.report(&c, event("stopped"))?);
+                    let items: Vec<HandoffItem> = self.secrets.lock().expect("the mover's secrets").iter().filter(|i| c.secrets.contains(&i.kind)).cloned().collect();
+                    if !items.is_empty() {
+                        answers.push(self.hand_off(&c.old, &c.id, items)?);
+                    }
                     answers.push(self.report(&c, progress(1, 1))?);
                     match script {
                         Script::Done => {

@@ -32,8 +32,8 @@ use std::rc::Rc;
 use fragment_core::migrations::{self as machine, Col, Effect, Move, Refused, Step};
 use fragment_nip98::Payload;
 use fragment_proto::migrations::{
-    parse_stage, stage_prefix, valid_old, AdminAct, Mailbox, MoveAt, MoveState, Offer, OfferYes, Offers, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
-    PARTS_MAX, PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
+    parse_stage, stage_prefix, valid_old, AdminAct, Handoff, Has, Mailbox, MoveAt, MoveState, Offer, OfferYes, Offers, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
+    PARTS_MAX, PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, SecretKind, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
 };
 use fragment_proto::notice::NoticeList;
 use fragment_proto::{limits, ErrorCode, IdentityKind};
@@ -160,6 +160,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Post, ["stages", stage, "complete"]) => return complete(env, stage, body).await,
         (Method::Put, ["roster"]) => "roster".to_string(),
         (Method::Get, ["mailbox"]) => "mailbox".to_string(),
+        (Method::Post, ["agents", old, "secrets"]) => {
+            old_ok(old)?;
+            return handoff(env, old, body).await;
+        }
         (Method::Post, ["agents", old, "report"]) => {
             old_ok(old)?;
             format!("report/{old}")
@@ -405,6 +409,57 @@ fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str,
     })
 }
 
+/// The mover's hand-off of an old agent's secrets (F11): the object says
+/// whether its command takes these kinds now, and whose Vault and agent
+/// they are for (it never sees a value); each value goes from here
+/// straight into that Vault, bound to the new agent's fragment; then the
+/// object marks the command handed, so the same command again puts
+/// nothing (a person may have moved one out since). One the Vault refuses
+/// (its rules, or a full Vault) is left out of the answer; a Vault that
+/// could not be asked fails the call, and the mover tries again. No value
+/// is logged or put in an error: a body that does not read is refused in
+/// words of its own, never serde's, which quote what they read.
+fn handoff<'a>(env: &'a Env, old: &'a str, body: String) -> Waits<'a, Response> {
+    Box::pin(async move {
+        let h: Handoff = serde_json::from_slice(body.as_bytes()).map_err(|_| CellError::invalid("a hand-off is {command, items: [{kind, value}]}, its kinds telegram_bot_token, openrouter_key and nostr_nsec"))?;
+        drop(body);
+        let kinds = machine::handoff_kinds(&h).map_err(refused)?;
+        let named = |ks: &mut dyn Iterator<Item = SecretKind>| ks.map(SecretKind::as_str).collect::<Vec<_>>().join(",");
+        let asked = format!("{}\n{}", h.command, named(&mut kinds.iter().copied()));
+        let at = text(ask(env, format!("handoff/{old}"), asked).await?)?;
+        let Some((person, agent)) = at.strip_prefix("put\n").and_then(|a| a.split_once('\n')) else {
+            // handed already: its answer as it was
+            return crate::json_passed(at.strip_prefix("handed\n").unwrap_or_default().as_bytes().to_vec());
+        };
+        let fragment = agent_fragment(env, agent).await?;
+        let mut handed = vec![];
+        for item in &h.items {
+            let put = match machine::vault_secret(item.kind, &fragment, &item.value) {
+                Some((name, put)) => crate::vault::put(env, person, &name, &put).await,
+                None => Err(CellError::invalid("not a Nostr key")),
+            };
+            match put {
+                Ok(_) => handed.push(item.kind),
+                // refused by its rules: left on the old platform
+                Err(e) if e.code.status() < 500 => console_log!("migrations.handoff: {old} {} refused ({})", item.kind.as_str(), e.code.status()),
+                Err(e) => return Err(e),
+            }
+        }
+        pass(env, format!("handed/{old}"), format!("{}\n{}", h.command, named(&mut handed.into_iter()))).await
+    })
+}
+
+/// The agent fragment `agent` (an identity) was made from: where its
+/// routines go, and what its Vault secrets name.
+#[inline(never)]
+fn agent_fragment<'a>(env: &'a Env, agent: &'a str) -> Waits<'a, String> {
+    Box::pin(async move {
+        let profiles = crate::ask_registry(env, &crate::registry::calls::Profiles { ids: vec![agent.to_string()], emails_of: vec![] }).await?;
+        profiles.profiles.get(agent).and_then(|p| p.fragment.clone()).ok_or_else(|| CellError::new(ErrorCode::Conflict, format!("{agent} has no agent fragment")))
+    })
+}
+
+
 /// One part of a stage's zip: the object says whether the mover may upload
 /// this stage now, and where (its upload made here once, the first part's);
 /// the request's own stream goes to R2 unread; the object takes the part.
@@ -517,6 +572,38 @@ fn refused(r: Refused) -> CellError {
         Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
     };
     CellError::new(code, r.message())
+}
+
+/// A hand-off as the object reads it: its command, then its kinds.
+fn handoff_in(body: &str) -> CellResult<(String, Vec<SecretKind>)> {
+    let (command, kinds) = body.split_once('\n').unwrap_or((body, ""));
+    let kinds = kinds.split(',').filter(|k| !k.is_empty()).map(|k| SecretKind::parse(k).ok_or_else(|| CellError::invalid(format!("no secret kind {k}")))).collect::<CellResult<_>>()?;
+    Ok((command.to_string(), kinds))
+}
+
+/// Where a command's hand-off is kept: its kinds, never a value.
+fn handed_key(command: &str) -> String {
+    format!("handed:{command}")
+}
+
+/// A command's `HandedOff`, from its kinds as kept (each a fixed word).
+fn handed_answer(kinds: &str) -> String {
+    let handed: Vec<String> = kinds.split(',').filter_map(SecretKind::parse).map(|k| format!("\"{}\"", k.as_str())).collect();
+    format!("{{\"handed\":[{}]}}", handed.join(","))
+}
+
+/// A move's row, with which secrets its old agent has as its roster offer
+/// says (`has_t`, `has_o`, `has_n`), read by SQLite: no decoder of its own.
+macro_rules! with_has {
+    () => {
+        "SELECT *, json_extract(offer, '$.has.telegram') AS has_t, json_extract(offer, '$.has.openrouter') AS has_o, json_extract(offer, '$.has.nostr') AS has_n FROM moves"
+    };
+}
+
+/// Which secrets a move's old agent has, from its row's `with_has` columns.
+fn has_of(row: &Value) -> Has {
+    let had = |c: &str| row[c].as_i64() == Some(1);
+    Has { telegram: had("has_t"), openrouter: had("has_o"), nostr: had("has_n") }
 }
 
 // ---- the object
@@ -737,6 +824,28 @@ impl MigrationsCell {
             }
             ("mailbox", []) => crate::json_answer(&self.mailbox()?),
             ("report", [old]) => crate::json_answer(&self.report(old, &crate::json_body(body.as_bytes())?)?),
+            // the mover's hand-off (F11; body: its command, then its kinds):
+            // whose Vault and agent, or the command's answer, handed already
+            ("handoff", [old]) => {
+                let (command, kinds) = handoff_in(&body)?;
+                if let Some(handed) = parts.meta(&handed_key(&command))? {
+                    return Ok(Response::ok(format!("handed\n{}", handed_answer(&handed)))?);
+                }
+                let (m, has) = self.with_has(old)?;
+                machine::handoff(&m, &command, &has, &kinds).map_err(refused)?;
+                let person = parts.person_of(&m.workos_id)?.ok_or_else(|| CellError::host(format!("{old} moves with no person bound")))?;
+                Ok(Response::ok(format!("put\n{person}\n{}", m.agent.unwrap_or_default()))?)
+            }
+            // its kinds the Vault took, kept as the command's answer: the
+            // first kept stays (a hand-off cut short and sent again keeps it)
+            ("handed", [old]) => {
+                let (command, _) = handoff_in(&body)?;
+                self.with_has(old)?;
+                let kinds = body.split_once('\n').map(|(_, k)| k).unwrap_or_default();
+                parts.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", vec![text_value(&handed_key(&command)), text_value(kinds)])?;
+                let kept = parts.meta(&handed_key(&command))?.unwrap_or_default();
+                Ok(Response::ok(handed_answer(&kept))?)
+            }
             ("list", [after]) => {
                 let rows = parts.rows(ADMIN_PAGE, vec![text_value(after), SqlStorageValue::Integer(PAGE as i64 + 1)])?;
                 let next = (rows.len() > PAGE).then(|| rows[PAGE - 1]["old"].clone());
@@ -984,6 +1093,12 @@ impl MigrationsCell {
         Ok((m, crate::json_body(offer.as_bytes())?))
     }
 
+    /// `old`'s move, and which secrets its old agent has (404: none).
+    fn with_has(&self, old: &str) -> CellResult<(Move, Has)> {
+        let row = self.parts().rows(concat!(with_has!(), " WHERE old = ?"), vec![text_value(old)])?.pop().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move")))?;
+        Ok((Move::read(&row).map_err(CellError::host)?, has_of(&row)))
+    }
+
     /// A person's answer to `old`'s offer (`later`, `never`, `ask-again`,
     /// `yes` with an agent and its owner): `person` names who answers, its
     /// move theirs (404 otherwise); `None` is a lever's, for its person.
@@ -1032,8 +1147,15 @@ impl MigrationsCell {
 
     /// The mover's commands, oldest first.
     fn mailbox(&self) -> CellResult<Mailbox> {
-        let moves = self.parts().moves("SELECT * FROM moves WHERE command IS NOT NULL ORDER BY since_ms, old LIMIT ?", vec![SqlStorageValue::Integer(MAILBOX_MAX as i64)])?;
-        Ok(Mailbox { commands: moves.iter().filter_map(Move::command).collect() })
+        let rows = self.parts().rows(concat!(with_has!(), " WHERE command IS NOT NULL ORDER BY since_ms, old LIMIT ?"), vec![SqlStorageValue::Integer(MAILBOX_MAX as i64)])?;
+        let mut commands = vec![];
+        for row in &rows {
+            let m = Move::read(row).map_err(CellError::host)?;
+            let Some(mut c) = m.command() else { continue };
+            c.secrets = m.secrets(&has_of(row));
+            commands.push(c);
+        }
+        Ok(Mailbox { commands })
     }
 
     fn report(&self, old: &str, r: &Report) -> CellResult<Reported> {
@@ -1207,8 +1329,7 @@ impl MigrationsCell {
         if m.state != MoveState::Importing || m.stage().as_deref() != Some(stage) {
             return Ok(());
         }
-        let profiles = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids: vec![agent.to_string()], emails_of: vec![] }).await?;
-        let fragment = profiles.profiles.get(agent).and_then(|p| p.fragment.clone()).ok_or_else(|| CellError::host(format!("{agent} has no agent fragment")))?;
+        let fragment = agent_fragment(&self.env, agent).await?;
         let key = m.routine_key().ok_or_else(|| CellError::host(format!("{stage} is no import's")))?;
         crate::routed::object_answer(&self.env, "FRAGMENT", &fragment, &format!("stage/routine/{key}"), machine::routine_text(stage)).await?;
         Ok(())

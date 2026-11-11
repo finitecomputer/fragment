@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use fragment_fakes::mover::{event, fixture_zip, staged, Mover, Script};
-use fragment_proto::migrations::{Has, Roster, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT, WHY_MAX_BYTES};
+use fragment_proto::migrations::{HandoffItem, Has, Roster, SecretKind, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT, WHY_MAX_BYTES};
 use std::time::Duration;
 use serde_json::{json, Value};
 
@@ -142,12 +142,30 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let yes_again = answer(&a1, "yes", Some(&alice_agent))?;
     let cmd = mover.commands()?.into_iter().find(|c| c.old == a1).context("a1's command")?;
     s.ok(
-        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, and Yes again changes nothing",
+        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, handing off every secret the old agent has, and Yes again changes nothing",
         theirs.status == 403
             && yes.body["state"] == "asked"
             && yes_again.status == 200
-            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1") }),
+            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["nostr_nsec"] }),
         format!("{theirs} {cmd:?}"),
+    );
+
+    // ---- the hand-off of its secrets (F11): the mover's alone, for its
+    // command's kinds; a value is never echoed (move-import puts them)
+    let hand = |keys: &crate::Keys, o: &str, body: Value| api.signed(keys, "POST", &format!("/api/migrations/mover/agents/{o}/secrets"), Some(&body));
+    let mover_keys = s.mover.clone();
+    let nsec = json!({ "kind": "nostr_nsec", "value": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5" });
+    let stranger_hand = hand(&stranger, &a1, json!({ "command": cmd.id, "items": [nsec] }))?;
+    let unasked = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "telegram_bot_token", "value": "123456:handoff-sentinel" }] }))?;
+    let twice = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [nsec, nsec] }))?;
+    let unread = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "nostr_nsec", "value": 987_654_321_012u64 }] }))?;
+    let stale = hand(&mover_keys, &a1, json!({ "command": format!("{a1}:9:stop_and_stage"), "items": [nsec] }))?;
+    let none = hand(&mover_keys, &d1, json!({ "command": format!("{d1}:1:stop_and_stage"), "items": [nsec] }))?;
+    let quiet = [&unasked, &twice, &unread].iter().all(|r| !r.text.contains("handoff-sentinel") && !r.text.contains("987654321012"));
+    s.ok(
+        "a hand-off is the mover's alone (403); a kind its command does not ask for, a kind twice, or a body that does not read is refused (400) in words that never quote a value; another command, or an old agent with none, is 409",
+        stranger_hand.status == 403 && unasked.status == 400 && twice.status == 400 && unread.status == 400 && quiet && stale.status == 409 && none.status == 409,
+        format!("{} {} {} {} {} {}", stranger_hand.status, unasked, twice.status, unread, stale.status, none.status),
     );
 
     // ---- the mover down: held, then staff try again
@@ -424,8 +442,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let p2 = mover.commands()?.into_iter().filter(|c| [&a2, &c1, &d1].contains(&&c.old)).map(|c| (c.old.clone(), serde_json::to_value(&c).unwrap_or_default())).collect::<Vec<_>>();
     let f_cut = mover.commands()?.into_iter().any(|c| c.old == w1);
     s.ok(
-        "at the cutoff every unasked move is archiving: stop_and_stage of its stage <old>.p2.<attempt>; staff's withdrawn, the roster listing it, is passed by",
-        p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2.")))) && !f_cut && state(&w1) == "withdrawn",
+        "at the cutoff every unasked move is archiving: stop_and_stage of its stage <old>.p2.<attempt>, handing off no secret (no one said Yes); staff's withdrawn, the roster listing it, is passed by",
+        p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2."))) && c["secrets"].is_null()) && !f_cut && state(&w1) == "withdrawn",
         format!("{p2:?} {f_cut} {}", state(&w1)),
     );
     mover.run_once()?;
@@ -655,13 +673,56 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(woke, "the computer wakes: {}", phase(api, &owner, &id));
 
     // the move: Yes with this agent, staged
-    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people: vec![person(&workos_id, &[&old])] })?;
+    // an old agent with all three secrets: Yes hands each to its owner's Vault
+    let mut people = vec![person(&workos_id, &[&old])];
+    people[0].agents[0].has = Has { telegram: true, openrouter: true, nostr: true };
+    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people })?;
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
     anyhow::ensure!(visit.status == 200 && visit.body["bound"] == 1, "its owner opens the move, and is bound: {visit}");
     let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": identity })))?;
     anyhow::ensure!(yes.status == 200, "Yes: {yes}");
-    mover.run_once()?;
+    let tag = crate::Keys::generate().pubkey_hex()[..16].to_string();
+    let (token, key) = (format!("123456:tg-sentinel-{tag}"), format!("sk-or-v1-sentinel-{tag}"));
+    const NSEC: &str = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+    let items = vec![
+        HandoffItem { kind: SecretKind::TelegramBotToken, value: token.clone() },
+        HandoffItem { kind: SecretKind::OpenrouterKey, value: key.clone() },
+        HandoffItem { kind: SecretKind::NostrNsec, value: NSEC.into() },
+    ];
+    mover.secrets(items.clone());
+    let worked = mover.run_once()?;
+    mover.secrets(vec![]);
+    let (command, answers) = worked.into_iter().find(|(c, _)| c.old == old).context("its stop_and_stage")?;
+    let handed = answers.get(1).cloned().context("its hand-off's answer")?;
+    let vault = api.signed(&owner, "GET", "/api/vault", None)?;
+    let entry = |word: &str| vault.body["secrets"].as_array().and_then(|l| l.iter().find(|e| e["name"].as_str().is_some_and(|n| n.starts_with(&format!("{word}-"))))).cloned().unwrap_or_default();
+    let (tg, or, ns) = (entry("telegram"), entry("openrouter"), entry("nostr"));
+    let mine = json!([agent_name]);
+    s.ok(
+        "Yes hands every secret the old agent has to its person's Vault once it is stopped: Telegram's toward api.telegram.org, OpenRouter's toward openrouter.ai, the Nostr key kept to sign with and sent nowhere, each bound to the new agent alone, and no value listed",
+        command.secrets == SecretKind::ALL
+            && handed.status == 200
+            && handed.body == json!({ "handed": ["telegram_bot_token", "openrouter_key", "nostr_nsec"] })
+            && tg["hosts"] == json!(["api.telegram.org"]) && tg["agents"] == mine
+            && or["hosts"] == json!(["openrouter.ai"]) && or["agents"] == mine
+            && ns["hosts"] == json!([]) && ns["place"] == json!({ "sign": "nip98" }) && ns["agents"] == mine
+            && ![token.as_str(), key.as_str(), NSEC].iter().any(|v| vault.text.contains(v)),
+        format!("{} {} | {}", handed.status, handed.body, vault.text),
+    );
+    // replay: the same command again puts nothing (its owner removed one since)
+    let tg_name = tg["name"].as_str().unwrap_or_default().to_string();
+    let removed = api.signed(&owner, "DELETE", &format!("/api/vault/{tg_name}"), None)?;
+    let again = mover.hand_off(&old, &command.id, items)?;
+    let after = api.signed(&owner, "GET", "/api/vault", None)?;
+    let left: Vec<&str> = after.body["secrets"].as_array().map(|l| l.iter().filter_map(|e| e["name"].as_str()).collect()).unwrap_or_default();
+    s.ok(
+        "the same hand-off again answers the same and puts nothing: a secret its owner removed since stays removed",
+        removed.status == 200 && again.status == 200 && again.body == handed.body && left.len() == 2 && !left.contains(&tg_name.as_str()),
+        format!("{} {} {left:?}", again.status, again.body),
+    );
+    let logged = super::vault::logs(s);
+    s.ok("no value handed off is in any node's log", ![token.as_str(), key.as_str(), NSEC].iter().any(|v| logged.contains(v)), "a value was logged");
     let stage = format!("{old}.p1.1");
     let agent_npub = agent["npub"].as_str().unwrap_or("").to_string();
     let routine = || records(api, &owner, &agent_name, "tasks").into_iter().find(|r| r["body"]["kind"] == "routine" && r["body"]["text"].as_str().is_some_and(|t| t.contains(&stage)));

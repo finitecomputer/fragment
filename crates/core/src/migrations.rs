@@ -13,7 +13,10 @@
 //! `Move::values`): no reader of its own in the cell's Wasm.
 //! Removable with the move (docs/technical-debt-ledger.md).
 
-use fragment_proto::migrations::{command_id, stage_id, stage_prefix, Command, CommandKind, HeldReason, Mark, MoveState, Phase, Report, StageDone, ATTEMPTS_MAX, WHY_MAX_BYTES};
+use fragment_proto::migrations::{
+    command_id, stage_id, stage_prefix, Command, CommandKind, Handoff, Has, HeldReason, Mark, MoveState, Phase, Report, SecretKind, StageDone, ATTEMPTS_MAX, HANDOFF_VALUE_MAX_BYTES, TEXT_MAX_BYTES, WHY_MAX_BYTES,
+};
+use fragment_proto::vault::{Place, PutSecret};
 use fragment_proto::notice::{Notice, NoticeAction, NoticeLevel};
 use serde_json::Value;
 
@@ -357,6 +360,19 @@ impl Move {
         })
     }
 
+    /// The secrets its current command hands to its person's Vault: on a
+    /// person's Yes (a phase 1 `stop_and_stage`, bound to their agent),
+    /// every kind its old agent has, with no question of its own (the
+    /// Vault is theirs, and nothing uses an entry until they set
+    /// something up); none otherwise.
+    pub fn secrets(&self, has: &Has) -> Vec<SecretKind> {
+        if self.command != Some(Act::StopAndStage) || self.phase != Phase::P1 || self.agent.is_none() {
+            return vec![];
+        }
+        let held = [has.telegram, has.openrouter, has.nostr];
+        SecretKind::ALL.into_iter().zip(held).filter_map(|(k, h)| h.then_some(k)).collect()
+    }
+
     /// Its current attempt's stage id and prefix (none before an attempt).
     pub fn stage(&self) -> Option<String> {
         (self.attempt >= 1).then(|| stage_id(self.phase, &self.old, self.attempt))
@@ -654,6 +670,69 @@ pub fn report(m: &Move, r: &Report, now: i64) -> Outcome {
         (Act::Restart, "restarted" | "failed") => step(Move { command: None, seq: 0, ..taken }),
         _ => unfit,
     }
+}
+
+// ---- the mover's hand-off of an old agent's secrets (F11)
+
+/// A hand-off's kinds, within its bounds: its command's id at most
+/// `TEXT_MAX_BYTES`, 1 to 3 items, each kind once, each value 1 to
+/// `HANDOFF_VALUE_MAX_BYTES`. Says nothing of a value.
+pub fn handoff_kinds(h: &Handoff) -> Result<Vec<SecretKind>, Refused> {
+    let command_ok = !h.command.is_empty() && h.command.len() <= TEXT_MAX_BYTES && h.command.bytes().all(|b| b.is_ascii_graphic());
+    if !command_ok || h.items.is_empty() || h.items.len() > SecretKind::ALL.len() {
+        return Err(Refused::Unfit("a hand-off names its command and 1 to 3 secrets"));
+    }
+    if h.items.iter().any(|i| i.value.is_empty() || i.value.len() > HANDOFF_VALUE_MAX_BYTES) {
+        return Err(Refused::Unfit("a secret's value is 1 to 4096 bytes"));
+    }
+    let kinds: Vec<SecretKind> = h.items.iter().map(|i| i.kind).collect();
+    if kinds.iter().enumerate().any(|(n, k)| kinds[..n].contains(k)) {
+        return Err(Refused::Unfit("a hand-off names each kind once"));
+    }
+    Ok(kinds)
+}
+
+/// Whether the mover may hand off `kinds` of `m`'s old agent for
+/// `command`: its current command (409 otherwise), whose `secrets` name
+/// each (400), while its old agent is being stopped or staged (409).
+pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Result<(), Refused> {
+    if m.command_id().as_deref() != Some(command) {
+        return Err(Refused::Stale);
+    }
+    let asked = m.secrets(has);
+    if !kinds.iter().all(|k| asked.contains(k)) {
+        return Err(Refused::Unfit("a hand-off names only the secrets its command asks for"));
+    }
+    match m.state {
+        MoveState::Asked | MoveState::Staging => Ok(()),
+        s => Err(Refused::NotNow(s)),
+    }
+}
+
+/// A secret handed off, as its person's Vault keeps it: its name there,
+/// bound to the new agent's fragment, toward the hosts its kind goes to.
+/// `None`: a Nostr key that is not one (the Vault takes no other value).
+///
+/// - Telegram's token, toward `api.telegram.org`: moved from there into
+///   the new agent's Telegram connector by Settings (`fromVault`).
+/// - OpenRouter's key, toward `openrouter.ai`.
+/// - The Nostr key, as 64 hex, to sign with (NIP-98) and with no host
+///   yet: kept, never sent, until something its person sets up asks for
+///   one.
+///
+/// Its name is its kind's and the agent's, at most 32 bytes: `telegram-
+/// <label>--<suffix>`, the label cut short to fit.
+pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(String, PutSecret)> {
+    let (word, hosts, place, value) = match kind {
+        SecretKind::TelegramBotToken => ("telegram", vec!["api.telegram.org".to_string()], Place::default(), value.to_string()),
+        SecretKind::OpenrouterKey => ("openrouter", vec!["openrouter.ai".to_string()], Place::default(), value.to_string()),
+        SecretKind::NostrNsec => ("nostr", vec![], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
+    };
+    let (label, suffix) = fragment_proto::split_fragment_name(fragment)?;
+    let room = 32 - word.len() - 3 - suffix.len();
+    let label = label[..label.len().min(room)].trim_end_matches('-');
+    let name = format!("{word}-{label}--{suffix}");
+    Some((name, PutSecret { value, hosts, place, agents: vec![fragment.to_string()] }))
 }
 
 // ---- the mover's upload
@@ -1662,5 +1741,70 @@ mod tests {
         let held = tick(&asked, T0 + STOP_MS).expect("held").to;
         assert_eq!((held.state, said(&held, "Ada").as_str()), (MoveState::Held, "Paused: someone from Finite will look at it and be in touch."));
         assert_eq!(said(&restarted(&held), "Ada"), said(&held, "Ada"), "restart");
+    }
+
+    /// Goal: a person's Yes hands every secret its old agent has to their
+    /// Vault (F11), only for that command, while it stops or stages, and
+    /// each into an entry bound to the new agent toward its kind's hosts.
+    #[test]
+    fn a_yes_hands_off_the_old_agents_secrets() {
+        use fragment_proto::migrations::HandoffItem;
+        let all = Has { telegram: true, openrouter: true, nostr: true };
+        let some = Has { telegram: true, openrouter: false, nostr: false };
+        let asked = to(yes(&open_move(), AGENT, T0));
+        // valid: every kind it has, on its command, while asked or staging
+        assert_eq!(asked.secrets(&all), SecretKind::ALL.to_vec());
+        assert_eq!(asked.secrets(&some), vec![SecretKind::TelegramBotToken]);
+        let cmd = asked.command_id().unwrap();
+        assert_eq!(handoff(&asked, &cmd, &all, &SecretKind::ALL), Ok(()));
+        let s = staging();
+        assert_eq!(handoff(&restarted(&s), &s.command_id().unwrap(), &some, &[SecretKind::TelegramBotToken]), Ok(()), "staging, restarted");
+        // invalid: a kind it has not, another command, a move past staging
+        assert_eq!(handoff(&s, &s.command_id().unwrap(), &some, &[SecretKind::OpenrouterKey]), Err(Refused::Unfit("a hand-off names only the secrets its command asks for")));
+        assert_eq!(handoff(&s, "prj_1:2:stop_and_stage", &all, &[SecretKind::NostrNsec]), Err(Refused::Stale));
+        let i = importing();
+        assert_eq!(handoff(&i, &cmd, &all, &[SecretKind::NostrNsec]), Err(Refused::Stale), "staged: its command is done");
+        // none without a Yes: phase 2's stop_and_stage, an unasked move, staff's restart
+        let p2 = cutoff(&Move::listed("o", "u", false, T0), T0, T0).unwrap().to;
+        assert_eq!(p2.secrets(&all), vec![]);
+        assert!(handoff(&p2, &p2.command_id().unwrap(), &all, &[SecretKind::NostrNsec]).is_err());
+        assert_eq!(open_move().secrets(&all), vec![]);
+        // its bounds: each kind once, 1 to 3, a value 1 to 4096 bytes
+        let item = |kind, value: &str| HandoffItem { kind, value: value.into() };
+        let h = |items| Handoff { command: cmd.clone(), items };
+        assert_eq!(handoff_kinds(&h(vec![item(SecretKind::NostrNsec, "x"), item(SecretKind::TelegramBotToken, "y")])), Ok(vec![SecretKind::NostrNsec, SecretKind::TelegramBotToken]));
+        assert!(handoff_kinds(&h(vec![])).is_err());
+        assert!(handoff_kinds(&h(vec![item(SecretKind::NostrNsec, "x"), item(SecretKind::NostrNsec, "y")])).is_err());
+        assert!(handoff_kinds(&h(vec![item(SecretKind::OpenrouterKey, "")])).is_err());
+        assert!(handoff_kinds(&h(vec![item(SecretKind::OpenrouterKey, &"k".repeat(HANDOFF_VALUE_MAX_BYTES + 1))])).is_err());
+        assert!(handoff_kinds(&Handoff { command: "c".repeat(TEXT_MAX_BYTES + 1), items: vec![item(SecretKind::NostrNsec, "x")] }).is_err());
+        assert!(handoff_kinds(&Handoff { command: format!("{cmd}\nnostr_nsec"), items: vec![item(SecretKind::NostrNsec, "x")] }).is_err(), "one line");
+    }
+
+    #[test]
+    fn each_kind_is_a_vault_entry_of_the_new_agent() {
+        use crate::catalog::Catalog;
+        let (name, put) = vault_secret(SecretKind::TelegramBotToken, "kestrel--x7k2", "123:abc").unwrap();
+        assert_eq!((name.as_str(), put.hosts.as_slice(), put.agents.as_slice(), put.value.as_str()), ("telegram-kestrel--x7k2", &["api.telegram.org".to_string()][..], &["kestrel--x7k2".to_string()][..], "123:abc"));
+        let (name, put) = vault_secret(SecretKind::OpenrouterKey, "kestrel--x7k2", "sk-or-1").unwrap();
+        assert_eq!((name.as_str(), put.hosts.as_slice()), ("openrouter-kestrel--x7k2", &["openrouter.ai".to_string()][..]));
+        // NIP-19's example key: kept as hex, to sign with, sent nowhere
+        let nsec = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+        let hex = "67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa";
+        let (name, put) = vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", nsec).unwrap();
+        assert_eq!((name.as_str(), put.value.as_str(), put.hosts.len(), put.place.sign.as_deref()), ("nostr-kestrel--x7k2", hex, 0, Some("nip98")));
+        assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", hex).unwrap().1.value, hex, "hex too");
+        assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", "nsec1nope"), None, "not a key");
+        // a long label is cut short to fit a name; every entry passes the Vault's rules
+        let long = format!("{}--x7k2", "a".repeat(20) + "-b");
+        let catalog = Catalog::default();
+        for kind in SecretKind::ALL {
+            let value = if kind == SecretKind::NostrNsec { nsec } else { "tok-123" };
+            for fragment in ["kestrel--x7k2", long.as_str()] {
+                let (name, put) = vault_secret(kind, fragment, value).unwrap();
+                assert!(name.len() <= 32 && name.ends_with("--x7k2"), "{name}");
+                crate::vault::check(&name, &put, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+        }
     }
 }
