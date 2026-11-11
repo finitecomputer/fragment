@@ -16,9 +16,9 @@
 //   accounts: the keys it holds, by name and the hosts each may go to
 //   (never a value), with Remove; the agent it speaks to when it is a
 //   connector's door (`/api/f/{name}/door`), with Unlink; their own agents
-//   in it. Such an app is theirs and their agents' alone for now: the cell
-//   refuses sharing it, and its share sheet (its Sharing here) says so
-//   (reach.rs, share.rs).
+//   in it. Such an app has no share link and is not public for now: the
+//   cell refuses them, and its share sheet (its Sharing here) says so, and
+//   that the people added can use its keys (reach.rs, share.rs).
 // Archived ones are folded at the end, each with Unarchive.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,

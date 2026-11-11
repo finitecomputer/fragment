@@ -626,6 +626,20 @@ iframe[data-blocked] { display: none; }
 /* the shell's form: fields (inputs, selects, text areas) are rounded rectangles, 10px, on the card's white; buttons are pills */
 .settings-section input:not([type="file"]):not([type="checkbox"]), .settings-section select, .agent-dialog input:not([type="file"]):not([type="checkbox"]), .agent-dialog select { font: var(--type-field); min-height: 36px; padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
 .settings-section input[type="checkbox"] { accent-color: var(--accent-blue); }
+/* a check: a checkbox in the platform's look, for picking things (the move's
+   page; any page that picks), still the browser's own control under it: its
+   label, keys, focus and forms. Off, the card's square in the strong border;
+   on, filled with the primary buttons' colour, its tick theirs; the switch's
+   focus ring; under forced colours, the system's own box */
+input.check { position: relative; flex: none; width: 18px; height: 18px; margin: 0; appearance: none; -webkit-appearance: none; border: 1.5px solid var(--border-strong); border-radius: 5px; background: var(--bg-card); cursor: pointer; transition: background .12s, border-color .12s; }
+input.check::before { content: ""; position: absolute; left: 50%; top: 45%; width: 4px; height: 9px; border: solid var(--primary-foreground); border-width: 0 2px 2px 0; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; }
+input.check:checked { border-color: var(--primary); background: var(--primary); }
+input.check:checked::before { opacity: 1; }
+input.check:hover:not(:disabled):not(:checked) { border-color: var(--text-tertiary); }
+input.check:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+input.check:disabled { opacity: .55; cursor: default; }
+@media (prefers-reduced-motion: reduce) { input.check { transition: none; } }
+@media (forced-colors: active) { input.check { appearance: auto; -webkit-appearance: auto; } input.check::before { display: none; } }
 /* a setting's on and off: a checkbox drawn as a switch (billing.js, Sleep), its row the label */
 label.settings-line { cursor: pointer; }
 .settings-section input.settings-switch { position: relative; flex: none; width: 40px; height: 24px; margin: 0; appearance: none; -webkit-appearance: none; border-radius: 999px; background: var(--border-strong); cursor: pointer; transition: background .15s; }
@@ -999,7 +1013,6 @@ label.settings-line { cursor: pointer; }
 .move-copy strong { display: block; margin-bottom: 2px; color: var(--text-primary); font-size: 15px; }
 .move-copy p { margin: 0; }
 .move-pick { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 14px; }
-.move-pick input[type="checkbox"] { flex: none; width: 18px; height: 18px; margin: 0; }
 .move-row > button { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font: 600 13px/28px var(--font-sans); }
 .move-layout .form-error { margin: 0 0 12px; }
 @media (max-width: 640px) { .move-layout { padding: 18px 16px 60px; } }
@@ -1040,9 +1053,36 @@ label.settings-line { cursor: pointer; }
 .history-preview.found { color: var(--text-secondary); }
 .history-more { align-self: center; margin-top: 14px; height: 32px; padding: 0 16px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
 .history-more:hover { background: var(--bg-hover); }
+/* the Schedules page (schedules-page.js): History's layout, one row a
+   job (its name, when it runs, its fragment), the paused last */
+.schedules-layout { display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
+.schedules-intro h1 { margin: 0 0 18px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.schedules-list { display: flex; flex-direction: column; }
+.schedules-empty, .schedules-failed p { margin: 16px 2px; font-size: 14px; }
+.schedules-failed p { margin: 8px 2px; font-size: 13px; }
+.schedules-row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 9px 10px; border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.schedules-row:hover { background: var(--bg-hover); }
+.schedules-art { display: grid; flex: none; place-items: center; width: 30px; height: 30px; }
+.schedules-art .app-icon, .schedules-art .app-picture, .schedules-art .app-picture .app-icon { width: 30px; height: 30px; border-radius: 8px; }
+.schedules-art .app-icon { background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
+.schedules-art .app-icon svg { width: 18px; height: 18px; stroke-width: 1.7; }
+.schedules-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.schedules-line, .schedules-sub { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.schedules-line .label { min-width: 0; overflow: hidden; color: var(--text-primary); font-size: 14.5px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.schedules-chip { flex: none; padding: 0 7px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font-size: 11px; line-height: 18px; }
+.schedules-line time { flex: none; margin-left: auto; color: var(--text-secondary); font-size: 12px; line-height: 20px; }
+.schedules-sub { color: var(--text-tertiary); font-size: 13px; line-height: 18px; }
+.schedules-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schedules-fragment { flex: none; max-width: 45%; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.schedules-said + .schedules-fragment::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
 @container settings (max-width: 620px) {
   .apps-layout { padding: 18px 16px 60px; }
   .history-layout { padding: 18px 16px 60px; }
+  .schedules-layout { padding: 18px 16px 60px; }
+  /* its schedule in words over its fragment, each whole */
+  .schedules-sub { flex-direction: column; align-items: flex-start; gap: 0; }
+  .schedules-said, .schedules-fragment { max-width: 100%; white-space: normal; }
+  .schedules-said + .schedules-fragment::before { content: none; }
   /* a row's Continue under its words, so its title and what a search found
      have the width (two agents' "Continue with [agent]" left them "M…") */
   .history-row { flex-wrap: wrap; }

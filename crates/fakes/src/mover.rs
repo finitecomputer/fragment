@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use fragment_nip98::Keys;
-use fragment_proto::migrations::{Command, CommandKind, LeftBehind, Mailbox, Manifest, Phase, Report, Roster, STAGE_FORMAT};
+use fragment_proto::migrations::{Command, CommandKind, Handoff, HandoffItem, LeftBehind, Mailbox, Manifest, Phase, Report, Roster, STAGE_FORMAT};
 use serde_json::Value;
 use sha2::Digest;
 
@@ -130,6 +130,13 @@ impl Mover {
     pub fn report_as(&self, old: &str, command: &str, seq: u64, event: Report) -> Result<Answered> {
         let r = Report { command: command.into(), seq, ..event };
         self.call("POST", &format!("/api/migrations/mover/agents/{old}/report"), Some(&serde_json::to_value(&r)?))
+    }
+
+    /// Hands `items` off for `command`, as the real mover does once it
+    /// stopped the old agent (`POST …/agents/{old}/secrets`).
+    pub fn hand_off(&self, old: &str, command: &str, items: Vec<HandoffItem>) -> Result<Answered> {
+        let h = Handoff { command: command.into(), items };
+        self.call("POST", &format!("/api/migrations/mover/agents/{old}/secrets"), Some(&serde_json::to_value(&h)?))
     }
 
     /// Part `n` of `stage`'s zip, its hash in its signed URL.

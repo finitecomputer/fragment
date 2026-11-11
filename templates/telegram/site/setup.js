@@ -2,7 +2,11 @@
 // Settings frames it in a dialog of the shell's (cell/shell/connector-setup.js)
 // or, where that frame can't sign in (Safari's cookie rule), it opens in a
 // tab of its own. Its owner's alone, one action a step:
-// 1. the bot: its token pasted (from @BotFather) and, the first time, a
+// 1. the bot: its token, from its owner's Vault when Settings found one
+//    there for this agent (`?vault=<name>`: a bot moved from
+//    finite.computer, FIN-463 F11), moved into this fragment as its secret
+//    (`fromVault`: gone from the Vault, kept here), or pasted (from
+//    @BotFather); and, the first time, a
 //    webhook secret this browser makes, each set as this fragment's secret
 //    toward api.telegram.org (`__secrets`: written, never read back, never
 //    through code or a model); `connect` checks the token and points the
@@ -49,12 +53,15 @@ const row = (...items) => {
 async function platformJson(path, init) {
   const resp = await fetch(new URL(path, location.href), { credentials: "same-origin", ...init });
   const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(body.message || `${resp.status}`);
+  if (!resp.ok) throw Object.assign(new Error(body.message || `${resp.status}`), { status: resp.status });
   return body;
 }
 
-// one of this fragment's secrets, its value never read back
-const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "PUT", headers: JSON_TYPE, body: JSON.stringify({ value, hosts: [TELEGRAM_HOST] }) });
+// one of this fragment's secrets, its value never read back; or one of
+// its owner's Vault, moved here (`{fromVault}`)
+const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "PUT", headers: JSON_TYPE, body: JSON.stringify({ ...value, hosts: [TELEGRAM_HOST] }) });
+// the bot token in its owner's Vault that Settings found for this agent
+const VAULT = new URLSearchParams(location.search).get("vault");
 const randomHex = (n) => [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, "0")).join("");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -94,6 +101,9 @@ export async function setup(root) {
   let polling = null;
   // the token step again, from a connected bot (New token)
   let replacing = false;
+  // the Vault's bot (named here, or taken already: `held`) is offered
+  // until it connects, unless another is asked for
+  let declined = false;
 
   // a step: its line (or what failed, in its place), and its controls
   const say = (line, ...parts) => {
@@ -134,11 +144,13 @@ export async function setup(root) {
   // the token set, and checked: drawn once `known` has this attempt's
   // answer, a bot or why not (an attempt of its own: another dialog's
   // connect, answered meanwhile, is not this one's)
-  async function connect(token) {
+  async function connect(setToken) {
     const first = !state.bot;
     const attempt = randomHex(16);
-    await secret("TELEGRAM_BOT_TOKEN", token);
-    if (first) await secret("TELEGRAM_WEBHOOK_SECRET", randomHex(32));
+    // the webhook's secret first: once the token is here, connecting is
+    // all a try cut short needs
+    if (first) await secret("TELEGRAM_WEBHOOK_SECRET", { value: randomHex(32) });
+    await setToken();
     await fragment.call("connect", { platform: me.platform, attempt });
     for (const until = Date.now() + CONNECT_WAIT_MS; Date.now() < until; ) {
       await sleep(POLL_MS);
@@ -159,6 +171,26 @@ export async function setup(root) {
     const bot = state.bot ? `@${state.bot.username}` : "";
     if (state.error && !error) error = state.error;
     // 1: the bot, or another token for it (a token Telegram refused asks again)
+    if (!declined && !state.bot && (VAULT || state.held)) {
+      const go = button("Use it", "", act(async () => {
+        go.disabled = true;
+        go.textContent = "Connecting…";
+        // said here first, so a try cut short anywhere is offered again
+        await fragment.call("hold");
+        await connect(async () => {
+          if (!VAULT) return;
+          // none in the Vault: moved here already (its answer lost)
+          await secret("TELEGRAM_BOT_TOKEN", { fromVault: VAULT }).catch((e) => {
+            if (e.status !== 404) throw e;
+          });
+        });
+      }));
+      const other = button("Use another bot", "quiet", () => {
+        declined = true;
+        draw();
+      });
+      return say(el("p", null, "Your bot is ready to connect."), row(go, other));
+    }
     if (!state.bot || replacing || state.error) {
       const input = el("input");
       input.type = "password";
@@ -171,7 +203,7 @@ export async function setup(root) {
         go.disabled = true;
         input.disabled = true;
         go.textContent = "Connecting…";
-        await connect(token);
+        await connect(() => secret("TELEGRAM_BOT_TOKEN", { value: token }));
       }));
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !go.disabled) go.click();

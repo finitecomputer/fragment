@@ -24,7 +24,9 @@ back to WorkOS's own authorize URL. The routes are docs/api.md's
 - **Tokens** go from the provider's token endpoint straight to Pipes'
   import for that subject: never to the browser, never kept by Fragment,
   never retried. An import whose outcome is unknown consumes the attempt;
-  the person connects again.
+  the person connects again. A grant whose answer names no `expires_in`
+  (Salesforce's never does) is imported as expired, so Pipes refreshes it
+  before its first use.
 - **The OAuth client** must be the one the deployment's WorkOS
   integration uses, or Pipes cannot refresh. Its secret is a store
   secret (docs/secrets.md).
@@ -99,6 +101,21 @@ later connect is known to have imported, so an import that lands late is
 never taken for a connection. Google's revocation ends the Google
 account's whole grant to the client, so it also ends another person's
 connection of that same account.
+
+## An account's own host
+
+Where a row names an `account_host`, the import that makes an account
+also hands Pipes the token answer's field the row names (`metadata`,
+Salesforce's `instance_url`), when it is an https URL of a host under the
+row's suffix; a grant naming none such is not imported (its calls there
+would all be refused). WorkOS takes `metadata` on create alone, so a
+connect where an account is already is never an update: the account is
+deleted and made again, its host the new grant's. An update would keep
+the earlier grant's host beside the new token: another org's, where the
+person connected another. Such a row connects one account. The swap reads it back from Pipes'
+credential (`/data-integrations/{slug}/credentials`) for each request to a
+host under the suffix, and sends the token there only when the hosts are
+the same (docs/computers.md, "An account's own host").
 
 ## Several accounts
 

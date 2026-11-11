@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::ledger::{charged, entries, forget_gate, usage};
 use crate::api::Api;
-use crate::{Suite, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
+use crate::{Suite, ORG_CONNECTION, ORG_CONNECTION_HOST, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
 
 /// Who the swap's checks act as, and on what.
 pub(super) struct Swapping<'a> {
@@ -79,6 +79,10 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
     "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
+    "a connection whose accounts live at hosts of their own (Salesforce's orgs): a call to its account's own host, as Pipes' metadata names it, is swapped the account's credential, and one to its named host Pipes' token",
+    "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
+    "an account whose Pipes metadata names no host under the suffix, or another host, has its calls there refused, reaching no one",
+    "connected through its callback as one org, then again as another: the account is made again with the new org's host, never updated beside the old one's, so the token goes to the new org's host and the old org's is refused, reaching no one",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -120,7 +124,7 @@ const XAI_CHAT: &str = r#"{"model":"grok-4.3","messages":[{"role":"user","conten
 /// `provider`: a local run holds the node's host secret, so it makes one
 /// as the platform does (a forgery needs the secret; a guest has none).
 pub(super) fn placeholder(s: &Suite, id: &str, agent: &str, provider: &str) -> String {
-    let kind = if [SWAP_CONNECTION, SEVERAL].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
+    let kind = if [SWAP_CONNECTION, SEVERAL, ORG_CONNECTION].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
     let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(id, agent, provider);
     fragment_core::swap::Placeholder::new(kind, provider, &tag).text()
 }
@@ -251,6 +255,56 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let cleared = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": null })))?;
     let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}"), None)?;
     anyhow::ensure!(cleared.status == 200 && gone.status == 200, "the several accounts' checks cleared: {cleared}; {gone}");
+
+    // a connection whose accounts live at hosts of their own (its row's
+    // account_host): its named host takes Pipes' token, and a host under
+    // its suffix the account's credential, at the account's own host alone
+    let under = fragment_fakes::workos::ACCOUNT_HOSTS_UNDER;
+    let own = format!("acme.{under}");
+    s.workos.connect(&email, ORG_CONNECTION, true);
+    s.workos.keep_metadata(&email, ORG_CONNECTION, json!({ "instance_url": format!("https://{own}") }));
+    // the owner's read tells the computer at once, as above
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    anyhow::ensure!(state_of(&r, ORG_CONNECTION) == "connected", "the account host's connection connected: {r}");
+    let fetch = |s: &Suite, host: &str| format!("fetch http://{host}/services/data/v62.0/sobjects with {}", placeholder(s, w.id, w.agent, ORG_CONNECTION));
+    let swapped_at = |s: &Suite, host: &str| s.workos.tokens(ORG_CONNECTION).last().is_some_and(|t| s.upstream.seen().last().is_some_and(|seen| seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {t}")));
+    let at_own = say(s, 164, &fetch(s, &own))?;
+    let own_swapped = swapped_at(s, &own);
+    let at_login = say(s, 165, &fetch(s, ORG_CONNECTION_HOST))?;
+    s.ok(SWAP_CHECKS[46], at_own.starts_with("fetched 200") && own_swapped && at_login.starts_with("fetched 200") && swapped_at(s, ORG_CONNECTION_HOST), json!({ "own": at_own, "login": at_login }));
+    let seen_before = s.upstream.seen().len();
+    let another = say(s, 166, &fetch(s, &format!("rival.{under}")))?;
+    s.ok(SWAP_CHECKS[47], another.starts_with("fetched 403") && another.contains(&format!("is at {own}")) && s.upstream.seen().len() == seen_before, &another);
+    s.workos.keep_metadata(&email, ORG_CONNECTION, json!({}));
+    let unnamed = say(s, 167, &fetch(s, &own))?;
+    s.workos.keep_metadata(&email, ORG_CONNECTION, json!({ "instance_url": "https://acme.org.test" }));
+    let elsewhere = say(s, 168, &fetch(s, &own))?;
+    s.ok(
+        SWAP_CHECKS[48],
+        [&unnamed, &elsewhere].iter().all(|said| said.starts_with("fetched 5") && said.contains(&format!("names no host under {under}"))) && s.upstream.seen().len() == seen_before,
+        json!({ "unnamed": unnamed, "elsewhere": elsewhere }),
+    );
+    // through its callback, as a person connects: one org, then another;
+    // an account there already is made again, its host the new grant's
+    let session = api.sign_in(&email)?;
+    let first = connected_as(api, &session, ORG_CONNECTION, json!({ "access": "write" }), "acme")?;
+    let at_first = say(s, 169, &fetch(s, &own))?;
+    let first_swapped = swapped_at(s, &own);
+    let rival = format!("rival.{under}");
+    let second = connected_as(api, &session, ORG_CONNECTION, json!({ "access": "write" }), "rival")?;
+    let at_second = say(s, 170, &fetch(s, &rival))?;
+    let second_swapped = swapped_at(s, &rival);
+    let seen_before = s.upstream.seen().len();
+    let at_old = say(s, 178, &fetch(s, &own))?;
+    s.ok(
+        SWAP_CHECKS[49],
+        first.status == 200 && at_first.starts_with("fetched 200") && first_swapped && second.status == 200 && at_second.starts_with("fetched 200") && second_swapped
+            && at_old.starts_with("fetched 403") && at_old.contains(&format!("is at {rival}")) && s.upstream.seen().len() == seen_before
+            && s.workos.metadata(&email, ORG_CONNECTION) == Some(json!({ "instance_url": format!("https://{rival}") })),
+        json!({ "first": first.status, "atFirst": at_first, "second": second.status, "atSecond": at_second, "atOld": at_old }),
+    );
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{ORG_CONNECTION}"), None)?;
+    anyhow::ensure!(gone.status == 200, "the account host's checks cleared: {gone}");
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
@@ -640,6 +694,29 @@ pub(super) fn sent_back(api: &Api, page: &str) -> Result<String> {
     Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
 }
 
+/// A connect of `provider` through its callback, as Settings makes one (its
+/// body `body`): the person's session begins it, the stand-in provider's
+/// consent signs in as `account` and grants all it asks for, and their
+/// browser comes back to the callback, whose answer this is.
+fn connected_as(api: &Api, session: &str, provider: &str, body: Value, account: &str) -> Result<crate::api::Reply> {
+    let r = api.call(crate::api::Call {
+        method: "POST",
+        url: format!("{}/api/connections/{provider}/authorize", api.base),
+        body: Some(body.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())],
+        ..crate::api::Call::default()
+    })?;
+    anyhow::ensure!(r.status == 200, "begin {provider}: {r}");
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).ok_or_else(|| anyhow::anyhow!("no connection cookie: {r}"))?;
+    let mut to = reqwest::Url::parse(r.body["url"].as_str().unwrap_or_default())?;
+    to.query_pairs_mut().append_pair("account", account);
+    let consent = api.external(to.as_str())?;
+    anyhow::ensure!(consent.status == 302, "the stand-in provider's consent: {consent}");
+    api.call(crate::api::Call { method: "GET", url: consent.header("location"), cookie: Some(format!("fragment_session={session}; {bound}")), ..crate::api::Call::default() })
+}
+
 /// Settings' Connect, as the shell sends it (its session, from the
 /// platform's own page): the provider's page, and the cookie binding the
 /// sign-in to this browser.
@@ -898,6 +975,8 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
     "an answer that echoes a Vault's value as an event stream, or among bytes that are no text, names it as its secret, never the value",
     "basic auth: a short password's header echoed back is named as its secret, never its base64",
     "a signed request goes with the query its signature covers, byte for byte, an empty piece and all",
+    "a secret named as a connection the deployment offers (named before it offered it) stays its person's: in the view as a key, its placeholder filled toward its host",
+    "one request carrying that connection's placeholder and the secret's, at the connection's host, each where its row takes it: each is filled with its own (Pipes' token in the header, the Vault's value in the query), never the other's",
 ];
 
 /// A Vault's secret, as its person puts it (`PUT /api/vault/{name}`).
@@ -1003,6 +1082,40 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let signer = fragment_nip98::verify(Some(&header), "GET", &format!("https://{host}{target}"), b"", now, 120);
     s.ok(VAULT_CHECKS[11], r.starts_with("fetched 200") && seen["target"] == target && signer.as_deref() == Ok(nostr.pubkey_hex()), json!({ "said": r, "seen": seen, "signer": format!("{signer:?}") }));
 
+    // a secret named as a connection the catalog offers (`e2e-oauth`): a key
+    // (`fck_`), so its own, beside the connection's (`fcx_`)
+    let shared = "e2e-oauth";
+    vault_put(api, w, shared, json!({ "value": value, "hosts": [host], "agents": [w.agent] }))?;
+    let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(w.id, w.agent, shared);
+    let as_key = fragment_core::swap::Placeholder::new(fragment_core::catalog::Kind::Own, shared, &tag).text();
+    let given = say(s, 614, "credentials", &mut said)?;
+    let before = s.upstream.seen().len();
+    let r = say(s, 615, &format!("fetch http://{host}/v1/me with {as_key}"), &mut said)?;
+    let seen = last_seen(s, before);
+    s.ok(
+        VAULT_CHECKS[12],
+        given.contains(&as_key) && r.starts_with("fetched 200") && seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {value}") && r.contains(&format!("Bearer {{{{{shared}}}}}")),
+        json!({ "given": given, "said": r, "seen": seen }),
+    );
+    // that connection connected, and the secret toward its host in a query
+    // parameter: one request carries both, one name and one tag between them
+    let email = Api::email_of(w.owner);
+    s.workos.connect(&email, shared, true);
+    vault_put(api, w, shared, json!({ "value": value, "hosts": ["oauth.test"], "place": { "query": "key" }, "agents": [w.agent] }))?;
+    let as_connection = fragment_core::swap::Placeholder::new(fragment_core::catalog::Kind::Connection, shared, &tag).text();
+    let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let before = s.upstream.seen().len();
+    let r = say(s, 616, &format!("fetch http://oauth.test/v1/me?key={as_key} with {as_connection}"), &mut said)?;
+    let seen = last_seen(s, before);
+    let token = s.workos.tokens(shared).last().cloned().unwrap_or_default();
+    s.ok(
+        VAULT_CHECKS[13],
+        listed.status == 200 && r.starts_with("fetched 200") && !token.is_empty() && seen["auth"]["authorization"] == format!("Bearer {token}") && seen["query"] == json!([["key", value]]),
+        json!({ "said": r, "seen": seen }),
+    );
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{shared}"), None)?;
+    anyhow::ensure!(off.status == 200, "the shared name's connection cleared: {off}");
+
     let gone = api.signed(w.owner, "DELETE", "/api/vault/e2e-vault", None)?;
     let before = s.upstream.seen().len();
     let r = say(s, 609, &format!("fetch http://{host}/v1/me with {}", ph("e2e-vault")), &mut said)?;
@@ -1018,7 +1131,7 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let secrets = [value.as_str(), other.as_str(), &nostr.secret_hex()];
     let leaked: Vec<&str> = secrets.iter().copied().filter(|v| said.iter().any(|t| t.contains(v)) || logs.contains(v)).collect();
     s.ok(VAULT_CHECKS[8], !logs.is_empty() && leaked.is_empty(), json!({ "answers": said.len(), "log bytes": logs.len(), "leaked": leaked.len() }));
-    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic"] {
+    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-oauth"] {
         api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
     }
     Ok(turns)

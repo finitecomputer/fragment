@@ -294,6 +294,20 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
 /// several (its id, with the plural opt-in, in the body as WorkOS' SDK
 /// sends them); None is the compatibility connection's, as with one.
 pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>) -> CellResult<(u16, Value)> {
+    pipes_vend(env, api, provider, user, account, "token").await
+}
+
+/// `user`'s credential for `provider` beside what Pipes keeps of its
+/// provider's token answers (WorkOS Pipes' vend, `POST
+/// /data-integrations/{provider}/credentials`): `{active, credential:
+/// {value, metadata, …}}`, or `{active: false, error}`. A connection with an
+/// account host asks it, to learn its account's host (`metadata`). As
+/// `pipes_token`, `account` names one of several.
+pub async fn pipes_credential(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>) -> CellResult<(u16, Value)> {
+    pipes_vend(env, api, provider, user, account, "credentials").await
+}
+
+async fn pipes_vend(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>, what: &str) -> CellResult<(u16, Value)> {
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     let key = required(env, store::WORKOS_KEY).await?;
     let body = match account {
@@ -303,7 +317,7 @@ pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str, accou
         }
         None => json!({ "user_id": user }),
     };
-    post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&body), "WorkOS").await
+    post_json(&format!("{api}/data-integrations/{provider}/{what}"), Method::Post, Some(&key), Some(&body), "WorkOS").await
 }
 
 /// A connected account as Pipes describes it, with no token
@@ -359,6 +373,10 @@ pub(super) async fn connection_exchange(env: &Env, provider: &str, o: &fragment_
 async fn confidential_request(url: &str, method: Method, content_type: &str, bearer: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
     let headers = Headers::new();
     headers.set("content-type", content_type)?;
+    // its answer is read as JSON: said so, since a token endpoint may pick
+    // its answer's format by `Accept` (Salesforce's answers JSON, XML or a
+    // form)
+    headers.set("accept", "application/json")?;
     if let Some(key) = bearer { headers.set("authorization", &format!("Bearer {key}"))?; }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(body.into()));
@@ -379,11 +397,15 @@ async fn confidential_request(url: &str, method: Method, content_type: &str, bea
 /// query, as WorkOS' SDK sends them); Pipes' refusals of an addition are
 /// told apart (`connection_accounts::imported`). An uncertain outcome is
 /// never retried. Refresh stays at WorkOS, using the same OAuth client.
+/// What the tokens keep of their answer (`Tokens::metadata`, a connection's
+/// account host's) goes with an import that makes an account, never an
+/// update (WorkOS takes it on create alone; Pipes keeps it from the
+/// provider's refreshes after).
 pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>, several: Option<(&Import, Option<&str>)>) -> CellResult<Imported> {
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
     let key = required(env, store::WORKOS_KEY).await?;
-    let expires_at = fragment_core::export::rfc3339(js::now_ms() + i64::from(tokens.expires_in) * 1000);
+    let expires_at = tokens.expires_at(js::now_ms());
     let mut body = tokens.import_body(&expires_at, account);
     let import = match several {
         Some((import, identifier)) => {
@@ -392,14 +414,33 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
         }
         None => &Import::Compatibility,
     };
-    let body = body.to_string();
+    let update = body.to_string();
+    // an account host's grant: Pipes keeps its host only as an account is
+    // made (WorkOS takes `metadata` on create alone)
+    let replace = tokens.metadata().is_some();
+    if let Some(m) = tokens.metadata() {
+        body["metadata"] = m.clone();
+    }
+    let create = body.to_string();
     let url = format!("{api}/user_management/users/{user}/connected_accounts/{provider}");
     let (status, answer) = match import {
-        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&key), &body).await?,
-        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?,
+        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&key), &update).await?,
+        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&key), &create).await?,
     };
     Ok(match (import, imported(status, &answer)) {
-        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0, &Value::Null) {
+        // one there already, of an account host: replaced, never updated,
+        // so its token and its host are always one grant's (an update would
+        // keep the earlier grant's host, another org's, beside this token).
+        // A delete that lands and a make that fails leaves none: the person
+        // connects again
+        (Import::Compatibility, Imported::Conflict) if replace => {
+            pipes_delete(env, api, provider, user, None).await?;
+            match imported(confidential_request(&url, Method::Post, "application/json", Some(&key), &create).await?.0, &Value::Null) {
+                i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
+                _ => Imported::Refused,
+            }
+        }
+        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &update).await?.0, &Value::Null) {
             i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
             _ => Imported::Refused,
         },

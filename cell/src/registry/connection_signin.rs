@@ -185,6 +185,12 @@ impl RegistryCell {
         // fenced the account while the code was exchanged cancels it (its
         // tokens are dropped, never revoked: `Finishing`), and one from
         // here on is refused until this answers
+        // an account host's grant names its account's host, or is no use:
+        // its calls there would all be refused (of one account a person:
+        // no turn to give back)
+        let account_host = self.cfg.providers.get(&b.provider).and_then(|p| p.account_host.as_ref());
+        let metadata = account_host.and_then(|a| connection_signin::import_metadata(&answer, a));
+        if account_host.is_some() && metadata.is_none() { return Ok(Failed); }
         if !self.finishing.borrow_mut().may_import(id) { return Ok(NotUnderWay); }
         // An import that fails, or whose outcome is unknown (a timeout, a
         // 5xx), leaves a disconnect's lasting fence standing: it may yet
@@ -194,7 +200,7 @@ impl RegistryCell {
         if let Some(t) = &turn {
             t.uncertain.set(Some(js::now_ms() + accounts::UNCERTAIN_HOLD_MS));
         }
-        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
+        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens.keeping(metadata), label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
         if let Some(t) = turn.as_ref().filter(|_| imported != Imported::Failed) {
             t.uncertain.set(None);
         }

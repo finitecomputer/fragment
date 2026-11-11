@@ -643,6 +643,15 @@ provider's own hosts.
   when its owner's gate refuses (402, 403). A body goes as it came, and a
   redirect is never followed. A connection's token is asked of Pipes for
   each request, never held.
+- **An account's own host.** A connection whose accounts each live at a
+  host of their own (a Salesforce org at its My Domain) names the suffix
+  they are under and the Pipes metadata field naming each account's
+  (`account_host`). The intercept also catches the suffix's glob
+  (`*.my.salesforce.com`); a request to a host under it is swapped only
+  when Pipes' credential for the account names that very host
+  (`AccountHost::of_metadata`), since anyone may own a host under the
+  suffix. Another account's host is refused (403), naming the account's
+  own; an account whose metadata names none is refused too.
 - **Who may use what.** An agent may use every provider its owner has
   (decision 44); its owner may narrow it to a list, a specialization
   rather than a wall. Where a connection takes several accounts, each

@@ -164,11 +164,20 @@ fragment session import <source> --layout <L>
 
 This files every conversation in your owner's Session Archive, which
 their History lists. Importing again adds nothing twice. It can take a
-few minutes, so run it in the background and wait.
+while, so start it now in the background, **without `notify`**, and go on
+with the next steps while it runs. With `notify`, its end would reach
+your owner as a message of its own, apart from your report; without it,
+nothing is said until you ask (ignore the hint to add it).
 
-If it says `Search: skipped`, run it again at the end. These chats are
-your owner's to read. They are not yours to learn from: don't read them
-into your memory or a brain.
+Before you write the report (step 8), wait for it with your `process`
+tool (`action: wait`; wait again while it still runs) and read the end
+of what it printed: how many conversations the archive holds. If it
+stopped before printing that, run it again the same way and wait for
+it: it goes on where it stopped. If it says `Search: skipped`, run it
+again too.
+
+These chats are your owner's to read. They are not yours to learn from:
+don't read them into your memory or a brain.
 
 ## 3. Files, into an app
 
@@ -298,8 +307,8 @@ times as they are; don't convert them yourself.
 
 Finish with one message, in plain words:
 - **Where things are**, each with its link: the files app and whatever
-  the profile made. The old chats are in their History, where search
-  finds them by what was said.
+  the profile made. The old chats are in their History (how many, as
+  the import printed), where search finds them by what was said.
 - **What came over:** your personality, how many memories, the skills (by
   name), and the routines (when they run, in your owner's time).
 - **What didn't, and why**, a sentence each:

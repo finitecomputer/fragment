@@ -403,6 +403,15 @@ never reaches another agent's core.
   card's question with its choices. An unlink stops the mirror and keeps
   the chat; a link again is that chat. `state.json` holds nothing of
   SimpleX.
+- **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
+  carries no typing, so while the agent's turn runs on a message from
+  their app (the engine's `working`: its own turn phases, whatever the
+  runtime), the link reacts 🚀 to that message, and takes it off when the
+  turn ends, with a reply or without. A refusal (their reactions off)
+  shows nothing and is not retried, and a ratchet out of step waits until
+  it is in step; `link.json`
+  keeps what it reacted to, so a later start takes off what an earlier
+  one left on.
 - **The agent is told in that chat alone**, as the chat's topic on every
   inbound there (Relay's `chat_topic`). Hermes reads a topic as a label,
   never as an instruction. Its name in their app is the agent's title,
@@ -430,6 +439,40 @@ never reaches another agent's core.
   (v7.0.3's force makes new keys each time, which an offline phone cannot
   follow). A connection repeated forces already damaged may stay stuck.
   Restarts and recovery send the owner nothing.
+- **An owner's old SimpleX conversation can be kept** (FIN-463,
+  `simplex/stage.rs`; docs/migrations.md, "SimpleX in a stage"). Before the
+  move's routine reaches the agent (`driver.rs` `feed` holds it, within
+  ten minutes), the bridge reads the stage's SimpleX files by ranges, as
+  the agent, checks each whole (its CRC, a SQLite
+  database, the contract's three files and no other), and keeps them in
+  the agent's SimpleX directory (`staged/`), running nothing. Its link
+  page's view says `staged`, and the page offers it first ("Keep my
+  SimpleX chat", or "Start a new chat" for Link SimpleX); while the
+  computer sleeps, it says the chat can be kept once it stays on. Its owner's adoption ticket (`POST
+  /simplex/adopt`) then reads the identity once with its core in
+  maintenance mode (`-m`, started with nothing subscribed): their contact
+  there and their name, and their chat's newest item, which is marked
+  delivered, so nothing the old agent already had is carried as new. The
+  door's key is registered, then the adoption's intent is written
+  (`staged/commit.json`), then the files become the core's databases and
+  the link is bound to that contact, at this start's generation (no
+  rollback), and written; only then does the staged copy go. A failed
+  write or a crash anywhere in between is finished at the next start (and
+  retried meanwhile) before any core runs or anything else links.
+  Its core then starts: what arrived while it moved is carried, the old
+  agent's other contacts are deleted (told), its groups left and deleted,
+  and its address deleted, each asked at every start until the core says
+  it is gone. Their app is told its new name, and once that it moved. A
+  stage that is not whole, or names no contact of that identity as its
+  owner, is let go, and Link SimpleX works as before.
+- **Another client on its databases** (FIN-483: a core run elsewhere on
+  a copy of them, such as an old finite.computer agent started again after
+  its conversation moved) takes the contact's queues, and the core says so
+  (`contactAnotherClient`, `subscriptionEnd`). The bridge stops that core
+  and starts it again, which subscribes again (counted as an exit, so one
+  that keeps losing them waits for its owner); replies meanwhile wait in
+  its outbox, and its start's state read heals the ratchet, unforced, and
+  sends them.
 - **The agent is kept out**: the core and `BRIDGE_SIMPLEX_DIR` are root's,
   0700, and on no agent's PATH. The agent's passwordless sudo still
   reaches root, and a core's bot API listens on loopback (the debt

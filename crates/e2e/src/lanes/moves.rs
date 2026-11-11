@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use fragment_fakes::mover::{event, fixture_zip, staged, Mover, Script};
-use fragment_proto::migrations::{Has, Roster, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT};
+use fragment_proto::migrations::{HandoffItem, Has, Roster, SecretKind, RosterAgent, RosterPerson, Sizes, STAGE_FORMAT, WHY_MAX_BYTES};
 use std::time::Duration;
 use serde_json::{json, Value};
 
@@ -52,6 +52,8 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let operator = s.operator.clone();
     let admin = |method: &str, path: &str| api.signed(&operator, method, &format!("/api/admin/migrations{path}"), None);
     let act = |o: &str, op: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": op })));
+    let withdraw = |o: &str, why: &str| api.signed(&operator, "POST", &format!("/api/admin/migrations/{o}"), Some(&json!({ "op": "withdraw", "why": why })));
+    const WHY: &str = "a staff test agent";
     // a move as staff read it: the operators' list, page by page
     let moved = |o: &str| -> Result<Value> {
         let mut after = String::new();
@@ -140,12 +142,30 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let yes_again = answer(&a1, "yes", Some(&alice_agent))?;
     let cmd = mover.commands()?.into_iter().find(|c| c.old == a1).context("a1's command")?;
     s.ok(
-        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, and Yes again changes nothing",
+        "Yes with another person's agent is refused (403); with their own, the mover's mailbox holds stop_and_stage of the stage <old>.p1.1, handing off every secret the old agent has, and Yes again changes nothing",
         theirs.status == 403
             && yes.body["state"] == "asked"
             && yes_again.status == 200
-            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1") }),
+            && serde_json::to_value(&cmd)? == json!({ "id": format!("{a1}:1:stop_and_stage"), "old": a1, "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{a1}.p1.1"), "secrets": ["nostr_nsec"] }),
         format!("{theirs} {cmd:?}"),
+    );
+
+    // ---- the hand-off of its secrets (F11): the mover's alone, for its
+    // command's kinds; a value is never echoed (move-import puts them)
+    let hand = |keys: &crate::Keys, o: &str, body: Value| api.signed(keys, "POST", &format!("/api/migrations/mover/agents/{o}/secrets"), Some(&body));
+    let mover_keys = s.mover.clone();
+    let nsec = json!({ "kind": "nostr_nsec", "value": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5" });
+    let stranger_hand = hand(&stranger, &a1, json!({ "command": cmd.id, "items": [nsec] }))?;
+    let unasked = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "telegram_bot_token", "value": "123456:handoff-sentinel" }] }))?;
+    let twice = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [nsec, nsec] }))?;
+    let unread = hand(&mover_keys, &a1, json!({ "command": cmd.id, "items": [{ "kind": "nostr_nsec", "value": 987_654_321_012u64 }] }))?;
+    let stale = hand(&mover_keys, &a1, json!({ "command": format!("{a1}:9:stop_and_stage"), "items": [nsec] }))?;
+    let none = hand(&mover_keys, &d1, json!({ "command": format!("{d1}:1:stop_and_stage"), "items": [nsec] }))?;
+    let quiet = [&unasked, &twice, &unread].iter().all(|r| !r.text.contains("handoff-sentinel") && !r.text.contains("987654321012"));
+    s.ok(
+        "a hand-off is the mover's alone (403); a kind its command does not ask for, a kind twice, or a body that does not read is refused (400) in words that never quote a value; another command, or an old agent with none, is 409",
+        stranger_hand.status == 403 && unasked.status == 400 && twice.status == 400 && unread.status == 400 && quiet && stale.status == 409 && none.status == 409,
+        format!("{} {} {} {} {} {}", stranger_hand.status, unasked, twice.status, unread, stale.status, none.status),
     );
 
     // ---- the mover down: held, then staff try again
@@ -263,7 +283,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let r = act(&a1, "retire")?;
     mover.script(Script::Done);
     mover.run_once()?;
-    let bad = act(&a1, "withdraw")?;
+    let bad = withdraw(&a1, WHY)?;
     s.ok("staff retire it: the mover retires the old agent and the move is done (moved); a done move is not withdrawn (409)", r.body["state"] == "retiring" && state(&a1) == "moved" && bad.status == 409, format!("{} {}", r.body, bad));
 
     // ---- the one person's bound agent reads its own stage, while it
@@ -292,7 +312,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{refused:?} {mover_reads:?}"),
     );
     let row = moved(&e1)?;
-    let fields = ["old", "workos_id", "person", "agent", "state", "reason", "phase", "attempt", "command", "since_ms", "deadline_ms", "staged_ms"];
+    let fields = ["old", "workos_id", "person", "agent", "state", "reason", "phase", "attempt", "command", "since_ms", "deadline_ms", "staged_ms", "why"];
     s.ok("staff's list says its state and when, never a stage's bytes or manifest", row["state"] == "importing" && row.as_object().is_some_and(|o| o.keys().all(|k| fields.contains(&k.as_str()))), &row);
     let other = api.signed(&alice_agent_keys, "POST", &format!("/api/migrations/stages/{e1}.p1.9/open"), None)?;
     let opened = api.signed(&alice_agent_keys, "POST", &at("open"), None)?;
@@ -333,7 +353,7 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
     let gone = state(&b1);
     let r2 = mover.push(&roster("s4", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&format!("{run}-nobody"), &[&b1])]))?;
     let back = state(&b1);
-    let w = act(&b1, "withdraw")?;
+    let w = withdraw(&b1, WHY)?;
     mover.push(&roster("s5", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&format!("{run}-nobody"), &[&b1])]))?;
     s.ok(
         "a roster without an unasked move withdraws it, the next that lists it offers it again, and staff's withdrawal stays whatever a roster says; a moved one is untouched",
@@ -341,20 +361,90 @@ pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{} {} {gone} {back}", r.body, r2.body),
     );
 
+    // ---- the will-not-move list: staff withdraw an old agent ahead of the
+    // roster, saying why; `include` takes a withdrawal back
+    let (w1, w2) = (old("w1"), old("w2"));
+    let nobody = format!("{run}-nobody");
+    let (empty, long) = (withdraw(&w1, " ")?, withdraw(&w1, &"x".repeat(WHY_MAX_BYTES + 1))?);
+    let ahead = withdraw(&w1, WHY)?;
+    let again = withdraw(&w1, WHY)?;
+    s.ok(
+        "staff withdraw an old agent no roster has listed yet, saying why (none, or too long: 400); the same again changes nothing",
+        empty.status == 400 && long.status == 400 && ahead.status == 200 && ahead.body["state"] == "withdrawn" && ahead.body["why"] == WHY && ahead.body["workos_id"] == "" && again.status == 200 && again.body == ahead.body,
+        format!("{empty} {long} {ahead} {again}"),
+    );
+    let r = mover.push(&roster("s5b", vec![person(&alice_id, &[&a1, &a2, &w1]), person(&dave_id, &[&d1, &d2]), person(&nobody, &[&b1])]))?;
+    let f = moved(&w1)?;
+    let notices = api.signed(&alice, "GET", "/api/notices", None)?;
+    let offers = api.signed(&alice, "GET", "/api/migrations/offers", None)?;
+    let told = mover.commands()?.into_iter().any(|c| c.old == w1);
+    s.ok(
+        "a roster that lists it names whose it is and leaves it withdrawn, with its why: its person is not asked, and the mover told nothing",
+        r.status == 200 && f["state"] == "withdrawn" && f["workos_id"] == alice_id.as_str() && f["why"] == WHY && notices.status == 200 && !notices.text.contains(&format!("move:{w1}")) && offers.status == 200 && !offers.text.contains(&w1) && !told,
+        format!("{} {f} {notices} {offers} {told}", r.body),
+    );
+    let list = admin("GET", "")?;
+    let listed: Vec<String> = list.body["moves"].as_array().into_iter().flatten().filter(|m| m["why"].is_string()).filter_map(|m| m["old"].as_str().map(str::to_string)).collect();
+    s.ok("the operators' list gives staff's why with each move they withdrew, and none with any other", list.status == 200 && listed.contains(&b1) && listed.contains(&w1) && !listed.contains(&a2), json!(listed));
+    // include: b1, listed by the roster, its person not here: listed again
+    let inc = act(&b1, "include")?;
+    let inc_again = act(&b1, "include")?;
+    // w1, dropped by the roster: left withdrawn, the roster's, until a
+    // roster lists it, which offers it to its person (bound: open)
+    mover.push(&roster("s5c", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&nobody, &[&b1])]))?;
+    let dropped = act(&w1, "include")?;
+    mover.push(&roster("s5d", vec![person(&alice_id, &[&a1, &a2, &w1]), person(&dave_id, &[&d1, &d2]), person(&nobody, &[&b1])]))?;
+    let f_back = state(&w1);
+    // w2, withdrawn ahead of any roster: forgotten
+    let g = withdraw(&w2, WHY)?;
+    let forgot = act(&w2, "include")?;
+    let forgot_again = act(&w2, "include")?;
+    s.ok(
+        "include takes staff's withdrawal back: listed again (again: nothing more); one the roster dropped stays withdrawn until a roster lists it (then offered); one withdrawn ahead of any roster is forgotten (then 404)",
+        inc.status == 200 && inc.body["state"] == "listed" && inc.body["why"].is_null() && inc_again.body == inc.body
+            && dropped.status == 200 && dropped.body["state"] == "withdrawn" && dropped.body["why"].is_null() && f_back == "open"
+            && g.status == 200 && forgot.status == 200 && forgot.body.is_null() && moved(&w2).is_err() && forgot_again.status == 404,
+        format!("{inc} {dropped} {f_back} {forgot} {forgot_again}"),
+    );
+    // the same from the CLI, with the operator key's file
+    let file = s.dir("move-operator").join("operator.key");
+    std::fs::write(&file, format!("{}\n", operator.secret_hex()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let (home, key) = (s.dir("move-cli"), file.to_string_lossy().to_string());
+    let w3 = old("w3");
+    let cli = |args: &[&str]| s.cli_json(api, &home, &[&["operator"], args, &["--key-file", &key, "--json"]].concat());
+    let out = cli(&["withdraw", &w3, "--why", WHY]);
+    let list = cli(&["moves", "--withdrawn"]);
+    let back = cli(&["include", &w3]);
+    let after = cli(&["moves", "--withdrawn"]);
+    let olds = |v: &Result<Value>| v.as_ref().ok().and_then(|v| v["moves"].as_array().cloned()).unwrap_or_default().iter().filter_map(|m| m["old"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    s.ok(
+        "`fragment operator withdraw`, `moves --withdrawn` and `include` with the operator key's file: an old id no roster listed is withdrawn with its why, on the list, then forgotten",
+        out.as_ref().is_ok_and(|v| v["state"] == "withdrawn" && v["why"] == WHY) && olds(&list).contains(&w3) && back.as_ref().is_ok_and(Value::is_null) && !olds(&after).contains(&w3) && olds(&after).iter().all(|o| o != &a2),
+        format!("{out:?} {list:?} {back:?}"),
+    );
+    // w1 out again, for the cutoff below
+    withdraw(&w1, WHY)?;
+
     // ---- phase 2: past the cutoff, the unasked are staged and retired
     // unasked (archived); a late Yes imports the kept stage; 90 days on, expired
     // carol is on the old platform alone: she signs up only after the cutoff
     let carol = crate::Keys::generate();
     let c_id = s.workos.user(&Api::email_of(&carol)).id;
-    mover.push(&roster("s6", vec![person(&alice_id, &[&a1, &a2]), person(&dave_id, &[&d1, &d2]), person(&c_id, &[&c1])]))?;
+    mover.push(&roster("s6", vec![person(&alice_id, &[&a1, &a2, &w1]), person(&dave_id, &[&d1, &d2]), person(&c_id, &[&c1])]))?;
     let cutoff = crate::MIGRATIONS_CUTOFF_MS;
     let now = lever(json!({ "op": "clock", "offsetMs": offset.get() }))?["now"].as_i64().context("the object's now")?;
     later_by(cutoff - now + 1)?;
     let p2 = mover.commands()?.into_iter().filter(|c| [&a2, &c1, &d1].contains(&&c.old)).map(|c| (c.old.clone(), serde_json::to_value(&c).unwrap_or_default())).collect::<Vec<_>>();
+    let f_cut = mover.commands()?.into_iter().any(|c| c.old == w1);
     s.ok(
-        "at the cutoff every unasked move is archiving: stop_and_stage of its stage <old>.p2.<attempt>",
-        p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2.")))),
-        format!("{p2:?}"),
+        "at the cutoff every unasked move is archiving: stop_and_stage of its stage <old>.p2.<attempt>, handing off no secret (no one said Yes); staff's withdrawn, the roster listing it, is passed by",
+        p2.len() == 3 && p2.iter().all(|(o, c)| c["kind"] == "stop_and_stage" && c["phase"] == "p2" && c["stage"].as_str().is_some_and(|p| p.starts_with(&format!("{o}.p2."))) && c["secrets"].is_null()) && !f_cut && state(&w1) == "withdrawn",
+        format!("{p2:?} {f_cut} {}", state(&w1)),
     );
     mover.run_once()?;
     let retire = mover.commands()?.into_iter().find(|c| c.old == c1).map(|c| serde_json::to_value(&c).unwrap_or_default());
@@ -583,13 +673,64 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(woke, "the computer wakes: {}", phase(api, &owner, &id));
 
     // the move: Yes with this agent, staged
-    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people: vec![person(&workos_id, &[&old])] })?;
+    // an old agent with all three secrets: Yes hands each to its owner's Vault
+    let mut people = vec![person(&workos_id, &[&old])];
+    people[0].agents[0].has = Has { telegram: true, openrouter: true, nostr: true };
+    let r = mover.push(&Roster { snapshot: format!("{old}-s1"), observed_ms: 1_800_000_000_000, people })?;
     anyhow::ensure!(r.status == 200, "the roster: {} {}", r.status, r.body);
     let visit = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "visit", "who": Api::email_of(&owner) })))?;
     anyhow::ensure!(visit.status == 200 && visit.body["bound"] == 1, "its owner opens the move, and is bound: {visit}");
     let yes = api.unsigned("POST", "/api/test/migrations", Some(&json!({ "op": "answer", "old": old, "answer": "yes", "agent": identity })))?;
     anyhow::ensure!(yes.status == 200, "Yes: {yes}");
+    let tag = crate::Keys::generate().pubkey_hex()[..16].to_string();
+    let (token, key) = (format!("123456:tg-sentinel-{tag}"), format!("sk-or-v1-sentinel-{tag}"));
+    const NSEC: &str = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+    let item = |kind, value: &str| HandoffItem { kind, value: value.into() };
+    let all = vec![item(SecretKind::TelegramBotToken, &token), item(SecretKind::OpenrouterKey, &key), item(SecretKind::NostrNsec, NSEC)];
+    let cmd = mover.commands()?.into_iter().find(|c| c.old == old).context("its stop_and_stage")?;
+    let stopped = mover.report(&cmd, event("stopped"))?;
+    anyhow::ensure!(stopped.status == 200, "stopped: {} {}", stopped.status, stopped.body);
+    let vault = || -> Result<Value> { Ok(api.signed(&owner, "GET", "/api/vault", None)?.body) };
+    let entry = |v: &Value, name: &str| v["secrets"].as_array().and_then(|l| l.iter().find(|e| e["name"] == name)).cloned().unwrap_or_default();
+    let name_of = |kind| fragment_core::migrations::vault_secret(kind, &agent_name, NSEC).map(|(n, _)| n).unwrap_or_default();
+    let (tg_name, or_name, ns_name) = (name_of(SecretKind::TelegramBotToken), name_of(SecretKind::OpenrouterKey), name_of(SecretKind::NostrNsec));
+    let mine = json!([agent_name]);
+
+    // a hand-off cut short after its first secret: that one is in the Vault
+    let first = mover.hand_off(&old, &cmd.id, vec![item(SecretKind::TelegramBotToken, &token)])?;
+    let v = vault()?;
+    let tg = entry(&v, &tg_name);
+    s.ok(
+        "Yes hands the old agent's Telegram token to its person's Vault once it is stopped: toward api.telegram.org, bound to the new agent alone, its value listed nowhere",
+        cmd.secrets == SecretKind::ALL && first.status == 200 && first.body == json!({ "handed": ["telegram_bot_token"] }) && tg["hosts"] == json!(["api.telegram.org"]) && tg["agents"] == mine && !v.to_string().contains(&token),
+        format!("{} {} | {v}", first.status, first.body),
+    );
+    // its person removes it, and keeps a secret of another agent's under the
+    // name OpenRouter's would take; then the mover tries the whole hand-off again
+    let removed = api.signed(&owner, "DELETE", &format!("/api/vault/{tg_name}"), None)?;
+    let theirs = api.signed(&owner, "PUT", &format!("/api/vault/{or_name}"), Some(&json!({ "value": "their-own-key", "hosts": ["example.com"], "agents": ["other--x7k2"] })))?;
+    anyhow::ensure!(removed.status == 200 && theirs.status == 200, "the owner's own edits: {removed} {theirs}");
+    let again = mover.hand_off(&old, &cmd.id, all.clone())?;
+    let v = vault()?;
+    let (ns, or) = (entry(&v, &ns_name), entry(&v, &or_name));
+    s.ok(
+        "tried again whole, it puts what it had not (the Nostr key, kept to sign with and sent nowhere), never puts back the token its person removed, and never takes the name of another agent's secret (OpenRouter's left out, theirs untouched)",
+        again.status == 200
+            && again.body == json!({ "handed": ["telegram_bot_token", "nostr_nsec"] })
+            && entry(&v, &tg_name).is_null()
+            && ns["hosts"] == json!([]) && ns["place"] == json!({ "sign": "nip98" }) && ns["agents"] == mine
+            && or["agents"] == json!(["other--x7k2"]) && or["hosts"] == json!(["example.com"])
+            && ![token.as_str(), key.as_str(), NSEC].iter().any(|x| v.to_string().contains(x)),
+        format!("{} {} | {v}", again.status, again.body),
+    );
+    let replay = mover.hand_off(&old, &cmd.id, all.clone())?;
+    let after = vault()?;
+    s.ok("the same hand-off again answers the same and changes nothing", replay.status == 200 && replay.body == again.body && after == v, format!("{} {}", replay.status, replay.body));
     mover.run_once()?;
+    let late = mover.hand_off(&old, &cmd.id, all)?;
+    s.ok("once its stage is staged, its command is done: a hand-off is stale (409)", late.status == 409, format!("{} {}", late.status, late.body));
+    let logged = super::vault::logs(s);
+    s.ok("no value handed off is in any node's log", ![token.as_str(), key.as_str(), NSEC].iter().any(|v| logged.contains(v)), "a value was logged");
     let stage = format!("{old}.p1.1");
     let agent_npub = agent["npub"].as_str().unwrap_or("").to_string();
     let routine = || records(api, &owner, &agent_name, "tasks").into_iter().find(|r| r["body"]["kind"] == "routine" && r["body"]["text"].as_str().is_some_and(|t| t.contains(&stage)));
@@ -794,6 +935,7 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         &seen,
     );
     let _ = b.screenshot(&page, &shots.join("move-1280-light.png"));
+    let mut picked = vec![check_by_keys(b, &page, shots, 1280, "light")?];
     for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
         let p = b.open(&format!("{}/move", api.base))?;
         b.viewport(&p, width, height, phone)?;
@@ -801,8 +943,17 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         let _ = b.until(&p, &format!("!!{row}?.querySelector('img')?.naturalWidth"), wait);
         std::thread::sleep(Duration::from_millis(300));
         let _ = b.screenshot(&p, &shots.join(format!("move-{width}-{scheme}.png")));
+        picked.push(check_by_keys(b, &p, shots, width, scheme)?);
         b.close(p)?;
     }
+    let held = |c: &Value| {
+        c["drawn"] == "none" && c["off"] == json!({ "checked": false, "focused": true, "ring": true, "bring": false }) && c["on"] == json!({ "checked": true, "focused": true, "ring": true, "bring": true }) && c["fill"] != c["empty"]
+    };
+    s.ok(
+        "at 1280 and 390 px, light and dark, the box is the platform's check, not the browser's: reached by Tab, Space unchecks it and checks it again, its focus ring kept, Bring over following each",
+        picked.len() == 4 && picked.iter().all(held),
+        json!(picked),
+    );
 
     // Bring over
     b.eval(&page, "(document.querySelector('#move-page button.primary').click(), true)")?;
@@ -829,6 +980,9 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     let importing = b.until(&page, &format!("{said} === 'Bringing Juniper over…'"), Duration::from_secs(60));
     let _ = b.screenshot(&page, &shots.join("move-importing-1280-light.png"));
     s.ok("the move as it goes, read again while under way: the mover staged it, and the page says it is being brought over", importing, b.eval(&page, &said)?);
+    // FIN-463: where its SimpleX chat is kept, said once, calmly
+    let simplex = b.eval(&page, "[...document.querySelectorAll('#move-page .move-simplex')].map((p) => p.textContent)")?;
+    s.ok("as it imports, one line says its SimpleX chat, if it had one, is kept in Settings", simplex == json!(["If you chatted with it on SimpleX, keep that chat in Settings."]), &simplex);
     for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
         let p = b.open(&format!("{}/move", api.base))?;
         b.viewport(&p, width, height, phone)?;
@@ -840,4 +994,31 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     }
     b.close(page)?;
     Ok(())
+}
+
+/// The move page's check, by keys alone: Tab to it, Space to uncheck it (a
+/// picture, its focus ring on), Space to check it again (a picture). What
+/// each left: checked, focused, its ring, Bring over enabled; and how it is
+/// drawn (`appearance`), its fill on and off.
+fn check_by_keys(b: &mut crate::browser::Browser, page: &crate::browser::Page, shots: &std::path::Path, width: u32, scheme: &str) -> Result<Value> {
+    let at = json!(format!("{width} {scheme}"));
+    for _ in 0..40 {
+        if b.eval(page, "document.activeElement?.matches('#move-page input.check') === true")? == json!(true) {
+            break;
+        }
+        b.press(page, "Tab", false)?;
+    }
+    const STATE: &str = "(() => { const c = document.querySelector('#move-page input.check'); return { checked: c.checked, focused: document.activeElement === c, ring: c.matches(':focus-visible'), bring: !document.querySelector('#move-page button.primary').disabled }; })()";
+    b.press(page, " ", false)?;
+    std::thread::sleep(Duration::from_millis(200));
+    let off = b.eval(page, STATE)?;
+    let empty = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).backgroundColor")?;
+    let _ = b.screenshot(page, &shots.join(format!("move-unchecked-focus-{width}-{scheme}.png")));
+    b.press(page, " ", false)?;
+    std::thread::sleep(Duration::from_millis(200));
+    let on = b.eval(page, STATE)?;
+    let fill = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).backgroundColor")?;
+    let _ = b.screenshot(page, &shots.join(format!("move-checked-focus-{width}-{scheme}.png")));
+    let drawn = b.eval(page, "getComputedStyle(document.querySelector('#move-page input.check')).appearance")?;
+    Ok(json!({ "at": at, "drawn": drawn, "off": off, "on": on, "empty": empty, "fill": fill }))
 }

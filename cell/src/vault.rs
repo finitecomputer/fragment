@@ -133,6 +133,21 @@ pub(crate) async fn put(env: &Env, person: &str, name: &str, put: &RawValue) -> 
     ask(env, person, &op_path("put", name)?, Some(put)).await
 }
 
+/// `vault/handoff/<name>`'s body: the hand-off's receipt (`<old> <kind>`)
+/// and its secret. A tuple on the wire.
+#[derive(Serialize, Deserialize)]
+struct HandOff<P>(String, P);
+
+/// Puts `put` into `person`'s Vault under `name` for an old agent's
+/// hand-off (FIN-463 F11), once for `receipt`: its receipt kept in the
+/// turn that puts it, so the same hand-off again (a retry, or a call
+/// beside it) puts nothing, even once its person removed, moved or set
+/// that secret since. It never takes the name of a secret bound to
+/// another agent (409).
+pub(crate) async fn hand_off(env: &Env, person: &str, name: &str, receipt: &str, put: &PutSecret) -> CellResult<Vec<u8>> {
+    crate::routed::ask_bytes(env, "VAULT", person, &op_path("handoff", name)?, &HandOff(receipt.to_string(), put)).await
+}
+
 /// What a move reads of a kept `Secret`: where it goes.
 #[derive(serde::Deserialize)]
 struct Placed {
@@ -255,7 +270,11 @@ impl VaultCell {
         }
         self.schema.ready()?;
         let answer = match path.trim_start_matches('/').split('/').collect::<Vec<_>>()[..] {
-            ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "put", name] => self.put(name, &crate::json_body(&req.bytes().await?)?, None).await?,
+            ["vault", "handoff", name] => {
+                let HandOff(receipt, put) = crate::json_body(&req.bytes().await?)?;
+                self.put(name, &put, Some(&receipt)).await?
+            }
             ["vault", "list"] => self.list()?,
             ["vault", "delete", name] => self.delete(name)?,
             ["vault", "take", name] => self.take(name, &crate::json_body::<String>(&req.bytes().await?)?).await?,
@@ -271,10 +290,18 @@ impl VaultCell {
     }
 
     /// `put` checked, sealed and kept under `name`: its `Secret` as JSON.
-    async fn put(&self, name: &str, put: &PutSecret) -> CellResult<String> {
+    /// A hand-off's (`receipt`) is put once, its receipt kept in the same
+    /// turn (two writes with no wait between, which the object commits
+    /// together); again, it puts nothing and answers `{}`. Nor does it take
+    /// the name of a secret bound to other agents.
+    async fn put(&self, name: &str, put: &PutSecret, receipt: Option<&str>) -> CellResult<String> {
         let wiped = || CellError::new(ErrorCode::Forbidden, "this person was wiped: their vault keeps nothing");
         if self.wiped.get() {
             return Err(wiped());
+        }
+        let received = |r: &str| -> CellResult<bool> { Ok(!self.rows("SELECT key FROM receipts WHERE key = ?", vec![r.into()])?.is_empty()) };
+        if receipt.map(received).transpose()? == Some(true) {
+            return Ok("{}".into());
         }
         let checked = rules::check(name, put, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
         if checked.placing == Placing::Nip98 && fragment_nip98::Keys::from_secret_hex(&put.value).is_none() {
@@ -287,7 +314,20 @@ impl VaultCell {
         if self.wiped.get() {
             return Err(wiped());
         }
-        let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
+        let existing = self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        if let Some(r) = receipt {
+            // a hand-off beside this one put it while this one sealed
+            if received(r)? {
+                return Ok("{}".into());
+            }
+            if let Some(row) = existing.first() {
+                let held: Bound = stored(row)?;
+                if held.agents != checked.agents {
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{name} is a secret of other agents' here: a hand-off never takes its place")));
+                }
+            }
+        }
+        let exists = !existing.is_empty();
         let held = self.rows("SELECT COUNT(*) AS n FROM secrets", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
         if !exists && held >= rules::SECRETS_MAX as u64 {
             return Err(CellError::invalid(format!("a vault keeps at most {} secrets: remove one first", rules::SECRETS_MAX)));
@@ -298,6 +338,9 @@ impl VaultCell {
             "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret, claim = NULL",
             vec![name.into(), sealed.into(), text.as_str().into()],
         )?;
+        if let Some(r) = receipt {
+            self.sql().exec("INSERT INTO receipts (key, at) VALUES (?, ?)", vec![r.into(), SqlStorageValue::Integer(js::now_ms())])?;
+        }
         Ok(text)
     }
 

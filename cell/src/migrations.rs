@@ -32,8 +32,8 @@ use std::rc::Rc;
 use fragment_core::migrations::{self as machine, Col, Effect, Move, Refused, Step};
 use fragment_nip98::Payload;
 use fragment_proto::migrations::{
-    parse_stage, stage_prefix, valid_old, AdminAct, Mailbox, MoveAt, MoveState, Offer, OfferYes, Offers, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
-    PARTS_MAX, PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
+    parse_stage, stage_prefix, valid_old, AdminAct, Handoff, Has, Mailbox, MoveAt, MoveState, Offer, OfferYes, Offers, Report, Reported, RosterTaken, StageCompleted, StageDone, StagePart, StageParts, MAILBOX_MAX, MANIFEST_MAX_BYTES,
+    PARTS_MAX, PART_MAX_BYTES, ROSTER_AGENTS_MAX, ROSTER_PEOPLE_MAX, SecretKind, STAGE_FORMAT, STAGE_MANIFEST, STAGE_ZIP, TEXT_MAX_BYTES,
 };
 use fragment_proto::notice::NoticeList;
 use fragment_proto::{limits, ErrorCode, IdentityKind};
@@ -61,7 +61,7 @@ const AGAIN_MS: i64 = 1_000;
 /// page that offers it, at most.
 const OFFER_MAX_BYTES: usize = 64 * 1024;
 /// Staff's acts (`AdminAct`'s `op`).
-const ACTS: [&str; 4] = ["retry", "restart-old", "retire", "withdraw"];
+const ACTS: [&str; 5] = ["retry", "restart-old", "retire", "withdraw", "include"];
 /// Stages one alarm pass deletes, and the pages of keys of each: one, so
 /// at most 1,000 objects a stage a pass (R2 lists and deletes 1,000 a
 /// call; docs/migrations.md, "Deletion").
@@ -90,20 +90,22 @@ const NO_NOTICES: &[u8] = br#"{"notices":[]}"#;
 /// and binds them, and the queries built of them: whole at compile time.
 macro_rules! columns {
     () => {
-        "old, workos_id, state, reason, held_from, phase, attempt, agent, command, seq, since_ms, progress_ms, staged_ms, routine_ms, routines, opened, expires_ms, by_staff, generation, deadline_ms"
+        "old, workos_id, state, reason, held_from, phase, attempt, agent, command, seq, since_ms, progress_ms, staged_ms, routine_ms, routines, opened, expires_ms, by_staff, generation, why, dropped, deadline_ms"
     };
 }
 macro_rules! marks {
     () => {
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
     };
 }
-/// A move as staff read it: states and sizes, never a stage's bytes.
+/// A move as staff read it: states and sizes, never a stage's bytes; and
+/// staff's why while they keep it out (the will-not-move list).
 macro_rules! admin_row {
     () => {
         "SELECT m.old, m.workos_id, p.person, m.agent, m.state, m.reason, m.phase, m.attempt,
     CASE WHEN m.command IS NULL THEN NULL ELSE m.old || ':' || m.attempt || ':' || m.command END AS command,
-    m.since_ms, m.deadline_ms, m.staged_ms FROM moves m LEFT JOIN people p ON p.workos_id = m.workos_id"
+    m.since_ms, m.deadline_ms, m.staged_ms, CASE WHEN m.by_staff = 1 THEN COALESCE(m.why, '') END AS why
+    FROM moves m LEFT JOIN people p ON p.workos_id = m.workos_id"
     };
 }
 /// The unasked, whom a roster withdraws and the cutoff archives.
@@ -116,7 +118,9 @@ const INSERT_MOVE: &str = concat!("INSERT INTO moves (", columns!(), ", offer) V
 const UPDATE_MOVE: &str = concat!("UPDATE moves SET (", columns!(), ") = (", marks!(), ") WHERE old = ?");
 const ADMIN_PAGE: &str = concat!(admin_row!(), " WHERE m.old > ? ORDER BY m.old LIMIT ?");
 const ADMIN_ONE: &str = concat!(admin_row!(), " WHERE m.old = ?");
-const UNASKED_ALL: &str = concat!("SELECT * FROM moves WHERE ", unasked!());
+/// What a roster that does not name them withdraws: the unasked, and
+/// staff's withdrawn it has not dropped yet.
+const DROPPABLE: &str = concat!("SELECT * FROM moves WHERE ", unasked!(), " OR (state = 'withdrawn' AND by_staff = 1 AND dropped = 0)");
 const UNASKED_FIRST: &str = concat!("SELECT * FROM moves WHERE ", unasked!(), " ORDER BY old LIMIT ?");
 const UNASKED_COUNT: &str = concat!("SELECT COUNT(*) AS n FROM moves WHERE ", unasked!());
 
@@ -156,6 +160,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Post, ["stages", stage, "complete"]) => return complete(env, stage, body).await,
         (Method::Put, ["roster"]) => "roster".to_string(),
         (Method::Get, ["mailbox"]) => "mailbox".to_string(),
+        (Method::Post, ["agents", old, "secrets"]) => {
+            old_ok(old)?;
+            return handoff(env, old, body).await;
+        }
         (Method::Post, ["agents", old, "report"]) => {
             old_ok(old)?;
             format!("report/{old}")
@@ -183,11 +191,12 @@ pub(crate) async fn admin(env: &Env, cfg: &Config, by: &str, method: Method, res
         }
         (Method::Post, [old]) => {
             old_ok(old)?;
-            let AdminAct { op } = crate::json_body(body)?;
+            let AdminAct { op, why } = crate::json_body(body)?;
             if !ACTS.contains(&op.as_str()) {
                 return Err(CellError::invalid(format!("an act is one of {}", ACTS.join(", "))));
             }
-            format!("act/{old}/{op}")
+            // who, then a withdrawal's why (the object checks it)
+            return pass(env, format!("act/{old}/{op}"), format!("{by}\n{}", why.unwrap_or_default())).await;
         }
         (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/migrations/{}", m.as_ref(), rest.join("/")))),
     };
@@ -400,6 +409,56 @@ fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str,
     })
 }
 
+/// The mover's hand-off of an old agent's secrets (F11): the object says
+/// whether its command takes these kinds now, and whose Vault and agent
+/// they are for (it never sees a value); each value goes from here
+/// straight into that Vault, bound to the new agent's fragment, once per
+/// old agent and kind: the Vault keeps its receipt in the turn that puts
+/// it, so the same hand-off again, cut short or beside another, puts
+/// nothing (a person may have moved one out since). One the Vault refuses
+/// (its rules, a full Vault, a name another agent's secret holds) is left
+/// out of the answer; a Vault that could not be asked fails the call, and
+/// the mover tries again. No value is logged or put in an error: a body
+/// that does not read is refused in words of its own, never serde's,
+/// which quote what they read.
+fn handoff<'a>(env: &'a Env, old: &'a str, body: String) -> Waits<'a, Response> {
+    Box::pin(async move {
+        let h: Handoff = serde_json::from_slice(body.as_bytes()).map_err(|_| CellError::invalid("a hand-off is {command, items: [{kind, value}]}, its kinds telegram_bot_token, openrouter_key and nostr_nsec"))?;
+        drop(body);
+        let kinds = machine::handoff_kinds(&h).map_err(refused)?;
+        let named = kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(",");
+        let at = text(ask(env, format!("handoff/{old}"), format!("{}\n{named}", h.command)).await?)?;
+        let (person, agent) = at.split_once('\n').ok_or_else(|| CellError::host("a hand-off's Vault"))?;
+        let fragment = agent_fragment(env, agent).await?;
+        let mut handed = vec![];
+        for item in &h.items {
+            let put = match machine::vault_secret(item.kind, &fragment, &item.value) {
+                Some((name, put)) => crate::vault::hand_off(env, person, &name, &format!("{old} {}", item.kind.as_str()), &put).await,
+                None => Err(CellError::invalid("not a Nostr key")),
+            };
+            match put {
+                Ok(_) => handed.push(format!("\"{}\"", item.kind.as_str())),
+                // refused by its rules: left on the old platform
+                Err(e) if e.code.status() < 500 => console_log!("migrations.handoff: {old} {} refused ({})", item.kind.as_str(), e.code.status()),
+                Err(e) => return Err(e),
+            }
+        }
+        // `HandedOff`, its kinds fixed words
+        crate::json_passed(format!("{{\"handed\":[{}]}}", handed.join(",")).into_bytes())
+    })
+}
+
+/// The agent fragment `agent` (an identity) was made from: where its
+/// routines go, and what its Vault secrets name.
+#[inline(never)]
+fn agent_fragment<'a>(env: &'a Env, agent: &'a str) -> Waits<'a, String> {
+    Box::pin(async move {
+        let profiles = crate::ask_registry(env, &crate::registry::calls::Profiles { ids: vec![agent.to_string()], emails_of: vec![] }).await?;
+        profiles.profiles.get(agent).and_then(|p| p.fragment.clone()).ok_or_else(|| CellError::new(ErrorCode::Conflict, format!("{agent} has no agent fragment")))
+    })
+}
+
+
 /// One part of a stage's zip: the object says whether the mover may upload
 /// this stage now, and where (its upload made here once, the first part's);
 /// the request's own stream goes to R2 unread; the object takes the part.
@@ -506,12 +565,33 @@ fn text_ok(what: &str, s: &str) -> CellResult<()> {
 /// A refusal of the machine's, as the route answers it.
 fn refused(r: Refused) -> CellError {
     let code = match r {
-        Refused::NotNow(_) | Refused::Stale => ErrorCode::Conflict,
+        Refused::NotNow(_) | Refused::Stale | Refused::Begun => ErrorCode::Conflict,
         Refused::NotYours => ErrorCode::Forbidden,
         Refused::NoStage => ErrorCode::NotFound,
-        Refused::Unfit(_) => ErrorCode::InvalidRequest,
+        Refused::Unfit(_) | Refused::Why => ErrorCode::InvalidRequest,
     };
     CellError::new(code, r.message())
+}
+
+/// A hand-off as the object reads it: its command, then its kinds.
+fn handoff_in(body: &str) -> CellResult<(String, Vec<SecretKind>)> {
+    let (command, kinds) = body.split_once('\n').unwrap_or((body, ""));
+    let kinds = kinds.split(',').filter(|k| !k.is_empty()).map(|k| SecretKind::parse(k).ok_or_else(|| CellError::invalid(format!("no secret kind {k}")))).collect::<CellResult<_>>()?;
+    Ok((command.to_string(), kinds))
+}
+
+/// A move's row, with which secrets its old agent has as its roster offer
+/// says (`has_t`, `has_o`, `has_n`), read by SQLite: no decoder of its own.
+macro_rules! with_has {
+    () => {
+        "SELECT *, json_extract(offer, '$.has.telegram') AS has_t, json_extract(offer, '$.has.openrouter') AS has_o, json_extract(offer, '$.has.nostr') AS has_n FROM moves"
+    };
+}
+
+/// Which secrets a move's old agent has, from its row's `with_has` columns.
+fn has_of(row: &Value) -> Has {
+    let had = |c: &str| row[c].as_i64() == Some(1);
+    Has { telegram: had("has_t"), openrouter: had("has_o"), nostr: had("has_n") }
 }
 
 // ---- the object
@@ -732,14 +812,24 @@ impl MigrationsCell {
             }
             ("mailbox", []) => crate::json_answer(&self.mailbox()?),
             ("report", [old]) => crate::json_answer(&self.report(old, &crate::json_body(body.as_bytes())?)?),
+            // the mover's hand-off (F11; body: its command, then its kinds):
+            // whose Vault, and which agent's
+            ("handoff", [old]) => {
+                let (command, kinds) = handoff_in(&body)?;
+                let (m, has) = self.with_has(old)?;
+                machine::handoff(&m, &command, &has, &kinds).map_err(refused)?;
+                let person = parts.person_of(&m.workos_id)?.ok_or_else(|| CellError::host(format!("{old} moves with no person bound")))?;
+                Ok(Response::ok(format!("{person}\n{}", m.agent.unwrap_or_default()))?)
+            }
             ("list", [after]) => {
                 let rows = parts.rows(ADMIN_PAGE, vec![text_value(after), SqlStorageValue::Integer(PAGE as i64 + 1)])?;
                 let next = (rows.len() > PAGE).then(|| rows[PAGE - 1]["old"].clone());
                 crate::json_answer(&json!({ "moves": &rows[..rows.len().min(PAGE)], "next": next }))
             }
             ("act", [old, act]) => {
-                self.act(old, act)?;
-                console_log!("migrations.staff: {act} {old} by {body}");
+                let (by, why) = body.split_once('\n').unwrap_or((&body, ""));
+                self.act(old, act, why)?;
+                console_log!("migrations.staff: {act} {old} by {by}");
                 crate::json_answer(&parts.rows(ADMIN_ONE, vec![text_value(old)])?.pop())
             }
             // where its zip goes, and its upload: the one the router made
@@ -854,7 +944,7 @@ impl MigrationsCell {
                         }
                         Some(m) => {
                             parts.exec("UPDATE moves SET offer = ? WHERE old = ?", vec![text_value(&offer), text_value(&old)])?;
-                            machine::relisted(&m, person.is_some(), now).or_else(|| person.as_ref().and_then(|_| machine::bind(&m, now)))
+                            machine::relisted(&m, &p.workos_id, person.is_some(), now).or_else(|| person.as_ref().and_then(|_| machine::bind(&m, now)))
                         }
                     };
                     if let Some(s) = step {
@@ -865,11 +955,12 @@ impl MigrationsCell {
                 }
             }
             // a move it no longer names keeps its state (an archived one waits
-            // for a late Yes); one unasked is withdrawn
-            for m in parts.moves(UNASKED_ALL, vec![])? {
+            // for a late Yes); one unasked is withdrawn, one staff withdrew
+            // marked dropped
+            for m in parts.moves(DROPPABLE, vec![])? {
                 if !listed.contains(&m.old) {
                     if let Some(s) = machine::withdrawn(&m, now) {
-                        withdrawn += 1;
+                        withdrawn += u32::from(m.unasked());
                         parts.apply(&s, now)?;
                     }
                 }
@@ -977,6 +1068,12 @@ impl MigrationsCell {
         Ok((m, crate::json_body(offer.as_bytes())?))
     }
 
+    /// `old`'s move, and which secrets its old agent has (404: none).
+    fn with_has(&self, old: &str) -> CellResult<(Move, Has)> {
+        let row = self.parts().rows(concat!(with_has!(), " WHERE old = ?"), vec![text_value(old)])?.pop().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move")))?;
+        Ok((Move::read(&row).map_err(CellError::host)?, has_of(&row)))
+    }
+
     /// A person's answer to `old`'s offer (`later`, `never`, `ask-again`,
     /// `yes` with an agent and its owner): `person` names who answers, its
     /// move theirs (404 otherwise); `None` is a lever's, for its person.
@@ -1025,8 +1122,15 @@ impl MigrationsCell {
 
     /// The mover's commands, oldest first.
     fn mailbox(&self) -> CellResult<Mailbox> {
-        let moves = self.parts().moves("SELECT * FROM moves WHERE command IS NOT NULL ORDER BY since_ms, old LIMIT ?", vec![SqlStorageValue::Integer(MAILBOX_MAX as i64)])?;
-        Ok(Mailbox { commands: moves.iter().filter_map(Move::command).collect() })
+        let rows = self.parts().rows(concat!(with_has!(), " WHERE command IS NOT NULL ORDER BY since_ms, old LIMIT ?"), vec![SqlStorageValue::Integer(MAILBOX_MAX as i64)])?;
+        let mut commands = vec![];
+        for row in &rows {
+            let m = Move::read(row).map_err(CellError::host)?;
+            let Some(mut c) = m.command() else { continue };
+            c.secrets = m.secrets(&has_of(row));
+            commands.push(c);
+        }
+        Ok(Mailbox { commands })
     }
 
     fn report(&self, old: &str, r: &Report) -> CellResult<Reported> {
@@ -1051,20 +1155,31 @@ impl MigrationsCell {
         }
     }
 
-    fn act(&self, old: &str, act: &str) -> CellResult<()> {
-        let m = self.parts().get(old)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move")))?;
+    /// Staff's act on `old`'s move. A withdrawal of an old agent no roster
+    /// has listed yet keeps a row of its own (`Move::unlisted`), which the
+    /// roster's then fills in.
+    fn act(&self, old: &str, act: &str, why: &str) -> CellResult<()> {
+        let parts = self.parts();
         let now = self.now()?;
+        let found = parts.get(old)?;
+        let m = match (found.clone(), act) {
+            (Some(m), _) => m,
+            (None, "withdraw") => Move::unlisted(old, now),
+            (None, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no old agent {old} in the move"))),
+        };
         let outcome = match act {
             "retry" => machine::retry(&m, now),
             "restart-old" => machine::restart_old(&m, now),
             "retire" => machine::retire(&m, now),
-            "withdraw" => machine::withdraw(&m, now),
+            "withdraw" => machine::withdraw(&m, why, now),
+            "include" => machine::include(&m, parts.person_of(&m.workos_id)?.is_some(), now),
             other => return Err(CellError::invalid(format!("no act {other}"))),
         };
-        if let Some(s) = outcome.map_err(refused)? {
-            self.commit(vec![s], now)?;
+        match (outcome.map_err(refused)?, found) {
+            (Some(s), None) => parts.insert(&s.to, "{}"),
+            (Some(s), Some(_)) => self.commit(vec![s], now),
+            (None, _) => Ok(()),
         }
-        Ok(())
     }
 
     /// The move whose stage `stage` names, if any (404 otherwise).
@@ -1189,8 +1304,7 @@ impl MigrationsCell {
         if m.state != MoveState::Importing || m.stage().as_deref() != Some(stage) {
             return Ok(());
         }
-        let profiles = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids: vec![agent.to_string()], emails_of: vec![] }).await?;
-        let fragment = profiles.profiles.get(agent).and_then(|p| p.fragment.clone()).ok_or_else(|| CellError::host(format!("{agent} has no agent fragment")))?;
+        let fragment = agent_fragment(&self.env, agent).await?;
         let key = m.routine_key().ok_or_else(|| CellError::host(format!("{stage} is no import's")))?;
         crate::routed::object_answer(&self.env, "FRAGMENT", &fragment, &format!("stage/routine/{key}"), machine::routine_text(stage)).await?;
         Ok(())
@@ -1331,6 +1445,7 @@ impl Parts {
                     "INSERT INTO routines (stage, agent, tries, next_ms) VALUES (?, ?, 0, ?) ON CONFLICT (stage) DO UPDATE SET agent = excluded.agent, tries = 0, next_ms = excluded.next_ms",
                     vec![text_value(stage), text_value(agent), SqlStorageValue::Integer(now)],
                 )?,
+                Effect::Forget => self.exec("DELETE FROM moves WHERE old = ?", vec![text_value(&s.to.old)])?,
             }
         }
         Ok(())
