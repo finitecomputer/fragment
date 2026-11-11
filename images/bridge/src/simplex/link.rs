@@ -251,6 +251,10 @@ pub enum Input<'a> {
     /// before anything new could arrive (a core that subscribed nothing);
     /// `leftovers` what else it held. Taken only while off.
     Adopt { owner: ContactId, name: &'a str, newest: i64, leftovers: &'a [Leftover] },
+    /// Its core is stopped to start again (another client took its queues):
+    /// replies wait in the outbox until the next start reads it in step,
+    /// as through a sync, rather than go to no core.
+    Restarting,
 }
 
 /// What the link asks for.
@@ -307,6 +311,10 @@ pub enum Notice {
     Unlinked { by_them: bool },
     /// The core refused something the link asked, saying `what`.
     Failed { what: String },
+    /// Another client took the bound contact's queues (FIN-483: a core run
+    /// elsewhere on a copy of these databases): this core is deaf to them
+    /// until it subscribes again, so it is started again.
+    Taken,
 }
 
 impl Link {
@@ -444,6 +452,11 @@ impl Link {
                     self.delivered = self.delivered.max(item);
                 }
             }
+            Input::Restarting => {
+                if self.contact().is_some() {
+                    self.syncing = true;
+                }
+            }
             Input::Resync => {
                 if let (Some(contact), true) = (self.contact(), self.syncing) {
                     out.push(Action::Ask(Cmd::ContactInfo { contact }));
@@ -484,6 +497,7 @@ impl Link {
                 Phase::Linked { contact: linked, .. } if linked == contact => {}
                 _ => out.extend([Action::Ask(Cmd::Delete { contact: *contact, notify: false }), Action::Tell(Notice::Refused)]),
             },
+            Resp::AnotherClient { contact } | Resp::SubscriptionEnd { contact: Some(contact) } if self.linked_to(*contact) => out.push(Action::Tell(Notice::Taken)),
             Resp::Items(items) => self.items(items, out),
             Resp::Page(items) => self.page(items, out),
             Resp::Sync { contact, status } if self.linked_to(*contact) => match status {
@@ -546,6 +560,8 @@ impl Link {
             // an adopted identity's read (the bridge's, before it adopts), and
             // what is not one of its leftovers
             Resp::User { .. } | Resp::Contacts(_) | Resp::Groups(_) | Resp::GroupLeft { .. } | Resp::AddressDeleted => {}
+            // another contact's queues, or a connection of no contact's (its address)
+            Resp::AnotherClient { .. } | Resp::SubscriptionEnd { .. } => {}
         }
     }
 
@@ -1039,6 +1055,33 @@ mod tests {
         for status in [SyncStatus::Required, SyncStatus::Allowed] {
             assert_eq!(link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status })), vec![Action::Ask(Cmd::Sync { contact: 3, force: false })]);
         }
+    }
+
+    /// Goal (FIN-483): another client on the bound contact's queues is told,
+    /// so its core subscribes again; another contact's, or the address's,
+    /// moves nothing.
+    #[test]
+    fn another_client_on_its_queues_is_told() {
+        let mut link = linked();
+        assert_eq!(link.apply(Input::Said(&Resp::AnotherClient { contact: 3 })), vec![Action::Tell(Notice::Taken)]);
+        assert_eq!(link.apply(Input::Said(&Resp::SubscriptionEnd { contact: Some(3) })), vec![Action::Tell(Notice::Taken)]);
+        for r in [Resp::AnotherClient { contact: 9 }, Resp::SubscriptionEnd { contact: Some(9) }, Resp::SubscriptionEnd { contact: None }] {
+            assert!(link.apply(Input::Said(&r)).is_empty(), "{r:?}");
+        }
+        assert!(Link::default().apply(Input::Said(&Resp::AnotherClient { contact: 3 })).is_empty(), "not linked");
+        assert_eq!(link.contact(), Some(3), "still bound");
+        // Codex's review: a reply while its core starts again waits for it,
+        // across a restart of the bridge too, and goes once it is in step
+        link.apply(Input::Restarting);
+        assert!(link.apply(Input::Reply("answered meanwhile")).is_empty(), "held, not sent to no core");
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(link.apply(Input::Started { rollback: false })[0], Action::Ask(Cmd::ContactInfo { contact: 3 }));
+        let ok = link.apply(Input::Said(&Resp::ContactInfo { contact: 3, status: SyncStatus::Ok }));
+        assert_eq!(sends(&ok), vec!["answered meanwhile"]);
+        assert!(!link.syncing);
+        let mut off = Link::default();
+        off.apply(Input::Restarting);
+        assert!(!off.syncing, "nothing bound, nothing held");
     }
 
     /// Goal: the outbox is bounded: past it the oldest parts go, counted.

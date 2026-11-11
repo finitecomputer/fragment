@@ -907,6 +907,9 @@ struct Slot {
     resync_at: Option<Instant>,
     /// It stopped too often: not started again until its owner asks.
     broken: Option<String>,
+    /// Another client took its contact's queues (`Notice::Taken`): its core
+    /// is stopped at the next tick and started again (FIN-483).
+    taken: bool,
     /// What last went wrong, or what the owner last did, for its page.
     note: Option<String>,
     /// Since when it should not run but has commands under way.
@@ -1476,6 +1479,7 @@ impl Manager {
                 retry_at: None,
                 resync_at: None,
                 broken: None,
+                taken: false,
                 note: None,
                 draining_since: None,
                 cancel_at: None,
@@ -1584,6 +1588,7 @@ impl Manager {
             self.pulse_until = None;
             let _ = self.pulse.send(false);
         }
+        self.retake().await;
         self.reconcile().await;
         self.read_names(Instant::now());
         self.resync();
@@ -1788,6 +1793,28 @@ impl Manager {
             for id in ids {
                 self.act(&f, Action::Ask(Cmd::CancelFile { file: id }));
             }
+        }
+    }
+
+    /// Each core whose contact's queues another client took (FIN-483): a
+    /// core run elsewhere on a copy of its databases (an old agent started
+    /// again) subscribes to them, and this one hears nothing more until it
+    /// subscribes again, which only a start does (v7.0.3; the 2026-11-10
+    /// spike). Stopped, and counted as an exit, so it is started again
+    /// after `RESTART_MS`, within `EXITS_MAX`: one that keeps losing them
+    /// waits for its owner. Its next start's state read heals the ratchet
+    /// unforced, as for any start.
+    async fn retake(&mut self) {
+        let taken: Vec<String> = self.slots.iter().filter(|(_, s)| s.taken).map(|(f, _)| f.clone()).collect();
+        for f in taken {
+            crate::ev!("simplex.taken", { "agent": f });
+            // its replies meanwhile wait for its next start, not for no core
+            self.apply(&f, Input::Restarting);
+            self.stop_core(&f).await;
+            if let Some(s) = self.slots.get_mut(&f) {
+                s.taken = false;
+            }
+            self.count_exit(&f, "another SimpleX client took its chat");
         }
     }
 
@@ -2356,6 +2383,7 @@ impl Manager {
                     Notice::Linked { .. } | Notice::Adopted { .. } => s.note = None,
                     Notice::Refused => crate::ev!("simplex.refused_contact", { "agent": f }),
                     Notice::MaybeLost | Notice::Resynced => {}
+                    Notice::Taken => s.taken = true,
                     Notice::Unlinked { by_them } => {
                         s.note = Some(if *by_them { "They removed this agent in their SimpleX app.".into() } else { "Unlinked.".into() });
                     }
@@ -3681,6 +3709,7 @@ mod tests {
             retry_at: None,
             resync_at: None,
             broken: None,
+            taken: false,
             note: None,
             draining_since: None,
             cancel_at: None,
@@ -4028,6 +4057,7 @@ mod tests {
             retry_at: None,
             resync_at: None,
             broken: None,
+            taken: false,
             note: None,
             draining_since: None,
             cancel_at: None,
@@ -4104,6 +4134,27 @@ mod tests {
     /// A waiting sync polls state at the timer's bound, before and after
     /// acceptance, and stops polling once it is ready. No timer replaces
     /// the keys of an accepted negotiation.
+    /// Goal (FIN-483, Codex's review): a core whose queues another client
+    /// took is stopped to start again, and a reply posted meanwhile waits
+    /// in its link's outbox for that start, never sent to no core.
+    #[tokio::test]
+    async fn a_reply_while_its_core_starts_again_waits_for_it() {
+        let dir = std::env::temp_dir().join(format!("simplex-taken-{}", std::process::id()));
+        let (mut m, _sent, _) = captured(&dir, 16);
+        let f = "juniper--k3x9";
+        // its process gone already (the test runs none): what retake does after
+        m.slots.get_mut(f).expect("its slot").core = None;
+        m.apply(f, Input::Said(&Resp::AnotherClient { contact: 3 }));
+        assert!(m.slots[f].taken);
+        m.retake().await;
+        assert!(!m.slots[f].taken && m.slots[f].retry_at.is_some(), "started again after a while");
+        m.apply(f, Input::Reply("the answer"));
+        assert_eq!(m.slots[f].saved.link.outbox.iter().cloned().collect::<Vec<_>>(), vec!["the answer".to_string()], "held for its next start");
+        let back = load(&m.slots[f].dir, &agent()).expect("its file");
+        assert_eq!(back.link.outbox.len(), 1, "and in its file, across a restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_waiting_sync_polls_state_without_replacing_keys() {
         let dir = std::env::temp_dir().join(format!("simplex-sync-timer-{}", std::process::id()));
@@ -4160,6 +4211,7 @@ mod tests {
             retry_at: None,
             resync_at: None,
             broken: None,
+            taken: false,
             note: None,
             draining_since: None,
             cancel_at: None,
