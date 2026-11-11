@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twenty-one skills. Eleven are Fragment platform contracts:
+Twenty-two skills. Twelve are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -44,6 +44,7 @@ Twenty-one skills. Eleven are Fragment platform contracts:
 | git-finite | Fragment repositories, sync, deploys and rollback |
 | brain-finite | The brain template's files, search and wiki contract |
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
+| microsoft-finite | Connected Microsoft 365 access through per-agent placeholders; Microsoft Graph, no app registration or local OAuth |
 | linear-finite | Connected Linear access through per-agent placeholders; no API key or local OAuth |
 | salesforce-finite | Connected Salesforce access through per-agent placeholders, to the connected org's own host alone; no session id or local OAuth |
 | jira-finite | Connected Jira access through per-agent placeholders, to the person's Atlassian sites through api.atlassian.com; no API token or local OAuth |

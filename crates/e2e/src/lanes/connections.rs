@@ -113,6 +113,33 @@ fn access_picked(s: &mut Suite, api: &Api, a: &str) -> Result<()> {
     let listed = row(api, a, PROVIDER)?;
     s.ok("a grant of read and write's write scope alone connects as asked: read and write, read only's scopes missing",
         r.status == 200 && listed["access"] == "write" && listed["granted"] == json!(["mail.send"]) && listed["missing"] == json!(["mail.read", "files.read"]), &listed);
+    // the services its person picked (its row's Mail and Files): their
+    // scopes alone asked for, and the grant checked against them
+    let scope_of = |r: &Reply| reqwest::Url::parse(r.body["url"].as_str().unwrap_or("http://none.invalid/")).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "scope").map(|(_, v)| v.into_owned())).unwrap_or_default();
+    let mail = begin_as(api, a, PROVIDER, json!({ "access": "read", "services": ["mail"] }))?;
+    let mail_write = begin_as(api, a, PROVIDER, json!({ "access": "write", "services": ["mail"] }))?;
+    let mut refused = vec![];
+    for body in [json!({ "access": "read", "services": [] }), json!({ "access": "read", "services": ["calendar"] }), json!({ "access": "read", "services": ["mail", "mail"] }), json!({ "access": "read", "services": "mail" })] {
+        refused.push((body.clone(), begin_as(api, a, PROVIDER, body)?.status));
+    }
+    let listed = row(api, a, PROVIDER)?;
+    s.ok("a connect asks for the services its person picked alone, its access's of theirs and signing in; a pick of none, of one the row doesn't offer, or of one twice is refused (400); the list names the row's services",
+        mail.status == 200 && scope_of(&mail) == "mail.read openid" && mail_write.status == 200 && scope_of(&mail_write) == "mail.read mail.send openid"
+            && refused.iter().all(|(_, status)| *status == 400) && listed["services"] == json!([{ "id": "mail", "name": "Mail" }, { "id": "files", "name": "Files" }]),
+        json!({ "mail": scope_of(&mail), "mailWrite": scope_of(&mail_write), "refused": refused, "services": listed["services"] }));
+    // its answer names no scope (RFC 6749: the one requested), so what Pipes
+    // holds is what the pending row kept of the pick, never the access whole
+    s.workos.omit_next_scope();
+    let r = begin_as(api, a, PROVIDER, json!({ "access": "read", "services": ["mail"] }))?;
+    anyhow::ensure!(r.status == 200, "begin mail alone: {r}");
+    let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).context("connection cookie")?;
+    let mut to = reqwest::Url::parse(r.body["url"].as_str().context("authorize URL")?)?;
+    to.query_pairs_mut().append_pair("account", "partial-a");
+    let consent = api.external(to.as_str())?;
+    let r = back(api, &consent.header("location"), Some(a), Some(&cookie))?;
+    let listed = row(api, a, PROVIDER)?;
+    s.ok("connected with Mail alone, its answer naming no scope, Pipes holds the pick's scope and signing in as the pending row kept them, and the list says Files' scope is not allowed (a reconnect adds it), read only",
+        r.status == 200 && s.workos.scopes("connection-a@e2e.test", PROVIDER) == ["mail.read", "openid"] && listed["missing"] == json!(["files.read"]) && listed["access"] == "read", &listed);
     let (all, cookie, _) = granting(api, a, "partial-a", None)?;
     let r = back(api, &all, Some(a), Some(&cookie))?;
     anyhow::ensure!(r.status == 200, "connected read only again for the checks after: {r}");

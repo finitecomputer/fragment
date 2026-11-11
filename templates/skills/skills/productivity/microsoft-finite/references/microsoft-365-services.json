@@ -1,0 +1,35 @@
+[
+  {
+    "id": "mail",
+    "name": "Outlook mail",
+    "scopes": [
+      "https://graph.microsoft.com/Mail.Read",
+      "https://graph.microsoft.com/Mail.ReadWrite",
+      "https://graph.microsoft.com/Mail.Send"
+    ]
+  },
+  {
+    "id": "calendar",
+    "name": "Outlook calendar",
+    "scopes": [
+      "https://graph.microsoft.com/Calendars.Read",
+      "https://graph.microsoft.com/Calendars.ReadWrite"
+    ]
+  },
+  {
+    "id": "files",
+    "name": "OneDrive",
+    "scopes": [
+      "https://graph.microsoft.com/Files.Read",
+      "https://graph.microsoft.com/Files.ReadWrite"
+    ]
+  },
+  {
+    "id": "contacts",
+    "name": "Contacts",
+    "scopes": [
+      "https://graph.microsoft.com/Contacts.Read",
+      "https://graph.microsoft.com/Contacts.ReadWrite"
+    ]
+  }
+]

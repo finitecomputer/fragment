@@ -43,6 +43,17 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     calendar: "Calendar",
     "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
+    // Microsoft Graph's (https://graph.microsoft.com/<name>)
+    "User.Read": "Profile",
+    "Mail.Read": "Mail (read)",
+    "Mail.ReadWrite": "Mail (manage)",
+    "Mail.Send": "Mail (send)",
+    "Calendars.Read": "Calendar (read)",
+    "Calendars.ReadWrite": "Calendar",
+    "Files.Read": "OneDrive (read)",
+    "Files.ReadWrite": "OneDrive",
+    "Contacts.Read": "Contacts (read)",
+    "Contacts.ReadWrite": "Contacts",
   };
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said
@@ -62,11 +73,20 @@ export function createConnections({ api, el, section, named, seg, computer, getA
   // (`focus`), never by watching `w.closed`: the shell's COOP has that read
   // true once the window is at the provider, still open. `body`, where the
   // person connects several accounts: `{add: true}` for another, `{account}`
-  // for one of theirs again.
+  // for one of theirs again. A connection that offers services adds those
+  // its card has ticked (`servicePickers`), as the press finds them: none
+  // ticked opens nothing and says so.
   function connectButton(p, label, said, body = {}) {
     const go = el("button", "quiet", label);
     go.type = "button";
     go.onclick = async () => {
+      const picker = p.kind === "connection" ? servicePickers.get(p.provider) : null;
+      const services = picker?.picked();
+      if (picker && !services.length) {
+        said.textContent = "Tick at least one service for your agents to use.";
+        return;
+      }
+      const sent = services ? { ...body, services } : body;
       const w = window.open("", "_blank", "popup,width=520,height=720");
       if (!w) {
         said.textContent = "Your browser blocked the window. Allow pop-ups for this site, then try again.";
@@ -75,7 +95,7 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       go.disabled = true;
       said.textContent = "";
       try {
-        const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, body);
+        const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, sent);
         w.location = url;
         addEventListener("focus", () => reopenSettings().catch(() => {}), { once: true });
       } catch (e) {
@@ -86,6 +106,27 @@ export function createConnections({ api, el, section, named, seg, computer, getA
       }
     };
     return go;
+  }
+  // Each card's services, ticked or not, of a connection that offers them
+  // (`services`): what its every connect asks for, read as it is pressed.
+  // All are ticked as the card is drawn.
+  const servicePickers = new Map();
+  function servicePicker(p) {
+    const box = el("fieldset", "provider-services");
+    box.append(el("legend", null, "What your agents may use"));
+    const ticks = p.services.map((s) => {
+      const label = el("label", "provider-service");
+      const tick = el("input");
+      tick.type = "checkbox";
+      tick.checked = true;
+      tick.value = s.id;
+      tick.dataset.service = s.id;
+      label.append(tick, el("span", null, s.name));
+      box.append(label);
+      return tick;
+    });
+    servicePickers.set(p.provider, { picked: () => ticks.filter((t) => t.checked).map((t) => t.value) });
+    return box;
   }
   // The accesses a connection offers (`accesses`): read only and read and
   // write, or, where its provider has no read-only scope, read and write
@@ -391,6 +432,9 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     };
     // Connect, read only or read and write, as the person picks; connected
     // again as it was where its access is known
+    // the services its connects ask for, of a connection that offers them
+    if (p.kind === "connection" && p.services?.length) details.push(servicePicker(p));
+    else servicePickers.delete(p.provider);
     if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
       const again = p.state === "needs_reauthorization";
       actions.append(...(again && p.access ? [connectButton(p, "Connect again", said, { access: p.access })] : accessButtons(p, again ? "Connect again" : "Connect", said)));
