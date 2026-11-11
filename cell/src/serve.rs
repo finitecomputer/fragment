@@ -573,6 +573,9 @@ impl FragmentCell {
                     if let Some(status) = f.status {
                         answer["status"] = json!(status);
                     }
+                    if f.graph {
+                        answer["graph"] = json!(true);
+                    }
                 }
                 return json_response(&answer);
             }
