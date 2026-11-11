@@ -692,7 +692,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(stopped.status == 200, "stopped: {} {}", stopped.status, stopped.body);
     let vault = || -> Result<Value> { Ok(api.signed(&owner, "GET", "/api/vault", None)?.body) };
     let entry = |v: &Value, name: &str| v["secrets"].as_array().and_then(|l| l.iter().find(|e| e["name"] == name)).cloned().unwrap_or_default();
-    let name_of = |kind| fragment_core::migrations::vault_secret(kind, &agent_name, "x").map(|(n, _)| n).unwrap_or_default();
+    let name_of = |kind| fragment_core::migrations::vault_secret(kind, &agent_name, NSEC).map(|(n, _)| n).unwrap_or_default();
     let (tg_name, or_name, ns_name) = (name_of(SecretKind::TelegramBotToken), name_of(SecretKind::OpenrouterKey), name_of(SecretKind::NostrNsec));
     let mine = json!([agent_name]);
 
