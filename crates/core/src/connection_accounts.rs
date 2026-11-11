@@ -229,8 +229,8 @@ impl Intent {
     /// `account: "<id>"`, never both.
     pub fn asked(body: &Value) -> Result<(Intent, ConnectionAccess), String> {
         let Some(o) = body.as_object() else { return Err("a connect's body is an object naming its access: {\"access\": \"read\"} or {\"access\": \"write\"}".into()) };
-        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "access" | "add" | "account")) {
-            return Err(format!("a connect names `access`, and `add` or `account`, not {k:?}"));
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "access" | "add" | "account" | "services")) {
+            return Err(format!("a connect names `access`, `services`, and `add` or `account`, not {k:?}"));
         }
         let access = match o.get("access") {
             Some(Value::String(a)) => ConnectionAccess::of_word(a),

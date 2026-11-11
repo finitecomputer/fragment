@@ -623,6 +623,9 @@ pub(crate) struct BeginConnection {
     pub provider: String,
     pub intent: fragment_core::connection_accounts::Intent,
     pub access: fragment_proto::computer::ConnectionAccess,
+    /// The services it picked, of its row's (none: every one).
+    #[serde(default)]
+    pub services: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]

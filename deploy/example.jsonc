@@ -313,7 +313,8 @@
       // "key": "<the client secret's store name>",
       // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
       //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
-      //   "client_id": "<the client's id>", "access": <the Google skill's references/google-workspace-access.json> },
+      //   "client_id": "<the client's id>", "access": <the Google skill's references/google-workspace-access.json>,
+      //   "services": <the Google skill's references/google-workspace-services.json> },
       // several Google accounts a person (personal and work), each agent
       // using the one picked for it in Settings, once WorkOS has enabled
       // additional connections and a release that knows the field is
@@ -348,7 +349,9 @@
     // through the browser once its Entra app's secret is in the store (the
     // app Pipes' Microsoft integration uses, with the platform's callback
     // beside Pipes'). `common` takes every kind of account; `offline_access`
-    // is what has Microsoft answer a refresh token. Microsoft has no
+    // is what has Microsoft answer a refresh token. Its consent can't leave a
+    // permission out, so its services are how a person does (and leave out
+    // one their organization's admin must approve). Microsoft has no
     // revocation endpoint: a disconnect deletes the account at Pipes, and
     // the person removes the app in their account's settings.
     { "name": "microsoft", "kind": "connection",
@@ -358,7 +361,8 @@
       // "key": "<the client secret's store name>",
       // "connection_oauth": { "authorize": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account",
       //   "exchange": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-      //   "client_id": "<the app's client id>", "access": <the Microsoft skill's references/microsoft-365-access.json> },
+      //   "client_id": "<the app's client id>", "access": <the Microsoft skill's references/microsoft-365-access.json>,
+      //   "services": <the Microsoft skill's references/microsoft-365-services.json> },
       // several Microsoft accounts a person (work and personal), as Google's
       // "accounts_max": 5,
       "env": ["MICROSOFT_OAUTH_ACCESS_TOKEN"] },
