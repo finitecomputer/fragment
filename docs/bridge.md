@@ -403,6 +403,15 @@ never reaches another agent's core.
   card's question with its choices. An unlink stops the mirror and keeps
   the chat; a link again is that chat. `state.json` holds nothing of
   SimpleX.
+- **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
+  carries no typing, so while the agent's turn runs on a message from
+  their app (the engine's `working`: its own turn phases, whatever the
+  runtime), the link reacts 🚀 to that message, and takes it off when the
+  turn ends, with a reply or without. A refusal (their reactions off)
+  shows nothing and is not retried, and a ratchet out of step waits until
+  it is in step; `link.json`
+  keeps what it reacted to, so a later start takes off what an earlier
+  one left on.
 - **The agent is told in that chat alone**, as the chat's topic on every
   inbound there (Relay's `chat_topic`). Hermes reads a topic as a label,
   never as an instruction. Its name in their app is the agent's title,

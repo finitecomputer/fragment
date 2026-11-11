@@ -898,6 +898,87 @@ async fn messages_go_both_ways_through_the_chat() {
     fake.with(|w| assert_eq!(w.made.as_slice(), std::slice::from_ref(&chat), "its SimpleX chat found again, never made twice"));
 }
 
+/// What the person's app heard of `sent` (their message, by its sender's
+/// id), in order, until `done` holds: `+` and `-` for the agent's
+/// `WORKING` reaction on it put on and taken off, and each text received.
+async fn heard(person: &mut Api, sent: &str, within: Duration, heard: &mut Vec<String>, done: impl Fn(&[String]) -> bool) {
+    let t0 = Instant::now();
+    // bounded by `within`
+    loop {
+        while let Some(e) = person.events.pop_front() {
+            match tag(&e).as_str() {
+                "chatItemReaction" if e.to_string().contains(sent) && e["reaction"]["chatReaction"]["reaction"]["emoji"] == "🚀" => {
+                    heard.push(if e["added"] == true { "+".into() } else { "-".into() });
+                }
+                "newChatItems" => {
+                    for ci in e["chatItems"].as_array().into_iter().flatten() {
+                        let item = &ci["chatItem"];
+                        if item["chatDir"]["type"] == "directRcv" && item["content"]["type"] == "rcvMsgContent" {
+                            heard.push(item["content"]["msgContent"]["text"].as_str().unwrap_or("").to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if done(heard) {
+            return;
+        }
+        assert!(t0.elapsed() < within, "the person heard only {heard:?} within {within:?}");
+        person.drain(Duration::from_millis(200)).await;
+    }
+}
+
+/// Goal (Paul, 2026-11-11: their app shows the agent working), against the
+/// real core: while the agent's turn runs on its owner's SimpleX message,
+/// their app shows `WORKING` on that message, from before its reply comes
+/// until its turn ends; and a turn that ends with no reply (an error) takes
+/// it off too. Nothing else is said for it: no message of its own.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn the_owners_app_shows_the_agent_working() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("working", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+
+    // a slow turn (a tool call of two seconds): on before its reply, off once it ends
+    let sent = say(&mut person, at_person, "tool please, slowly").await;
+    let mut got = vec![];
+    let answer = |t: &String| t.starts_with("echo: [paul]") && t.contains("tool please, slowly");
+    heard(&mut person, &sent, Duration::from_secs(90), &mut got, |h| h.iter().any(answer) && h.iter().any(|t| t == "-")).await;
+    let on = got.iter().position(|t| t == "+");
+    let reply = got.iter().position(answer);
+    assert!(on.is_some_and(|on| reply.is_some_and(|r| on < r)), "shown working before its reply: {got:?}");
+    assert_eq!(got.iter().filter(|t| *t == "+" || *t == "-").collect::<Vec<_>>(), vec!["+", "-"], "on once, then off: {got:?}");
+    assert!(!got.iter().any(|t| t.contains('🚀')), "no message of its own: {got:?}");
+
+    // a turn that ends with no reply (an error): off all the same
+    let sent = say(&mut person, at_person, "the message that fails").await;
+    let mut got = vec![];
+    heard(&mut person, &sent, Duration::from_secs(90), &mut got, |h| h.iter().any(|t| t == "-")).await;
+    assert_eq!(got.iter().filter(|t| *t == "+" || *t == "-").collect::<Vec<_>>(), vec!["+", "-"], "on, then off with no reply: {got:?}");
+    // its app's item agrees: no reaction left on either message
+    let items = person.cmd(&format!("/_get chat @{at_person} count=20")).await;
+    let reacted: Vec<Value> = items["chat"]["chatItems"].as_array().into_iter().flatten().filter(|i| i["reactions"].as_array().is_some_and(|r| !r.is_empty())).cloned().collect();
+    assert!(reacted.is_empty(), "nothing left on: {reacted:?}");
+    c.stop();
+}
+
 /// The scripted agent's answer to "speak and draw", in the person's app: its
 /// text, then a voice message (its length, playable: the host's ffprobe
 /// decodes it) and a file, each the chat's own attachment byte for byte;

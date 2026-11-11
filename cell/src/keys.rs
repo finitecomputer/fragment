@@ -359,10 +359,6 @@ pub(super) async fn connection_exchange(env: &Env, provider: &str, o: &fragment_
 async fn confidential_request(url: &str, method: Method, content_type: &str, bearer: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
     let headers = Headers::new();
     headers.set("content-type", content_type)?;
-    // its answer is read as JSON: said so, since a token endpoint may pick
-    // its answer's format by `Accept` (Salesforce's answers JSON, XML or a
-    // form)
-    headers.set("accept", "application/json")?;
     if let Some(key) = bearer { headers.set("authorization", &format!("Bearer {key}"))?; }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(body.into()));
@@ -387,7 +383,7 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
     let key = required(env, store::WORKOS_KEY).await?;
-    let expires_at = tokens.expires_at(js::now_ms());
+    let expires_at = fragment_core::export::rfc3339(js::now_ms() + i64::from(tokens.expires_in) * 1000);
     let mut body = tokens.import_body(&expires_at, account);
     let import = match several {
         Some((import, identifier)) => {

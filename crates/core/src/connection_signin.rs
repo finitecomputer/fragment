@@ -129,9 +129,7 @@ fn bounded(scopes: Vec<String>) -> Option<Vec<String>> {
 pub struct Tokens {
     access: String,
     refresh: String,
-    /// The access token's lifetime in seconds; None where the token
-    /// endpoint named none (`expires_at`).
-    pub expires_in: Option<u32>,
+    pub expires_in: u32,
     scopes: Vec<String>,
 }
 
@@ -150,12 +148,7 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
     let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     if !answer["token_type"].as_str().ok_or(Invalid)?.eq_ignore_ascii_case("bearer") { return Err(Invalid); }
-    // RFC 6749 §5.1 only recommends `expires_in` (Salesforce never names
-    // it); named, it must be a lifetime
-    let expires_in = match answer.get("expires_in") {
-        None => None,
-        Some(s) => Some(s.as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32),
-    };
+    let expires_in = answer["expires_in"].as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32;
     // RFC 6749: omitted scope means the requested scope. A partial grant is
     // kept: the person may untick what they will not allow (Google's
     // granular consent), and Pipes holds exactly what the provider granted.
@@ -189,13 +182,6 @@ pub fn pipes_scopes(account: &Value) -> Option<Vec<String>> {
 }
 
 impl Tokens {
-    /// When the access token expires, for Pipes (`import_body`), given the
-    /// time now: its lifetime from now, or, where the token endpoint named
-    /// none, now, so Pipes refreshes it before its first use.
-    pub fn expires_at(&self, now_ms: i64) -> String {
-        crate::export::rfc3339(now_ms + i64::from(self.expires_in.unwrap_or(0)) * 1000)
-    }
-
     /// WorkOS's documented connected-account import/update body. `account`
     /// is its label (`account_label`); `null` clears an earlier account's
     /// on an update.
@@ -658,14 +644,14 @@ mod tests {
         let scopes = |scope: &str| tokens(&granting(scope), &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone());
         assert_eq!(scopes("openid mail.read"), Ok(json!(["openid", "mail.read"])), "a partial grant, recorded as the provider answered it");
         assert_eq!(scopes("files.read"), Ok(json!(["files.read"])), "with no sign-in scope at all");
-        for field in ["access_token", "refresh_token", "token_type"] {
+        for field in ["access_token", "refresh_token", "expires_in", "token_type"] {
             let mut bad = good.clone();
             bad.as_object_mut().unwrap().remove(field);
             assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "missing {field}");
         }
         let too_long = format!("mail.read {}", "s".repeat(SCOPE_MAX_BYTES + 1));
         let too_many = vec!["mail.read"; SCOPES_MAX + 1].join(" ");
-        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("expires_in", json!(null)), ("expires_in", json!("3600")), ("expires_in", json!(3600.5)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
+        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
             let mut bad = good.clone();
             bad[field] = value;
             assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "invalid {field}");
@@ -673,30 +659,6 @@ mod tests {
         let mut omitted = good;
         omitted.as_object_mut().unwrap().remove("scope");
         assert_eq!(tokens(&omitted, &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone()), Ok(json!(requested)), "RFC 6749: an omitted scope is the one requested");
-    }
-
-    /// A token endpoint that names no `expires_in` (RFC 6749 §5.1 only
-    /// recommends it; Salesforce's never does) leaves the grant's lifetime
-    /// unknown: it is imported as expired already, so Pipes refreshes it
-    /// before its first use, on a first connect (WorkOS: an access token, a
-    /// refresh token and `expires_at`) and a reconnect alike (an update
-    /// replaces both, the earlier grant's included). A grant that names
-    /// one keeps it, as before.
-    #[test]
-    fn a_grant_of_unknown_lifetime_is_imported_expired() {
-        let requested = requested();
-        let named = granting(&requested.join(" "));
-        let mut unnamed = named.clone();
-        unnamed.as_object_mut().unwrap().remove("expires_in");
-        let now = 1_793_000_000_000;
-        let unknown = tokens(&unnamed, &requested).expect("a grant with no lifetime named");
-        assert_eq!(unknown.expires_in, None);
-        assert_eq!(unknown.expires_at(now), crate::export::rfc3339(now), "expired as it lands");
-        let body = unknown.import_body(&unknown.expires_at(now), None);
-        assert_eq!((body["access_token"].as_str(), body["refresh_token"].as_str(), body["state"].as_str()), (Some("mock-access"), Some("mock-refresh"), Some("connected")));
-        let known = tokens(&named, &requested).expect("a grant naming its lifetime");
-        assert_eq!(known.expires_in, Some(3600));
-        assert_eq!(known.expires_at(now), crate::export::rfc3339(now + 3_600_000));
     }
 
     #[test]

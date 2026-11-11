@@ -112,7 +112,17 @@ pub enum Cmd {
     /// or `userProfileNoChange` for the name it holds. `name` is one
     /// `name_ok` takes.
     Profile { name: String },
+    /// `WORKING` on a contact's message (`item`, the core's), or taken off
+    /// it (`on: false`): the core sends the reaction, which their app shows
+    /// under that message and notifies no one of. Refused when either side
+    /// turned reactions off, or it is on (off) already: nothing to do.
+    React { contact: ContactId, item: i64, on: bool },
 }
+
+/// What the link puts on its owner's message while its agent works on it
+/// (Paul, 2026-11-11): one of the core's own reactions (`mrEmojiChar`'s
+/// eight), since SimpleX carries no typing.
+pub const WORKING: &str = "🚀";
 
 /// A display name the core takes as it is: one `valid_name` leaves as it
 /// is, of at most `NAME_MAX_BYTES`. The core holds a new profile and a
@@ -255,6 +265,11 @@ impl Cmd {
             Cmd::Profile { name } => {
                 assert!(name_ok(name), "a profile's name the core takes as it is");
                 format!("/p '{name}'")
+            }
+            Cmd::React { contact, item, on } => {
+                assert!(*contact > 0 && *item > 0, "a reaction names a contact and its item");
+                let reaction = json!({ "type": "emoji", "emoji": WORKING });
+                format!("/_reaction @{contact} {item} {} {reaction}", if *on { "on" } else { "off" })
             }
         }
     }
@@ -757,6 +772,9 @@ mod tests {
         // a profile's name, quoted: one with a space reads whole
         assert_eq!(Cmd::Profile { name: "Waffle Bot".into() }.line(), "/p 'Waffle Bot'");
         assert_eq!(Cmd::Profile { name: "Waffle".into() }.line(), "/p 'Waffle'");
+        // a reaction, its emoji JSON
+        assert_eq!(Cmd::React { contact: 3, item: 41, on: true }.line(), r#"/_reaction @3 41 on {"emoji":"🚀","type":"emoji"}"#);
+        assert_eq!(Cmd::React { contact: 3, item: 41, on: false }.line(), r#"/_reaction @3 41 off {"emoji":"🚀","type":"emoji"}"#);
     }
 
     /// Goal: `valid_name` is the core's `mkValidName`, by the core's own

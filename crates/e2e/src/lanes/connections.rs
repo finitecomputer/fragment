@@ -175,14 +175,6 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("connected again allowing what was left out, the update records the new grant: nothing is missing",
         r.status == 200 && s.workos.scopes("connection-a@e2e.test", PROVIDER) == ["mail.read", "files.read", "openid"]
             && listed_a["granted"] == json!(["mail.read", "files.read", "openid"]) && listed_a["missing"] == json!([]), &listed_a);
-    // a token endpoint that names no lifetime (Salesforce's never does)
-    s.workos.omit_next_expires_in();
-    let refreshes = s.workos.refreshes();
-    let (unknown, cookie, _) = pending(&api, &a, "partial-a")?;
-    let r = back(&api, &unknown, Some(&a), Some(&cookie))?;
-    let listed_a = row(&api, &a, PROVIDER)?;
-    s.ok("a grant naming no lifetime connects all the same, imported as expired: Pipes refreshes it at the first token asked for, not before",
-        r.status == 200 && listed_a["state"] == "connected" && listed_a["missing"] == json!([]) && s.workos.refreshes() == refreshes, format!("{r}; {listed_a}"));
 
     let (concurrent, cookie, _) = pending(&api, &b, "concurrent-b")?;
     let counts = s.workos.connection_counts();
@@ -222,10 +214,8 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let user_a = s.workos.user("connection-a@e2e.test").id;
     let (revoked, deleted) = (s.workos.revoked().len(), s.workos.deleted().len());
     let was = listed(&api, &a, PROVIDER)?;
-    let refreshes = s.workos.refreshes();
     let r = shell(&api, &a, "DELETE", &path)?;
     let minted = s.workos.tokens(PROVIDER).last().cloned().unwrap_or_default();
-    s.ok("the first token Pipes mints for a grant that named no lifetime (the revocation's) is a refreshed one", s.workos.refreshes() == refreshes + 1, s.workos.refreshes());
     s.ok("disconnecting revokes the grant at the provider with a token Pipes mints for it, then deletes the account at Pipes: not connected, the token in no answer",
         was == "connected" && r.status == 200 && r.body["revoked"] == true && r.body["state"] == "not_connected"
             && !minted.is_empty() && !r.body.to_string().contains(&minted)

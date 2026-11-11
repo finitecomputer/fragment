@@ -42,13 +42,21 @@
 //!   crash, a refusal) is read again. Forwarding is idempotent, so this
 //!   costs reads. An anchor the core no longer has ends the scan with what
 //!   it read.
+//! - **Working.** While the agent's turn runs on one of its owner's
+//!   messages (the engine's `working`, by its seq in their SimpleX chat),
+//!   the link puts `wire::WORKING` on that message in their app, and takes
+//!   it off when the turn ends, however it ends (`react`). It knows a
+//!   message's seq from its post (`Input::Posted`, the newest
+//!   `POSTED_KEPT`), and keeps the messages it reacted to, so a later
+//!   start takes off what an earlier one left on. A refusal (reactions
+//!   off, or a ratchet out of step) is no one's to hear: it shows nothing.
 //! - **A reply the core will not send now** waits in the outbox until the
 //!   ratchet is `ok`. Failed syncs keep replies held too. Restarts and timer
 //!   ticks (`Resync`) read `/_info` before retrying: a forced sync replaces
 //!   its private keys even during negotiation, breaking the keys already
 //!   queued on SMP when the peer is away (the offline-phone lab).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +70,9 @@ pub const SCAN_MAX: usize = 8 * CATCHUP_ITEMS as usize;
 /// Parts of replies held while the ratchet synchronizes, at most; past it
 /// the oldest go (and are counted).
 pub const OUTBOX_MAX: usize = 32;
+/// The owner's messages whose seq on their chat the link keeps (the
+/// newest): past a chat's turns, the one running and the 16 queued.
+pub const POSTED_KEPT: usize = 32;
 
 /// Where the link is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +118,15 @@ pub struct Link {
     /// A start's catch-up, under way: in no file, and in no comparison.
     #[serde(skip)]
     pub scan: Scan,
+    /// The owner's messages posted on their chat, each `(seq, item)`: its
+    /// seq there and the core's item, the newest `POSTED_KEPT`, oldest
+    /// first. A rollback takes them back with the database, whose item ids
+    /// it may reuse.
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub posted: VecDeque<(u64, i64)>,
+    /// The items the link put `wire::WORKING` on and has not taken off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reacted: Vec<i64>,
     /// What an unlink still has the core let go (the contact, told, or an
     /// unused invitation): asked again at each start until it is done, so
     /// an unlink while the core cannot run (under a hold, not always on)
@@ -179,6 +199,8 @@ pub enum Input<'a> {
     /// replies wait in the outbox until the next start reads it in step,
     /// as through a sync, rather than go to no core.
     Restarting,
+    /// The owner's message of this item was posted on their chat as `seq`.
+    Posted { seq: u64, item: i64 },
 }
 
 /// What the link asks for.
@@ -317,6 +339,15 @@ impl Link {
                         out.push(Action::Tell(Notice::Failed { what }));
                     }
                     _ => {}
+                }
+            }
+            Input::Posted { seq, item } => {
+                if self.contact().is_some() && item > 0 {
+                    self.posted.retain(|(s, i)| *s != seq && *i != item);
+                    if self.posted.len() == POSTED_KEPT {
+                        self.posted.pop_front();
+                    }
+                    self.posted.push_back((seq, item));
                 }
             }
             Input::Delivered(item) => {
@@ -521,11 +552,38 @@ impl Link {
         }
     }
 
+    /// What shows the agent working (`wire::WORKING`) on its owner's
+    /// messages, made what `working` says: the `chat` seqs of the messages
+    /// its turns run on now (the engine's `working`). Taken off each it no
+    /// longer works on, put on each it now does; nothing while the ratchet
+    /// is out of step (its sends are refused), and again once it is. Asked
+    /// only of a running core (the manager's), so what it asks is sent.
+    /// The same `working` again asks nothing.
+    pub fn react(&mut self, working: &BTreeSet<u64>) -> Vec<Action> {
+        let mut out = vec![];
+        let Phase::Linked { contact, .. } = self.phase else { return out };
+        if self.syncing {
+            return out;
+        }
+        let wanted: Vec<i64> = self.posted.iter().filter(|(seq, _)| working.contains(seq)).map(|(_, item)| *item).collect();
+        for item in self.reacted.iter().filter(|i| !wanted.contains(i)) {
+            out.push(Action::Ask(Cmd::React { contact, item: *item, on: false }));
+        }
+        for item in wanted.iter().filter(|i| !self.reacted.contains(i)) {
+            out.push(Action::Ask(Cmd::React { contact, item: *item, on: true }));
+        }
+        self.reacted = wanted;
+        self.check();
+        out
+    }
+
     /// A contact bound or let go: nothing of the last one's waits.
     fn let_go(&mut self) {
         self.syncing = false;
         self.forced = false;
         self.outbox.clear();
+        self.posted.clear();
+        self.reacted.clear();
         self.delivered = 0;
         self.scan.items.clear();
         self.scan.running = false;
@@ -549,6 +607,10 @@ impl Link {
         assert!(linked || (!self.syncing && self.outbox.is_empty()), "only a bound link syncs or holds replies");
         assert!(self.syncing || !self.forced, "a forced sync is one under way");
         assert!(self.outbox.len() <= OUTBOX_MAX, "the outbox is bounded");
+        assert!(linked || (self.posted.is_empty() && self.reacted.is_empty()), "only a bound link keeps its owner's messages");
+        // (an item it reacted to may have aged out of `posted` since: the
+        // next `react` takes it off)
+        assert!(self.posted.len() <= POSTED_KEPT && self.reacted.len() <= POSTED_KEPT, "what it keeps of its owner's messages is bounded");
     }
 
     /// The link as written beside the core's database.
@@ -598,6 +660,56 @@ mod tests {
 
     fn sends(actions: &[Action]) -> Vec<String> {
         actions.iter().filter_map(|a| if let Action::Ask(Cmd::Send { text, .. }) = a { Some(text.clone()) } else { None }).collect()
+    }
+
+    fn reactions(actions: &[Action]) -> Vec<(i64, bool)> {
+        actions.iter().filter_map(|a| if let Action::Ask(Cmd::React { contact: 3, item, on }) = a { Some((*item, *on)) } else { None }).collect()
+    }
+
+    /// Goal (Paul, 2026-11-11): while its agent works on its owner's
+    /// message, its app shows `WORKING` on it, and not once the turn ends,
+    /// however it ends. Replay: the same working set again asks nothing,
+    /// and a message posted again is one. A ratchet out of step shows
+    /// nothing until it is in step. Restart: what a life put on, written
+    /// in its file, is taken off by the next once no turn runs on it. An
+    /// unlink keeps nothing; and what it keeps is bounded, oldest out.
+    #[test]
+    fn its_owners_message_shows_the_agent_working_while_its_turn_runs() {
+        let mut link = linked();
+        let none = BTreeSet::new();
+        assert!(link.react(&BTreeSet::from([7])).is_empty(), "a seq it was never told of: nothing");
+        link.apply(Input::Posted { seq: 7, item: 41 });
+        link.apply(Input::Posted { seq: 7, item: 41 });
+        link.apply(Input::Posted { seq: 9, item: 44 });
+        assert_eq!(link.posted, VecDeque::from([(7, 41), (9, 44)]), "posted again: one");
+        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, true)], "its turn runs: on");
+        assert!(link.react(&BTreeSet::from([7])).is_empty(), "the same again: nothing");
+        assert_eq!(reactions(&link.react(&BTreeSet::from([9]))), vec![(41, false), (44, true)], "the next one's turn: off the first, on the next");
+        assert_eq!(reactions(&link.react(&none)), vec![(44, false)], "ended: off");
+        assert!(link.reacted.is_empty());
+        // a ratchet out of step: nothing, until it is in step
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
+        assert!(link.react(&BTreeSet::from([7])).is_empty(), "syncing: nothing sent");
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
+        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, true)], "in step: on");
+        // a restart: read back from its file, its next start takes it off
+        let mut back = Link::from_json(&link.to_json()).expect("its file reads back");
+        assert_eq!((back.posted.clone(), back.reacted.clone()), (link.posted.clone(), vec![41]));
+        assert_eq!(reactions(&back.react(&none)), vec![(41, false)], "no turn runs on it now: off");
+        // bounded: the oldest goes, and one it reacted to that went comes off
+        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![]);
+        for n in 0..POSTED_KEPT as u64 {
+            link.apply(Input::Posted { seq: 100 + n, item: 100 + n as i64 });
+        }
+        assert!(link.posted.len() == POSTED_KEPT && !link.posted.contains(&(7, 41)), "the oldest went");
+        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, false)], "aged out: off");
+        // unlinked: nothing kept, and nothing asked
+        link.react(&BTreeSet::from([131]));
+        link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: true }));
+        assert!(link.posted.is_empty() && link.reacted.is_empty());
+        assert!(link.react(&BTreeSet::from([131])).is_empty(), "unlinked: nothing");
+        link.apply(Input::Posted { seq: 200, item: 1 });
+        assert!(link.posted.is_empty(), "unlinked: nothing kept");
     }
 
     /// Goal (valid): the owner links, writes and is answered; each message
