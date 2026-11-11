@@ -3,7 +3,7 @@
 //! This small URL/form codec uses existing url/serde/PKCE primitives because
 //! the cell uses Workers Fetch, not a native OAuth client's HTTP transport.
 
-use crate::catalog::{self, ConnectionOAuth};
+use crate::catalog::{self, ConnectionAccess, ConnectionOAuth, Grant};
 use serde_json::{json, Value};
 
 pub const SCOPES_MAX: usize = 32;
@@ -12,7 +12,7 @@ pub const TOKEN_MAX_BYTES: usize = 8192;
 pub const PENDING_PER_SESSION_MAX: u64 = 8;
 /// One synchronous SQLite statement: a mismatched callback consumes nothing;
 /// the winner consumes the transaction before the caller awaits any vendor.
-pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at, intent, account";
+pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at, intent, account, access";
 /// A disconnect's end of every attempt at its account still pending, each
 /// session's: (issuer, subject, provider). No index has the subject: it
 /// reads at most the fleet's pending sign-ins (`signins_pending_max`).
@@ -82,16 +82,42 @@ pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
             return Err("the revocation endpoint has no query: the token is its form's".into());
         }
     }
-    if !token(&o.client_id, 256) || !(1..=SCOPES_MAX).contains(&o.scopes.len()) || o.scopes.iter().any(|s| !token(s, SCOPE_MAX_BYTES) || s.contains(['"', '\\'])) {
-        return Err("a connection needs a client id and 1–32 bounded OAuth scopes".into());
+    let bounded = |g: &Grant| (1..=SCOPES_MAX).contains(&g.scopes.len()) && g.scopes.iter().all(|s| token(s, SCOPE_MAX_BYTES) && !s.contains(['"', '\\']));
+    if !token(&o.client_id, 256) || !o.access.read.as_ref().is_none_or(bounded) || !bounded(&o.access.write) {
+        return Err("a connection needs a client id, and 1–32 bounded OAuth scopes for each access it names (write, and read where its provider has a read-only scope)".into());
+    }
+    if let Some(read) = &o.access.read {
+        if !o.access.write.scopes.iter().any(|s| !identity(s) && !read.scopes.contains(s)) {
+            return Err("its write access asks for a scope its read access does not: that scope is how a grant of read and write is told from one of read only (a provider with no read-only scope names write alone)".into());
+        }
     }
     Ok(())
 }
 
-pub fn authorize_url(o: &ConnectionOAuth, callback: &str, challenge: &str, state: &str) -> String {
+/// What a grant of `granted` lets its agents do: read only while every
+/// scope it holds, but signing in, is one read only asks for; else read
+/// and write. A scope its row does not name now (one an earlier row asked
+/// for, or one the provider added) is never taken for reading. So it is
+/// what the person picked as they connected, unless they left every write
+/// scope unticked, or a reconnect as read only kept an earlier grant's (a
+/// provider that keeps what was granted before: Google's
+/// `include_granted_scopes`): it is said as the grant holds it. None where
+/// the row names write alone (its provider has no read-only scope): there
+/// is no access to tell, only its provider user's permissions.
+pub fn access_of(o: &ConnectionOAuth, granted: &[String]) -> Option<ConnectionAccess> {
+    let read = o.access.read.as_ref()?;
+    Some(match granted.iter().all(|s| identity(s) || read.scopes.contains(s)) {
+        true => ConnectionAccess::Read,
+        false => ConnectionAccess::Write,
+    })
+}
+
+/// The provider's page a person is sent to, asking for what `grant` (the
+/// access they picked, `Access::of`) asks.
+pub fn authorize_url(o: &ConnectionOAuth, grant: &Grant, callback: &str, challenge: &str, state: &str) -> String {
     let mut u = url::Url::parse(&o.authorize).expect("catalog checked");
     u.query_pairs_mut().append_pair("client_id", &o.client_id).append_pair("redirect_uri", callback)
-        .append_pair("response_type", "code").append_pair("scope", &o.scopes.join(" "))
+        .append_pair("response_type", "code").append_pair("scope", &grant.scopes.join(" "))
         .append_pair("state", state).append_pair("code_challenge", challenge).append_pair("code_challenge_method", "S256");
     u.into()
 }
@@ -129,7 +155,9 @@ fn bounded(scopes: Vec<String>) -> Option<Vec<String>> {
 pub struct Tokens {
     access: String,
     refresh: String,
-    pub expires_in: u32,
+    /// The access token's lifetime in seconds; None where the token
+    /// endpoint named none (`expires_at`).
+    pub expires_in: Option<u32>,
     scopes: Vec<String>,
 }
 
@@ -148,7 +176,12 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
     let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
     if !answer["token_type"].as_str().ok_or(Invalid)?.eq_ignore_ascii_case("bearer") { return Err(Invalid); }
-    let expires_in = answer["expires_in"].as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32;
+    // RFC 6749 §5.1 only recommends `expires_in` (Salesforce never names
+    // it); named, it must be a lifetime
+    let expires_in = match answer.get("expires_in") {
+        None => None,
+        Some(s) => Some(s.as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32),
+    };
     // RFC 6749: omitted scope means the requested scope. A partial grant is
     // kept: the person may untick what they will not allow (Google's
     // granular consent), and Pipes holds exactly what the provider granted.
@@ -182,6 +215,13 @@ pub fn pipes_scopes(account: &Value) -> Option<Vec<String>> {
 }
 
 impl Tokens {
+    /// When the access token expires, for Pipes (`import_body`), given the
+    /// time now: its lifetime from now, or, where the token endpoint named
+    /// none, now, so Pipes refreshes it before its first use.
+    pub fn expires_at(&self, now_ms: i64) -> String {
+        crate::export::rfc3339(now_ms + i64::from(self.expires_in.unwrap_or(0)) * 1000)
+    }
+
     /// WorkOS's documented connected-account import/update body. `account`
     /// is its label (`account_label`); `null` clears an earlier account's
     /// on an update.
@@ -342,7 +382,9 @@ mod tests {
     use super::*;
 
     fn config() -> ConnectionOAuth {
-        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), scopes: vec!["mail.read".into(), "files.read".into()], revoke: None }
+        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let access = catalog::Access { read: Some(grant(&["mail.read", "files.read"])), write: grant(&["mail.read", "mail.send", "files.read"]) };
+        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, revoke: None }
     }
 
     fn id_token(claims: Value) -> Value {
@@ -589,11 +631,23 @@ mod tests {
         let mut bad = o.clone();
         bad.exchange.push_str("?code=wrong");
         assert!(check(&bad).is_err());
+        for access in [ConnectionAccess::Read, ConnectionAccess::Write] {
+            for refused in [vec!["scope with spaces".to_string()], vec!["s".to_string(); SCOPES_MAX + 1], vec![], vec!["a\"b".to_string()]] {
+                bad = o.clone();
+                match access {
+                    ConnectionAccess::Read => bad.access.read.as_mut().unwrap().scopes = refused.clone(),
+                    ConnectionAccess::Write => bad.access.write.scopes = refused.clone(),
+                }
+                assert!(check(&bad).is_err(), "{access:?}: {refused:?}");
+            }
+        }
         bad = o.clone();
-        bad.scopes = vec!["scope with spaces".into()];
-        assert!(check(&bad).is_err());
-        bad.scopes = vec!["s".into(); SCOPES_MAX + 1];
-        assert!(check(&bad).is_err());
+        bad.access.write = bad.access.read.clone().unwrap();
+        assert!(check(&bad).is_err(), "write asks for nothing read does not");
+        bad.access.write.scopes.push("openid".into());
+        assert!(check(&bad).is_err(), "nor only a sign-in scope beside it");
+        bad.access.read = None;
+        assert!(check(&bad).is_ok(), "write alone, its provider having no read-only scope");
         bad = o;
         bad.authorize = "http://attacker.example/authorize".into();
         assert!(check(&bad).is_err());
@@ -603,8 +657,10 @@ mod tests {
     fn authorize_and_exchange_bind_the_same_client_callback_and_challenge() {
         let o = config();
         let callback = "https://platform.example/api/connections/mail/callback";
-        let u = url::Url::parse(&authorize_url(&o, callback, "challenge", "state")).unwrap();
+        let u = url::Url::parse(&authorize_url(&o, o.access.of(ConnectionAccess::Read).unwrap(), callback, "challenge", "state")).unwrap();
         let q: std::collections::BTreeMap<_, _> = u.query_pairs().into_owned().collect();
+        let wrote = url::Url::parse(&authorize_url(&o, &o.access.write, callback, "challenge", "state")).unwrap();
+        assert_eq!(wrote.query_pairs().find(|(k, _)| k == "scope").map(|(_, v)| v.into_owned()).as_deref(), Some("mail.read mail.send files.read"), "read and write asks for its own scopes");
         assert_eq!(q["state"], "state");
         assert_eq!(q["code_challenge_method"], "S256");
         assert_eq!(q["code_challenge"], "challenge");
@@ -644,14 +700,14 @@ mod tests {
         let scopes = |scope: &str| tokens(&granting(scope), &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone());
         assert_eq!(scopes("openid mail.read"), Ok(json!(["openid", "mail.read"])), "a partial grant, recorded as the provider answered it");
         assert_eq!(scopes("files.read"), Ok(json!(["files.read"])), "with no sign-in scope at all");
-        for field in ["access_token", "refresh_token", "expires_in", "token_type"] {
+        for field in ["access_token", "refresh_token", "token_type"] {
             let mut bad = good.clone();
             bad.as_object_mut().unwrap().remove(field);
             assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "missing {field}");
         }
         let too_long = format!("mail.read {}", "s".repeat(SCOPE_MAX_BYTES + 1));
         let too_many = vec!["mail.read"; SCOPES_MAX + 1].join(" ");
-        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
+        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("expires_in", json!(null)), ("expires_in", json!("3600")), ("expires_in", json!(3600.5)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
             let mut bad = good.clone();
             bad[field] = value;
             assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "invalid {field}");
@@ -659,6 +715,30 @@ mod tests {
         let mut omitted = good;
         omitted.as_object_mut().unwrap().remove("scope");
         assert_eq!(tokens(&omitted, &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone()), Ok(json!(requested)), "RFC 6749: an omitted scope is the one requested");
+    }
+
+    /// A token endpoint that names no `expires_in` (RFC 6749 §5.1 only
+    /// recommends it; Salesforce's never does) leaves the grant's lifetime
+    /// unknown: it is imported as expired already, so Pipes refreshes it
+    /// before its first use, on a first connect (WorkOS: an access token, a
+    /// refresh token and `expires_at`) and a reconnect alike (an update
+    /// replaces both, the earlier grant's included). A grant that names
+    /// one keeps it, as before.
+    #[test]
+    fn a_grant_of_unknown_lifetime_is_imported_expired() {
+        let requested = requested();
+        let named = granting(&requested.join(" "));
+        let mut unnamed = named.clone();
+        unnamed.as_object_mut().unwrap().remove("expires_in");
+        let now = 1_793_000_000_000;
+        let unknown = tokens(&unnamed, &requested).expect("a grant with no lifetime named");
+        assert_eq!(unknown.expires_in, None);
+        assert_eq!(unknown.expires_at(now), crate::export::rfc3339(now), "expired as it lands");
+        let body = unknown.import_body(&unknown.expires_at(now), None);
+        assert_eq!((body["access_token"].as_str(), body["refresh_token"].as_str(), body["state"].as_str()), (Some("mock-access"), Some("mock-refresh"), Some("connected")));
+        let known = tokens(&named, &requested).expect("a grant naming its lifetime");
+        assert_eq!(known.expires_in, Some(3600));
+        assert_eq!(known.expires_at(now), crate::export::rfc3339(now + 3_600_000));
     }
 
     #[test]
@@ -688,6 +768,33 @@ mod tests {
         }
     }
 
+    /// A grant is read and write while it holds a scope only read and
+    /// write asks for, whatever was picked: one of read only, or of read
+    /// and write with every such scope unticked, is read only; a read-only
+    /// reconnect that kept an earlier grant's write scope is read and write.
+    #[test]
+    fn a_grant_is_read_and_write_while_it_holds_a_scope_read_only_does_not_ask_for() {
+        let o = config();
+        let of = |granted: &[&str]| access_of(&o, &granted.iter().map(|s| s.to_string()).collect::<Vec<_>>()).expect("a row of both");
+        assert_eq!(of(&["mail.read", "files.read", "openid"]), ConnectionAccess::Read);
+        assert_eq!(of(&["mail.read", "mail.send", "files.read"]), ConnectionAccess::Write);
+        assert_eq!(of(&["mail.send"]), ConnectionAccess::Write, "a partial grant of read and write");
+        assert_eq!(of(&["openid", "mail.read"]), ConnectionAccess::Read, "read and write with its write scope unticked");
+        assert_eq!(of(&[]), ConnectionAccess::Read);
+        // a scope read only does not ask for is never taken for reading:
+        // one its row no longer names, or one the provider added
+        assert_eq!(of(&["mail.read", "mail.modify"]), ConnectionAccess::Write, "a write scope the row dropped since");
+        assert_eq!(of(&["mail.read", "admin"]), ConnectionAccess::Write, "a scope the provider granted beside");
+        // a sign-in scope only read and write names tells nothing
+        let mut signs_in = config();
+        signs_in.access.write.scopes.push("openid".into());
+        assert_eq!(access_of(&signs_in, &["openid".to_string(), "mail.read".to_string()]), Some(ConnectionAccess::Read));
+        // write alone (no read-only scope at its provider): nothing to tell
+        let mut one = config();
+        one.access.read = None;
+        assert_eq!(access_of(&one, &["mail.read".to_string()]), None);
+    }
+
     /// Google's row asks it to show its account chooser, then its consent,
     /// and to keep what the person granted before, so a reconnect asks only
     /// for the rest (docs/pipes-browser-binding.md): the authorize URL's own
@@ -698,9 +805,45 @@ mod tests {
         let mut o = config();
         o.authorize = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent".into();
         assert!(check(&o).is_ok());
-        let u = url::Url::parse(&authorize_url(&o, "https://platform.example/api/connections/google/callback", "challenge", "state")).unwrap();
+        let u = url::Url::parse(&authorize_url(&o, &o.access.write, "https://platform.example/api/connections/google/callback", "challenge", "state")).unwrap();
         let prompts: Vec<String> = u.query_pairs().filter(|(k, _)| k == "prompt").map(|(_, v)| v.into_owned()).collect();
         assert_eq!(prompts, ["select_account consent"]);
         assert_eq!(u.query_pairs().filter(|(k, v)| k == "include_granted_scopes" && v == "true").count(), 1);
+    }
+
+    /// Linear's row (deploy/example.jsonc): Linear's authorize takes its
+    /// scopes comma-separated and always grants `read` beside them, so the
+    /// row asks for `write` alone, one scope either way; its answer names
+    /// both, space-separated (linear.app/developers/oauth-2-0-authentication,
+    /// read 2026-11-10), and nothing is missing. An answer naming its scopes
+    /// as a list (Linear's apps made before December 2023) is refused, never
+    /// read as a grant of nothing.
+    #[test]
+    fn a_grant_of_more_than_was_asked_connects_with_nothing_missing() {
+        let linear = |scope: &str| Grant { scopes: vec![scope.into()] };
+        let access = catalog::Access { read: Some(linear("read")), write: linear("write") };
+        let o = ConnectionOAuth { authorize: "https://linear.app/oauth/authorize?actor=user&prompt=consent".into(), exchange: "https://api.linear.app/oauth/token".into(), client_id: "client".into(), access, revoke: Some("https://api.linear.app/oauth/revoke".into()) };
+        assert!(check(&o).is_ok());
+        let asked = |access: ConnectionAccess| -> Vec<(String, String)> {
+            url::Url::parse(&authorize_url(&o, o.access.of(access).unwrap(), "https://platform.example/api/connections/linear/callback", "challenge", "state")).unwrap().query_pairs().into_owned().collect()
+        };
+        for (access, scope) in [(ConnectionAccess::Read, "read"), (ConnectionAccess::Write, "write")] {
+            let query = asked(access);
+            assert!(query.contains(&("scope".into(), scope.into())) && query.contains(&("actor".into(), "user".into())) && query.contains(&("prompt".into(), "consent".into())), "{access:?}: {query:?}");
+        }
+        let answer = json!({ "access_token": "mock-access", "token_type": "Bearer", "expires_in": 86399, "scope": "read write", "refresh_token": "mock-refresh" });
+        let requested = &o.access.write.scopes;
+        let granted = tokens(&answer, requested).expect("Linear's documented answer");
+        assert_eq!(granted.import_body("2026-11-10T00:00:00Z", None)["scopes"], json!(["read", "write"]), "Pipes holds what Linear granted");
+        assert!(missing(requested, &granted.scopes).is_empty());
+        assert_eq!(access_of(&o, &granted.scopes), Some(ConnectionAccess::Write));
+        let mut read = answer.clone();
+        read["scope"] = json!("read");
+        let read_scopes = &o.access.read.as_ref().unwrap().scopes;
+        let read_only = tokens(&read, read_scopes).expect("a read-only grant");
+        assert_eq!((access_of(&o, &read_only.scopes), missing(read_scopes, &read_only.scopes)), (Some(ConnectionAccess::Read), vec![]), "read only, as picked, nothing missing");
+        let mut listed = answer;
+        listed["scope"] = json!(["read", "write"]);
+        assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
     }
 }

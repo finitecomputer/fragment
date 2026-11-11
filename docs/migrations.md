@@ -243,6 +243,46 @@ p2/…                               the same, for phase 2
   No public bucket (`xtask deploy` refuses one with an r2.dev URL or a
   custom domain), no presigned URL, no token.
 
+### SimpleX in a stage
+
+An old agent's SimpleX conversation with its owner can come with it, so
+their SimpleX app keeps talking to the same contact, with no code to scan
+(FIN-463). The mover stages it only when the old agent has exactly one
+approved owner contact (Hermes' `simplex-approved.json` names one decimal
+`contactId`), both databases are plain SQLite (no passphrase), and no
+`-journal` or `-wal` file is beside them (its core stopped cleanly).
+Then the zip holds exactly these three files, and nothing else under
+`.finite-stage/simplex/`:
+
+```
+.finite-stage/simplex/chat.db      the old core's identity_chat.db, as it is
+.finite-stage/simplex/agent.db     its identity_agent.db, as it is
+.finite-stage/simplex/owner.json   {"contact": <the owner's contactId, an integer>}
+```
+
+Each stored or deflated, unencrypted; each database at most 256 MiB.
+`owner.json` holds that one key. Anything else under the prefix, or one
+of the three missing, and the bridge keeps none of it. The old core
+(v7.0.2) and the new image's (v7.0.3) share their database version, so
+the files open as they are.
+
+- **The agent never imports it.** The import skill's layout lists
+  `.finite-stage/**` as never read (`import-agent-home`).
+- **The stage's SimpleX files are read before the routine reaches the
+  agent.** Its computer's bridge holds the move's routine (its words are
+  `fragment_core::migrations::routine_text`) until it has set them aside,
+  read by ranges as the agent, or given up (then Link SimpleX, as before),
+  so the import, and its `done`, come after by construction. It runs
+  nothing then.
+- **Only the owner adopts it**, from their Settings ("Keep my SimpleX
+  chat"), by a door ticket the platform signs (`adopt`, docs/api.md, "An
+  agent's doors"). The bridge binds its link to that contact and lets the
+  old agent's other contacts, groups and address go (docs/bridge.md,
+  "SimpleX").
+- **The old core must not run again** on its copy: the two would take
+  turns at the same queues. A `restart-old` after an adoption breaks the
+  new agent's conversation until its bridge restarts its core (FIN-483).
+
 ### Who may read a stage
 
 Only the one person's bound agent: the agent Migrations bound at their

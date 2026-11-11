@@ -13,7 +13,10 @@
 //! - `POST /simplex/link?agent=…` with a link's ticket (the body): its
 //!   owner links it (a one-time invitation, shown to the page whose
 //!   ticket's nonce is its session);
-//! - `POST /simplex/unlink?agent=…` with an unlink's ticket.
+//! - `POST /simplex/unlink?agent=…` with an unlink's ticket;
+//! - `POST /simplex/adopt?agent=…` with an adoption's ticket: its owner
+//!   keeps their SimpleX chat with their old agent (FIN-463, `stage`),
+//!   staged from its move, its contact the same in their app.
 //!
 //! The tickets come from the owner's Settings alone, signed by the
 //! platform (`door`): the agent's tools, which reach this port too, can
@@ -100,12 +103,13 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
     let path = req.uri().path().to_string();
     let answer = match (req.method().clone(), path.as_str()) {
         (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer") }),
-        (Method::POST, "/simplex/link" | "/simplex/unlink") => match ticket_of(req).await {
+        (Method::POST, "/simplex/link" | "/simplex/unlink" | "/simplex/adopt") => match ticket_of(req).await {
             Err(why) => Err(Refused { status: 403, why }),
             Ok(t) if path == "/simplex/link" => h.link(&agent, t).await,
+            Ok(t) if path == "/simplex/adopt" => h.adopt(&agent, t).await,
             Ok(t) => h.unlink(&agent, t).await,
         },
-        _ => return net::refusal(StatusCode::NOT_FOUND, "not_found", "GET /simplex/, /simplex/state or /simplex/qr.svg; POST /simplex/link or /simplex/unlink"),
+        _ => return net::refusal(StatusCode::NOT_FOUND, "not_found", "GET /simplex/, /simplex/state or /simplex/qr.svg; POST /simplex/link, /simplex/unlink or /simplex/adopt"),
     };
     match answer {
         Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
@@ -115,6 +119,7 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
                 403 => "forbidden",
                 404 => "not_found",
                 409 => "conflict",
+                422 => "invalid",
                 503 => "starting",
                 _ => "failed",
             };

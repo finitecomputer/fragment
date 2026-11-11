@@ -63,6 +63,7 @@ pub const ACCOUNTS_MAX: u8 = 25;
 /// key (lent to every agent, each call metered to its owner at the row's
 /// price and the margin), or an `own` key (the person's, never metered).
 /// The wire type is proto's.
+pub use fragment_proto::computer::ConnectionAccess;
 pub use fragment_proto::computer::ProviderKind as Kind;
 
 /// Which half of HTTP basic auth (`user:password`) holds the credential.
@@ -174,7 +175,9 @@ pub struct ConnectionOAuth {
     pub authorize: String,
     pub exchange: String,
     pub client_id: String,
-    pub scopes: Vec<String>,
+    /// What a person may let their agents do, picked as they connect: each
+    /// access's scopes (docs/pipes-browser-binding.md, Access).
+    pub access: Access,
     /// Where a disconnect revokes the grant (RFC 7009, `POST token=`): a
     /// token Pipes mints for the account, whose grant goes with it
     /// (Google's `https://oauth2.googleapis.com/revoke` takes an access
@@ -182,6 +185,44 @@ pub struct ConnectionOAuth {
     /// deletes the account at Pipes and the grant stays at the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoke: Option<String>,
+}
+
+/// A connection's accesses, each what its authorization asks for: read and
+/// write, and, where its provider's OAuth has a read-only scope, read only.
+/// Read and write then asks for at least one scope read only does not
+/// (`connection_signin::check`), which is how a grant is told apart
+/// (`connection_signin::access_of`). Where it has none (Salesforce's `api`
+/// is all its user may do), the row names read and write alone: there is
+/// nothing to pick, and what an account may do is its provider user's
+/// permissions (docs/pipes-browser-binding.md, Access).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Access {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<Grant>,
+    pub write: Grant,
+}
+
+impl Access {
+    /// What `access` asks for: none where the row offers no such access.
+    pub fn of(&self, access: ConnectionAccess) -> Option<&Grant> {
+        match access {
+            ConnectionAccess::Read => self.read.as_ref(),
+            ConnectionAccess::Write => Some(&self.write),
+        }
+    }
+
+    /// The accesses a person may pick as they connect, read only first.
+    pub fn offered(&self) -> Vec<ConnectionAccess> {
+        self.read.iter().map(|_| ConnectionAccess::Read).chain([ConnectionAccess::Write]).collect()
+    }
+}
+
+/// What one access asks the provider for: its OAuth scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Grant {
+    pub scopes: Vec<String>,
 }
 
 /// A model a person may pick for an agent: its id as the provider names it,
@@ -610,7 +651,7 @@ impl Catalog {
     /// of its own (`vault::row`), for one request's swap: their names are
     /// none of the catalog's (`vault::name_ok`).
     pub fn with(&self, vault: Vec<Provider>) -> Catalog {
-        assert!(vault.iter().all(|v| self.get(&v.name).is_none()), "a vault's secret is named apart from the catalog's providers");
+        assert!(vault.iter().all(|v| v.kind == Kind::Own && self.named(&v.name, false).is_none()), "a vault's secret is an own key, named apart from the catalog's keys");
         Catalog { providers: self.providers.iter().cloned().chain(vault).collect() }
     }
 
@@ -620,6 +661,15 @@ impl Catalog {
 
     pub fn get(&self, name: &str) -> Option<&Provider> {
         self.providers.iter().find(|p| p.name == name)
+    }
+
+    /// The row a placeholder naming `name` is for: a connection's (`fcx_`,
+    /// `connection`) or a key's (`fck_`). A person's Vault secret, a key,
+    /// may share a connection's name (`vault::name_ok`; a connection the
+    /// deployment offers after its person named a secret so), and each
+    /// placeholder still names one row.
+    pub fn named(&self, name: &str, connection: bool) -> Option<&Provider> {
+        self.providers.iter().find(|p| p.name == name && (p.kind == Kind::Connection) == connection)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -834,12 +884,56 @@ mod tests {
         assert!(parse(json!([key])).is_ok(), "an own key's too");
     }
 
+    /// A connection's authorization names what each access asks for, read
+    /// only and read and write: a person picks one as they connect. A row
+    /// naming one list of scopes for both is refused (no access to pick).
+    #[test]
+    fn a_connections_authorization_names_its_read_and_its_write_access() {
+        let oauth = |access: serde_json::Value| {
+            let mut g = google();
+            g["connection_oauth"] = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "access": access });
+            parse(json!([g]))
+        };
+        let c = oauth(json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.read", "mail.send"] } })).unwrap();
+        let o = c.get("google").unwrap().connection_oauth.as_ref().unwrap();
+        assert_eq!((o.access.of(ConnectionAccess::Read).unwrap().scopes.as_slice(), o.access.of(ConnectionAccess::Write).unwrap().scopes.as_slice()), (&["mail.read".to_string()][..], &["mail.read".to_string(), "mail.send".to_string()][..]));
+        assert_eq!(o.access.offered(), [ConnectionAccess::Read, ConnectionAccess::Write]);
+        // a provider with no read-only scope: read and write alone
+        let one = oauth(json!({ "write": { "scopes": ["api", "refresh_token"] } })).unwrap();
+        let o = one.get("google").unwrap().connection_oauth.as_ref().unwrap();
+        assert_eq!((o.access.of(ConnectionAccess::Read), o.access.offered()), (None, vec![ConnectionAccess::Write]));
+        assert_eq!(Catalog::parse(&serde_json::to_string(one.providers()).unwrap()).unwrap(), one, "it reads back, naming no read");
+        assert_eq!(Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap(), c, "the wire form reads back");
+        for bad in [json!({ "read": { "scopes": ["mail.read"] } }), json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.read"] } }), json!({ "read": { "scopes": [] }, "write": { "scopes": ["mail.send"] } }), json!({ "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.send"] }, "admin": { "scopes": ["all"] } }), json!({ "read": { "scopes": ["mail.read"], "extra": 1 }, "write": { "scopes": ["mail.send"] } })] {
+            assert!(matches!(oauth(bad.clone()), Err(CatalogError::OAuth { .. }) | Err(CatalogError::Shape(_))), "{bad}");
+        }
+        let mut g = google();
+        g["connection_oauth"] = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "scopes": ["mail.read"] });
+        assert!(matches!(parse(json!([g])), Err(CatalogError::Shape(_))), "one list of scopes for both is a row of before: refused, never read as either");
+    }
+
+    /// A person's Vault secret (an own key) may share a connection's name,
+    /// each placeholder naming its kind's row; a key's name is the
+    /// catalog's alone.
+    #[test]
+    fn a_vault_secret_may_share_a_connections_name_and_never_a_keys() {
+        let c = parse(json!([google(), { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["PERPLEXITY_API_KEY"] }])).unwrap();
+        let bearer = Placement::Header { name: "authorization".into(), format: "Bearer {}".into() };
+        let with = c.with(vec![crate::vault::row("google", vec!["api.vault.test".into()], bearer.clone())]);
+        assert_eq!(with.named("google", true).map(|p| p.hosts.clone()), Some(vec!["gmail.googleapis.com".to_string(), "www.googleapis.com".to_string()]), "the connection's");
+        assert_eq!(with.named("google", false).map(|p| p.hosts.clone()), Some(vec!["api.vault.test".to_string()]), "the Vault's");
+        assert_eq!((c.named("google", false), c.named("perplexity", true)), (None, None), "no row of the other kind");
+        assert_eq!(c.named("perplexity", false).map(|p| p.kind), Some(Kind::Operator));
+        let key = crate::vault::row("perplexity", vec!["api.vault.test".into()], bearer);
+        assert!(std::panic::catch_unwind(|| c.with(vec![key])).is_err(), "a key's name is never a Vault's");
+    }
+
     /// Several accounts: a connection whose callback imports them (its
     /// `connection_oauth`) may name 1 to Pipes' 25; absent, it is 1, and the
     /// row hashes and reads back as before the field was.
     #[test]
     fn several_accounts_are_a_browser_bound_connections_up_to_pipes_limit() {
-        let oauth = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "scopes": ["mail.read"] });
+        let oauth = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "access": { "read": { "scopes": ["mail.read"] }, "write": { "scopes": ["mail.modify"] } } });
         let with = |accounts: serde_json::Value, oauth: Option<&serde_json::Value>| {
             let mut g = google();
             g["accounts_max"] = accounts;

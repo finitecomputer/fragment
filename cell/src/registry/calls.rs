@@ -615,12 +615,14 @@ impl Call for TestHook {
 
 /// `POST /connection/begin`: a connect of `provider` from this session,
 /// for what its body asked (`connection_accounts::Intent`: another of
-/// several accounts, or one again), which its pending row keeps.
+/// several accounts, or one again) and with the access its person picked,
+/// which its pending row keeps.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct BeginConnection {
     pub session: String,
     pub provider: String,
     pub intent: fragment_core::connection_accounts::Intent,
+    pub access: fragment_proto::computer::ConnectionAccess,
 }
 
 #[derive(Serialize, Deserialize)]
