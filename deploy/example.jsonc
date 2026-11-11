@@ -336,6 +336,27 @@
       //   "exchange": "https://api.linear.app/oauth/token", "revoke": "https://api.linear.app/oauth/revoke",
       //   "client_id": "<the app's client id>", "access": { "read": { "scopes": ["read"] }, "write": { "scopes": ["write"] } } },
       "env": ["LINEAR_OAUTH_ACCESS_TOKEN"] },
+    // The person's Box account, as Google is: Pipes' `box` provider,
+    // connected through the browser once its OAuth app's secret is in the
+    // store (the app Pipes' Box integration uses, with the platform's
+    // callback beside Pipes', and both its scopes enabled). Box's authorize
+    // narrows a grant to the scope it asks for: `root_readonly` read only,
+    // `root_readwrite` read and write. Its answer names no `scope` (so the
+    // grant is what was asked), lasts an hour, and its refresh token is
+    // single-use, rotating, for 60 days. Box lets read only download no
+    // file's contents, and its note says so. Its token goes to the API and
+    // the upload host; a download's redirect to dl.boxcloud.com needs none.
+    // No `revoke`: Box's takes the client's id and secret beside the token
+    // (developer.box.com's OAuth guides and API reference, read 2026-11-11).
+    { "name": "box", "kind": "connection",
+      "hosts": ["api.box.com", "upload.box.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "note": "Box lets read only list, search and see your files and folders, but not download what is in them. To let your agents read a file's contents, connect with read and write.",
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://account.box.com/api/oauth2/authorize",
+      //   "exchange": "https://api.box.com/oauth2/token",
+      //   "client_id": "<the app's client id>", "access": { "read": { "scopes": ["root_readonly"] }, "write": { "scopes": ["root_readwrite"] } } },
+      "env": ["BOX_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },

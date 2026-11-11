@@ -1981,9 +1981,9 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            // the example offers Linear beside Google, and Salesforce; the hosted e2e's preview, not yet
+            // the example offers Linear and Box beside Google, and Salesforce; the hosted e2e's preview, not yet
             let example = file == "deploy/example.jsonc";
-            let connections: &[&str] = if example { &["google", "linear"] } else { &["google"] };
+            let connections: &[&str] = if example { &["google", "linear", "box"] } else { &["google"] };
             let orgs: &[&str] = if example { &["salesforce"] } else { &[] };
             let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use"]
                 .into_iter()
@@ -2025,6 +2025,34 @@ mod tests {
         assert_eq!((o.client_id.as_str(), o.revoke.as_deref()), ("linear-client", Some("https://api.linear.app/oauth/revoke")));
         assert_eq!((scopes(fragment_core::catalog::ConnectionAccess::Read), scopes(fragment_core::catalog::ConnectionAccess::Write)), (vec!["read".to_string()], vec!["write".to_string()]), "read only asks for read, read and write for write");
         assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_LINEAR".into(), "fragment-linear-oauth-secret")));
+    }
+
+    /// The example's Box row, its commented connect uncommented (a client id
+    /// and the secret's store name filled in), loads: one scope for each
+    /// access, no revocation (Box's takes the client's secret beside the
+    /// token), its hosts the API's and the upload's alone, its note, and
+    /// its client secret bound as the cell's.
+    #[test]
+    fn the_example_box_connect_loads_once_uncommented() {
+        let example = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let start = example.find(r#"{ "name": "box""#).expect("the example's box row");
+        let row = &example[start..start + example[start..].find(r#""env": ["BOX_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-box-oauth-secret").replace("<the app's client id>", "box-client");
+        let dir = devstack::repo_root().join("target/xtask-tests/box-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("box").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        let scopes = |a: fragment_core::catalog::ConnectionAccess| o.access.of(a).map(|g| g.scopes.clone()).unwrap_or_default();
+        assert_eq!((o.client_id.as_str(), o.authorize.as_str(), o.exchange.as_str(), o.revoke.as_deref()), ("box-client", "https://account.box.com/api/oauth2/authorize", "https://api.box.com/oauth2/token", None));
+        assert_eq!((scopes(fragment_core::catalog::ConnectionAccess::Read), scopes(fragment_core::catalog::ConnectionAccess::Write)), (vec!["root_readonly".to_string()], vec!["root_readwrite".to_string()]), "read only asks for root_readonly, read and write for root_readwrite");
+        assert_eq!(p.hosts, ["api.box.com", "upload.box.com"], "never a download's host: its URL needs no token");
+        assert!(p.note.as_deref().is_some_and(|n| n.contains("read and write")), "Settings says read only downloads nothing: {:?}", p.note);
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_BOX".into(), "fragment-box-oauth-secret")));
     }
 
     /// The example's Salesforce row, its commented connect uncommented (a
@@ -2074,7 +2102,7 @@ mod tests {
         let d = with(note).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
-        assert!(catalog.providers().iter().filter(|p| !["google", "salesforce"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Salesforce's");
+        assert!(catalog.providers().iter().filter(|p| !["google", "box", "salesforce"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none but Box's and Salesforce's");
         let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
         let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");
