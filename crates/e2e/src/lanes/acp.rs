@@ -19,11 +19,12 @@ use super::jobs::records;
 use crate::api::Api;
 use crate::Suite;
 
-pub(super) const CHECKS: [&str; 4] = [
+pub(super) const CHECKS: [&str; 5] = [
     "fragment acp serves its owner's agent to an ACP client over stdio: a session is a new chat with the agent in it, a prompt a message to it there, and its turn streams back: its words, its tool call as it is asked for and as it ends, then its end",
     "an ACP client's cancel stops the prompt's turn: a Stop on the chat that names it, the turn ended stopped or never run, and the prompt answered cancelled",
     "a question the agent asks in words ends its prompt, and the client's next prompt is its answer: the turn that asked goes on with it to its end, and no turn starts for the answer",
     "asked, and its computer put to sleep: its owner's answer wakes it, the turn that asked ends as lost, the answer is a turn of its own, and the prompt is answered with that turn's reply, never failed by the lost one",
+    "another ACP client lists the agent's chats as its sessions and loads one: what was said is replayed in the order it happened, and a prompt goes on in it",
 ];
 
 /// The CLI as an ACP client holds it: its stdin, and each message it says.
@@ -83,6 +84,11 @@ impl Client {
         self.stdin = None;
         self.child.wait().is_ok_and(|status| status.success())
     }
+}
+
+/// An update's kind, and its words or its call's title.
+fn told(update: &Value) -> (&str, &str) {
+    (update["sessionUpdate"].as_str().unwrap_or(""), update["content"]["text"].as_str().or(update["title"].as_str()).unwrap_or(""))
 }
 
 /// The words a list of updates says for `kind`, as one text.
@@ -205,6 +211,34 @@ pub(super) fn checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, ag
             && phase(api, owner, id) == "awake"
             && asker.end(),
         json!({ "slept": slept.body["phase"], "told": told_back, "answered": answered, "work": work.iter().map(|r| &r["body"]).collect::<Vec<_>>() }),
+    );
+
+    // another client: the chat is among the agent's sessions, loads as it
+    // was said, and goes on
+    let mut reader = Client::start(s, api, &home, agent)?;
+    let (_, sessions) = reader.ask(1, "session/list", json!({ "cwd": "/work/repo" }), Duration::from_secs(60))?;
+    let found = sessions["result"]["sessions"].as_array().into_iter().flatten().find(|x| x["sessionId"] == session.as_str()).cloned().unwrap_or(Value::Null);
+    let (replayed, loaded) = reader.ask(2, "session/load", json!({ "sessionId": session, "cwd": "/work/repo", "mcpServers": [] }), Duration::from_secs(60))?;
+    let again = "hello again, from acp";
+    let (updates, answer) = reader.ask(3, "session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": again }] }), wake)?;
+    let order: Vec<(&str, &str)> = replayed.iter().map(told).collect();
+    let echo = |told: &(&str, &str), text: &str| told.0 == "agent_message_chunk" && told.1.starts_with("echo: [") && told.1.ends_with(text);
+    s.ok(
+        CHECKS[4],
+        found["cwd"] == "/work/repo"
+            && found["title"].as_str().is_some_and(|t| !t.is_empty())
+            && loaded["result"] == json!({})
+            && order.len() >= 5
+            && order[0] == ("user_message_chunk", asked)
+            && order[1] == ("agent_message_chunk", "Let me look.")
+            && order[2].0 == "tool_call"
+            && replayed[2]["status"] == "completed"
+            && echo(&order[3], asked)
+            && order[4] == ("user_message_chunk", slow)
+            && answer["result"] == json!({ "stopReason": "end_turn" })
+            && words(&updates, "agent_message_chunk").ends_with(again)
+            && reader.end(),
+        json!({ "listed": found, "replayed": replayed, "updates": updates, "answer": answer }),
     );
     Ok(())
 }
