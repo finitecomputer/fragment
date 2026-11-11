@@ -581,19 +581,21 @@ only by the platform's own pages, severs its opener, loads scripts,
 styles and images only from the platform (`Content-Security-Policy`), and
 sends `Referrer-Policy: same-origin`.
 
-**Reach stays private** (Paul, 2026-11-01, FIN-352; temporary:
-docs/technical-debt-ledger.md). A fragment holding a secret or a door
-(a connector bound, an agent's SimpleX door) has reach (`status.reach`,
-`Sharing.reach` in its owner's row), and is shared with no one but its
-owner and their own agents. While it has reach, anyone else added or
-given a role, an invite or its yes, and `link` or `public` visibility are
-403 `reason: private_while_reaching`; while it is shared beyond them
-(`Sharing::beyond`: not `members`, someone else in it, or an invite
-waiting), `PUT secrets`, `__secrets`, a connector's link and an agent's
-door ticket are 403 `reason: unshare_first`. Narrowing it is never
-refused, and one shared before the rule keeps serving. The sheet then adds
-no one and offers `members` only. A public address is the same members
-and visibility, so no sharing.
+**Reach has no link** (Paul, 2026-11-01 and 2026-11-11, FIN-352;
+temporary: docs/technical-debt-ledger.md). A fragment holding a secret or
+a door (a connector bound, an agent's SimpleX door) has reach
+(`status.reach`, `Sharing.reach` in its owner's row), and is never opened
+by its link or public. While it has reach, `link` or `public` visibility
+is 403 `reason: private_while_reaching`; while its link opens it
+(`Sharing::beyond`: not `members`), `PUT secrets`, `__secrets`, a
+connector's link and an agent's door ticket are 403 `reason:
+unshare_first`. People named are never refused: its owner adds them at
+any role, invites them, and they accept, and they can use its keys as
+their role allows. Narrowing it is never refused, and one opened by its
+link before the rule keeps serving. The sheet then offers `members` only
+and tells its owner, once, under the invite form: "People you add can
+use this app's keys." A public address is the same members and
+visibility, so no sharing.
 
 On a chat one of the owner's agents is in, the sheet, and `fragment
 members add`, say "People in this chat can talk to your agent."

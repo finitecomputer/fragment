@@ -1256,16 +1256,20 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
     let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
     let r = ticket(c.stranger, "link")?;
     s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
-    // an agent shared beyond its owner and their agents is given no door
-    // (FIN-352): an invite waiting, its link refused; revoked, it is given
+    // an agent its link opens is given no door (FIN-352); members only
+    // again, it is, and an invite waiting (someone named) refuses none
+    let visibility = |v: &str| api.signed(c.owner, "PUT", &format!("/api/f/{}/visibility", c.agent), Some(&json!({ "visibility": v })));
+    let linked = visibility("link")?;
+    let shared = ticket(c.owner, "link")?;
+    let narrowed = visibility("members")?;
     let outsider = format!("door-outsider-{}@e2e.test", &crate::Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(c.owner, "POST", &format!("/api/f/{}/invites", c.agent), Some(&json!({ "email": outsider, "role": "viewer" })))?;
-    let shared = ticket(c.owner, "link")?;
+    let named = ticket(c.owner, "link")?;
     let revoked = api.signed(c.owner, "DELETE", &format!("/api/f/{}/invites/{outsider}", c.agent), None)?;
     s.ok(
-        "an agent with an invite waiting is given no link ticket to a door (403 unshare_first), and once it is revoked, it is",
-        invited.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && revoked.status == 200,
-        json!({ "invited": invited.body, "ticket": shared.body, "revoked": revoked.status }),
+        "an agent its link opens is given no link ticket to a door (403 unshare_first); members only again, with an invite waiting, it is",
+        linked.status == 200 && shared.status == 403 && shared.body["reason"] == "unshare_first" && narrowed.status == 200 && invited.status == 200 && named.status == 200 && revoked.status == 200,
+        json!({ "linked": linked.status, "ticket": shared.body, "narrowed": narrowed.status, "invited": invited.body, "named": named.status, "revoked": revoked.status }),
     );
     let t = ticket(c.owner, "link")?;
     let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
@@ -1895,7 +1899,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
     s.deploy(&agent);
     // members only, as one made from the agent template is: a door is
-    // linked only on an agent no one else is in (FIN-352)
+    // linked only on an agent its link does not open (FIN-352)
     let r = api.signed(&owner, "PUT", &format!("/api/f/{agent_name}/visibility"), Some(&json!({ "visibility": "members" })))?;
     anyhow::ensure!(r.status == 200, "the agent made members-only: {r}");
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
