@@ -783,11 +783,11 @@ mod tests {
     #[test]
     fn a_grant_of_more_than_was_asked_connects_with_nothing_missing() {
         let linear = |scope: &str| Grant { scopes: vec![scope.into()] };
-        let access = catalog::Access { read: linear("read"), write: linear("write") };
+        let access = catalog::Access { read: Some(linear("read")), write: linear("write") };
         let o = ConnectionOAuth { authorize: "https://linear.app/oauth/authorize?actor=user&prompt=consent".into(), exchange: "https://api.linear.app/oauth/token".into(), client_id: "client".into(), access, revoke: Some("https://api.linear.app/oauth/revoke".into()) };
         assert!(check(&o).is_ok());
         let asked = |access: ConnectionAccess| -> Vec<(String, String)> {
-            url::Url::parse(&authorize_url(&o, access, "https://platform.example/api/connections/linear/callback", "challenge", "state")).unwrap().query_pairs().into_owned().collect()
+            url::Url::parse(&authorize_url(&o, o.access.of(access).unwrap(), "https://platform.example/api/connections/linear/callback", "challenge", "state")).unwrap().query_pairs().into_owned().collect()
         };
         for (access, scope) in [(ConnectionAccess::Read, "read"), (ConnectionAccess::Write, "write")] {
             let query = asked(access);
@@ -798,11 +798,12 @@ mod tests {
         let granted = tokens(&answer, requested).expect("Linear's documented answer");
         assert_eq!(granted.import_body("2026-11-10T00:00:00Z", None)["scopes"], json!(["read", "write"]), "Pipes holds what Linear granted");
         assert!(missing(requested, &granted.scopes).is_empty());
-        assert_eq!(access_of(&o, &granted.scopes), ConnectionAccess::Write);
+        assert_eq!(access_of(&o, &granted.scopes), Some(ConnectionAccess::Write));
         let mut read = answer.clone();
         read["scope"] = json!("read");
-        let read_only = tokens(&read, &o.access.read.scopes).expect("a read-only grant");
-        assert_eq!((access_of(&o, &read_only.scopes), missing(&o.access.read.scopes, &read_only.scopes)), (ConnectionAccess::Read, vec![]), "read only, as picked, nothing missing");
+        let read_scopes = &o.access.read.as_ref().unwrap().scopes;
+        let read_only = tokens(&read, read_scopes).expect("a read-only grant");
+        assert_eq!((access_of(&o, &read_only.scopes), missing(read_scopes, &read_only.scopes)), (Some(ConnectionAccess::Read), vec![]), "read only, as picked, nothing missing");
         let mut listed = answer;
         listed["scope"] = json!(["read", "write"]);
         assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
