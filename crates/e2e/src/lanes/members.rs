@@ -677,6 +677,7 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     // people named are in while it holds the key (Paul, 2026-11-11): an
     // invite, its yes, an editor's role, another invite waiting
     let bea_id = npub::encode(bea.pubkey_hex());
+    let bea_identity = api.identity(&bea)?;
     let ivy = api.person()?;
     let invited = invite(&name, &bea)?;
     let yes = api.signed(&bea, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
@@ -695,7 +696,7 @@ pub fn reach(s: &mut Suite, api: &Api) -> Result<()> {
     let members = api.signed(&owner, "GET", &at(&name, "members"), None)?;
     let invites = api.signed(&owner, "GET", &at(&name, "invites"), None)?;
     let status = api.status(&owner, &name)?;
-    let bea_role = members.body["members"].as_array().and_then(|a| a.iter().find(|m| m["principal"] == bea_id.as_str()).map(|m| m["role"].clone()));
+    let bea_role = members.body["members"].as_array().and_then(|a| a.iter().find(|m| m["principal"] == bea_identity.as_str()).map(|m| m["role"].clone()));
     s.ok(
         "refused again the same, and it is as it was: members only, its key held, its named editor in, its invite waiting",
         refused(&again, "private_while_reaching")
