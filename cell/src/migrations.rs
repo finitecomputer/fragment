@@ -412,40 +412,39 @@ fn stage_route<'a>(mut req: Request, env: &'a Env, url: &'a Url, stage: &'a str,
 /// The mover's hand-off of an old agent's secrets (F11): the object says
 /// whether its command takes these kinds now, and whose Vault and agent
 /// they are for (it never sees a value); each value goes from here
-/// straight into that Vault, bound to the new agent's fragment; then the
-/// object marks the command handed, so the same command again puts
+/// straight into that Vault, bound to the new agent's fragment, once per
+/// old agent and kind: the Vault keeps its receipt in the turn that puts
+/// it, so the same hand-off again, cut short or beside another, puts
 /// nothing (a person may have moved one out since). One the Vault refuses
-/// (its rules, or a full Vault) is left out of the answer; a Vault that
-/// could not be asked fails the call, and the mover tries again. No value
-/// is logged or put in an error: a body that does not read is refused in
-/// words of its own, never serde's, which quote what they read.
+/// (its rules, a full Vault, a name another agent's secret holds) is left
+/// out of the answer; a Vault that could not be asked fails the call, and
+/// the mover tries again. No value is logged or put in an error: a body
+/// that does not read is refused in words of its own, never serde's,
+/// which quote what they read.
 fn handoff<'a>(env: &'a Env, old: &'a str, body: String) -> Waits<'a, Response> {
     Box::pin(async move {
         let h: Handoff = serde_json::from_slice(body.as_bytes()).map_err(|_| CellError::invalid("a hand-off is {command, items: [{kind, value}]}, its kinds telegram_bot_token, openrouter_key and nostr_nsec"))?;
         drop(body);
         let kinds = machine::handoff_kinds(&h).map_err(refused)?;
-        let named = |ks: &mut dyn Iterator<Item = SecretKind>| ks.map(SecretKind::as_str).collect::<Vec<_>>().join(",");
-        let asked = format!("{}\n{}", h.command, named(&mut kinds.iter().copied()));
-        let at = text(ask(env, format!("handoff/{old}"), asked).await?)?;
-        let Some((person, agent)) = at.strip_prefix("put\n").and_then(|a| a.split_once('\n')) else {
-            // handed already: its answer as it was
-            return crate::json_passed(at.strip_prefix("handed\n").unwrap_or_default().as_bytes().to_vec());
-        };
+        let named = kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(",");
+        let at = text(ask(env, format!("handoff/{old}"), format!("{}\n{named}", h.command)).await?)?;
+        let (person, agent) = at.split_once('\n').ok_or_else(|| CellError::host("a hand-off's Vault"))?;
         let fragment = agent_fragment(env, agent).await?;
         let mut handed = vec![];
         for item in &h.items {
             let put = match machine::vault_secret(item.kind, &fragment, &item.value) {
-                Some((name, put)) => crate::vault::put(env, person, &name, &put).await,
+                Some((name, put)) => crate::vault::hand_off(env, person, &name, &format!("{old} {}", item.kind.as_str()), &put).await,
                 None => Err(CellError::invalid("not a Nostr key")),
             };
             match put {
-                Ok(_) => handed.push(item.kind),
+                Ok(_) => handed.push(format!("\"{}\"", item.kind.as_str())),
                 // refused by its rules: left on the old platform
                 Err(e) if e.code.status() < 500 => console_log!("migrations.handoff: {old} {} refused ({})", item.kind.as_str(), e.code.status()),
                 Err(e) => return Err(e),
             }
         }
-        pass(env, format!("handed/{old}"), format!("{}\n{}", h.command, named(&mut handed.into_iter()))).await
+        // `HandedOff`, its kinds fixed words
+        crate::json_passed(format!("{{\"handed\":[{}]}}", handed.join(",")).into_bytes())
     })
 }
 
@@ -579,17 +578,6 @@ fn handoff_in(body: &str) -> CellResult<(String, Vec<SecretKind>)> {
     let (command, kinds) = body.split_once('\n').unwrap_or((body, ""));
     let kinds = kinds.split(',').filter(|k| !k.is_empty()).map(|k| SecretKind::parse(k).ok_or_else(|| CellError::invalid(format!("no secret kind {k}")))).collect::<CellResult<_>>()?;
     Ok((command.to_string(), kinds))
-}
-
-/// Where a command's hand-off is kept: its kinds, never a value.
-fn handed_key(command: &str) -> String {
-    format!("handed:{command}")
-}
-
-/// A command's `HandedOff`, from its kinds as kept (each a fixed word).
-fn handed_answer(kinds: &str) -> String {
-    let handed: Vec<String> = kinds.split(',').filter_map(SecretKind::parse).map(|k| format!("\"{}\"", k.as_str())).collect();
-    format!("{{\"handed\":[{}]}}", handed.join(","))
 }
 
 /// A move's row, with which secrets its old agent has as its roster offer
@@ -825,26 +813,13 @@ impl MigrationsCell {
             ("mailbox", []) => crate::json_answer(&self.mailbox()?),
             ("report", [old]) => crate::json_answer(&self.report(old, &crate::json_body(body.as_bytes())?)?),
             // the mover's hand-off (F11; body: its command, then its kinds):
-            // whose Vault and agent, or the command's answer, handed already
+            // whose Vault, and which agent's
             ("handoff", [old]) => {
                 let (command, kinds) = handoff_in(&body)?;
-                if let Some(handed) = parts.meta(&handed_key(&command))? {
-                    return Ok(Response::ok(format!("handed\n{}", handed_answer(&handed)))?);
-                }
                 let (m, has) = self.with_has(old)?;
                 machine::handoff(&m, &command, &has, &kinds).map_err(refused)?;
                 let person = parts.person_of(&m.workos_id)?.ok_or_else(|| CellError::host(format!("{old} moves with no person bound")))?;
-                Ok(Response::ok(format!("put\n{person}\n{}", m.agent.unwrap_or_default()))?)
-            }
-            // its kinds the Vault took, kept as the command's answer: the
-            // first kept stays (a hand-off cut short and sent again keeps it)
-            ("handed", [old]) => {
-                let (command, _) = handoff_in(&body)?;
-                self.with_has(old)?;
-                let kinds = body.split_once('\n').map(|(_, k)| k).unwrap_or_default();
-                parts.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", vec![text_value(&handed_key(&command)), text_value(kinds)])?;
-                let kept = parts.meta(&handed_key(&command))?.unwrap_or_default();
-                Ok(Response::ok(handed_answer(&kept))?)
+                Ok(Response::ok(format!("{person}\n{}", m.agent.unwrap_or_default()))?)
             }
             ("list", [after]) => {
                 let rows = parts.rows(ADMIN_PAGE, vec![text_value(after), SqlStorageValue::Integer(PAGE as i64 + 1)])?;

@@ -659,7 +659,8 @@ unfinished design, not debt.
   rules in `xtask deploy`, the stage's reads (one zip by ranges; no
   mount), the mover's npub in the config (`migrations.mover`; it signs
   with its own key, so fragment holds no secret for it), the secrets
-  hand-off (F11: the Vault entries it made are their person's, and stay),
+  hand-off (F11: the Vault entries it made are their person's, and stay;
+  the Vault's `receipts` table is the move's),
   the e2e lane `move` and the fake mover;
   and, from its other PRs, the page `/move`, the welcome's slot, the
   notices owner, the sign-in call (`signin.rs`), `Source::Stage` and
@@ -684,7 +685,8 @@ unfinished design, not debt.
   5. Remove `Source::Stage`, `fragment stage`, and the `finite-computer`
      layout and profile.
   6. Remove `finite-chat-archive/1` once phase 0 ends.
-  7. Remove the vault's `nostr_nsec` purpose and what it holds.
+  7. Remove the vault's `nostr_nsec` purpose and what it holds, and the
+     Vault's `receipts` table (a step that drops it) with `vault/handoff`.
   8. Delete the `STAGE` bucket (Paul).
   9. Remove the SPECIAL-CASE-INVENTORY row and this entry.
   10. In finite-mono: the mover, the host reader, the database role and

@@ -498,7 +498,7 @@ out. `GET /api/f/<name>/status` (viewer and up).
 
 ### `HandedOff`
 
-out. Its answer: the kinds its person's Vault took. One the Vault refused (its rules: a value it does not take, or a Vault full) is left out, and stays on the old platform. The same command again answers the same, and puts nothing.
+out. Its answer: the kinds its person's Vault holds, each put once per old agent (the Vault's receipt). One the Vault refused (its rules, a full Vault, a name another agent's secret holds) is left out, and stays on the old platform. The same hand-off again answers the same, and puts nothing.
 
 | field | type | | |
 | --- | --- | --- | --- |

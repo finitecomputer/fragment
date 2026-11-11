@@ -625,7 +625,7 @@
         "x-fragment-direction": "out"
       },
       "HandedOff": {
-        "description": "Its answer: the kinds its person's Vault took. One the Vault refused\n(its rules: a value it does not take, or a Vault full) is left out, and\nstays on the old platform. The same command again answers the same,\nand puts nothing.",
+        "description": "Its answer: the kinds its person's Vault holds, each put once per old\nagent (the Vault's receipt). One the Vault refused (its rules, a full\nVault, a name another agent's secret holds) is left out, and stays on\nthe old platform. The same hand-off again answers the same, and puts\nnothing.",
         "properties": {
           "handed": {
             "items": {

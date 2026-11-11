@@ -168,14 +168,24 @@ revoked.
   while it is asked or staging (409). Each kind once, a value at most
   `HANDOFF_VALUE_MAX_BYTES` (4 KiB).
 - **Where.** The router reads the values; `Migrations` sees only their
-  kinds, says whose Vault and agent they are for, and marks the command
-  handed. Each value goes from the router straight into the person's
-  Vault (`vault::put`), in the call, and is never stored, logged or
-  echoed on the way; a body that does not read is refused in words of
-  its own. The mover reads them in memory (`finite-mover-host secrets`),
-  never on disk or in a log.
+  kinds, and says whose Vault and agent they are for. Each value goes
+  from the router straight into the person's Vault (`vault::hand_off`),
+  in the call, and is never stored, logged or echoed on the way; a body
+  that does not read is refused in words of its own. The mover reads
+  them in memory (`finite-mover-host secrets`), never on disk or in a
+  log.
+- **Once.** The Vault keeps a receipt for each old agent and kind
+  (`<old> <kind>`, its `receipts` table), in the turn that puts the
+  secret. A hand-off whose receipt is there puts nothing: a retry, one
+  cut short and sent again, or two at once never put back a secret its
+  person removed, moved into a connector or set since. The receipt
+  outlives the secret; a wipe empties it.
 - **The entries** (`fragment_core::migrations::vault_secret`), each
-  bound to the new agent's fragment, named `<kind>-<label>--<suffix>`:
+  bound to the new agent's fragment, named `<kind>-<fragment>`, or, when
+  that is over 32 bytes, `<kind>-<label…>-<hash>--<suffix>` (the label
+  cut short beside 6 hex of the fragment name's SHA-256). A hand-off
+  never takes the name of a secret bound to other agents (the Vault
+  refuses it, 409):
 
   | Kind | Hosts | Place |
   |---|---|---|
@@ -183,12 +193,12 @@ revoked.
   | OpenRouter's key | `openrouter.ai` | `Authorization: Bearer` |
   | The Nostr key, as 64 hex | none: kept, sent nowhere | `{"sign": "nip98"}`, for a signer set up later (FIN-486) |
 
-- **Answers.** `HandedOff {handed}`: the kinds the Vault took. One it
-  refuses (its rules, a full Vault) is left out, and stays on the old
-  platform. A Vault that could not be asked fails the call, and the
-  mover tries again. The same command again answers the same and puts
-  nothing, so a secret its person moved out or removed since stays so.
-  A later attempt's command hands off again.
+- **Answers.** `HandedOff {handed}`: the kinds the Vault holds a
+  receipt for. One it refuses (its rules, a full Vault, another agent's
+  name) is left out, and stays on the old platform. A Vault that could
+  not be asked fails the call, and the mover tries again. The same
+  hand-off again answers the same and puts nothing; once the stage is
+  staged, its command is done and a hand-off is 409.
 
 ## A new agent's stage
 

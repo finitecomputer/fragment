@@ -685,42 +685,50 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     let tag = crate::Keys::generate().pubkey_hex()[..16].to_string();
     let (token, key) = (format!("123456:tg-sentinel-{tag}"), format!("sk-or-v1-sentinel-{tag}"));
     const NSEC: &str = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
-    let items = vec![
-        HandoffItem { kind: SecretKind::TelegramBotToken, value: token.clone() },
-        HandoffItem { kind: SecretKind::OpenrouterKey, value: key.clone() },
-        HandoffItem { kind: SecretKind::NostrNsec, value: NSEC.into() },
-    ];
-    mover.secrets(items.clone());
-    let worked = mover.run_once()?;
-    mover.secrets(vec![]);
-    let (command, answers) = worked.into_iter().find(|(c, _)| c.old == old).context("its stop_and_stage")?;
-    let handed = answers.get(1).cloned().context("its hand-off's answer")?;
-    let vault = api.signed(&owner, "GET", "/api/vault", None)?;
-    let entry = |word: &str| vault.body["secrets"].as_array().and_then(|l| l.iter().find(|e| e["name"].as_str().is_some_and(|n| n.starts_with(&format!("{word}-"))))).cloned().unwrap_or_default();
-    let (tg, or, ns) = (entry("telegram"), entry("openrouter"), entry("nostr"));
+    let item = |kind, value: &str| HandoffItem { kind, value: value.into() };
+    let all = vec![item(SecretKind::TelegramBotToken, &token), item(SecretKind::OpenrouterKey, &key), item(SecretKind::NostrNsec, NSEC)];
+    let cmd = mover.commands()?.into_iter().find(|c| c.old == old).context("its stop_and_stage")?;
+    let stopped = mover.report(&cmd, event("stopped"))?;
+    anyhow::ensure!(stopped.status == 200, "stopped: {} {}", stopped.status, stopped.body);
+    let vault = || -> Result<Value> { Ok(api.signed(&owner, "GET", "/api/vault", None)?.body) };
+    let entry = |v: &Value, name: &str| v["secrets"].as_array().and_then(|l| l.iter().find(|e| e["name"] == name)).cloned().unwrap_or_default();
+    let name_of = |kind| fragment_core::migrations::vault_secret(kind, &agent_name, "x").map(|(n, _)| n).unwrap_or_default();
+    let (tg_name, or_name, ns_name) = (name_of(SecretKind::TelegramBotToken), name_of(SecretKind::OpenrouterKey), name_of(SecretKind::NostrNsec));
     let mine = json!([agent_name]);
+
+    // a hand-off cut short after its first secret: that one is in the Vault
+    let first = mover.hand_off(&old, &cmd.id, vec![item(SecretKind::TelegramBotToken, &token)])?;
+    let v = vault()?;
+    let tg = entry(&v, &tg_name);
     s.ok(
-        "Yes hands every secret the old agent has to its person's Vault once it is stopped: Telegram's toward api.telegram.org, OpenRouter's toward openrouter.ai, the Nostr key kept to sign with and sent nowhere, each bound to the new agent alone, and no value listed",
-        command.secrets == SecretKind::ALL
-            && handed.status == 200
-            && handed.body == json!({ "handed": ["telegram_bot_token", "openrouter_key", "nostr_nsec"] })
-            && tg["hosts"] == json!(["api.telegram.org"]) && tg["agents"] == mine
-            && or["hosts"] == json!(["openrouter.ai"]) && or["agents"] == mine
-            && ns["hosts"] == json!([]) && ns["place"] == json!({ "sign": "nip98" }) && ns["agents"] == mine
-            && ![token.as_str(), key.as_str(), NSEC].iter().any(|v| vault.text.contains(v)),
-        format!("{} {} | {}", handed.status, handed.body, vault.text),
+        "Yes hands the old agent's Telegram token to its person's Vault once it is stopped: toward api.telegram.org, bound to the new agent alone, its value listed nowhere",
+        cmd.secrets == SecretKind::ALL && first.status == 200 && first.body == json!({ "handed": ["telegram_bot_token"] }) && tg["hosts"] == json!(["api.telegram.org"]) && tg["agents"] == mine && !v.to_string().contains(&token),
+        format!("{} {} | {v}", first.status, first.body),
     );
-    // replay: the same command again puts nothing (its owner removed one since)
-    let tg_name = tg["name"].as_str().unwrap_or_default().to_string();
+    // its person removes it, and keeps a secret of another agent's under the
+    // name OpenRouter's would take; then the mover tries the whole hand-off again
     let removed = api.signed(&owner, "DELETE", &format!("/api/vault/{tg_name}"), None)?;
-    let again = mover.hand_off(&old, &command.id, items)?;
-    let after = api.signed(&owner, "GET", "/api/vault", None)?;
-    let left: Vec<&str> = after.body["secrets"].as_array().map(|l| l.iter().filter_map(|e| e["name"].as_str()).collect()).unwrap_or_default();
+    let theirs = api.signed(&owner, "PUT", &format!("/api/vault/{or_name}"), Some(&json!({ "value": "their-own-key", "hosts": ["example.com"], "agents": ["other--x7k2"] })))?;
+    anyhow::ensure!(removed.status == 200 && theirs.status == 200, "the owner's own edits: {removed} {theirs}");
+    let again = mover.hand_off(&old, &cmd.id, all.clone())?;
+    let v = vault()?;
+    let (ns, or) = (entry(&v, &ns_name), entry(&v, &or_name));
     s.ok(
-        "the same hand-off again answers the same and puts nothing: a secret its owner removed since stays removed",
-        removed.status == 200 && again.status == 200 && again.body == handed.body && left.len() == 2 && !left.contains(&tg_name.as_str()),
-        format!("{} {} {left:?}", again.status, again.body),
+        "tried again whole, it puts what it had not (the Nostr key, kept to sign with and sent nowhere), never puts back the token its person removed, and never takes the name of another agent's secret (OpenRouter's left out, theirs untouched)",
+        again.status == 200
+            && again.body == json!({ "handed": ["telegram_bot_token", "nostr_nsec"] })
+            && entry(&v, &tg_name).is_null()
+            && ns["hosts"] == json!([]) && ns["place"] == json!({ "sign": "nip98" }) && ns["agents"] == mine
+            && or["agents"] == json!(["other--x7k2"]) && or["hosts"] == json!(["example.com"])
+            && ![token.as_str(), key.as_str(), NSEC].iter().any(|x| v.to_string().contains(x)),
+        format!("{} {} | {v}", again.status, again.body),
     );
+    let replay = mover.hand_off(&old, &cmd.id, all.clone())?;
+    let after = vault()?;
+    s.ok("the same hand-off again answers the same and changes nothing", replay.status == 200 && replay.body == again.body && after == v, format!("{} {}", replay.status, replay.body));
+    mover.run_once()?;
+    let late = mover.hand_off(&old, &cmd.id, all)?;
+    s.ok("once its stage is staged, its command is done: a hand-off is stale (409)", late.status == 409, format!("{} {}", late.status, late.body));
     let logged = super::vault::logs(s);
     s.ok("no value handed off is in any node's log", ![token.as_str(), key.as_str(), NSEC].iter().any(|v| logged.contains(v)), "a value was logged");
     let stage = format!("{old}.p1.1");

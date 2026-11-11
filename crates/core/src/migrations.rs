@@ -720,8 +720,12 @@ pub fn handoff(m: &Move, command: &str, has: &Has, kinds: &[SecretKind]) -> Resu
 ///   yet: kept, never sent, until something its person sets up asks for
 ///   one.
 ///
-/// Its name is its kind's and the agent's, at most 32 bytes: `telegram-
-/// <label>--<suffix>`, the label cut short to fit.
+/// Its name is its kind's and the agent's, at most 32 bytes:
+/// `telegram-<fragment>` whole when it fits; otherwise the label cut short
+/// and the first 6 hex of the fragment name's SHA-256 beside it
+/// (`telegram-<label…>-<hash>--<suffix>`), so two of a person's agents
+/// whose cut names would meet do not share one. The Vault refuses a
+/// hand-off a name another agent's secret holds, should two meet anyway.
 pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(String, PutSecret)> {
     let (word, hosts, place, value) = match kind {
         SecretKind::TelegramBotToken => ("telegram", vec!["api.telegram.org".to_string()], Place::default(), value.to_string()),
@@ -729,9 +733,15 @@ pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(St
         SecretKind::NostrNsec => ("nostr", vec![], Place { sign: Some("nip98".into()), ..Place::default() }, crate::npub::secret_hex(value)?),
     };
     let (label, suffix) = fragment_proto::split_fragment_name(fragment)?;
-    let room = 32 - word.len() - 3 - suffix.len();
-    let label = label[..label.len().min(room)].trim_end_matches('-');
-    let name = format!("{word}-{label}--{suffix}");
+    let whole = format!("{word}-{fragment}");
+    let name = if whole.len() <= 32 {
+        whole
+    } else {
+        let hash = &crate::blob::sha256_hex(fragment.as_bytes())[..6];
+        let room = 32 - word.len() - 1 - 1 - hash.len() - 2 - suffix.len();
+        let label = label[..label.len().min(room)].trim_end_matches('-');
+        format!("{word}-{label}-{hash}--{suffix}")
+    };
     Some((name, PutSecret { value, hosts, place, agents: vec![fragment.to_string()] }))
 }
 
@@ -1795,7 +1805,15 @@ mod tests {
         assert_eq!((name.as_str(), put.value.as_str(), put.hosts.len(), put.place.sign.as_deref()), ("nostr-kestrel--x7k2", hex, 0, Some("nip98")));
         assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", hex).unwrap().1.value, hex, "hex too");
         assert_eq!(vault_secret(SecretKind::NostrNsec, "kestrel--x7k2", "nsec1nope"), None, "not a key");
-        // a long label is cut short to fit a name; every entry passes the Vault's rules
+        // a long label is cut short to fit a name, beside its whole name's
+        // hash: two agents whose cut labels meet still have names of their own
+        let (alpha, beta) = ("abcdefghijklmnop-alpha--x7k2", "abcdefghijklmnop-beta--x7k2");
+        for kind in SecretKind::ALL {
+            let value = if kind == SecretKind::NostrNsec { nsec } else { "tok-123" };
+            let (a, b) = (vault_secret(kind, alpha, value).unwrap().0, vault_secret(kind, beta, value).unwrap().0);
+            assert!(a != b && a.len() <= 32 && b.len() <= 32, "{a} {b}");
+        }
+        // every entry passes the Vault's rules
         let long = format!("{}--x7k2", "a".repeat(20) + "-b");
         let catalog = Catalog::default();
         for kind in SecretKind::ALL {
