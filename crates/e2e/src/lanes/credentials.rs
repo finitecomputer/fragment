@@ -82,6 +82,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a connection whose accounts live at hosts of their own (Salesforce's orgs): a call to its account's own host, as Pipes' metadata names it, is swapped the account's credential, and one to its named host Pipes' token",
     "a call to another account's host under its suffix (another org's) is refused, naming its own account's host, and reaches no one",
     "an account whose Pipes metadata names no host under the suffix, or another host, has its calls there refused, reaching no one",
+    "connected through its callback as one org, then again as another: the account is made again with the new org's host, never updated beside the old one's, so the token goes to the new org's host and the old org's is refused, reaching no one",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -282,6 +283,25 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         SWAP_CHECKS[48],
         [&unnamed, &elsewhere].iter().all(|said| said.starts_with("fetched 5") && said.contains(&format!("names no host under {under}"))) && s.upstream.seen().len() == seen_before,
         json!({ "unnamed": unnamed, "elsewhere": elsewhere }),
+    );
+    // through its callback, as a person connects: one org, then another;
+    // an account there already is made again, its host the new grant's
+    let session = api.sign_in(&email)?;
+    let first = connected_as(api, &session, ORG_CONNECTION, json!({}), "acme")?;
+    let at_first = say(s, 169, &fetch(s, &own))?;
+    let first_swapped = swapped_at(s, &own);
+    let rival = format!("rival.{under}");
+    let second = connected_as(api, &session, ORG_CONNECTION, json!({}), "rival")?;
+    let at_second = say(s, 170, &fetch(s, &rival))?;
+    let second_swapped = swapped_at(s, &rival);
+    let seen_before = s.upstream.seen().len();
+    let at_old = say(s, 178, &fetch(s, &own))?;
+    s.ok(
+        SWAP_CHECKS[49],
+        first.status == 200 && at_first.starts_with("fetched 200") && first_swapped && second.status == 200 && at_second.starts_with("fetched 200") && second_swapped
+            && at_old.starts_with("fetched 403") && at_old.contains(&format!("is at {rival}")) && s.upstream.seen().len() == seen_before
+            && s.workos.metadata(&email, ORG_CONNECTION) == Some(json!({ "instance_url": format!("https://{rival}") })),
+        json!({ "first": first.status, "atFirst": at_first, "second": second.status, "atSecond": at_second, "atOld": at_old }),
     );
     let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{ORG_CONNECTION}"), None)?;
     anyhow::ensure!(gone.status == 200, "the account host's checks cleared: {gone}");
@@ -672,6 +692,29 @@ fn path_of(url: &str) -> String {
 pub(super) fn sent_back(api: &Api, page: &str) -> Result<String> {
     let r = api.external(page)?;
     Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+}
+
+/// A connect of `provider` through its callback, as Settings makes one (its
+/// body `body`): the person's session begins it, the stand-in provider's
+/// consent signs in as `account` and grants all it asks for, and their
+/// browser comes back to the callback, whose answer this is.
+fn connected_as(api: &Api, session: &str, provider: &str, body: Value, account: &str) -> Result<crate::api::Reply> {
+    let r = api.call(crate::api::Call {
+        method: "POST",
+        url: format!("{}/api/connections/{provider}/authorize", api.base),
+        body: Some(body.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())],
+        ..crate::api::Call::default()
+    })?;
+    anyhow::ensure!(r.status == 200, "begin {provider}: {r}");
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).ok_or_else(|| anyhow::anyhow!("no connection cookie: {r}"))?;
+    let mut to = reqwest::Url::parse(r.body["url"].as_str().unwrap_or_default())?;
+    to.query_pairs_mut().append_pair("account", account);
+    let consent = api.external(to.as_str())?;
+    anyhow::ensure!(consent.status == 302, "the stand-in provider's consent: {consent}");
+    api.call(crate::api::Call { method: "GET", url: consent.header("location"), cookie: Some(format!("fragment_session={session}; {bound}")), ..crate::api::Call::default() })
 }
 
 /// Settings' Connect, as the shell sends it (its session, from the

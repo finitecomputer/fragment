@@ -699,6 +699,16 @@ impl Catalog {
                     return Err(CatalogError::AccountHost { provider, why: format!("a {} has no accounts: only a connection does", p.kind.name()) });
                 }
                 check_account_host(a).map_err(|why| CatalogError::AccountHost { provider: provider.clone(), why })?;
+                // a named host under the suffix would take any account's
+                // token, whatever its metadata names: never
+                if let Some(h) = p.hosts.iter().find(|h| a.covers(h)) {
+                    return Err(CatalogError::AccountHost { provider, why: format!("{h} is under {}: an account's own host there is its metadata's to name, never the row's", a.under) });
+                }
+                // a reconnect of one of several updates it, which can't
+                // carry metadata (`keys::pipes_import` replaces the one)
+                if p.several() {
+                    return Err(CatalogError::AccountHost { provider, why: "an account host's connection connects one account".into() });
+                }
             }
         }
         Ok(Catalog { providers: rows })
@@ -988,6 +998,8 @@ mod tests {
             assert!(matches!(with(&|o| o["account_host"]["metadata"] = field.clone()), Err(CatalogError::AccountHost { .. })), "{field}");
         }
         assert!(matches!(with(&|o| o["account_host"]["more"] = json!(1)), Err(CatalogError::Shape(_))));
+        assert!(matches!(with(&|o| o["hosts"] = json!(["login.salesforce.com", "acme.my.salesforce.com"])), Err(CatalogError::AccountHost { .. })), "a named host under the suffix would skip its account's check");
+        assert!(matches!(with(&|o| o["accounts_max"] = json!(2)), Err(CatalogError::AccountHost { .. }) | Err(CatalogError::Accounts { .. })), "one account: a reconnect of one of several can't carry metadata");
         assert!(matches!(with(&|o| o["account_host"]["under"] = json!(7)), Err(CatalogError::Shape(_))));
     }
 

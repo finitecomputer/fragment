@@ -61,8 +61,12 @@ connection of that same account.
 Where a row names an `account_host`, the import that makes an account
 also hands Pipes the token answer's field the row names (`metadata`,
 Salesforce's `instance_url`), when it is an https URL of a host under the
-row's suffix; an update never does (WorkOS refuses it there, and keeps it
-from the provider's refreshes). The swap reads it back from Pipes'
+row's suffix; a grant naming none such is not imported (its calls there
+would all be refused). WorkOS takes `metadata` on create alone, so a
+connect where an account is already is never an update: the account is
+deleted and made again, its host the new grant's. An update would keep
+the earlier grant's host beside the new token: another org's, where the
+person connected another. Such a row connects one account. The swap reads it back from Pipes'
 credential (`/data-integrations/{slug}/credentials`) for each request to a
 host under the suffix, and sends the token there only when the hosts are
 the same (docs/computers.md, "An account's own host").
