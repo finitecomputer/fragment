@@ -16,8 +16,8 @@
 //!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
 //!                    docs/self-host.md, seam 1): no computers, no cards,
 //!                    the secrets behind the cell's stand-ins for the
-//!                    store's bindings, in .dev.vars or, with
-//!                    FRAGMENT_SECRETS_BACKEND=openbao, in OpenBao on :8802
+//!                    store's bindings, in OpenBao on :8802, its audit log
+//!                    on, or with FRAGMENT_SECRETS_BACKEND=vars in .dev.vars
 //!                    (seam 12); FRAGMENT_MODELS_FILE and
 //!                    FRAGMENT_MODEL_KEY_FILE put the text tiers on this
 //!                    machine's own models (seam 3)
@@ -156,8 +156,8 @@ const DEV_MAIL_PORT: u16 = 8798;
 /// The Stripe fake (docs/billing.md): dev never charges a card; its
 /// Checkout is a page with a Pay button.
 const DEV_STRIPE_PORT: u16 = 8800;
-/// OpenBao, on loopback, when the cell's secrets are its (on celld,
-/// `FRAGMENT_SECRETS_BACKEND=openbao`: `dev_openbao`).
+/// OpenBao, on loopback, where the cell's secrets are (on celld, unless
+/// `FRAGMENT_SECRETS_BACKEND=vars`: `dev_openbao`).
 const DEV_OPENBAO_PORT: u16 = 8802;
 const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
@@ -433,7 +433,7 @@ fn dev(args: &[String]) -> Result<()> {
             bao.layout().dir.display(),
             bao.layout().log().display()
         ),
-        None if celld.is_some() => println!("  secrets:      the cell's variables (.dev.vars; FRAGMENT_SECRETS_BACKEND=openbao for OpenBao)"),
+        None if celld.is_some() => println!("  secrets:      the cell's variables (.dev.vars, FRAGMENT_SECRETS_BACKEND=vars: a local fleet's alone)"),
         None => println!("  secrets:      wrangler's local Secrets Store"),
     }
 
@@ -467,13 +467,15 @@ fn dev(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The dev stack's OpenBao (docs/self-host.md, seam 12), when the cell's
-/// secrets are its: on celld, `FRAGMENT_SECRETS_BACKEND` is `vars` (the
-/// stand-ins' variables, the default) or `openbao`; on wrangler, which has
-/// a Secrets Store of its own, unset. The pinned OpenBao (or
-/// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`, its state in
-/// `target/devstack/openbao-<port>` (cleared by `--clean`, after which
-/// every secret is seeded again). With it, how long its start took.
+/// The dev stack's OpenBao (docs/self-host.md, seam 12), where the cell's
+/// secrets are: on celld, `FRAGMENT_SECRETS_BACKEND` is `openbao` (the
+/// default, as on any self-hosted deployment) or `vars` (the stand-ins'
+/// variables in .dev.vars, a local fleet's convenience); on wrangler, which
+/// has a Secrets Store of its own, unset. The pinned OpenBao (or
+/// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`, its audit log on,
+/// its state in `target/devstack/openbao-<port>` (cleared by `--clean`,
+/// after which every secret is seeded again). With it, how long its start
+/// took.
 fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
     let var = std::env::var("FRAGMENT_SECRETS_BACKEND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     if !celld {
@@ -482,7 +484,7 @@ fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::
         }
         return Ok(None);
     }
-    match var.as_deref().unwrap_or("vars") {
+    match var.as_deref().unwrap_or("openbao") {
         "vars" => return Ok(None),
         "openbao" => {}
         other => bail!("FRAGMENT_SECRETS_BACKEND is vars or openbao, not {other:?}"),
@@ -492,7 +494,7 @@ fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::
         std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
     }
     let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
-    let opts = devstack::openbao::Options { dir, port, audit: false };
+    let opts = devstack::openbao::Options { dir, port, audit: true };
     Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
 }
 

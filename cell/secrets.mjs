@@ -22,7 +22,12 @@
 //   set). The token is the one secret given outside the service, and the
 //   stand-ins hide it from the rest of the env.
 // - `vars`: the Worker variable named as its binding (celld dev's
-//   `.dev.vars`, devstack's `Secrets::Shim`).
+//   `.dev.vars`, devstack's `Secrets::Shim`): a convenience for a local
+//   fleet alone (dev and the e2e, `FRAGMENT_EGRESS_LOCAL=allow`), refused
+//   anywhere else. A self-hosted deployment's secrets are OpenBao's.
+//
+// A `FRAGMENT_SECRETS` that names no backend is refused: nothing falls
+// back to a backend it did not name.
 //
 // Unset, as on Cloudflare, `withSecrets` hands the env on as it came.
 //
@@ -85,7 +90,9 @@ const BACKENDS = {
   // stand-in shadows.
   vars: {
     keys: [],
-    check: () => {},
+    check: (cfg, env) => {
+      if (env?.FRAGMENT_EGRESS_LOCAL !== "allow") throw new Error("FRAGMENT_SECRETS' backend vars is a local fleet's alone (dev, the e2e: FRAGMENT_EGRESS_LOCAL=allow): a deployment's secrets are openbao's");
+    },
     reader: (env) => (secret) => {
       const value = env[secret.binding];
       return typeof value === "string" ? value : null;
@@ -170,7 +177,7 @@ class Fetcher {
 }
 
 // `FRAGMENT_SECRETS`, checked: a config that is wrong throws, naming why.
-export function config(text) {
+export function config(text, env) {
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -182,7 +189,7 @@ export function config(text) {
   const known = ["backend", "secrets", ...BACKENDS[backend].keys];
   const unknown = Object.keys(parsed).filter((k) => !known.includes(k));
   if (unknown.length) throw new Error(`FRAGMENT_SECRETS' backend ${backend} takes ${known.join(", ")}, not ${unknown.join(", ")}`);
-  BACKENDS[backend].check(parsed);
+  BACKENDS[backend].check(parsed, env);
   if (!Array.isArray(secrets) || secrets.length > SECRETS_MAX) throw new Error(`FRAGMENT_SECRETS' secrets are a list of at most ${SECRETS_MAX}`);
   const seen = new Set();
   for (const s of secrets) {
@@ -206,7 +213,7 @@ export function withSecrets(env) {
   if (typeof text !== "string" || text === "") return env;
   const kept = given.get(env);
   if (kept) return kept;
-  const cfg = config(text);
+  const cfg = config(text, env);
   const read = BACKENDS[cfg.backend].reader(env, cfg);
   const out = Object.create(env);
   for (const secret of cfg.secrets) {

@@ -34,7 +34,7 @@ its bindings. A mode flag is a design bug.
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer over chrome-headless-shell | out of scope: a card is skipped, saying why |
 | 10 | Money: who used what, own hardware in points | out of scope |
-| 12 | Secrets | **done**: the stand-in, a variables backend, OpenBao 2.7.2 |
+| 12 | Secrets | **done**: the stand-in, OpenBao 2.7.2 behind it (the default), a variables backend for local fleets alone |
 | — | Mail | **done** as debt: said and carried on (docs/technical-debt-ledger.md, "No mail without Email Sending") |
 
 ## 1. The runtime: celld
@@ -65,7 +65,7 @@ Every binding and runtime API master's cell uses, against the fork's celld
 | An object's requests in flight | 64 at most by default | works, configured | devstack runs celld with 512 (found 50) |
 | `r2_buckets` (`BLOBS`) | yes; its class reads as `Object` | works | read by what it does (`js::by_what_it_does`, found 35) |
 | `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes; its class reads as `Object` | works | read by what it does (found 35) |
-| `secrets_store_secrets` | refused | stood in | the cell's stand-ins (seam 12) |
+| `secrets_store_secrets` | refused | stood in | the cell's stand-ins (seam 12), OpenBao behind them; people's secrets stay in the Vault object |
 | `ai` (`AI`: Workers AI) | refused | degraded, typed refusal | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail typed ("this node has no AI binding"). Dev and the e2e keep the fake (`FRAGMENT_AI_URL`) |
 | `send_email` (`EMAIL`) | refused | degraded, said | no mail: each send logs `mail.unsent` and answers no id, never an error (below) |
 | `browser` (`BROWSER`) | refused | degraded, said | no cards: a live is skipped once, `card.skipped` `no_browser`; asking for a shot again is refused, typed (`host_failed`). Seam 7 brings a renderer |
@@ -143,7 +143,18 @@ Rust is the same on both and never knows which it read. Two backends:
   nothing: keys.rs keeps a value a minute per isolate, as it keeps the
   store's.
 - **`vars`:** the Worker variable of the binding's own name, in
-  `.dev.vars` (`devstack::Secrets::Shim`).
+  `.dev.vars` (`devstack::Secrets::Shim`): a convenience for dev and the
+  e2e alone. The shim refuses it on any fleet that is not local
+  (`FRAGMENT_EGRESS_LOCAL=allow`).
+
+**OpenBao is a self-hosted deployment's backend** (Paul, 2026-11-11): it
+stands in for Cloudflare's Secrets Store, holding the platform's root
+secrets (the host secret, the code store's key, sign-in's and the
+connections' client secrets, the model keys, the operator keys). A
+`FRAGMENT_SECRETS` that names no backend is refused at the first request,
+loudly; nothing falls back to the file. People's own secrets are not
+here: they stay in master's Vault Durable Object, sealed under keys
+derived from the host secret, as on Cloudflare.
 
 **OpenBao** (crates/devstack/src/openbao.rs), used as it ships:
 
@@ -170,10 +181,18 @@ Rust is the same on both and never knows which it read. Two backends:
   start and hourly while `xtask dev` runs, minted again when it has
   lapsed; in `.dev.vars` (0600).
 - **Loopback only**, no TLS: the cell and OpenBao share the box.
-- **Choosing it:** `cargo xtask dev --runtime celld` with
-  `FRAGMENT_SECRETS_BACKEND=openbao` (on :8802, its state in
-  `target/devstack/openbao-8802`, which `--clean` clears); the e2e on celld
-  unless `FRAGMENT_E2E_SECRETS=vars`. `wrangler dev` keeps its own store.
+- **Its audit log is on:** every request, its secrets HMAC'd by OpenBao,
+  in `audit.log` beside its data (the e2e counts the cell's reads from it).
+  A deployment rotates it as it rotates any log.
+- **Its unseal key** is the static seal's key file, `seal.key` in its
+  state directory (0600, beside its data): whoever reads that directory
+  can unseal it. The hardening path, not built: a TPM-held key, a PKCS#11
+  HSM, or a cloud KMS auto-unseal, each keeping the key off the disk that
+  holds the data.
+- **Choosing it:** the default. `cargo xtask dev --runtime celld` runs it
+  (on :8802, its state in `target/devstack/openbao-8802`, which `--clean`
+  clears) unless `FRAGMENT_SECRETS_BACKEND=vars`; the e2e on celld unless
+  `FRAGMENT_E2E_SECRETS=vars`. `wrangler dev` keeps its own store.
 - **A company's Vault:** `FRAGMENT_SECRETS` names it (`{"backend":
   "openbao", "addr": "https://vault.corp.example:8200", "mount": "secret",
   "prefix": "fragment", "namespace": "eng", "secrets": […]}`), each secret
@@ -347,7 +366,9 @@ through the person's browser, so the tailnet is enough.
 2. TLS: a publicly trusted certificate and a wildcard (ACME DNS-01).
 3. The front door sets `CF-Connecting-IP` (found 48): without it every
    CLI code's ask counts as one address, and a client could name its own.
-4. Host secret: 32 or more random bytes, in the secrets backend (seam 12).
+4. Secrets: OpenBao (or the org's own Vault), its unseal key kept
+   safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
+   random bytes, among the platform's root secrets there (seam 12).
 5. WorkOS: its own environment and the redirects.
 6. code.storage: its own org and key (or macrofiche, once ported).
 7. Models: endpoints for every slot, and embeddings.
@@ -374,8 +395,8 @@ behind a tailnet name, and the Hermes `FRAGMENT_HOST` rebuild.
 ```sh
 # celld: the fork's selfhost line (cargo build --release -p celld)
 CELLD_BIN=…/celld cargo xtask dev --runtime celld
-# its secrets in OpenBao instead of .dev.vars
-FRAGMENT_SECRETS_BACKEND=openbao CELLD_BIN=… cargo xtask dev --runtime celld
+# its secrets in .dev.vars instead of OpenBao (a local fleet's convenience)
+FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
 # its text tiers on this machine's own model: a deployment's `models` in a file, its key in another
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model.key CELLD_BIN=… cargo xtask dev --runtime celld
 # the e2e on celld (OpenBao behind the stand-ins unless FRAGMENT_E2E_SECRETS=vars)

@@ -20,7 +20,7 @@ test("without FRAGMENT_SECRETS the env is the runtime's own", () => {
 });
 
 test("vars: each binding answers the variable of its name through get(), the rest as it came", async () => {
-  const env = { FRAGMENT_SECRETS: JSON.stringify({ backend: "vars", secrets: SECRETS }), HOST_SECRET: "h", CODESTORAGE_KEY: "", OTHER: 7 };
+  const env = { FRAGMENT_SECRETS: JSON.stringify({ backend: "vars", secrets: SECRETS }), FRAGMENT_EGRESS_LOCAL: "allow", HOST_SECRET: "h", CODESTORAGE_KEY: "", OTHER: 7 };
   const out = withSecrets(env);
   assert.equal(out.HOST_SECRET.constructor.name, "Fetcher", "named as workerd names the store's (workers-rs reads it by that name)");
   assert.equal(await out.HOST_SECRET.get(), "h");
@@ -30,14 +30,20 @@ test("vars: each binding answers the variable of its name through get(), the res
 });
 
 test("a wrong config is refused, saying why", () => {
-  const refused = (cfg, says) => assert.throws(() => config(typeof cfg === "string" ? cfg : JSON.stringify(cfg)), (e) => e.message.includes(says), says);
+  const local = { FRAGMENT_EGRESS_LOCAL: "allow" };
+  const refused = (cfg, says, env = local) => assert.throws(() => config(typeof cfg === "string" ? cfg : JSON.stringify(cfg), env), (e) => e.message.includes(says), says);
   refused("{not json", "is JSON");
   refused({ backend: "nope", secrets: [] }, "backend is one of vars");
+  // naming none is refused: nothing falls back to a backend it did not name
+  refused({ secrets: SECRETS }, "backend is one of vars");
+  // the file's backend is a local fleet's alone (dev, the e2e), never a deployment's
+  refused({ backend: "vars", secrets: SECRETS }, "a local fleet's alone", {});
+  refused({ backend: "vars", secrets: SECRETS }, "a local fleet's alone", { FRAGMENT_EGRESS_LOCAL: "deny" });
   refused({ backend: "vars", secrets: [], addr: "x" }, "not addr");
   refused({ backend: "vars", secrets: {} }, "a list of at most 64");
   refused({ backend: "vars", secrets: Array.from({ length: 65 }, (_, i) => ({ binding: `B${i}`, secret_name: `s${i}` })) }, "a list of at most 64");
   refused({ backend: "vars", secrets: [{ binding: "lower", secret_name: "a" }] }, "names each secret's binding");
   refused({ backend: "vars", secrets: [{ binding: "A", secret_name: "has space" }] }, "names each secret's binding");
   refused({ backend: "vars", secrets: [SECRETS[0], SECRETS[0]] }, "binds HOST_SECRET twice");
-  assert.deepEqual(config(JSON.stringify({ backend: "vars", secrets: SECRETS })).secrets, SECRETS);
+  assert.deepEqual(config(JSON.stringify({ backend: "vars", secrets: SECRETS }), local).secrets, SECRETS);
 });
