@@ -53,7 +53,7 @@ const row = (...items) => {
 async function platformJson(path, init) {
   const resp = await fetch(new URL(path, location.href), { credentials: "same-origin", ...init });
   const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(body.message || `${resp.status}`);
+  if (!resp.ok) throw Object.assign(new Error(body.message || `${resp.status}`), { status: resp.status });
   return body;
 }
 
@@ -101,8 +101,9 @@ export async function setup(root) {
   let polling = null;
   // the token step again, from a connected bot (New token)
   let replacing = false;
-  // the Vault's bot is offered until it is tried, or another is asked for
-  let offered = !!VAULT;
+  // the Vault's bot (named here, or taken already: `held`) is offered
+  // until it connects, unless another is asked for
+  let declined = false;
 
   // a step: its line (or what failed, in its place), and its controls
   const say = (line, ...parts) => {
@@ -143,11 +144,13 @@ export async function setup(root) {
   // the token set, and checked: drawn once `known` has this attempt's
   // answer, a bot or why not (an attempt of its own: another dialog's
   // connect, answered meanwhile, is not this one's)
-  async function connect(token) {
+  async function connect(setToken) {
     const first = !state.bot;
     const attempt = randomHex(16);
-    await secret("TELEGRAM_BOT_TOKEN", token);
+    // the webhook's secret first: once the token is here, connecting is
+    // all a try cut short needs
     if (first) await secret("TELEGRAM_WEBHOOK_SECRET", { value: randomHex(32) });
+    await setToken();
     await fragment.call("connect", { platform: me.platform, attempt });
     for (const until = Date.now() + CONNECT_WAIT_MS; Date.now() < until; ) {
       await sleep(POLL_MS);
@@ -168,16 +171,22 @@ export async function setup(root) {
     const bot = state.bot ? `@${state.bot.username}` : "";
     if (state.error && !error) error = state.error;
     // 1: the bot, or another token for it (a token Telegram refused asks again)
-    if (offered && !state.bot) {
+    if (!declined && !state.bot && (VAULT || state.held)) {
       const go = button("Use it", "", act(async () => {
         go.disabled = true;
         go.textContent = "Connecting…";
-        // tried once: moved here, or refused, the Vault's offer is done
-        offered = false;
-        await connect({ fromVault: VAULT });
+        // said here first, so a try cut short anywhere is offered again
+        await fragment.call("hold");
+        await connect(async () => {
+          if (!VAULT) return;
+          // none in the Vault: moved here already (its answer lost)
+          await secret("TELEGRAM_BOT_TOKEN", { fromVault: VAULT }).catch((e) => {
+            if (e.status !== 404) throw e;
+          });
+        });
       }));
       const other = button("Use another bot", "quiet", () => {
-        offered = false;
+        declined = true;
         draw();
       });
       return say(el("p", null, "Your bot is ready to connect."), row(go, other));
@@ -194,7 +203,7 @@ export async function setup(root) {
         go.disabled = true;
         input.disabled = true;
         go.textContent = "Connecting…";
-        await connect({ value: token });
+        await connect(() => secret("TELEGRAM_BOT_TOKEN", { value: token }));
       }));
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !go.disabled) go.click();

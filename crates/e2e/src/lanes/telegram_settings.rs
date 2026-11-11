@@ -380,7 +380,28 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
     shoot(&mut b, &page, &shots, "b2-vault-dark", None)?;
     b.color_scheme(&page, "light")?;
 
-    // Use it: the Vault's token moved into the chat, and connected
+    // Use it, its move's answer lost: the token is kept in the chat, gone
+    // from the Vault, and the page knows only that it failed
+    let lose = r#"(() => { const send = window.fetch; window.fetch = async (u, init) => { if (/__secrets\/TELEGRAM_BOT_TOKEN$/.test(String(u)) && String(init?.body).includes("fromVault")) { await send(u, init); window.fetch = send; throw new TypeError("Failed to fetch"); } return send(u, init); }; return true; })()"#;
+    let lost = to_fake(&mut b, &c.tg.url) && framed(&mut b, lose) == true && press(&mut b, "Use it");
+    let failed = until_line(s, &mut b, "Failed to fetch");
+    let vault_now = || -> Vec<String> { api.signed(c.owner, "GET", "/api/vault", None).ok().and_then(|r| r.body["secrets"].as_array().map(|l| l.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect())).unwrap_or_default() };
+    let moved_out = vault_now();
+    let kept = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
+    s.ok(
+        "a Use it whose move's answer is lost says it failed, and still offers that bot: the token is kept in the chat, gone from the Vault, not connected",
+        lost && failed && framed(&mut b, SAID)["buttons"] == json!(["Use it", "Use another bot"]) && moved_out == ["telegram-other"] && kept.text.contains("TELEGRAM_BOT_TOKEN") && state(api, c, &name)["bot"].is_null() && state(api, c, &name)["held"] == true,
+        json!({ "said": framed(&mut b, SAID), "vault": moved_out, "secrets": kept.body, "state": state(api, c, &name) }),
+    );
+    // closed and opened again: Settings names no Vault secret now, and the
+    // chat's own word offers that bot; Use it goes on from the token kept
+    b.eval(&page, "([...document.querySelectorAll('dialog.connector-setup .rename-actions button')].find((x) => x.textContent === 'Done')?.click(), true)")?;
+    b.until(&page, "!document.querySelector('dialog.connector-setup')", WAIT);
+    set_up(s, &mut b, &page, c.agent)?;
+    let again = until_line(s, &mut b, VAULT_LINE);
+    let src = b.eval(&page, "document.querySelector('dialog.connector-setup iframe')?.src ?? ''")?;
+    shoot(&mut b, &page, &shots, "b2-vault-again", None)?;
+    s.ok("opened again, it offers that bot from the chat's own word (no Vault secret named)", again && src.as_str().is_some_and(|u| !u.contains("vault")), &src);
     let used = to_fake(&mut b, &c.tg.url) && press(&mut b, "Use it");
     let connected = until_line(s, &mut b, &format!("Connected as @{BOT_USERNAME}."));
     let said = framed(&mut b, SAID);
@@ -390,7 +411,7 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
     let left: Vec<String> = api.signed(c.owner, "GET", "/api/vault", None)?.body["secrets"].as_array().map(|l| l.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
     let kept = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "Use it moves the bot's token from the Vault into this chat (gone from the Vault, kept here) and connects it: its webhook is this chat's inbox, with a secret of the page's making",
+        "Use it then connects the bot kept in this chat (gone from the Vault, kept here): its webhook is this chat's inbox, with a secret of the page's making",
         used && connected && said["buttons"] == json!(["Pair your Telegram", "New token"]) && secret.len() == 64 && left == ["telegram-other"] && kept.text.contains("TELEGRAM_BOT_TOKEN"),
         json!({ "said": said, "webhook": webhook, "vault": left, "secrets": kept.body }),
     );
