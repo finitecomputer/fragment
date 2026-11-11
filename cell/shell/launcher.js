@@ -242,8 +242,9 @@ export function createLauncher(shell) {
     }
     const groups = [
       ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
-      // the desktop's apps, as the dock lists them (`apps`)
-      ["Apps", fragments.filter((f) => f.kind === "app" || f.kind === "brain").map((f) => foundRow(f.name, ""))],
+      // the desktop's apps and brains, as the Apps and Brains pages list them
+      ["Apps", fragments.filter((f) => f.kind === "app").map((f) => foundRow(f.name, ""))],
+      ["Brains", fragments.filter((f) => f.kind === "brain").map((f) => foundRow(f.name, ""))],
       // a message in a fragment the list has not shown yet is left out until it has
       ["Messages", messages.filter((m) => byName(m.fragment)).map((m) => {
         const row = foundRow(m.fragment, m.snippet, el("span", "meta", when(m.at)));
