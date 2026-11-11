@@ -370,6 +370,31 @@
       //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
       //   "client_id": "<the app's consumer key>", "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
       "env": ["SALESFORCE_ACCESS_TOKEN"] },
+    // The person's Dropbox, as Google is: Pipes' `dropbox` provider,
+    // connected through the browser once its app's secret is in the store
+    // (the app Pipes' Dropbox integration uses: scoped, Full Dropbox, every
+    // scope below ticked on its Permissions tab, the platform's callback
+    // beside Pipes'). `token_access_type=offline` is what has Dropbox answer
+    // a refresh token, kept until revoked; an access token lasts four hours.
+    // `scope` asks for a part of the app's scopes, and each route needs its
+    // own, so a read-only grant cannot write. `openid email` labels the
+    // account. Its token goes to its API and to its upload and download
+    // host; a temporary link is on a host of its own and needs none.
+    // Dropbox's revocation takes the token as a bearer, not RFC 7009's form:
+    // a disconnect deletes the account at Pipes, and the person removes the
+    // app in Dropbox's connected apps. (docs.dropboxapi.com/dropbox-api:
+    // docs/get-started/authorization, docs/oidc, auth/token-revoke, read
+    // 2026-11-11.)
+    { "name": "dropbox", "kind": "connection",
+      "hosts": ["api.dropboxapi.com", "content.dropboxapi.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://www.dropbox.com/oauth2/authorize?token_access_type=offline&prompt=consent",
+      //   "exchange": "https://api.dropboxapi.com/oauth2/token",
+      //   "client_id": "<the app's key>", "access": {
+      //     "read": { "scopes": ["openid", "email", "account_info.read", "files.metadata.read", "files.content.read"] },
+      //     "write": { "scopes": ["openid", "email", "account_info.read", "files.metadata.read", "files.content.read", "files.metadata.write", "files.content.write"] } } },
+      "env": ["DROPBOX_OAUTH_ACCESS_TOKEN"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key
     // pasted), and paid by their OpenRouter credit, never metered here. An

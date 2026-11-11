@@ -37,6 +37,12 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     calendar: "Calendar",
     "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
+    // Dropbox's
+    "account_info.read": "Account info",
+    "files.metadata.read": "File details (read)",
+    "files.metadata.write": "File details",
+    "files.content.read": "Files (read)",
+    "files.content.write": "Files",
   };
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said

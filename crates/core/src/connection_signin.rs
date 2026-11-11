@@ -927,4 +927,61 @@ mod tests {
         listed["scope"] = json!(["read", "write"]);
         assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
     }
+
+    /// Dropbox's row (deploy/example.jsonc) and its token endpoint's answer
+    /// as Dropbox documents it (docs.dropboxapi.com/dropbox-api,
+    /// docs/get-started/authorization and docs/oidc, read 2026-11-11): the
+    /// row's `token_access_type=offline` beside the scopes asked,
+    /// space-separated; a four-hour token, a refresh token, the scopes
+    /// granted space-separated in an order of Dropbox's, and an ID token for
+    /// this client whose email is always verified. Each access connects as
+    /// picked with nothing missing, labeled by that email, whether or not
+    /// the answer's `scope` names the sign-in scopes. An answer with no
+    /// refresh token (an online grant, or a legacy long-lived token) is
+    /// refused.
+    #[test]
+    fn dropboxs_answer_connects_as_picked_labeled_by_its_email() {
+        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let read = ["openid", "email", "account_info.read", "files.metadata.read", "files.content.read"];
+        let write = [&read[..], &["files.metadata.write", "files.content.write"]].concat();
+        let access = catalog::Access { read: Some(grant(&read)), write: grant(&write) };
+        let o = ConnectionOAuth { authorize: "https://www.dropbox.com/oauth2/authorize?token_access_type=offline&prompt=consent".into(), exchange: "https://api.dropboxapi.com/oauth2/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        for access in [ConnectionAccess::Read, ConnectionAccess::Write] {
+            let asked = o.access.of(access).unwrap();
+            let u = url::Url::parse(&authorize_url(&o, asked, "https://platform.example/api/connections/dropbox/callback", "challenge", "state")).unwrap();
+            let query: Vec<(String, String)> = u.query_pairs().into_owned().collect();
+            let one = |k: &str| query.iter().filter(|(q, _)| q == k).map(|(_, v)| v.as_str()).collect::<Vec<_>>();
+            assert_eq!((u.host_str(), u.path()), (Some("www.dropbox.com"), "/oauth2/authorize"));
+            assert_eq!((one("scope"), one("token_access_type"), one("prompt"), one("code_challenge_method")), (vec![asked.scopes.join(" ").as_str()], vec!["offline"], vec!["consent"], vec!["S256"]), "{access:?}");
+        }
+        let answer = |scope: &str| {
+            let mut a = id_token(json!({ "iss": "https://www.dropbox.com", "aud": "client", "sub": "dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc", "email": "franz@example.com", "email_verified": true, "given_name": "Franz", "family_name": "Ferdinand" }));
+            for (k, v) in [("access_token", json!("sl.u.AbX9y6Fe3AuH5o66-gmJpR032jwAwQPIVVzWXZNkdzcYT02akC2de219dZi6gxYPVnYPrpvISRSf9lxKWJzYLjtMPH-d9fo_0gXex7X37VIvpty4-G8f4-WX45AcEPfRnJJDwzv-")), ("expires_in", json!(14400)), ("token_type", json!("bearer")), ("scope", json!(scope)),
+                           ("refresh_token", json!("nBiM85CZALsAAAAAAAAAAQXHBoNpNutK4ngsXHsqW4iGz9tisb3JyjGqikMJIYbd")), ("account_id", json!("dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc")), ("uid", json!("12345"))] {
+                a[k] = v;
+            }
+            a
+        };
+        for (access, scope) in [
+            (ConnectionAccess::Read, "account_info.read files.content.read files.metadata.read openid email"),
+            (ConnectionAccess::Read, "account_info.read files.content.read files.metadata.read"),
+            (ConnectionAccess::Write, "account_info.read files.content.read files.content.write files.metadata.read files.metadata.write email openid"),
+            (ConnectionAccess::Write, "account_info.read files.content.read files.content.write files.metadata.read files.metadata.write"),
+        ] {
+            let requested = &o.access.of(access).unwrap().scopes;
+            let answer = answer(scope);
+            let granted = tokens(&answer, requested).expect("Dropbox's documented answer");
+            assert_eq!(granted.import_body("2026-11-11T00:00:00Z", None)["scopes"], json!(scope.split(' ').collect::<Vec<_>>()), "Pipes holds what Dropbox granted");
+            assert_eq!((granted.expires_in, access_of(&o, &granted.scopes), missing(requested, &granted.scopes)), (Some(14400), Some(access), vec![]), "{scope}");
+            assert_eq!(account_label(&answer, "client").as_deref(), Some("franz@example.com"));
+            assert_eq!(account_identifier(&answer, "client").as_deref(), Some("dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc"), "its account id");
+        }
+        let requested = &o.access.write.scopes;
+        let mut online = answer("account_info.read files.content.read files.metadata.read");
+        online.as_object_mut().unwrap().remove("refresh_token");
+        assert_eq!(tokens(&online, requested).err(), Some(Refused::Invalid), "a grant without token_access_type=offline");
+        let legacy = json!({ "access_token": "7rBynGOob1cAAAAAAAAAAe72L3T6rQK5ImB5a06ijnwRG9IdeTxvsqdZNAIxq8pZ", "token_type": "bearer", "account_id": "dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc", "uid": "12345" });
+        assert_eq!(tokens(&legacy, requested).err(), Some(Refused::Invalid), "a legacy long-lived token");
+    }
 }
