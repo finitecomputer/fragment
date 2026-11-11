@@ -927,4 +927,58 @@ mod tests {
         listed["scope"] = json!(["read", "write"]);
         assert_eq!(tokens(&listed, requested).err(), Some(Refused::Invalid));
     }
+
+    /// GitLab.com's row (deploy/example.jsonc): read only asks for
+    /// `read_api`, read and write for `api`, each with `openid email`,
+    /// space-separated, and nothing else. Its token endpoint answers as its
+    /// Doorkeeper does (docs.gitlab.com/api/oauth2, and Doorkeeper 5.9.9's
+    /// `TokenResponse`, read 2026-11-11): a two-hour token, a refresh token,
+    /// the scopes granted space-separated, and an ID token for this client
+    /// whose email is the account's primary address, `email_verified` saying
+    /// whether it is confirmed. Its documented example names no `scope`,
+    /// which is taken as asked. Either access connects as picked, nothing
+    /// missing, labelled by its email once confirmed.
+    #[test]
+    fn gitlabs_answer_connects_as_picked_labelled_by_its_primary_email() {
+        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
+        let access = catalog::Access { read: Some(grant(&["read_api", "openid", "email"])), write: grant(&["api", "openid", "email"]) };
+        let o = ConnectionOAuth { authorize: "https://gitlab.com/oauth/authorize".into(), exchange: "https://gitlab.com/oauth/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        assert_eq!(o.access.offered(), [ConnectionAccess::Read, ConnectionAccess::Write]);
+        let callback = "https://platform.example/api/connections/gitlab/callback";
+        for (access, scope) in [(ConnectionAccess::Read, "read_api openid email"), (ConnectionAccess::Write, "api openid email")] {
+            let u = url::Url::parse(&authorize_url(&o, o.access.of(access).unwrap(), callback, "challenge", "state")).unwrap();
+            let query: Vec<(String, String)> = u.query_pairs().into_owned().collect();
+            let want = [("client_id", "client"), ("redirect_uri", callback), ("response_type", "code"), ("scope", scope), ("state", "state"), ("code_challenge", "challenge"), ("code_challenge_method", "S256")];
+            assert_eq!((u.host_str(), u.path()), (Some("gitlab.com"), "/oauth/authorize"));
+            assert_eq!(query, want.map(|(k, v)| (k.to_string(), v.to_string())), "{access:?}");
+        }
+        // the secret goes in the form, never also in a Basic header (GitLab refuses both)
+        let form: std::collections::HashMap<String, String> = url::form_urlencoded::parse(exchange_form(&o, callback, "code", "verifier", "secret").as_bytes()).into_owned().collect();
+        assert_eq!((form["client_secret"].as_str(), form["code_verifier"].as_str()), ("secret", "verifier"));
+        let signed_in = |verified: Value| id_token(json!({ "iss": "https://gitlab.com", "sub": "1234567", "aud": "client", "email": "ada@example.com", "email_verified": verified, "nickname": "ada" }));
+        let mut answer = signed_in(json!(true));
+        for (k, v) in [("access_token", json!("glo-mock-access")), ("token_type", json!("Bearer")), ("expires_in", json!(7200)), ("refresh_token", json!("mock-refresh")), ("scope", json!("api openid email")), ("created_at", json!(1_793_000_000))] {
+            answer[k] = v;
+        }
+        let requested = &o.access.write.scopes;
+        let granted = tokens(&answer, requested).expect("GitLab's answer");
+        let body = granted.import_body(&granted.expires_at(1_793_000_000_000), None);
+        assert_eq!((body["scopes"].clone(), body["refresh_token"].clone()), (json!(["api", "openid", "email"]), json!("mock-refresh")), "Pipes holds what GitLab granted");
+        assert_eq!(granted.expires_at(1_793_000_000_000), crate::export::rfc3339(1_793_000_000_000 + 7_200_000), "two hours");
+        assert!(missing(requested, &granted.scopes).is_empty());
+        assert_eq!(access_of(&o, &granted.scopes), Some(ConnectionAccess::Write));
+        assert_eq!((account_label(&answer, "client").as_deref(), account_identifier(&answer, "client").as_deref()), (Some("ada@example.com"), Some("1234567")));
+        let read_scopes = &o.access.read.as_ref().unwrap().scopes;
+        let mut read = answer.clone();
+        read["scope"] = json!("read_api openid email");
+        let read_only = tokens(&read, read_scopes).expect("a read-only grant");
+        assert_eq!((access_of(&o, &read_only.scopes), missing(read_scopes, &read_only.scopes)), (Some(ConnectionAccess::Read), vec![]), "read only, as picked, nothing missing");
+        let documented = json!({ "access_token": "de6780bc506a0446", "token_type": "bearer", "expires_in": 7200, "refresh_token": "8257e65c97202ed1", "created_at": 1_607_635_748 });
+        for (asked, access) in [(read_scopes, ConnectionAccess::Read), (requested, ConnectionAccess::Write)] {
+            let t = tokens(&documented, asked).expect("GitLab's documented example");
+            assert_eq!((&t.scopes, access_of(&o, &t.scopes)), (asked, Some(access)), "no scope named: the one asked for");
+        }
+        assert!(account_label(&signed_in(json!(false)), "client").is_none(), "a primary email not yet confirmed labels nothing");
+    }
 }
