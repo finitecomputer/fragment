@@ -512,8 +512,9 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &viewer_session)?;
     let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     let wait = Duration::from_secs(20);
-    // its page is the files view: the brain's tree, its front page, titled by it
-    let shown = chrome.until(&tab, "document.getElementById('tree')?.textContent.includes('garden') && document.getElementById('reader')?.textContent.includes('Each folder here is a wiki')", wait);
+    // its page is the files view, on its graph: the brain's tree, its pages, titled by it
+    let node = |p: &str| format!("!!document.querySelector('#graph .node[data-path=\"{p}\"]')");
+    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && {} && {}", node(SOLAR), node(CAFE)), wait);
     let caught_up = s.eventually(WAIT, || {
         let l = woke();
         l.len() == woke_before + 1 && l.iter().all(|r| r["status"] == "succeeded" && r["principal"] == own) && index(api, &keys, &name)["indexing"] == false
@@ -528,7 +529,27 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let decided = s.eventually(WAIT, || lever(api, &name, "woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
     s.ok("and coming back again, with nothing changed since, starts none", decided && woke().len() == woke_before + 1, json!(woke()));
     let brand = chrome.eval(&tab, "document.getElementById('brand')?.textContent ?? ''")?;
-    s.ok("its page is the files view: the brain's tree and its front page, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
+    s.ok("its page is the files view on its graph: the brain's tree and its pages, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
+    // a page chosen in the graph is previewed with its links, each way, as the reader resolves them
+    chrome.eval(&tab, &format!("(location.hash = '#graph/{SOLAR}', true)"))?;
+    let rows = |label: &str| format!("[...document.querySelectorAll('#peek .peek-list')].find((l) => l.querySelector('h3')?.textContent.startsWith('{label}'))?.querySelectorAll('.peek-row') ?? []");
+    let previewed = chrome.until(
+        &tab,
+        &format!(
+            "document.querySelector('#peek .peek-title')?.textContent === 'Solar panels' && [...{}].some((r) => r.dataset.path === '{CAFE}') && [...{}].some((r) => r.dataset.path === 'garden/index.md') && document.querySelector('#tree .row.active')?.dataset.path === '{SOLAR}'",
+            rows("Links to"),
+            rows("Linked from"),
+        ),
+        wait,
+    );
+    let _ = chrome.screenshot(&tab, &s.dir("brain-page").join("graph.png"));
+    s.ok("a page chosen in its graph is previewed, with the source it links to and the index that links to it, and marked in the tree", previewed, chrome.eval(&tab, "document.getElementById('peek')?.innerText.slice(0, 400) ?? ''")?);
+    // its front page, read, and a page that says what links to it
+    chrome.eval(&tab, "(location.hash = '#/index.md', true)")?;
+    let front = chrome.until(&tab, "document.getElementById('reader')?.textContent.includes('Each folder here is a wiki') && document.getElementById('graph').hidden", wait);
+    chrome.eval(&tab, &format!("(location.hash = '#/{SOLAR}', true)"))?;
+    let linked = chrome.until(&tab, "[...document.querySelectorAll('#reader .linked-row')].some((a) => a.dataset.path === 'garden/index.md')", wait);
+    s.ok("its front page reads, and a page read lists the pages that link to it", front && linked, chrome.eval(&tab, "document.getElementById('reader')?.innerText.slice(-300) ?? ''")?);
     let status = chrome.until(&tab, "/searchable/.test(document.getElementById('status-line')?.textContent ?? '')", wait);
     s.ok("its status line is its own (index_status's line)", status, chrome.eval(&tab, "document.getElementById('status')?.innerText ?? ''")?);
     chrome.eval(&tab, "(() => { const q = document.getElementById('q'); q.value = 'inverter'; q.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;

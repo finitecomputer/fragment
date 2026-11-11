@@ -52,7 +52,8 @@ These are fragments or computers, or components any fragment may use:
 - A computer's screen is a page its image serves, reached through the
   generic port proxy.
 - Platform components any fragment may use: the files view (`__files`:
-  its files, its own search, and a template's declared layer; a brain's
+  its files, the graph of their links, its own search, and a template's
+  declared layer; a brain's
   and a notes vault's page, by `files.page`), the browser library
   (`__fragment.js`), the markdown renderer (`__markdown.js`: markdown to
   DOM, never markup; the files view and the chat use it), and the

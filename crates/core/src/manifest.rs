@@ -36,6 +36,10 @@ pub struct FilesDecl {
     /// `line` (text) and `busy` (whether work is under way).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// It opens on its graph of links (pages and the links between them)
+    /// when no file is named, over `home` and the view's own choice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graph: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -399,19 +403,22 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     Ok(TriggerDecl { on, run, from })
 }
 
-/// `files: {page?, home?, status?}` (`FilesDecl`): `page` true or false;
-/// `home` a content path (not the fragment's machinery, nor its site);
-/// `status` a query it declares, since the view asks it on every visit.
+/// `files: {page?, home?, status?, graph?}` (`FilesDecl`): `page` and
+/// `graph` true or false; `home` a content path (not the fragment's
+/// machinery, nor its site); `status` a query it declares, since the view
+/// asks it on every visit.
 fn files(v: &Value, m: &Manifest) -> Result<FilesDecl, String> {
-    let obj = v.as_object().ok_or("files must be an object: {\"page\": true, \"home\": …, \"status\": …}")?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "page" | "home" | "status")) {
-        return Err(format!("files has an unknown key {k:?} (page, home, status)"));
+    let obj = v.as_object().ok_or("files must be an object: {\"page\": true, \"home\": …, \"status\": …, \"graph\": true}")?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "page" | "home" | "status" | "graph")) {
+        return Err(format!("files has an unknown key {k:?} (page, home, status, graph)"));
     }
-    let page = match obj.get("page") {
-        None => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => return Err("files.page must be true or false".into()),
+    let flag = |key: &str| match obj.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(format!("files.{key} must be true or false")),
     };
+    let page = flag("page")?;
+    let graph = flag("graph")?;
     let home = match obj.get("home") {
         None => None,
         Some(Value::String(p)) if fragment_proto::valid_repo_path(p) && !crate::site::is_machinery(p) && !p.starts_with("site/") => Some(p.clone()),
@@ -426,7 +433,7 @@ fn files(v: &Value, m: &Manifest) -> Result<FilesDecl, String> {
         },
         Some(_) => return Err("files.status must name a query".into()),
     };
-    Ok(FilesDecl { page, home, status })
+    Ok(FilesDecl { page, home, status, graph })
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
@@ -784,13 +791,18 @@ mod tests {
     #[test]
     fn files_make_the_files_view_a_page() {
         let m = parse(br#"{"operations":{"st":{"kind":"query"}},"files":{"page":true,"home":"wiki/index.md","status":"st"}}"#).unwrap();
-        assert_eq!(m.files, Some(FilesDecl { page: true, home: Some("wiki/index.md".into()), status: Some("st".into()) }));
+        assert_eq!(m.files, Some(FilesDecl { page: true, home: Some("wiki/index.md".into()), status: Some("st".into()), graph: false }));
         assert_eq!(serde_json::to_value(m.files.as_ref().unwrap()).unwrap(), serde_json::json!({ "page": true, "home": "wiki/index.md", "status": "st" }));
+        let g = parse(br#"{"files":{"page":true,"graph":true}}"#).unwrap();
+        assert_eq!(g.files, Some(FilesDecl { page: true, graph: true, ..FilesDecl::default() }), "it opens on its graph");
+        assert_eq!(serde_json::to_value(g.files.as_ref().unwrap()).unwrap(), serde_json::json!({ "page": true, "graph": true }));
+        assert_eq!(serde_json::from_value::<FilesDecl>(serde_json::json!({ "page": true })).unwrap().graph, false, "a stored decl from before reads as no graph");
         assert_eq!(parse(br#"{"files":{}}"#).unwrap().files, Some(FilesDecl::default()), "page is false unless said");
         assert_eq!(parse(b"{}").unwrap().files, None);
         for (bad, says) in [
             (&br#"{"files":true}"#[..], "files must be an object"),
             (br#"{"files":{"page":"yes"}}"#, "files.page must be true or false"),
+            (br#"{"files":{"graph":1}}"#, "files.graph must be true or false"),
             (br#"{"files":{"search":true}}"#, "unknown key \"search\""),
             (br#"{"files":{"home":"app.mjs"}}"#, "files.home must be a content path"),
             (br#"{"files":{"home":"site/index.html"}}"#, "files.home must be a content path"),
