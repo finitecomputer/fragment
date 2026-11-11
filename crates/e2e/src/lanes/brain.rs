@@ -122,6 +122,9 @@ const NOTE: &str = "garden/raw/roof-survey.md";
 const ASSET: &str = "garden/raw/assets/roof-survey.bin";
 const GROWS: &str = "garden/wiki/anemometer.md";
 const GUST: &str = "garden/wiki/gust.md";
+const HEDGES: &str = "garden/wiki/hedges.md";
+/// A page whose links go to its own heading, both ways a page writes one.
+const HEDGES_PAGE: &str = "# Hedges\n\nRead [the details](#details), or [[#Details|the same by wikilink]].\n\n## Details\n\nA hawthorn hedge takes five years to thicken.\n";
 
 pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     // the code.storage fake (a pointer read back), a restart, Chrome
@@ -512,8 +515,9 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &viewer_session)?;
     let tab = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     let wait = Duration::from_secs(20);
-    // its page is the files view: the brain's tree, its front page, titled by it
-    let shown = chrome.until(&tab, "document.getElementById('tree')?.textContent.includes('garden') && document.getElementById('reader')?.textContent.includes('Each folder here is a wiki')", wait);
+    // its page is the files view, on its graph: the brain's tree, its pages, titled by it
+    let node = |p: &str| format!("!!document.querySelector('#graph .node[data-path=\"{p}\"]')");
+    let shown = chrome.until(&tab, &format!("document.getElementById('tree')?.textContent.includes('garden') && !document.getElementById('graph').hidden && {} && {}", node(SOLAR), node("garden/index.md")), wait);
     let caught_up = s.eventually(WAIT, || {
         let l = woke();
         l.len() == woke_before + 1 && l.iter().all(|r| r["status"] == "succeeded" && r["principal"] == own) && index(api, &keys, &name)["indexing"] == false
@@ -528,7 +532,29 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let decided = s.eventually(WAIT, || lever(api, &name, "woke-reset", json!({})).is_ok_and(|r| r.body["had"] == true));
     s.ok("and coming back again, with nothing changed since, starts none", decided && woke().len() == woke_before + 1, json!(woke()));
     let brand = chrome.eval(&tab, "document.getElementById('brand')?.textContent ?? ''")?;
-    s.ok("its page is the files view: the brain's tree and its front page, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
+    s.ok("its page is the files view on its graph: the brain's tree and its pages, titled by the brain", shown && brand == "Garden", chrome.eval(&tab, "document.body.innerText.slice(0, 300)")?);
+    // a page chosen in the graph is previewed with what links to it, as the
+    // reader resolves links; the café source, removed above, left the graph
+    // and its link with it
+    chrome.eval(&tab, &format!("(location.hash = '#graph/{SOLAR}', true)"))?;
+    let rows = |label: &str| format!("[...document.querySelectorAll('#peek .peek-list')].find((l) => l.querySelector('h3')?.textContent.startsWith('{label}'))?.querySelectorAll('.peek-row') ?? []");
+    let previewed = chrome.until(
+        &tab,
+        &format!(
+            "document.querySelector('#peek .peek-title')?.textContent === 'Solar panels' && [...{}].length === 0 && ['garden/index.md', 'garden/log.md'].every((p) => [...{}].some((r) => r.dataset.path === p)) && document.querySelector('#tree .row.active')?.dataset.path === '{SOLAR}' && !{}",
+            rows("Links to"),
+            rows("Linked from"),
+            node(CAFE),
+        ),
+        wait,
+    );
+    s.ok("a page chosen in its graph is previewed, with the index and the log that link to it (the source it linked, removed, gone with its link), and marked in the tree", previewed, chrome.eval(&tab, "document.getElementById('peek')?.innerText.slice(0, 400) ?? ''")?);
+    // its front page, read, and a page that says what links to it
+    chrome.eval(&tab, "(location.hash = '#/index.md', true)")?;
+    let front = chrome.until(&tab, "document.getElementById('reader')?.textContent.includes('Each folder here is a wiki') && document.getElementById('graph').hidden", wait);
+    chrome.eval(&tab, &format!("(location.hash = '#/{SOLAR}', true)"))?;
+    let linked = chrome.until(&tab, "[...document.querySelectorAll('#reader .linked-row')].some((a) => a.dataset.path === 'garden/index.md')", wait);
+    s.ok("its front page reads, and a page read lists the pages that link to it", front && linked, chrome.eval(&tab, "document.getElementById('reader')?.innerText.slice(-300) ?? ''")?);
     let status = chrome.until(&tab, "/searchable/.test(document.getElementById('status-line')?.textContent ?? '')", wait);
     s.ok("its status line is its own (index_status's line)", status, chrome.eval(&tab, "document.getElementById('status')?.innerText ?? ''")?);
     chrome.eval(&tab, "(() => { const q = document.getElementById('q'); q.value = 'inverter'; q.dispatchEvent(new Event('input', { bubbles: true })); return true; })()")?;
@@ -601,6 +627,47 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
         "a brain's page shows its <img onerror>, <script>, <svg onload> and javascript: links as their text, and runs none of it",
         shown && chrome.eval(&tab, "(() => { const c = document.querySelector('#reader .doc'); return window.__ran === undefined && !c.querySelector('img,script,svg,iframe,a[href^=\"javascript\" i]') && c.textContent.includes('<img src=x onerror='); })()")? == true,
         chrome.eval(&tab, "JSON.stringify({ ran: window.__ran ?? null, text: document.getElementById('reader')?.innerText.slice(0, 400) })")?,
+    );
+
+    // a page previewed in the graph links to its own headings, whichever
+    // page the reader read last (or none, on a visit that opens on the graph)
+    write(&dir, HEDGES, HEDGES_PAGE.as_bytes())?;
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_s]);
+    anyhow::ensure!(out.status.success(), "the hedges page synced: {}", String::from_utf8_lossy(&out.stderr));
+    let own = format!("#/{HEDGES}#");
+    let links = "document.querySelectorAll('#peek .peek-text a')";
+    let chosen = format!("(location.hash = '#graph/{HEDGES}', true)");
+    // a link, clicked from the preview, reads the page itself at its heading
+    let follows = |chrome: &mut crate::browser::Browser, tab: &crate::browser::Page, i: usize| -> Result<Value> {
+        chrome.eval(tab, &chosen)?;
+        let ready = chrome.until(tab, &format!("document.querySelector('#peek .peek-title')?.textContent === 'Hedges' && {links}.length === 2"), wait);
+        if ready {
+            chrome.eval(tab, &format!("({links}[{i}].click(), true)"))?;
+        }
+        let read = ready && chrome.until(tab, &format!("location.hash.startsWith('{own}') && document.querySelector('#reader .doc h1')?.textContent === 'Hedges'"), wait);
+        Ok(json!({ "read": read, "hash": chrome.eval(tab, "location.hash")?, "peek": chrome.eval(tab, "document.getElementById('peek')?.innerText.slice(0, 200) ?? ''")? }))
+    };
+    // each link (0, the markdown one; 1, the wikilink) on a fresh visit,
+    // which opens on the graph with no page read yet
+    let mut first = vec![];
+    for i in 0..2 {
+        let fresh = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+        let on_graph = chrome.until(&fresh, &format!("!document.getElementById('graph').hidden && !!document.querySelector('#graph .node[data-path=\"{HEDGES}\"]')"), wait);
+        first.push(if on_graph { follows(&mut chrome, &fresh, i)? } else { json!({ "read": false, "on graph": false }) });
+    }
+    // and each after the front page was read (the first tab, reloaded to know the new page)
+    chrome.reload(&tab)?;
+    let mut after = vec![];
+    for i in 0..2 {
+        chrome.eval(&tab, "(location.hash = '#/index.md', true)")?;
+        let read = chrome.until(&tab, "document.getElementById('reader')?.textContent.includes('Each folder here is a wiki')", wait);
+        after.push(if read { follows(&mut chrome, &tab, i)? } else { json!({ "read": false, "front page read": false }) });
+    }
+    let all_went = |l: &[Value]| l.len() == 2 && l.iter().all(|w| w["read"] == true);
+    s.ok(
+        "a page previewed in its graph links to its own heading, by link and by wikilink: on a visit that opened on the graph, and after another page was read",
+        all_went(&first) && all_went(&after),
+        json!({ "fresh": first, "after another page": after }),
     );
 
     // a page that grows past 1 MiB leaves the index: no file left main, so the
