@@ -898,6 +898,8 @@ pub(super) const VAULT_CHECKS: &[&str] = &[
     "an answer that echoes a Vault's value as an event stream, or among bytes that are no text, names it as its secret, never the value",
     "basic auth: a short password's header echoed back is named as its secret, never its base64",
     "a signed request goes with the query its signature covers, byte for byte, an empty piece and all",
+    "a secret named as a connection the deployment offers (named before it offered it) stays its person's: in the view as a key, its placeholder filled toward its host",
+    "one request carrying that connection's placeholder and the secret's, at the connection's host, each where its row takes it: each is filled with its own (Pipes' token in the header, the Vault's value in the query), never the other's",
 ];
 
 /// A Vault's secret, as its person puts it (`PUT /api/vault/{name}`).
@@ -1003,6 +1005,40 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let signer = fragment_nip98::verify(Some(&header), "GET", &format!("https://{host}{target}"), b"", now, 120);
     s.ok(VAULT_CHECKS[11], r.starts_with("fetched 200") && seen["target"] == target && signer.as_deref() == Ok(nostr.pubkey_hex()), json!({ "said": r, "seen": seen, "signer": format!("{signer:?}") }));
 
+    // a secret named as a connection the catalog offers (`e2e-oauth`): a key
+    // (`fck_`), so its own, beside the connection's (`fcx_`)
+    let shared = "e2e-oauth";
+    vault_put(api, w, shared, json!({ "value": value, "hosts": [host], "agents": [w.agent] }))?;
+    let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(w.id, w.agent, shared);
+    let as_key = fragment_core::swap::Placeholder::new(fragment_core::catalog::Kind::Own, shared, &tag).text();
+    let given = say(s, 614, "credentials", &mut said)?;
+    let before = s.upstream.seen().len();
+    let r = say(s, 615, &format!("fetch http://{host}/v1/me with {as_key}"), &mut said)?;
+    let seen = last_seen(s, before);
+    s.ok(
+        VAULT_CHECKS[12],
+        given.contains(&as_key) && r.starts_with("fetched 200") && seen["host"] == host && seen["auth"]["authorization"] == format!("Bearer {value}") && r.contains(&format!("Bearer {{{{{shared}}}}}")),
+        json!({ "given": given, "said": r, "seen": seen }),
+    );
+    // that connection connected, and the secret toward its host in a query
+    // parameter: one request carries both, one name and one tag between them
+    let email = Api::email_of(w.owner);
+    s.workos.connect(&email, shared, true);
+    vault_put(api, w, shared, json!({ "value": value, "hosts": ["oauth.test"], "place": { "query": "key" }, "agents": [w.agent] }))?;
+    let as_connection = fragment_core::swap::Placeholder::new(fragment_core::catalog::Kind::Connection, shared, &tag).text();
+    let listed = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let before = s.upstream.seen().len();
+    let r = say(s, 616, &format!("fetch http://oauth.test/v1/me?key={as_key} with {as_connection}"), &mut said)?;
+    let seen = last_seen(s, before);
+    let token = s.workos.tokens(shared).last().cloned().unwrap_or_default();
+    s.ok(
+        VAULT_CHECKS[13],
+        listed.status == 200 && r.starts_with("fetched 200") && !token.is_empty() && seen["auth"]["authorization"] == format!("Bearer {token}") && seen["query"] == json!([["key", value]]),
+        json!({ "said": r, "seen": seen }),
+    );
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{shared}"), None)?;
+    anyhow::ensure!(off.status == 200, "the shared name's connection cleared: {off}");
+
     let gone = api.signed(w.owner, "DELETE", "/api/vault/e2e-vault", None)?;
     let before = s.upstream.seen().len();
     let r = say(s, 609, &format!("fetch http://{host}/v1/me with {}", ph("e2e-vault")), &mut said)?;
@@ -1018,7 +1054,7 @@ pub(super) fn vault_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
     let secrets = [value.as_str(), other.as_str(), &nostr.secret_hex()];
     let leaked: Vec<&str> = secrets.iter().copied().filter(|v| said.iter().any(|t| t.contains(v)) || logs.contains(v)).collect();
     s.ok(VAULT_CHECKS[8], !logs.is_empty() && leaked.is_empty(), json!({ "answers": said.len(), "log bytes": logs.len(), "leaked": leaked.len() }));
-    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic"] {
+    for name in ["e2e-vault-query", "e2e-vault-other", "e2e-vault-parked", "e2e-nostr", "e2e-vault-basic", "e2e-oauth"] {
         api.signed(w.owner, "DELETE", &format!("/api/vault/{name}"), None)?;
     }
     Ok(turns)
