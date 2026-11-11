@@ -821,7 +821,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // sheet says, all of it in view when it fits and scrolling when it does
     // not, and its X, clicked where it is drawn, closes it
     let (mut all, mut seen) = (true, vec![]);
-    for (height, fits) in [(700, false), (1440, true)] {
+    for (height, fits) in [(420, false), (1440, true)] {
         chrome.viewport(&home, 1280, height, false)?;
         // (two frames for the desktop to lay itself out at the new size)
         chrome.eval(&home, "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))")?;
