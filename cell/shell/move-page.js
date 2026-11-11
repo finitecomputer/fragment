@@ -42,8 +42,10 @@ export function createMovePage(root, h) {
   let busy = false;
   let shown = false;
   let timer = null;
-  // what the person chose, kept across drawings
+  // what the person chose, kept across drawings, and Bring over as drawn
   const chosen = new Map();
+  let go = null;
+  const anyChosen = () => (offers ?? []).some((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
 
   async function read() {
     try {
@@ -69,13 +71,15 @@ export function createMovePage(root, h) {
     li.append(copy);
     if (ASKABLE.has(o.state) && !doing) {
       const pick = el("label", "move-pick");
-      const box = el("input");
+      // the shell's check (shell.css `input.check`); a choice changes Bring
+      // over alone, so the box, and the person's focus on it, stay put
+      const box = el("input", "check");
       box.type = "checkbox";
       box.checked = chosen.get(o.old) ?? true;
       box.disabled = busy;
       box.onchange = () => {
         chosen.set(o.old, box.checked);
-        draw();
+        if (go) go.disabled = busy || !anyChosen();
       };
       pick.append(box, el("span", null, "Bring over"));
       copy.append(pick);
@@ -107,10 +111,11 @@ export function createMovePage(root, h) {
     wrap.append(list);
     if (offers.some((o) => CARRIED.has(o.state))) wrap.append(el("p", "muted move-simplex", "If you chatted with it on SimpleX, keep that chat in Settings."));
     if (failed) wrap.append(el("p", "form-error", failed));
+    go = null;
     if (offers.some((o) => ASKABLE.has(o.state))) {
-      const go = el("button", "primary", "Bring over");
+      go = el("button", "primary", "Bring over");
       go.type = "button";
-      go.disabled = busy || !offers.some((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
+      go.disabled = busy || !anyChosen();
       go.onclick = () => bring();
       wrap.append(go);
     }

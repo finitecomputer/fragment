@@ -412,6 +412,14 @@ pub enum Resp {
     GroupDeleted { group: GroupId },
     /// The user's contact address deleted (`userContactLinkDeleted`).
     AddressDeleted,
+    /// Another client took the contact's queues (`contactAnotherClient`):
+    /// a core run elsewhere on a copy of these databases (an old agent
+    /// started again after its conversation moved: FIN-483). This core
+    /// hears nothing more on them until it subscribes again.
+    AnotherClient { contact: ContactId },
+    /// A connection's subscription ended (`subscriptionEnd`), the contact's
+    /// when it names one (another client subscribed to its queue).
+    SubscriptionEnd { contact: Option<ContactId> },
     /// A command failed (`chatCmdError`), or the core reports an error of
     /// its own (`chatError`): what it said, cut.
     Error { what: String },
@@ -602,6 +610,8 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
         "leftMemberUser" => Resp::GroupLeft { group: id(&r["groupInfo"]["groupId"], "a leave with no group")? },
         "groupDeletedUser" => Resp::GroupDeleted { group: id(&r["groupInfo"]["groupId"], "a delete with no group")? },
         "userContactLinkDeleted" => Resp::AddressDeleted,
+        "contactAnotherClient" => Resp::AnotherClient { contact: id(&r["contact"]["contactId"], "another client of no contact")? },
+        "subscriptionEnd" => Resp::SubscriptionEnd { contact: r["connectionEntity"]["contact"]["contactId"].as_i64().filter(|n| *n > 0) },
         "chatCmdError" | "chatError" => Resp::Error { what: error_of(&r["chatError"]) },
         other => Resp::Other(cut(other, 64).into()),
     })
@@ -786,6 +796,14 @@ mod tests {
         assert!(matches!(parse(r#"{"resp":{"type":"contactsList","contacts":[{"contactId":0}]}}"#), Err(WireError::Shape(_))), "a contact with no id");
         let many = json!({ "resp": { "type": "groupsList", "groups": (1..=LIST_MAX as i64 + 5).map(|g| json!({ "groupId": g })).collect::<Vec<_>>() } });
         assert!(matches!(parse(&many.to_string()).expect("a frame").resp, Resp::Groups(g) if g.len() == LIST_MAX), "a list is bounded");
+        // FIN-483: an old core run again on a copy of the databases; v7.0.3
+        // said these to the lab's (2026-11-10), trimmed to what is read
+        let another = r#"{"resp":{"type":"contactAnotherClient","user":{"userId":1},"contact":{"contactId":3,"localDisplayName":"phone","activeConn":{"connId":2}}}}"#;
+        assert_eq!(parse(another).expect("a frame").resp, Resp::AnotherClient { contact: 3 });
+        let address = r#"{"resp":{"type":"subscriptionEnd","user":{"userId":1},"connectionEntity":{"type":"userContactConnection","entityConnection":{"connId":1},"userContact":{"userContactLinkId":1}}}}"#;
+        assert_eq!(parse(address).expect("a frame").resp, Resp::SubscriptionEnd { contact: None });
+        let direct = r#"{"resp":{"type":"subscriptionEnd","connectionEntity":{"type":"rcvDirectMsgConnection","entityConnection":{"connId":2},"contact":{"contactId":3}}}}"#;
+        assert_eq!(parse(direct).expect("a frame").resp, Resp::SubscriptionEnd { contact: Some(3) });
     }
 
     /// Goal: a command's line is what the lab's core took.

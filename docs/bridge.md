@@ -456,6 +456,14 @@ never reaches another agent's core.
   it is gone. Their app is told its new name, and once that it moved. A
   stage that is not whole, or names no contact of that identity as its
   owner, is let go, and Link SimpleX works as before.
+- **Another client on its databases** (FIN-483: a core run elsewhere on
+  a copy of them, such as an old finite.computer agent started again after
+  its conversation moved) takes the contact's queues, and the core says so
+  (`contactAnotherClient`, `subscriptionEnd`). The bridge stops that core
+  and starts it again, which subscribes again (counted as an exit, so one
+  that keeps losing them waits for its owner); replies meanwhile wait in
+  its outbox, and its start's state read heals the ratchet, unforced, and
+  sends them.
 - **The agent is kept out**: the core and `BRIDGE_SIMPLEX_DIR` are root's,
   0700, and on no agent's PATH. The agent's passwordless sudo still
   reaches root, and a core's bot API listens on loopback (the debt

@@ -211,3 +211,20 @@ test("a move that imports says, once, that its SimpleX chat is kept in Settings"
   await settle();
   assert.deepEqual(line(), ["If you chatted with it on SimpleX, keep that chat in Settings."]);
 });
+
+test("a choice keeps the page as it is, the box and its focus with it: only Bring over follows it; the box is the platform's check", async (t) => {
+  const p = page(t);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer.")] });
+  await settle();
+  const box = walk(p.root).find((n) => n.tag === "input" && n.type === "checkbox");
+  assert.ok(box.className.split(" ").includes("check"), "drawn as the shell's check (shell.css `input.check`)");
+  box.checked = false;
+  box.onchange();
+  assert.equal(walk(p.root).find((n) => n.tag === "input" && n.type === "checkbox"), box, "the same box: nothing drawn again under the person's focus");
+  assert.equal(p.button("Bring over").disabled, true, "nothing chosen");
+  box.checked = true;
+  box.onchange();
+  assert.equal(walk(p.root).find((n) => n.tag === "input" && n.type === "checkbox"), box);
+  assert.equal(p.button("Bring over").disabled, false, "chosen");
+});
