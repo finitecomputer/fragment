@@ -1233,10 +1233,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
         // the shell, for everyone: signed out it asks them to sign in;
-        // `/settings` opens its settings, `/apps` the person's apps, `/history`
-        // every chat they have had, `/schedules` every scheduled job of theirs,
+        // `/settings` opens its settings, `/apps` the person's apps, `/brains`
+        // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
         // `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["apps"] | ["history"] | ["schedules"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
+        (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         // Finite's about page, privacy policy and terms, for anyone (signed out too)
