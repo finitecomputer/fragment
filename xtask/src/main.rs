@@ -292,6 +292,11 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
+            // on celld, its users file is the fake's only record of the
+            // subjects it handed out (`celld::workos_users_kept`)
+            if celld.is_some() {
+                devstack::celld::workos_users_kept(&devstack::cell_dir(), &workos_users)?;
+            }
             let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
             // its users kept as the node keeps its people (who sign in by
             // subject), and every subject the node signs someone in by taken

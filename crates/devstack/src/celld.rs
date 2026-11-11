@@ -66,6 +66,25 @@ pub fn connectors() -> String {
     serde_json::to_string(&rows).expect("connectors serialize")
 }
 
+/// Whether a dev stack on celld may start dev's WorkOS fake on `project`:
+/// celld keeps the Registry in a store devstack does not read
+/// (`signed_in_subjects` reads wrangler's state), so the fake's own file of
+/// its users (`users_file`, written at every start) is the only record of
+/// the subjects it handed out. A celld state that outlived that file is
+/// refused: a fake started afresh would hand a subject the Registry knows
+/// to another email, and that email would sign in as its person.
+pub fn workos_users_kept(project: &Path, users_file: &Path) -> Result<()> {
+    let state = state_dir(project);
+    if state.exists() && !users_file.exists() {
+        bail!(
+            "{} is gone but celld's state ({}) is not: dev's WorkOS fake would hand its people's subjects to other emails. Restore the file, or start afresh with --clean",
+            users_file.display(),
+            state.display()
+        );
+    }
+    Ok(())
+}
+
 /// Where `celld dev` keeps a project's local state.
 pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".celld/dev")
@@ -185,6 +204,25 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a celld state whose WorkOS fake lost its users file is
+    /// refused (a fresh fake would give an existing subject to another
+    /// email); a state with its file, or none, starts. Replay: the same ask
+    /// again answers the same.
+    #[test]
+    fn a_celld_state_without_its_fakes_users_is_refused() {
+        let dir = std::env::temp_dir().join(format!("celld-workos-{}", crate::random_hex(6)));
+        let users = dir.join("workos.json");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(workos_users_kept(&dir, &users).is_ok(), "no state, no file: a first start");
+        fs::create_dir_all(state_dir(&dir)).unwrap();
+        let e = workos_users_kept(&dir, &users).unwrap_err().to_string();
+        assert!(e.contains("is gone") && e.contains("--clean"), "{e}");
+        assert!(workos_users_kept(&dir, &users).is_err(), "asked again, refused again");
+        fs::write(&users, "{}").unwrap();
+        assert!(workos_users_kept(&dir, &users).is_ok(), "its file kept: it starts");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// Goal: a self-hosted stack's connectors are the default's but
     /// Telegram, and the cell takes them as it takes a deployment's.
