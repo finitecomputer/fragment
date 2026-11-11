@@ -79,7 +79,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "a key's cap is its person's to set: an agent's key is refused (403), as are no signature (401), a provider that is no shared key (404) and a cap out of its bounds (400); the key stays paused",
     "its owner taps Allow: unconfirmed (its ask refused, the notices' read failing), the pause stays with its countdown, its button and the refusal's own words; confirmed, the computer lifts the cap a step, the notice goes, and the key's next call goes through",
     "a stale page's tap changes nothing, the computer lifting from the cap it holds; its person's CLI sets a cap and then the default, and the key pauses at each",
-    "a connection whose read only the platform keeps (its provider has no read-only scope, as Salesforce's), connected with no access kept: read only, a GET goes with Pipes' token, and a POST is refused (403) before any token is minted, reaching no one",
+    "a connection whose read only the platform keeps (its provider has no read-only scope, as Salesforce's), connected with no access kept: read only, a GET of a path its row lets read only reach goes with Pipes' token; a POST, a GET of another path (as Salesforce's executeAnonymous runs code), and a GET of an encoded path are refused (403) before any token is minted, reaching no one",
     "connected read and write through its callback, its access is kept: a POST at once (no read of the owner's between) goes with Pipes' token, and the owner's list says read and write",
     "connected read only again through its callback, a POST at once is refused again, reaching no one: no earlier write is believed; the owner's list says read only",
     "a reconnect as read only whose import's outcome is unknown (Pipes timed out, the import landing later) leaves it read only, never at the write before: a POST is refused before and after it lands",
@@ -271,10 +271,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let read_swapped = swapped(s);
     let before = unsent(s);
     let wrote = say(s, 172, &fetch(s, true))?;
+    let at = |s: &Suite, path: &str| format!("fetch http://{KEPT_CONNECTION_HOST}{path} with {}", placeholder(s, w.id, w.agent, KEPT_CONNECTION));
+    let elsewhere = say(s, 179, &at(s, "/v1/run"))?;
+    let encoded = say(s, 180, &at(s, "/v1/records%2F..%2Frun"))?;
     s.ok(
         SWAP_CHECKS[46],
-        access_of(&r) == "read" && read.starts_with("fetched 200") && read_swapped && wrote.starts_with("fetched 403") && wrote.contains("connected read only") && unsent(s) == before,
-        json!({ "access": access_of(&r), "read": read, "wrote": wrote }),
+        access_of(&r) == "read" && read.starts_with("fetched 200") && read_swapped
+            && [&wrote, &elsewhere, &encoded].iter().all(|said| said.starts_with("fetched 403") && said.contains("connected read only")) && unsent(s) == before,
+        json!({ "access": access_of(&r), "read": read, "wrote": wrote, "elsewhere": elsewhere, "encoded": encoded }),
     );
     // each change is the registry's at once: a write call asks it, so no
     // read of the owner's comes between a connect and the call

@@ -593,9 +593,11 @@ fn may_use(narrowed: &Option<Vec<String>>, provider: &str) -> bool {
 #[derive(Deserialize)]
 struct CredentialsAsk {
     host: String,
-    /// The request's method: a read-only account's token goes on its row's
-    /// read methods alone, where the platform keeps its access.
+    /// The request's method and path: a read-only account's token goes on
+    /// its row's read methods and paths alone, where the platform keeps its
+    /// access.
     method: String,
+    path: String,
     placeholders: Vec<Asked>,
 }
 
@@ -3184,7 +3186,7 @@ impl ComputerCell {
                 ));
             }
             let secret = match provider.kind {
-                Kind::Connection => self.connection_token(&owner, &provider.name, agent, &b.method).await?,
+                Kind::Connection => self.connection_token(&owner, &provider.name, agent, &b.method, &b.path).await?,
                 // its call is held to its owner's cap on the key here, gated on
                 // their standing and charged after (`egress_swap`)
                 Kind::Operator => {
@@ -3229,7 +3231,7 @@ impl ComputerCell {
     /// several accounts there, it is the token of the one `agent` uses: its
     /// pick, else the default (`connection_accounts::chosen`), named to
     /// Pipes by its id; only an account the owner's list named is ever named.
-    async fn connection_token(&self, owner: &str, provider: &str, agent: &str, method: &str) -> CellResult<String> {
+    async fn connection_token(&self, owner: &str, provider: &str, agent: &str, method: &str, path: &str) -> CellResult<String> {
         // only one its states say is connected, as the guest's view lists
         // them: one its owner disconnected stays refused, whatever Pipes
         // may hold for it since (an import landed late: registry/
@@ -3246,11 +3248,12 @@ impl ComputerCell {
         // would leave writing), before any token is minted; none kept is
         // read only
         if let Some(o) = self.cfg.providers.get(provider).and_then(|p| p.connection_oauth.as_ref()).filter(|o| o.kept()) {
-            if !fragment_core::connection_signin::method_allowed(o, ConnectionAccess::Read, method) {
+            if !fragment_core::connection_signin::call_allowed(o, ConnectionAccess::Read, method, path) {
                 let access = self.kept_access(owner, provider, o).await?;
-                if !fragment_core::connection_signin::method_allowed(o, access, method) {
+                if !fragment_core::connection_signin::call_allowed(o, access, method, path) {
                     let methods = o.access.read.methods.as_deref().unwrap_or_default().join(", ");
-                    return Err(CellError::new(ErrorCode::Forbidden, format!("{provider} is connected read only: its owner lets agents read with it ({methods}), not {method}. They can allow changes in Settings, under Connections")));
+                    let paths = o.access.read.paths.as_deref().map(|p| format!(" at {}", p.join(", "))).unwrap_or_default();
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("{provider} is connected read only: its owner lets agents read with it ({methods}{paths}), not {method} {path}. They can allow changes in Settings, under Connections")));
                 }
             }
         }
@@ -3944,7 +3947,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let mut payer: Option<(String, String, String)> = None;
     if !found.is_empty() {
         let asked: Vec<Value> = found.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
-        let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "method": method.as_ref(), "placeholders": asked })).await?;
+        let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "method": method.as_ref(), "path": url.path(), "placeholders": asked })).await?;
         for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
             answered.push((provider.to_string(), tag.to_string(), secret.to_string()));

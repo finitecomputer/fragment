@@ -59,8 +59,14 @@ Some providers have no read-only scope: Salesforce's `api` is everything
 its user may do through the API. Such a row's read access names the HTTP
 methods it may use (`read.methods`, some of `GET` and `HEAD`), and its
 scopes may then be read and write's (the catalog refuses identical scopes
-otherwise, and methods on write). The platform enforces it, not the
-provider:
+otherwise, and methods on write). Where a provider's GET may change
+something (Salesforce's Tooling `executeAnonymous` runs Apex on a GET, as
+an org's own Apex REST resources may), it names the paths read only may
+reach too (`read.paths`: patterns of segments, `*` any one, each reaching
+itself and what is under it), and a read-only call is held to both. A path
+is read as plainly written or not at all: an encoded `/` or `.`, a `\`,
+an empty, `.` or `..` segment reaches no pattern, since a server may read
+it as another path. The platform enforces it, not the provider:
 
 - The registry keeps the access picked (`connection_access`). Read only
   is kept before the import (in the turn its session is checked), so a
@@ -70,20 +76,19 @@ provider:
   began it is still signed in as that WorkOS user (a wipe while Pipes
   answered keeps nothing). None kept is read only
   (`connection_signin::access_held`). A wipe takes it.
-- The egress tells the computer each request's method (`computer/
-  credentials`' `method`). A call read only may make (`GET`, `HEAD`) asks
-  nothing more. Any other asks the registry for the access kept, then,
+- The egress tells the computer each request's method and path
+  (`computer/credentials`' `method`, `path`). A call read only may make
+  (its methods, at its paths) asks nothing more. Any other asks the registry for the access kept, then,
   never a belief from an earlier read (a downgrade since would leave it
   writing): read only, it is refused (403, saying so) before Pipes is
   asked for a token, so nothing is minted and nothing is sent
-  (`connection_signin::method_allowed`). Settings reads it with the
+  (`connection_signin::call_allowed`). Settings reads it with the
   fences, in the one question a person's states ask already.
 - Such a row connects one account (`accounts_max` 1): its access is kept a
   provider, not an account.
 
-A provider's own resources may still change something on a GET (an org's
-custom Apex REST endpoint, say): the methods hold a token to reading as
-HTTP means it, and no further.
+A row's paths are its operator's to keep to resources that only read: the
+platform holds read only to what the row names, and no further.
 
 ## Partial grants
 

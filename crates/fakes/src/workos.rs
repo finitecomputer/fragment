@@ -422,6 +422,9 @@ fn now_s() -> i64 {
 /// What the stand-in provider's connection asks for as read only
 /// (`connection_oauth.access.read`).
 pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
+/// The paths the kept connection's read only reaches (`kept_connection_oauth`):
+/// its records, of any version.
+pub const KEPT_READ_PATHS: [&str; 1] = ["/*/records"];
 /// What it asks for as read and write: read only's, and sending mail.
 pub const CONNECTION_WRITE_SCOPES: [&str; 4] = ["mail.read", "files.read", "mail.send", "openid"];
 
@@ -433,10 +436,11 @@ impl WorkOs {
 
     /// The stand-in provider's connection as a provider with no read-only
     /// scope has it (Salesforce's): read only asks for read and write's
-    /// scopes, and the platform holds its calls to GET and HEAD.
+    /// scopes, and the platform holds its calls to GET and HEAD at
+    /// `KEPT_READ_PATHS`.
     pub fn kept_connection_oauth(&self) -> Value {
         let mut o = self.connection_oauth();
-        o["access"]["read"] = json!({ "scopes": CONNECTION_WRITE_SCOPES, "methods": ["GET", "HEAD"] });
+        o["access"]["read"] = json!({ "scopes": CONNECTION_WRITE_SCOPES, "methods": ["GET", "HEAD"], "paths": KEPT_READ_PATHS });
         o
     }
 

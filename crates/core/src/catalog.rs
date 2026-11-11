@@ -222,6 +222,14 @@ pub struct Grant {
     /// platform keeps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub methods: Option<Vec<String>>,
+    /// With `methods`: the paths a read-only account's calls may reach, as
+    /// patterns of segments (`*` any one segment), each reaching itself and
+    /// what is under it. Where a provider's GET may change something
+    /// (Salesforce's Tooling `executeAnonymous` runs Apex on a GET, as an
+    /// org's own Apex REST resources may), read only is held to the
+    /// resources that only read. None: any path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
 }
 
 impl ConnectionOAuth {

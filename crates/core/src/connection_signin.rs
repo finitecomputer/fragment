@@ -86,8 +86,16 @@ pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
     if !token(&o.client_id, 256) || !bounded(&o.access.read) || !bounded(&o.access.write) {
         return Err("a connection needs a client id, and 1–32 bounded OAuth scopes for each access (read, write)".into());
     }
-    if o.access.write.methods.is_some() {
-        return Err("only its read access names methods: read and write's calls take any".into());
+    if o.access.write.methods.is_some() || o.access.write.paths.is_some() {
+        return Err("only its read access names methods and paths: read and write's calls take any".into());
+    }
+    if let Some(p) = &o.access.read.paths {
+        if o.access.read.methods.is_none() {
+            return Err("its read access names paths only beside its methods: the provider holds a read-only grant of a row with scopes of its own".into());
+        }
+        if !(1..=PATHS_MAX).contains(&p.len()) || p.iter().any(|x| !path_pattern(x)) {
+            return Err(format!("its read access's paths are 1 to {PATHS_MAX} patterns: `/`, then segments of letters, digits, `_`, `.` or `-` (never `.` or `..`), or `*`"));
+        }
     }
     if let Some(m) = &o.access.read.methods {
         let mut seen = std::collections::BTreeSet::new();
@@ -116,12 +124,45 @@ pub fn access_held(o: &ConnectionOAuth, granted: Option<&[String]>, kept: Option
     }
 }
 
-/// Whether an account of `access` may make a call of `method` with its
-/// token: any, unless it is read only and its row holds read only to some
-/// methods (`Grant::methods`).
-pub fn method_allowed(o: &ConnectionOAuth, access: ConnectionAccess, method: &str) -> bool {
+/// A read access's path patterns, at most (`Grant::paths`).
+pub const PATHS_MAX: usize = 32;
+
+/// A path's segments as a read-only call's are read: a plain path alone,
+/// `/` and segments of letters, digits, `_`, `.` and `-`, one trailing `/`
+/// at most, never an empty, `.` or `..` segment. None: any other, which no
+/// pattern reaches (an encoded `/` or `.`, a `\`, a doubled `/`: a server
+/// may read it as another path than the one checked).
+fn plain_segments(path: &str) -> Option<Vec<&str>> {
+    let rest = path.strip_prefix('/')?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let segments: Vec<&str> = rest.split('/').collect();
+    let plain = |s: &str| !s.is_empty() && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
+    segments.iter().all(|s| plain(s)).then_some(segments)
+}
+
+/// Whether `pattern` is one a read access may name: a plain path whose
+/// segments may be `*`.
+fn path_pattern(pattern: &str) -> bool {
+    pattern.len() <= 256 && plain_segments(&pattern.replace('*', "x")).is_some() && !pattern.split('/').any(|s| s.contains('*') && s != "*")
+}
+
+/// Whether `path` is one `patterns` reach: a pattern's segments are its
+/// first ones, each the same or the pattern's `*`.
+fn path_reached(patterns: &[String], path: &str) -> bool {
+    let Some(segments) = plain_segments(path) else { return false };
+    patterns.iter().any(|p| {
+        let want: Vec<&str> = p.trim_start_matches('/').trim_end_matches('/').split('/').collect();
+        want.len() <= segments.len() && want.iter().zip(&segments).all(|(w, s)| *w == "*" || w == s)
+    })
+}
+
+/// Whether an account of `access` may make a call of `method` to `path`
+/// with its token: any, unless it is read only and its row holds read only
+/// to some methods (`Grant::methods`) and, where it names them, paths
+/// (`Grant::paths`).
+pub fn call_allowed(o: &ConnectionOAuth, access: ConnectionAccess, method: &str, path: &str) -> bool {
     match (access, &o.access.read.methods) {
-        (ConnectionAccess::Read, Some(methods)) => methods.iter().any(|m| m == method),
+        (ConnectionAccess::Read, Some(methods)) => methods.iter().any(|m| m == method) && o.access.read.paths.as_deref().is_none_or(|p| path_reached(p, path)),
         _ => true,
     }
 }
@@ -410,7 +451,7 @@ mod tests {
     use super::*;
 
     fn config() -> ConnectionOAuth {
-        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect(), methods: None };
+        let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect(), methods: None, paths: None };
         let access = catalog::Access { read: grant(&["mail.read", "files.read"]), write: grant(&["mail.read", "mail.send", "files.read"]) };
         ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, revoke: None }
     }
@@ -819,12 +860,34 @@ mod tests {
         assert_eq!(access_held(&o, None, None), Some(Read), "none kept is read only, Pipes' scopes or none");
         assert_eq!(access_held(&config(), Some(&all), Some(Read)), Some(Write), "a row that keeps none says its grant's");
         assert_eq!(access_held(&config(), None, Some(Write)), None);
-        assert!(method_allowed(&o, Read, "GET") && method_allowed(&o, Read, "HEAD"));
+        assert!(call_allowed(&o, Read, "GET", "/any") && call_allowed(&o, Read, "HEAD", "/any"), "no paths named: any");
         for m in ["POST", "PATCH", "PUT", "DELETE", "OPTIONS", "get"] {
-            assert!(!method_allowed(&o, Read, m), "{m}");
-            assert!(method_allowed(&o, Write, m), "read and write: {m}");
-            assert!(method_allowed(&config(), Read, m), "the provider holds a read-only grant of a row with scopes of its own: {m}");
+            assert!(!call_allowed(&o, Read, m, "/any"), "{m}");
+            assert!(call_allowed(&o, Write, m, "/any"), "read and write: {m}");
+            assert!(call_allowed(&config(), Read, m, "/any"), "the provider holds a read-only grant of a row with scopes of its own: {m}");
         }
+        // where a GET may run code (Salesforce's executeAnonymous), read
+        // only is held to the paths that only read, as plainly written
+        o.access.read.paths = Some(vec!["/services/oauth2/userinfo".into(), "/services/data/*/query".into(), "/services/data/*/sobjects".into()]);
+        assert!(check(&o).is_ok());
+        for reached in ["/services/oauth2/userinfo", "/services/data/v63.0/query", "/services/data/v63.0/query/", "/services/data/v63.0/query/01gD0000002HU6KIAW-2000", "/services/data/v63.0/sobjects/Account/001xx000003DGb2AAG"] {
+            assert!(call_allowed(&o, Read, "GET", reached), "{reached}");
+        }
+        for refused in ["/services/data/v63.0/tooling/executeAnonymous/", "/services/apexrest/Orders", "/services/data", "/services/data/v63.0", "/services/data/v63.0/queryAll", "/services/data/v63.0/sobjects%2F..%2Ftooling%2FexecuteAnonymous", "/services/data/v63.0/sobjects/x%2F..%2F..%2Ftooling", "/services/data/v63.0/sobjects/../tooling/executeAnonymous", "/services/data/v63.0//sobjects", "/services/data/v63.0/sobjects/a\\b", "services/data/v63.0/query", "/Services/data/v63.0/query", ""] {
+            assert!(!call_allowed(&o, Read, "GET", refused), "{refused:?}");
+            assert!(call_allowed(&o, Write, "GET", refused), "read and write reaches any: {refused:?}");
+        }
+        for bad in [vec![], vec!["services/data".to_string()], vec!["/services//data".to_string()], vec!["/services/da*ta".to_string()], vec!["/services/../data".to_string()], vec!["/services/%2e".to_string()], vec!["/x".to_string(); PATHS_MAX + 1]] {
+            let mut bad_o = o.clone();
+            bad_o.access.read.paths = Some(bad.clone());
+            assert!(check(&bad_o).is_err(), "{bad:?}");
+        }
+        let mut paths_alone = config();
+        paths_alone.access.read.paths = Some(vec!["/x".into()]);
+        assert!(check(&paths_alone).is_err(), "paths only beside methods");
+        let mut write_paths = o.clone();
+        write_paths.access.write.paths = Some(vec!["/x".into()]);
+        assert!(check(&write_paths).is_err(), "read and write's calls are never held to paths");
     }
 
     /// Google's row asks it to show its account chooser, then its consent,
