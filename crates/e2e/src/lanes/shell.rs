@@ -7941,6 +7941,56 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
     Ok(())
 }
 
+/// Goal: a brain is on a page of its own, the Brains page (`/brains`,
+/// apps-page.js's brains shelf), and on the dock until taken off, as an app
+/// is. Valid: a brain made while Apps is open goes on the dock, and the
+/// sidebar's Brains lists it with its Dock switch on; its switch takes it
+/// off the dock and puts it back. Invalid: the Apps page never lists it,
+/// nor the Brains page an app. Replay: Back and Forward go between the two
+/// pages by their addresses, each listing what it did. Apps is open again
+/// at the end, and the brain gone.
+fn brains_page_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let in_page = |method: &str, path: &str, body: &str| {
+        format!("fetch({}, {{ method: {}, headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {body}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json().catch(() => null) }}))", js(path), js(method))
+    };
+    let made = b.eval(page, &in_page("POST", "/api/fragments", &js(&json!({ "label": "shelved-brain", "template": "brain", "title": "Shelved brain" }).to_string())))?;
+    let brain = made["body"]["name"].as_str().unwrap_or_default().to_string();
+    anyhow::ensure!(made["status"] == 200 && !brain.is_empty(), "the brain was not made: {made}");
+    let on_page = |page_id: &str, name: &str| format!("!!document.querySelector({})", js(&format!("#{page_id} .app-row[data-fragment=\"{name}\"]")));
+    let docked = format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{brain}\"]")));
+    let dock = format!("document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{brain}\"] [data-action=dock]")));
+
+    let off_apps = b.until(page, &format!("location.pathname === '/apps' && {docked} && {} && !{}", on_page("apps-page", app), on_page("apps-page", &brain)), wait);
+    s.ok("a brain made while Apps is open goes on the dock, and the Apps page never lists it", off_apps, b.eval(page, "document.getElementById('apps-page')?.innerText ?? null")?);
+
+    b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
+    let listed = b.until(
+        page,
+        &format!("location.pathname === '/brains' && document.getElementById('apps-page').hidden && !document.getElementById('brains-page').hidden && document.querySelector('#brains-page h1')?.textContent === 'Brains' && {} && !{} && {dock}?.getAttribute('aria-checked') === 'true'", on_page("brains-page", &brain), on_page("brains-page", app)),
+        wait,
+    );
+    s.ok("the sidebar's Brains opens the Brains page (/brains): the brain, its Dock switch on, and no app", listed, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
+
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    let off = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled && !{docked}"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    let back_on = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled && {docked}"), wait);
+    s.ok("a brain's Dock switch on the Brains page takes it off the dock and pins it back", off && back_on, b.eval(page, &format!("{dock}?.getAttribute('aria-checked') ?? null"))?);
+
+    b.eval(page, "(history.back(), true)")?;
+    let apps_again = b.until(page, &format!("location.pathname === '/apps' && document.getElementById('brains-page').hidden && {} && !{}", on_page("apps-page", app), on_page("apps-page", &brain)), wait);
+    b.eval(page, "(history.forward(), true)")?;
+    let brains_again = b.until(page, &format!("location.pathname === '/brains' && document.getElementById('apps-page').hidden && {}", on_page("brains-page", &brain)), wait);
+    s.ok("Back and Forward go between Apps and Brains by their addresses, each listing what it did", apps_again && brains_again, json!({ "apps": apps_again, "brains": brains_again }));
+
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let gone = b.eval(page, &in_page("DELETE", &format!("/api/f/{brain}"), "undefined"))?;
+    anyhow::ensure!(gone["status"] == 200, "{brain} was not deleted: {gone}");
+    anyhow::ensure!(b.until(page, &format!("location.pathname === '/apps' && {} && !{docked}", on_page("apps-page", app)), wait), "Apps did not open again with the brain gone");
+    Ok(())
+}
+
 /// An app created while Apps is open appears from the list, and its card is
 /// read then. Its first reads are 404; the bounded retry shows the card the
 /// platform has since made, byte for byte, without another list change.
@@ -8310,6 +8360,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
     s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
 
+    brains_page_ui(s, b, page, app)?;
     apps_dock_visit_ui(s, b, page, app)?;
     apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;
