@@ -242,6 +242,9 @@ struct Shared {
     /// Each linked agent's SimpleX chat, as the engine is told it
     /// (`Input::Relaying`): the one a routine at home runs in.
     mirrors: Mutex<BTreeMap<String, Option<String>>>,
+    /// The image's SimpleX, when it names a core: a move's routine waits
+    /// for it (`feed`).
+    simplex: Option<crate::simplex::run::Handle>,
 }
 
 impl Shared {
@@ -338,7 +341,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
 
     let (inbox_tx, mut inbox) = mpsc::channel::<Msg>(limits::INBOX_MAX);
     let (keep_tx, keep_rx) = watch::channel(false);
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared { simplex: simplex.clone(), ..Shared::default() });
 
     // Each runtime starts at once (Hermes dials it while the bridge reads
     // the platform), and its events go to the inbox, named by it. The
@@ -1064,6 +1067,18 @@ async fn follow_once(
 /// ends the follow, if anything: `Stopped` when the engine is gone.
 #[allow(clippy::too_many_arguments)]
 async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> Option<Ended> {
+    // The move's routine (FIN-463), the platform's on the agent's own
+    // `tasks`, as the agent: its stage's SimpleX files are set aside (or
+    // given up on) before the routine reaches the engine, so the import it
+    // starts, and the `done` that ends the stage, come after by
+    // construction (docs/migrations.md, "SimpleX in a stage"). Bounded
+    // (`SET_ASIDE_WAIT_MS`); a replay of it waits for nothing.
+    if let (true, Some(h)) = (tasks && fragment == agent.fragment && record.principal == agent.identity, &shared.simplex) {
+        let routine = record.body.get("kind").and_then(Value::as_str) == Some("routine");
+        if let Some(stage) = record.body.get("text").and_then(Value::as_str).filter(|_| routine).and_then(crate::simplex::stage::of_routine) {
+            h.set_aside_first(&agent.fragment, &stage).await;
+        }
+    }
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
         // is skipped, as cron skips a missed run; an answer never is (its

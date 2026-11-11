@@ -140,6 +140,7 @@ pub const REGISTRY: Class = Class {
         step!("org_content", "registry/0008_org_content.sql"),
         step!("key_sessions", "registry/0009_key_sessions.sql"),
         step!("comp_until", "registry/0010_comp_until.sql"),
+        step!("connection_signin_access", "registry/0011_connection_signin_access.sql"),
     ],
     variants: &[],
     kept: &[],

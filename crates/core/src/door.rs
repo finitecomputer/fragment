@@ -5,7 +5,10 @@
 //! opened (`connectors::Policy::authorize`). Only its owner opens one, and only
 //! what came through it speaks for them; the agent itself can do neither.
 //!
-//! - **A ticket** starts a link or an unlink. The platform makes one at
+//! - **A ticket** starts a link, an unlink, or an adoption (its owner keeps
+//!   their SimpleX conversation with their old finite.computer agent, set
+//!   aside from its move's stage: FIN-463; an adoption is a link to a
+//!   contact that exists already, so it is redeemed as a link's is). The platform makes one at
 //!   its owner's ask alone (from Settings), for one agent on one computer,
 //!   for `TICKET_MS`, and signs it as the agent fragment's own key; the
 //!   computer's bridge checks it with that key (its view's `key` for the
@@ -81,6 +84,7 @@ pub const SKEW_MS: i64 = 10 * 60_000;
 pub enum Act {
     Link,
     Unlink,
+    Adopt,
 }
 
 impl Act {
@@ -88,7 +92,14 @@ impl Act {
         match self {
             Act::Link => "link",
             Act::Unlink => "unlink",
+            Act::Adopt => "adopt",
         }
+    }
+
+    /// Whether it opens the door (a key is redeemed with its ticket): a
+    /// link, or an adoption.
+    pub fn opens(self) -> bool {
+        matches!(self, Act::Link | Act::Adopt)
     }
 }
 
@@ -244,7 +255,14 @@ mod tests {
         let mut other = ticket();
         other.act = Act::Unlink;
         assert!(!fragment_nip98::verify_digest(agent.pubkey_hex(), &other.digest(), &sig), "a link's ticket is no unlink's");
+        other.act = Act::Adopt;
+        assert_eq!(hex::encode(other.digest()), ADOPT_DIGEST, "an adoption's, the bridge's too");
+        assert!(!fragment_nip98::verify_digest(agent.pubkey_hex(), &other.digest(), &sig), "nor an adoption's");
+        assert!(Act::Link.opens() && Act::Adopt.opens() && !Act::Unlink.opens());
     }
+
+    /// images/bridge/src/simplex/door.rs holds the same.
+    pub(crate) const ADOPT_DIGEST: &str = "d4e45efd715720407801163b884480a90be37f9c66a9ac103edba3bf28391e9f";
 
     pub(crate) const TICKET_DIGEST: &str = "fc329f82d4dd4f6c73aaf32e55e0863b13a5de24b9b64ad7e3f2897e985d11e7";
     pub(crate) const RECORD_DIGEST: &str = "6f579428588821dc78f7f0ed9ea310980bafd4857b900ce164c03e732ccb48f4";
@@ -318,5 +336,8 @@ mod tests {
         }
         let read: Ticket = serde_json::from_value(json!({ "door": "simplex", "act": "unlink", "agent": "juniper--k3x9", "computer": "computer:00aa", "nonce": "0f".repeat(16), "exp": 5 })).expect("a ticket");
         assert_eq!((read.act, read.sig.as_str()), (Act::Unlink, ""));
+        let read: Ticket = serde_json::from_value(json!({ "door": "simplex", "act": "adopt", "agent": "juniper--k3x9", "computer": "computer:00aa", "nonce": "0f".repeat(16), "exp": 5 })).expect("a ticket");
+        assert_eq!(read.act, Act::Adopt);
+        assert!(serde_json::from_value::<Ticket>(json!({ "door": "simplex", "act": "keep", "agent": "juniper--k3x9", "computer": "computer:00aa", "nonce": "0f".repeat(16), "exp": 5 })).is_err(), "no other act");
     }
 }

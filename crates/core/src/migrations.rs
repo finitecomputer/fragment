@@ -63,7 +63,10 @@ pub fn comp_grant_id(person: &str) -> String {
 /// The routine that starts a stage's import, on its new agent's own
 /// `tasks` with no chat, so it runs in its owner's home (docs/migrations.md;
 /// docs/chat-records.md, "A routine"). Its person's answers join it with
-/// the page that asks them (F6).
+/// the page that asks them (F6). The computer's bridge reads its stage
+/// back from these words, to set its SimpleX identity aside before the
+/// import ends the stage (images/bridge/src/simplex/stage.rs, `of_routine`):
+/// a change of words is a change there too.
 pub fn routine_text(stage: &str) -> String {
     format!("Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage {stage}.")
 }
@@ -1016,6 +1019,14 @@ mod tests {
 
     fn ok() -> StageDone {
         StageDone { ok: true, report_sha256: None, why: None }
+    }
+
+    /// Goal: the routine's words are the ones the computer's bridge reads
+    /// its stage from (images/bridge/src/simplex/stage.rs tests the same
+    /// sentence), so its SimpleX identity is set aside before the stage ends.
+    #[test]
+    fn the_routine_names_its_stage_as_the_bridge_reads_it() {
+        assert_eq!(routine_text("u_0a-9Z.p1.2"), "Bring yourself over from finite.computer: use the import-agent-home skill, layout finite-computer, stage u_0a-9Z.p1.2.");
     }
 
     #[test]
