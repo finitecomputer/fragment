@@ -1981,7 +1981,10 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // the example offers Microsoft beside Google; the hosted e2e's preview, not yet
+            let microsoft: &[&str] = if file == "deploy/example.jsonc" { &["microsoft"] } else { &[] };
+            let expected: Vec<&str> = ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places"].into_iter().chain(microsoft.iter().copied()).chain(["xai", "elevenlabs", "openrouter"]).collect();
+            assert_eq!(names, expected, "{file}");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
             assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
@@ -1991,6 +1994,34 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// The example's Microsoft row, its commented connect uncommented (a
+    /// client id, the secret's store name and the skill's access file
+    /// filled in), loads: its two accesses as the skill's file names them,
+    /// no revocation (Microsoft has none), and its client secret bound.
+    #[test]
+    fn the_example_microsoft_connect_loads_once_uncommented() {
+        let root = devstack::repo_root();
+        let example = fs::read_to_string(root.join("deploy/example.jsonc")).unwrap();
+        let access = fs::read_to_string(root.join("templates/skills/skills/productivity/microsoft-finite/references/microsoft-365-access.json")).unwrap();
+        let start = example.find(r#"{ "name": "microsoft""#).expect("the example's microsoft row");
+        let row = &example[start..start + example[start..].find(r#""env": ["MICROSOFT_OAUTH_ACCESS_TOKEN"] }"#).expect("its end")];
+        let open = row.lines().filter(|l| !l.trim_start().starts_with("// several") && !l.trim_start().starts_with(r#"// "accounts_max""#)).map(|l| l.trim_start().strip_prefix("// ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+        let open = open.replace("<the client secret's store name>", "fragment-microsoft-oauth-secret").replace("<the app's client id>", "microsoft-client").replace("<the Microsoft skill's references/microsoft-365-access.json>", &access);
+        let dir = root.join("target/xtask-tests/microsoft-connect");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.jsonc");
+        fs::write(&file, example.replacen(row, &open, 1)).unwrap();
+        let d = load(&file).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        let p = catalog.get("microsoft").expect("its row");
+        let o = p.connection_oauth.as_ref().expect("its connect");
+        let written: serde_json::Value = serde_json::from_str(&access).unwrap();
+        assert_eq!(serde_json::to_value(&o.access).unwrap(), written, "the skill's access file is the row's access");
+        assert_eq!((o.client_id.as_str(), o.revoke.as_deref(), p.hosts.as_slice()), ("microsoft-client", None, &["graph.microsoft.com".to_string()][..]));
+        assert_eq!(o.access.offered(), [fragment_core::catalog::ConnectionAccess::Read, fragment_core::catalog::ConnectionAccess::Write]);
+        assert!(bound(&d).unwrap().cell().contains(&("CONNECTION_SECRET_MICROSOFT".into(), "fragment-microsoft-oauth-secret")));
     }
 
     /// A provider's note: the example's (its google row's, commented out)

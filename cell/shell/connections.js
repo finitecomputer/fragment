@@ -37,6 +37,17 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     calendar: "Calendar",
     "calendar.readonly": "Calendar (read)",
     "contacts.readonly": "Contacts",
+    // Microsoft Graph's (https://graph.microsoft.com/<name>)
+    "User.Read": "Profile",
+    "Mail.Read": "Mail (read)",
+    "Mail.ReadWrite": "Mail (manage)",
+    "Mail.Send": "Mail (send)",
+    "Calendars.Read": "Calendar (read)",
+    "Calendars.ReadWrite": "Calendar",
+    "Files.Read": "OneDrive (read)",
+    "Files.ReadWrite": "OneDrive",
+    "Contacts.Read": "Contacts (read)",
+    "Contacts.ReadWrite": "Contacts",
   };
   // what a connection's account lets its agents do, picked as the person
   // connects it (`access`): its name for people, on a button and as said
@@ -341,8 +352,8 @@ export function createConnections({ api, el, section, named, seg, computer, getA
     if (p.note) inner.append(el("p", "provider-about", p.note));
     // what a connection's account allows, in words
     const granted = !several && p.kind === "connection" && p.state === "connected" ? p.granted ?? [] : [];
-    // (never its sign-in's: openid, email, profile)
-    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|userinfo\.\w+)$/.test(g));
+    // (never its sign-in's: openid, email, profile, offline_access)
+    const scopes = [...new Set(granted.map(scopeName))].filter((g) => !/^(openid|email|profile|offline_access|userinfo\.\w+)$/.test(g));
     if (scopes.length) {
       const chips = el("div", "provider-chips");
       chips.append(...scopes.map((g) => el("span", null, g)));

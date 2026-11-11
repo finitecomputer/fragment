@@ -322,6 +322,26 @@
     { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"],
       "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }],
       "env": ["GOOGLE_PLACES_API_KEY"], "key": "fragment-google-places-api-key" },
+    // The person's Microsoft 365 (a work, school or personal account), as
+    // Google is: Pipes' `microsoft` provider, one connection for Microsoft
+    // Graph (Outlook mail and calendar, OneDrive, contacts), connected
+    // through the browser once its Entra app's secret is in the store (the
+    // app Pipes' Microsoft integration uses, with the platform's callback
+    // beside Pipes'). `common` takes every kind of account; `offline_access`
+    // is what has Microsoft answer a refresh token. Microsoft has no
+    // revocation endpoint: a disconnect deletes the account at Pipes, and
+    // the person removes the app in their account's settings.
+    { "name": "microsoft", "kind": "connection",
+      "hosts": ["graph.microsoft.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "note": "Some work accounts need an IT admin to approve Finite before you can connect.",
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account",
+      //   "exchange": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+      //   "client_id": "<the app's client id>", "access": <the Microsoft skill's references/microsoft-365-access.json> },
+      // several Microsoft accounts a person (work and personal), as Google's
+      // "accounts_max": 5,
+      "env": ["MICROSOFT_OAUTH_ACCESS_TOKEN"] },
     { "name": "xai", "kind": "operator", "hosts": ["api.x.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },

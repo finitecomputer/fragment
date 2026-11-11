@@ -133,12 +133,16 @@ pub fn revoke_form(token: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new()).append_pair("token", token).finish()
 }
 
-/// The scopes that only sign a person in: OpenID Connect's `openid`,
-/// `email` and `profile`, and Google's long names for the last two.
-/// Google grants them beside whatever else the person allows (its granular
-/// consent offers no box for them), so a grant of these alone lets an
-/// agent do nothing (`tokens` refuses it), and none is ever missing.
-pub const IDENTITY_SCOPES: [&str; 5] = ["openid", "email", "profile", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"];
+/// The scopes that only sign a person in, or keep them signed in: OpenID
+/// Connect's `openid`, `email`, `profile` and `offline_access` (a refresh
+/// token: OpenID Connect Core 11, which Microsoft and Atlassian ask for by
+/// that name), and Google's long names for `email` and `profile`. A
+/// provider grants them beside whatever else the person allows (Google's
+/// granular consent offers no box for them; Microsoft may leave
+/// `offline_access` out of its answer's `scope`), so a grant of these alone
+/// lets an agent do nothing (`tokens` refuses it), none is ever missing, and
+/// none tells an access.
+pub const IDENTITY_SCOPES: [&str; 6] = ["openid", "email", "profile", "offline_access", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"];
 
 fn identity(scope: &str) -> bool {
     IDENTITY_SCOPES.contains(&scope)
@@ -755,6 +759,40 @@ mod tests {
         let mut one = config();
         one.access.read = None;
         assert_eq!(access_of(&one, &["mail.read".to_string()]), None);
+    }
+
+    /// Microsoft's documented answer (Microsoft identity platform, the
+    /// authorization code flow): its Graph scopes by their full names, no
+    /// `offline_access` in its `scope` beside the refresh token, and an ID
+    /// token whose `email` has no `email_verified`. It connects with nothing
+    /// missing, read only or read and write as its grant holds, labeled by
+    /// that email.
+    #[test]
+    fn microsofts_answer_connects_with_its_graph_scopes_and_its_email() {
+        let g = |s: &str| format!("https://graph.microsoft.com/{s}");
+        let sign = ["openid", "email", "profile", "offline_access"].map(String::from);
+        let grant = |scopes: &[&str]| Grant { scopes: sign.iter().cloned().chain(scopes.iter().map(|s| g(s))).collect() };
+        let access = catalog::Access { read: Some(grant(&["User.Read", "Mail.Read", "Calendars.Read", "Files.Read", "Contacts.Read"])), write: grant(&["User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite", "Contacts.ReadWrite"]) };
+        let o = ConnectionOAuth { authorize: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account".into(), exchange: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(), client_id: "client".into(), access, revoke: None };
+        assert!(check(&o).is_ok());
+        let answer = |scopes: &[&str]| {
+            let mut a = id_token(json!({ "aud": "client", "sub": "AAAAAAAAAAAAAAAAAAAAAIkzqFVrSaSaFHy782bbtaQ", "email": "ada@contoso.com", "preferred_username": "ada@contoso.com", "name": "Ada" }));
+            let scope = ["openid", "profile", "email"].iter().map(|s| s.to_string()).chain(scopes.iter().map(|s| g(s))).collect::<Vec<_>>().join(" ");
+            for (k, v) in [("token_type", json!("Bearer")), ("scope", json!(scope)), ("expires_in", json!(3599)), ("ext_expires_in", json!(3599)), ("access_token", json!("eyJ0eXAiOiJKV1Qi.access")), ("refresh_token", json!("M.C5.refresh"))] {
+                a[k] = v;
+            }
+            a
+        };
+        for (access, scopes) in [(ConnectionAccess::Read, &["User.Read", "Mail.Read", "Calendars.Read", "Files.Read", "Contacts.Read"][..]), (ConnectionAccess::Write, &["User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite", "Contacts.ReadWrite"][..])] {
+            let requested = &o.access.of(access).unwrap().scopes;
+            let a = answer(scopes);
+            let granted = tokens(&a, requested).expect("Microsoft's documented answer");
+            assert_eq!(access_of(&o, &granted.scopes), Some(access), "{access:?}");
+            assert_eq!(missing(requested, &granted.scopes), Vec::<String>::new(), "{access:?}: offline_access, answered or not, is never missing");
+            assert_eq!(account_label(&a, "client").as_deref(), Some("ada@contoso.com"));
+        }
+        // offline_access with signing in alone is no grant of anything
+        assert_eq!(tokens(&granting("openid offline_access"), &o.access.write.scopes).err(), Some(Refused::NoScopes));
     }
 
     /// Google's row asks it to show its account chooser, then its consent,
