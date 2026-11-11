@@ -370,6 +370,30 @@
       //   "exchange": "https://login.salesforce.com/services/oauth2/token", "revoke": "https://login.salesforce.com/services/oauth2/revoke",
       //   "client_id": "<the app's consumer key>", "access": { "write": { "scopes": ["api", "refresh_token", "openid", "email"] } } },
       "env": ["SALESFORCE_ACCESS_TOKEN"] },
+    // The person's Atlassian sites (Jira), as Google is: Pipes' `atlassian`
+    // provider, Atlassian's one sign-in (OAuth 2.0 3LO) for its products
+    // (Pipes' `jira` and `confluence` are providers of their own),
+    // connected through the browser once its app's secret is in the store
+    // (the app Pipes' Atlassian integration uses, sharing on, with the
+    // platform's callback beside Pipes'). Its authorize needs
+    // `audience=api.atlassian.com`; `prompt=consent` shows its consent,
+    // where the person picks a site, and `offline_access` is what has
+    // Atlassian answer a refresh token (which rotates). Its token endpoint
+    // takes the form's `client_secret` and S256 PKCE (its metadata,
+    // auth.atlassian.com/.well-known/oauth-authorization-server). Every
+    // site's API is under api.atlassian.com (`/ex/jira/{cloudid}`), its one
+    // host. Atlassian documents no revocation for these apps: a disconnect
+    // deletes the account at Pipes, and the person removes the app in their
+    // Atlassian account's settings (developer.atlassian.com,
+    // cloud/jira/platform/oauth-2-3lo-apps, read 2026-11-11).
+    { "name": "atlassian", "kind": "connection",
+      "hosts": ["api.atlassian.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://auth.atlassian.com/authorize?audience=api.atlassian.com&prompt=consent",
+      //   "exchange": "https://auth.atlassian.com/oauth/token",
+      //   "client_id": "<the app's client id>", "access": <the Jira skill's references/atlassian-access.json> },
+      "env": ["ATLASSIAN_OAUTH_ACCESS_TOKEN"] },
     // The person's own OpenRouter account (Paul, 2026-10-08): connected from
     // settings through OpenRouter's own page (its PKCE key exchange: no key
     // pasted), and paid by their OpenRouter credit, never metered here. An
