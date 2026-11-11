@@ -1049,9 +1049,36 @@ label.settings-line { cursor: pointer; }
 .history-preview.found { color: var(--text-secondary); }
 .history-more { align-self: center; margin-top: 14px; height: 32px; padding: 0 16px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
 .history-more:hover { background: var(--bg-hover); }
+/* the Schedules page (schedules-page.js): History's layout, one row a
+   job (its name, when it runs, its fragment), the paused last */
+.schedules-layout { display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; padding: 34px clamp(20px, 4vw, 56px) 88px; }
+.schedules-intro h1 { margin: 0 0 18px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; }
+.schedules-list { display: flex; flex-direction: column; }
+.schedules-empty, .schedules-failed p { margin: 16px 2px; font-size: 14px; }
+.schedules-failed p { margin: 8px 2px; font-size: 13px; }
+.schedules-row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 9px 10px; border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.schedules-row:hover { background: var(--bg-hover); }
+.schedules-art { display: grid; flex: none; place-items: center; width: 30px; height: 30px; }
+.schedules-art .app-icon, .schedules-art .app-picture, .schedules-art .app-picture .app-icon { width: 30px; height: 30px; border-radius: 8px; }
+.schedules-art .app-icon { background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
+.schedules-art .app-icon svg { width: 18px; height: 18px; stroke-width: 1.7; }
+.schedules-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.schedules-line, .schedules-sub { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.schedules-line .label { min-width: 0; overflow: hidden; color: var(--text-primary); font-size: 14.5px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.schedules-chip { flex: none; padding: 0 7px; border-radius: 999px; background: var(--bg-active); color: var(--text-secondary); font-size: 11px; line-height: 18px; }
+.schedules-line time { flex: none; margin-left: auto; color: var(--text-secondary); font-size: 12px; line-height: 20px; }
+.schedules-sub { color: var(--text-tertiary); font-size: 13px; line-height: 18px; }
+.schedules-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schedules-fragment { flex: none; max-width: 45%; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.schedules-said + .schedules-fragment::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
 @container settings (max-width: 620px) {
   .apps-layout { padding: 18px 16px 60px; }
   .history-layout { padding: 18px 16px 60px; }
+  .schedules-layout { padding: 18px 16px 60px; }
+  /* its schedule in words over its fragment, each whole */
+  .schedules-sub { flex-direction: column; align-items: flex-start; gap: 0; }
+  .schedules-said, .schedules-fragment { max-width: 100%; white-space: normal; }
+  .schedules-said + .schedules-fragment::before { content: none; }
   /* a row's Continue under its words, so its title and what a search found
      have the width (two agents' "Continue with [agent]" left them "M…") */
   .history-row { flex-wrap: wrap; }
