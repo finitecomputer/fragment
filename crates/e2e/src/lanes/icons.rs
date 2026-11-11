@@ -571,13 +571,14 @@ fn template_icon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let listed = s.eventually(WAIT, || row(api, owner, &name)["picture"] == shown.as_str());
     let got = get(api, owner, &name, None)?;
     let versioned = api.signed(owner, "GET", &shown, None)?;
-    let again = get(api, owner, &name, Some(&format!("\"{}\"", release.sha256)))?;
+    let again = get(api, owner, &name, Some(got.header("etag").as_str()))?;
     s.ok(
-        "a new brain lists its template's icon, made by no one, and serves its bytes from the release (a PNG, by its hash: 304)",
+        "a new brain lists its template's icon, made by no one, and serves its bytes from the release (a PNG, tagged by its hash: 304 for that tag)",
         listed
             && got.status == 200
             && got.header("content-type") == icon::MEDIA_TYPE
             && hex::encode(Sha256::digest(&got.bytes)) == release.sha256
+            && got.header("etag") == format!("\"{}\"", release.sha256)
             && versioned.status == 200
             && versioned.bytes == got.bytes
             && again.status == 304,

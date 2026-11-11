@@ -87,13 +87,15 @@ impl FragmentCell {
         }
     }
 
-    /// The bytes of the icon it shows, streamed (never held whole).
+    /// The bytes of the icon it shows, streamed (never held whole), tagged
+    /// by its SHA-256 as a blob's are.
     async fn icon_body(&self, shown: &Shown) -> CellResult<Response> {
         match shown {
             Shown::Own(sha) => self.stream_blob(sha, icon::MEDIA_TYPE, None).await,
             Shown::Release(f) => {
                 let headers = Headers::new();
                 headers.set("content-type", icon::MEDIA_TYPE)?;
+                headers.set("etag", &format!("\"{}\"", f.sha256))?;
                 crate::assets::body(&self.env, f, headers).await
             }
         }
