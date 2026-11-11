@@ -4205,6 +4205,21 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
+    // each row's tile: its provider, its letter, and whether it holds a mark
+    // filled with the tile's own text colour (provider-marks.js)
+    let tiles = b.eval(
+        page,
+        "[...document.querySelectorAll('#settings-connections [data-provider] .provider-tile')].map((t) => { const m = t.querySelector('svg.provider-mark path'); \
+         return [t.closest('[data-provider]').dataset.provider, t.textContent, !!m && getComputedStyle(m).fill === getComputedStyle(t).color]; })",
+    )?;
+    let tile = |p: &str| tiles.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
+    let marked = ["google", "openrouter", "x", "perplexity", "google-places", "elevenlabs"];
+    let lettered = [("firecrawl", "F"), ("fal", "F"), ("browser-use", "B"), ("xai", "x"), (crate::SWAP_OWN, "E")];
+    s.ok(
+        "a provider with a mark shows it in its tile, in the theme's text colour, and no letter; one without keeps its name's first letter",
+        marked.iter().all(|p| tile(p) == json!([p, "", true])) && lettered.iter().all(|(p, l)| tile(p) == json!([p, l, false])),
+        &tiles,
+    );
     let accounts = b.eval(page, "[...document.querySelectorAll('#settings-connections [data-account]')].map((a) => [a.closest('[data-provider]').dataset.provider, a.textContent])")?;
     s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
     // each note: its row, its text, and whether it is the line under the

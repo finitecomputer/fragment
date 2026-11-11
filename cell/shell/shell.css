@@ -747,6 +747,8 @@ label.settings-line { cursor: pointer; }
 /* its tile: its name's first letter (no provider's logo is ours to show) */
 .provider-tile { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9px; background: var(--bg-card); box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text-primary); font: var(--type-body-strong); }
 .provider-tile.big { width: 48px; height: 48px; border-radius: 12px; font: 600 1.25rem/1 var(--font-sans); }
+.provider-mark { width: 18px; height: 18px; fill: currentColor; }
+.provider-tile.big .provider-mark { width: 24px; height: 24px; }
 .provider-body { min-width: 0; }
 .provider-name { display: block; font: var(--type-body-strong); }
 .provider-sub { display: block; margin-top: 2px; font: var(--type-body-sm); color: var(--text-secondary); }
