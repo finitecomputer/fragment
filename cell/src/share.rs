@@ -80,9 +80,11 @@ pub(crate) const FACES_MAX: usize = 64;
 
 /// Arms the page's buttons `DELAY_MS` after it shows (again each time it
 /// is shown), copies a link, asks a second click of a button that takes
-/// access away (`data-confirm`), and closes the sheet (Done; framed,
-/// Escape too). Framed, it tells the page around it, the platform's own,
-/// its height as it changes and when it is done.
+/// access away (`data-confirm`; an icon's asks in its card's note), keeps
+/// one role menu open at a time (a click elsewhere or Escape closes it;
+/// one with no room below opens upward), and closes the sheet (its X;
+/// framed, Escape too). Framed, it tells the page around it, the
+/// platform's own, its height as it changes and when it is done.
 const SCRIPT: &str = r#"<script>(() => {
   const acting = () => document.querySelectorAll("[data-arm]");
   let timer = 0;
@@ -94,36 +96,68 @@ const SCRIPT: &str = r#"<script>(() => {
   arm();
   addEventListener("pageshow", arm);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") arm(); });
+  // a button's words are its [data-label], so its icon stays
+  const label = (b) => b.querySelector("[data-label]") ?? b;
   for (const b of document.querySelectorAll("button[data-copy]")) b.onclick = () => {
-    const link = b.dataset.copy, was = b.textContent;
+    const link = b.dataset.copy, words = label(b), was = words.textContent;
     (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => {
-      b.textContent = "Copied";
-      setTimeout(() => { b.textContent = was; }, 1500);
+      words.textContent = "Copied";
+      setTimeout(() => { words.textContent = was; }, 1500);
     }, () => prompt("Copy this link:", link));
   };
   // what takes access away asks once more: the first click says so, the
   // second sends it (within a few seconds)
   for (const b of document.querySelectorAll("button[data-confirm]")) {
+    // an icon has no words to swap: its [data-note] says so in the card's note
+    const icon = b.classList.contains("icon-button");
+    const note = icon ? b.closest(".link-card")?.querySelector("[data-link-note]") : null;
+    const noted = note?.textContent;
     const was = b.textContent;
     let undo = 0;
     b.addEventListener("click", (e) => {
       if (b.dataset.sure) return;
       e.preventDefault();
       b.dataset.sure = "1";
-      b.textContent = b.dataset.confirm;
+      if (note) note.textContent = b.dataset.note;
+      else b.textContent = b.dataset.confirm;
       clearTimeout(undo);
-      undo = setTimeout(() => { delete b.dataset.sure; b.textContent = was; }, 4000);
+      undo = setTimeout(() => {
+        delete b.dataset.sure;
+        if (note) note.textContent = noted;
+        else b.textContent = was;
+      }, 4000);
     });
   }
-  // in the platform's dialog (only its pages may frame this one), Done or
-  // Escape closes the dialog; in a window of its own, Done closes the
+  // one menu open at a time, and a click elsewhere closes it
+  const menus = [...document.querySelectorAll("details.menu")];
+  const shut = (except) => { for (const m of menus) if (m !== except) m.open = false; };
+  for (const m of menus) m.addEventListener("toggle", () => {
+    if (!m.open) return;
+    shut(m);
+    // the frame is only as tall as the sheet: a menu with no room below opens upward
+    m.classList.remove("up");
+    m.classList.toggle("up", m.querySelector(".menu-panel").getBoundingClientRect().bottom > innerHeight);
+  });
+  document.addEventListener("click", (e) => { if (!e.target.closest("details.menu")) shut(); });
+  // the invite's role menu says what is chosen, and closes on a choice
+  for (const m of document.querySelectorAll("[data-invite-role]")) m.addEventListener("change", (e) => {
+    m.querySelector("[data-label]").textContent = e.target.closest("label").textContent;
+    m.open = false;
+  });
+  // in the platform's dialog (only its pages may frame this one), the X or
+  // Escape closes the dialog; in a window of its own, the X closes the
   // window, or it goes to the shell's Apps page, where sharing is
   const framed = parent !== window;
   const tell = (share) => parent.postMessage({ share, height: document.body.offsetHeight }, location.origin);
   if (framed) {
     tell("shown");
     new ResizeObserver(() => tell("resized")).observe(document.body);
-    addEventListener("keydown", (e) => { if (e.key === "Escape") tell("done"); });
+    addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      // Escape closes an open menu first
+      if (menus.some((m) => m.open)) return shut();
+      tell("done");
+    });
   }
   for (const b of document.querySelectorAll("button[data-done]")) b.onclick = () => {
     if (framed) return tell("done");
@@ -446,9 +480,9 @@ struct Sheet {
     /// Its address, which opens it for the people in it.
     canonical: String,
     /// It holds a key or a door, so it has no share link and is not public
-    /// (reach.rs): the sheet offers members only, says once that the people
-    /// added can use its keys, and its Copy link is its address, never the
-    /// share link.
+    /// (reach.rs): the sheet shows With link and Public unavailable, says
+    /// once that the people added can use its keys, and its Copy link is
+    /// its address, never the share link.
     reach: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
@@ -546,56 +580,78 @@ fn role_name(role: Role) -> &'static str {
     }
 }
 
-/// Who can open it, as General access says it: an icon, its name, and
-/// what it means.
+/// One of the sheet's icons: a 24-unit stroked path (platform-pages.css
+/// `main.share .i`, `.tick`).
+fn svg(class: &str, d: &str) -> String {
+    format!("<svg class=\"{class}\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"{d}\"/></svg>")
+}
+
+const CLOSE: &str = "M6 6l12 12 M18 6L6 18";
+const COPY: &str = "M11 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1";
+const CHEVRON: &str = "M6 9l6 6 6-6";
+const TICK: &str = "M5 12.5l4.5 4.5L19 7.5";
+const MAIL: &str = "M4 6h16v12H4z M4 7l8 6 8-6";
+const RENEW: &str = "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8 M21 3v5h-5";
+
+/// Who can open it, as the access switch says it: its icon, its name, and
+/// what that means.
 fn general(v: Visibility) -> (&'static str, &'static str, &'static str) {
     match v {
         Visibility::Members => (
-            "<rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V7a4 4 0 0 1 8 0v4\"/>",
+            "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4",
             "Restricted",
-            "Only people with access can open it.",
+            "Only the people here can open this link.",
         ),
         Visibility::Link => (
-            "<path d=\"M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1\"/><path d=\"M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1\"/>",
-            "Anyone with the link",
-            "Anyone with the link can view it.",
+            "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+            "With link",
+            "Anyone with this unique link can view it.",
         ),
-        Visibility::Public => (
-            "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18\"/>",
-            "Public",
-            "Anyone can view it, no link needed.",
-        ),
+        Visibility::Public => ("M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18z M3 12h18 M12 3a14 14 0 0 1 0 18 M12 3a14 14 0 0 0 0 18", "Public", "Anyone can view it."),
     }
 }
 
-const TICK: &str = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M5 12.5l4.5 4.5L19 7.5\"/></svg>";
-
-fn icon(v: Visibility) -> String {
-    let open = if v == Visibility::Members { "" } else { " open" };
-    format!("<span class=\"icon{open}\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">{}</svg></span>", general(v).0)
-}
-
-/// The owner's role buttons for a member: the one they hold pressed, the
-/// other a change.
-fn role_buttons(sheet: &Sheet, m: &Member, who: &str) -> String {
-    let button = |r: Role| match m.role == r {
-        true => format!("<button type=\"button\" aria-pressed=\"true\">{}</button>", role_name(r)),
-        false => format!("<button name=\"role\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{}</button>", r.as_str(), role_name(r)),
+/// The owner's menu for a member: their role (the one they hold ticked,
+/// the other a change) and Remove, which asks a second click. A
+/// `<details>`, never a `<select>`: an arrow key over a closed one sends
+/// nothing.
+fn role_menu(sheet: &Sheet, m: &Member, who: &str) -> String {
+    let item = |r: Role| match m.role == r {
+        true => format!("<button type=\"button\" role=\"menuitem\">{}{}</button>", role_name(r), svg("tick on", TICK)),
+        false => format!("<button role=\"menuitem\" name=\"role\" value=\"{}\" data-arm disabled>{}{}</button>", r.as_str(), role_name(r), svg("tick", TICK)),
     };
-    let seg = format!("<span class=\"seg\" role=\"group\" aria-label=\"{}'s role\">{}{}</span>", esc(who), button(Role::Viewer), button(Role::Editor));
-    action_form(sheet, "role", &format!("{}{seg}", hidden("member", &m.principal)), "")
+    let member = hidden("member", &m.principal);
+    let role = action_form(sheet, "role", &format!("{member}{}{}", item(Role::Viewer), item(Role::Editor)), "");
+    let remove = action_form(
+        sheet,
+        "remove",
+        &format!("{member}<button role=\"menuitem\" class=\"danger\" data-confirm=\"Remove?\" aria-label=\"Remove {w}\" data-arm disabled>Remove</button>", w = esc(who)),
+        "",
+    );
+    format!(
+        "<details class=\"menu\"><summary aria-label=\"{w}'s role\">{}{}</summary><div class=\"menu-panel\" role=\"menu\">{role}<hr>{remove}</div></details>",
+        role_name(m.role),
+        svg("i", CHEVRON),
+        w = esc(who),
+    )
 }
 
 /// Why a fragment with reach has no share link and is not public
-/// (reach.rs): beside General access, and a refused change's flash.
+/// (reach.rs): the access switch's note, and a refused change's flash.
 const REACH_LINE: &str = "Apps that can reach your accounts can't be shared by link or made public for now.";
 
 /// What its owner is told once, under the invite form, of a fragment with
 /// reach (Paul, 2026-11-11: "allow it and say so once").
 const KEYS_LINE: &str = "People you add can use this app's keys.";
 
+/// An address as the link's field shows it: no scheme, and no lone `/`.
+fn shown_url(url: &str) -> &str {
+    let bare = url.split_once("://").map_or(url, |(_, rest)| rest);
+    bare.strip_suffix('/').unwrap_or(bare)
+}
+
 fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
-    let mut out = String::new();
+    let mut out = format!("<button type=\"button\" class=\"close\" aria-label=\"Close\" data-done>{}</button>", svg("i", CLOSE));
     match flash {
         Some(Flash::Invited { who, role, again: false }) => out += &format!(
             "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link.</p></div>",
@@ -617,16 +673,73 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         Some(Flash::Refused(why)) => out += &format!("<div class=\"flash error\"><p>{}</p></div>", esc(&why)),
         None => {}
     }
+
+    // the link: who can open it (its owner's switch, else what it is), what
+    // that means, then its address and Copy
+    out += "<section><h2>Link</h2><div class=\"link-card\">";
+    let (path, named, means) = general(sheet.visibility);
+    // with reach, With link and Public show, unavailable, saying why (reach.rs)
+    let locked = |v: Visibility| sheet.reach && v != Visibility::Members;
+    if sheet.owner() {
+        let option = |v: Visibility| {
+            let (path, named, _) = general(v);
+            let face = format!("{}{named}", svg("i", path));
+            match (sheet.visibility == v, locked(v)) {
+                (true, _) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"true\">{face}</button>", v.as_str()),
+                (false, true) => format!("<button type=\"button\" value=\"{}\" aria-pressed=\"false\" aria-disabled=\"true\" title=\"{REACH_LINE}\" disabled>{face}</button>", v.as_str()),
+                (false, false) => format!("<button name=\"visibility\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{face}</button>", v.as_str()),
+            }
+        };
+        let options = [Visibility::Members, Visibility::Link, Visibility::Public].into_iter().map(option).collect::<String>();
+        out += &action_form(sheet, "visibility", &format!("<div class=\"access\" role=\"group\" aria-label=\"Who can open it\">{options}</div>"), "");
+    } else {
+        out += &format!("<div class=\"access-now\">{}<span>{named}</span></div>", svg("i", path));
+    }
+    let note = if sheet.owner() && sheet.reach { REACH_LINE } else { means };
+    out += &format!("<p class=\"hint\" data-link-note>{note}</p>");
+    // the share link: its owner's, while it is what opens it. With reach,
+    // Copy link never gives it, though one from before the rule still
+    // opens it: the sheet gives it to no one more (reach.rs); New link, in
+    // its field, still ends it
+    let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
+    let copied = shared.filter(|_| !sheet.reach).unwrap_or(&sheet.canonical);
+    let rotate = match sheet.owner() && shared.is_some() {
+        true => action_form(
+            sheet,
+            "rotate",
+            &format!(
+                "<button class=\"icon-button\" aria-label=\"New link\" title=\"New link\" data-confirm=\"Make a new one?\" data-note=\"A new link turns off this one. Click again to confirm.\" data-arm disabled>{}</button>",
+                svg("i", RENEW)
+            ),
+            "",
+        ),
+        false => String::new(),
+    };
+    out += &format!(
+        "<div class=\"link-row\"><div class=\"field\"><span class=\"url\">{}</span>{rotate}</div><button type=\"button\" class=\"copy\" data-copy=\"{}\">{}<span data-label>Copy link</span></button></div></div></section>",
+        esc(shown_url(copied)),
+        esc(copied),
+        svg("i", COPY),
+    );
+
+    // the people: the owner's invite form, then everyone in and invited
+    out += "<section><h2>People with access</h2>";
     if sheet.owner() {
         let radio = |value: &str, name: &str, checked: bool| {
-            format!("<label><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span></label>", if checked { " checked" } else { "" })
+            format!(
+                "<label class=\"menu-radio\"><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span>{}</label>",
+                if checked { " checked" } else { "" },
+                svg("tick", TICK)
+            )
         };
         out += &action_form(
             sheet,
             "invite",
             &format!(
-                "<input name=\"email\" type=\"email\" required maxlength=\"320\" placeholder=\"Add people by email\" autocomplete=\"off\" aria-label=\"email\">\
-                 <span class=\"seg\" role=\"radiogroup\" aria-label=\"their role\">{}{}</span><button data-arm disabled>Invite</button>",
+                "<div class=\"field\"><input name=\"email\" type=\"email\" required maxlength=\"320\" placeholder=\"Add people by email\" autocomplete=\"off\" aria-label=\"email\">\
+                 <details class=\"menu\" data-invite-role><summary><span data-label>Viewer</span>{}</summary><div class=\"menu-panel\" role=\"group\" aria-label=\"their role\">{}{}</div></details></div>\
+                 <button data-arm disabled>Invite</button>",
+                svg("i", CHEVRON),
                 radio("viewer", "Viewer", true),
                 radio("editor", "Editor", false)
             ),
@@ -642,18 +755,12 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             out += &format!("<p class=\"hint keys\">{KEYS_LINE}</p>");
         }
     }
-    out += "<h2>People with access</h2><ul class=\"people\">";
+    out += "<ul class=\"people\">";
     for m in &sheet.members {
         out += "<li>";
         out += &person(m, sheet);
         if sheet.owner() && m.role != Role::Owner && sheet.chat_agent.as_deref() != Some(m.principal.as_str()) {
-            let who = name_of(&m.principal, sheet.profiles.get(&m.principal));
-            let remove = format!(
-                "{}<button class=\"text away\" data-confirm=\"Remove?\" aria-label=\"Remove {}\" data-arm disabled>Remove</button>",
-                hidden("member", &m.principal),
-                esc(&who)
-            );
-            out += &format!("<span class=\"controls\">{}{}</span>", role_buttons(sheet, m, &who), action_form(sheet, "remove", &remove, ""));
+            out += &role_menu(sheet, m, &name_of(&m.principal, sheet.profiles.get(&m.principal)));
         } else {
             out += &format!("<span class=\"role\">{}</span>", role_name(m.role));
         }
@@ -668,60 +775,27 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             _ => "less than a day left".to_string(),
         };
         out += &format!(
-            "<li><span class=\"av\" aria-hidden=\"true\">✉</span><span class=\"who\">{e}<small>Invited as {r} · {until}</small></span>{revoke}</li>",
+            "<li><span class=\"av\" aria-hidden=\"true\">{mail}</span><span class=\"who\">{e}<small>Invited as {r} · {until}</small></span>{revoke}</li>",
+            mail = svg("i", MAIL),
             e = esc(&i.email),
             r = role_phrase(i.role),
             revoke = action_form(
                 sheet,
                 "uninvite",
                 &format!("{}<button class=\"text\" aria-label=\"Revoke the invite to {e}\" data-arm disabled>Revoke</button>", hidden("email", &i.email), e = esc(&i.email)),
-                "controls"
+                ""
             ),
         );
     }
-    out += "</ul><h2>General access</h2>";
-    if sheet.owner() {
-        let option = |v: Visibility| {
-            let (_, named, means) = general(v);
-            let face = format!("{}<span class=\"say\"><b>{named}</b><small>{means}</small></span><span class=\"tick\">{TICK}</span>", icon(v));
-            match sheet.visibility == v {
-                true => format!("<button type=\"button\" class=\"option\" value=\"{}\" aria-pressed=\"true\">{face}</button>", v.as_str()),
-                false => format!("<button class=\"option\" name=\"visibility\" value=\"{}\" aria-pressed=\"false\" data-arm disabled>{face}</button>", v.as_str()),
-            }
-        };
-        // with reach, only what it is now and members only (reach.rs)
-        let offered = [Visibility::Members, Visibility::Link, Visibility::Public].into_iter().filter(|v| !sheet.reach || *v == Visibility::Members || *v == sheet.visibility);
-        let options = offered.map(option).collect::<String>();
-        out += &action_form(sheet, "visibility", &format!("<div class=\"options\" role=\"group\" aria-label=\"general access\">{options}</div>"), "");
-        if sheet.reach {
-            out += &format!("<p class=\"hint\">{REACH_LINE}</p>");
-        }
-    } else {
-        let (_, named, means) = general(sheet.visibility);
-        out += &format!("<div class=\"static\">{}<span><b>{named}</b><span class=\"hint\">{means}</span></span></div>", icon(sheet.visibility));
+    out += "</ul></section>";
+    // anyone else's: who changes it, and a member's own leaving (its
+    // owner cannot)
+    if !sheet.owner() {
         out += "<p class=\"hint\">Only its owner changes who has access.</p>";
     }
-    // the share link: its owner's, while it is what opens it
-    let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
-    if sheet.owner() && shared.is_some() {
-        out += "<section class=\"more\"><h2>Share link</h2><div class=\"row\"><p class=\"hint\">A new link turns off the old one.</p>";
-        out += &action_form(sheet, "rotate", "<button class=\"quiet\" data-confirm=\"Make a new one?\" data-arm disabled>New link</button>", "");
-        out += "</div></section>";
+    if sheet.role.is_some_and(|r| r != Role::Owner) {
+        out += &format!("<footer>{}</footer>", action_form(sheet, "leave", "<button class=\"quiet\" data-confirm=\"Leave it?\" data-arm disabled>Leave</button>", "leave"));
     }
-    // a member's own: leaving (its owner cannot)
-    let leave = match sheet.role {
-        Some(r) if r != Role::Owner => action_form(sheet, "leave", "<button class=\"quiet\" data-confirm=\"Leave it?\" data-arm disabled>Leave</button>", "leave"),
-        _ => String::new(),
-    };
-    // Copy link: the share link while it opens it, else its address (the
-    // people in it open that; a public one, anyone). With reach, never the
-    // share link, though one from before the rule still opens it: the sheet
-    // gives it to no one more (reach.rs); New link, above, still ends it
-    let copied = shared.filter(|_| !sheet.reach);
-    out += &format!(
-        "<footer>{leave}<button type=\"button\" class=\"quiet\" data-copy=\"{}\">Copy link</button><button type=\"button\" data-done>Done</button></footer>",
-        esc(copied.unwrap_or(&sheet.canonical))
-    );
     out
 }
 
