@@ -430,6 +430,14 @@ never reaches another agent's core.
   (v7.0.3's force makes new keys each time, which an offline phone cannot
   follow). A connection repeated forces already damaged may stay stuck.
   Restarts and recovery send the owner nothing.
+- **A scan cut short.** The core takes the phone's confirmation, then
+  queues its acceptance. A core stopped between the two (a hold's save, a
+  crash) never accepts it in any later start, and the core has no command
+  that would, so the person's scan comes to nothing (preview, 2026-11-11).
+  Each start while inviting reads the invitation's connection; one taken
+  by an earlier life and still `requested` `RECHECK_MS` (10 s) later (one
+  whose acceptance was queued finishes within a moment) is let go, a new
+  invitation made, and the link page says to scan that.
 - **Another client on its databases** (FIN-483: a core run elsewhere on
   a copy of them, such as an old finite.computer agent started again after
   its conversation moved) takes the contact's queues, and the core says so

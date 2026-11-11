@@ -90,6 +90,11 @@ pub enum Cmd {
     Delete { contact: ContactId, notify: bool },
     /// A connection that never became a contact (a pending invitation).
     DeleteConn { conn: ConnId },
+    /// Its chats' connections (`/_get chats 1 pcc=on`, of the core's one
+    /// user: a bot's first start makes it, and it makes no other): each
+    /// pending one's and each contact's status (`Resp::Conns`). `again`: a
+    /// second look, which the answer is read as (the link's).
+    Conns { again: bool },
     /// The contact's newest `count` items, or with `before`, the `count`
     /// just older than that item (a catch-up's next page back).
     Chat { contact: ContactId, count: u16, before: Option<i64> },
@@ -224,6 +229,7 @@ impl Cmd {
                 assert!(*conn > 0, "a delete names a connection");
                 format!("/_delete :{conn}")
             }
+            Cmd::Conns { .. } => "/_get chats 1 pcc=on".into(),
             Cmd::Chat { contact, count, before } => {
                 assert!(*contact > 0 && *count > 0, "a read names a contact and a count");
                 match before {
@@ -338,6 +344,8 @@ pub enum Resp {
     Deleted { contact: ContactId, by_them: bool },
     /// A pending connection deleted (`contactConnectionDeleted`).
     ConnDeleted { conn: ConnId },
+    /// Its chats' connections, as `Cmd::Conns` read them (`apiChats`).
+    Conns(Vec<ConnState>),
     /// A file's description is ready: it may be received now
     /// (`rcvFileDescrReady`).
     FileReady { file: FileId },
@@ -369,6 +377,47 @@ pub enum Resp {
     Error { what: String },
     /// Anything else, by its type.
     Other(String),
+}
+
+/// A connection of the core's chats: a pending one (an invitation, used or
+/// not), or a contact's, as the core keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnState {
+    pub conn: ConnId,
+    /// The contact it is, once its acceptor's confirmation made one.
+    pub contact: Option<ContactId>,
+    /// `new` (unused); `requested` (its acceptor's confirmation taken, this
+    /// side not yet accepting); `accepted` (this side's acceptance under way,
+    /// which a later start resumes); `ready` once connected.
+    pub status: String,
+    /// When the core last changed it, in ms since the Unix epoch: a pending
+    /// one's own time, a contact's its contact's (its connection's is not
+    /// said); none when it says no time this reads.
+    pub updated_ms: Option<u64>,
+}
+
+/// A time the core writes (`2026-11-11T14:29:37.047359293Z`, UTC, any
+/// number of digits after the second's point), in ms since the Unix epoch.
+pub fn utc_ms(t: &str) -> Option<u64> {
+    let t = t.strip_suffix('Z')?;
+    let (date, time) = t.split_once('T')?;
+    let num = |s: &str| -> Option<u64> { (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok()).flatten() };
+    let mut d = date.splitn(3, '-').map(num);
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut h = hms.splitn(3, ':').map(num);
+    let (hh, mm, ss) = (h.next()??, h.next()??, h.next()??);
+    if !(1970..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let ms: u64 = frac.bytes().chain(std::iter::repeat(b'0')).take(3).fold(0, |n, b| n * 10 + u64::from(b - b'0'));
+    // days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`)
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let (era, yoe) = (y / 400, y % 400);
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era * 146_097 + doe).checked_sub(719_468)?;
+    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + ms)
 }
 
 /// A ratchet's synchronization, as the core names it.
@@ -525,6 +574,20 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
         "contactInfo" => Resp::ContactInfo { contact: id(&r["contact"]["contactId"], "a state read with no contact")?, status: sync_status(&r["connectionStats_"]["ratchetSyncState"])? },
         "contactDeleted" | "contactDeletedByContact" => Resp::Deleted { contact: id(&r["contact"]["contactId"], "a delete with no contact")?, by_them: t == "contactDeletedByContact" },
         "contactConnectionDeleted" => Resp::ConnDeleted { conn: id(&r["connection"]["pccConnId"], "a delete with no connection")? },
+        "apiChats" => {
+            let chats = r["chats"].as_array().ok_or_else(|| shape("chats with no list"))?;
+            let conns = chats.iter().take(ITEMS_MAX).filter_map(|c| {
+                let info = &c["chatInfo"];
+                let (p, contact, conn, status, at) = match info["type"].as_str()? {
+                    "contactConnection" => (&info["contactConnection"], None, "pccConnId", "pccConnStatus", "updatedAt"),
+                    "direct" => (&info["contact"]["activeConn"], Some(id(&info["contact"]["contactId"], "").ok()?), "connId", "connStatus", ""),
+                    _ => return None,
+                };
+                let at = if contact.is_some() { info["contact"]["updatedAt"].as_str() } else { p[at].as_str() };
+                Some(ConnState { conn: id(&p[conn], "").ok()?, contact, status: cut(p[status]["type"].as_str()?, 32).into(), updated_ms: at.and_then(utc_ms) })
+            });
+            Resp::Conns(conns.collect())
+        }
         "rcvFileDescrReady" => Resp::FileReady { file: id(&r["chatItem"]["chatItem"]["file"]["fileId"], "a file with no id")? },
         "rcvFileComplete" => {
             let file = &r["chatItem"]["chatItem"]["file"];
@@ -630,6 +693,8 @@ mod tests {
             "largeMsg" => include_str!("fixtures/largeMsg.json"),
             "contactDeleted" => include_str!("fixtures/contactDeleted.json"),
             "contactConnectionDeleted" => include_str!("fixtures/contactConnectionDeleted.json"),
+            "apiChats" => include_str!("fixtures/apiChats.json"),
+            "apiChatsCut" => include_str!("fixtures/apiChatsCut.json"),
             "voiceItem" => include_str!("fixtures/voiceItem.json"),
             "fileReady" => include_str!("fixtures/fileReady.json"),
             "fileDone" => include_str!("fixtures/fileDone.json"),
@@ -678,6 +743,13 @@ mod tests {
         assert_eq!(parse(broker).expect("a frame").resp, Resp::Error { what: "errorAgent BROKER NETWORK NETLSError".into() });
         assert_eq!(fixture("contactDeleted"), Resp::Deleted { contact: 4, by_them: false });
         assert_eq!(fixture("contactConnectionDeleted"), Resp::ConnDeleted { conn: 2 });
+        // its chats' connections: an invitation unused (its preset contact,
+        // with none, and its notes are none of them)
+        assert_eq!(fixture("apiChats"), Resp::Conns(vec![ConnState { conn: 1, contact: None, status: "new".into(), updated_ms: Some(1_794_408_708_475) }]));
+        // one whose core stopped as it took the scan's confirmation (the
+        // lab's `a_scan_cut_short_is_made_anew`): a contact, never accepted
+        let Resp::Conns(cut_short) = fixture("apiChatsCut") else { panic!("its connections") };
+        assert_eq!(cut_short, vec![ConnState { conn: 1, contact: Some(3), status: "requested".into(), updated_ms: utc_ms("2026-11-11T15:08:23.998855736Z") }]);
         // a voice message and its file, received (the lab's `voice_against_the_real_core`)
         let Resp::Items(voice) = fixture("voiceItem") else { panic!("items") };
         assert!(matches!(&voice[0].content, Content::Message { kind, text } if kind == "voice" && text.is_empty()), "{voice:?}");
@@ -720,6 +792,17 @@ mod tests {
 
     /// Goal: a command's line is what the lab's core took.
     #[test]
+    fn the_cores_times_read_as_ms() {
+        assert_eq!(utc_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(utc_ms("2026-11-11T14:51:48.47557014Z"), Some(1_794_408_708_475));
+        assert_eq!(utc_ms("2000-02-29T23:59:59.9Z"), Some(951_868_799_900));
+        assert_eq!(utc_ms("2026-11-11T14:51:48Z"), Some(1_794_408_708_000));
+        for bad in ["", "2026-11-11T14:51:48", "2026-13-11T14:51:48Z", "2026-11-11 14:51:48Z", "2026-11-11T14:51:48.4x5Z", "1969-12-31T23:59:59Z", "2026-11-11T-1:51:48Z"] {
+            assert_eq!(utc_ms(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn commands_are_lines_the_core_takes() {
         assert_eq!(Cmd::Invite.line(), "/connect");
         assert_eq!(Cmd::Sync { contact: 3, force: false }.line(), "/_sync @3");
@@ -727,6 +810,7 @@ mod tests {
         assert_eq!(Cmd::ContactInfo { contact: 3 }.line(), "/_info @3");
         assert_eq!(Cmd::Delete { contact: 4, notify: false }.line(), "/_delete @4 full notify=off");
         assert_eq!(Cmd::DeleteConn { conn: 2 }.line(), "/_delete :2");
+        assert_eq!(Cmd::Conns { again: true }.line(), "/_get chats 1 pcc=on");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: Some(41) }.line(), "/_get chat @3 before=41 count=20");
         assert_eq!(Cmd::Receive { file: 7 }.line(), "/freceive 7");
