@@ -1196,8 +1196,8 @@ async fn a_second_core_on_its_databases_is_outlasted() {
 /// confirmation (`requested`), then accepts it; a core stopped between the
 /// two (here a hold, as a save is, while the core is frozen right there)
 /// never accepts it, in any later start. So the next start makes a new
-/// code and its page says why; the person scans that, and the agent is
-/// linked, with its SimpleX chat.
+/// code beside it and its page says why; the person scans that, and the
+/// agent is linked, with its SimpleX chat, and the stalled scan let go.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Docker, python3 and sqlite3; run by hand"]
 async fn a_scan_cut_short_is_made_anew() {
@@ -1268,6 +1268,13 @@ sys.exit("never requested")
     assert_eq!(tag(&r), "sentConfirmation", "{r}");
     let v = c.state_of_until(agent, Duration::from_secs(90), "linked by the new code", |v| v["phase"] == "linked").await;
     assert!(v.get("why").is_none(), "nothing left to say: {v}");
+    // the stalled scan, kept beside it until then, is let go
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while String::from_utf8_lossy(&Command::new("bash").args(["-c", &status]).output().expect("read").stdout).lines().any(|l| l == "requested") {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the stalled scan let go");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     fake.until(30_000, "its SimpleX chat made", |w| w.made.iter().any(|m| m.starts_with("juniper-simplex--"))).await;
     assert_eq!(c.events("simplex.told").iter().filter(|e| e["agent"] == agent && e["notice"] == "ScanLost").count(), 1, "told once");
 }

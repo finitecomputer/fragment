@@ -95,8 +95,10 @@ const TICK_MS: u64 = 100;
 /// A sync still waiting reads the core's state this often until it is `ok`.
 const RESYNC_MS: u64 = 30_000;
 /// An invitation whose scan an earlier life took and did not accept is
-/// looked at again this long after: one the core had queued its acceptance
-/// of is accepted within a moment of its start (the lab's, about 130 ms).
+/// looked at again this long after, before a new one is shown beside it:
+/// one the core had queued its acceptance of is usually accepted within a
+/// moment of its start (the lab's, about 130 ms). Nothing is torn down at
+/// it (`link::Link::earlier`), so a later finish still links.
 const RECHECK_MS: u64 = 10_000;
 const INBOX_MAX: usize = 256;
 const WRITER_MAX: usize = 64;

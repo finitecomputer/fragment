@@ -435,9 +435,11 @@ never reaches another agent's core.
   crash) never accepts it in any later start, and the core has no command
   that would, so the person's scan comes to nothing (preview, 2026-11-11).
   Each start while inviting reads the invitation's connection; one taken
-  by an earlier life and still `requested` `RECHECK_MS` (10 s) later (one
-  whose acceptance was queued finishes within a moment) is let go, a new
-  invitation made, and the link page says to scan that.
+  by an earlier life and still `requested` `RECHECK_MS` (10 s) later gets
+  a new invitation beside it, and the link page says to scan that. The
+  stalled one is kept, never torn down: one whose acceptance was queued
+  looks the same and finishes once its servers answer. Whichever connects
+  is the link, and the other is let go then.
 - **Another client on its databases** (FIN-483: a core run elsewhere on
   a copy of them, such as an old finite.computer agent started again after
   its conversation moved) takes the contact's queues, and the core says so
