@@ -7978,11 +7978,12 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
 }
 
 /// Goal: an app's Reaches shows only on one that reaches the person's
-/// accounts, and such an app says it stays theirs and their agents' alone
-/// (Paul on FIN-352; the cell's rule, reach.rs). Invalid: an app with no key
-/// and no door has no Reaches tab. Valid: one given a key while the page is
-/// open gets the tab, its key by name and host, never its value, and its
-/// Sharing (its share sheet, share.rs) says why it is not shared; a
+/// accounts, and such an app has no share link and is not public (Paul on
+/// FIN-352; the cell's rule, reach.rs). Invalid: an app with no key and no
+/// door has no Reaches tab. Valid: one given a key while the page is open
+/// gets the tab, its key by name and host, never its value, and its
+/// Sharing (its share sheet, share.rs) still invites, says once that the
+/// people added can use its keys, and why it has no link; a
 /// connector bound as their agent's door is listed, its Reaches the door
 /// with Unlink, and their agents never are (an agent's own door is
 /// Settings': Alex on #918). Replay: its key removed from its Reaches
@@ -8019,8 +8020,8 @@ fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Resu
     );
     b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "sharing")))?;
     let sheet = format!("({row}?.querySelector('.app-row-panel iframe')?.contentDocument?.body?.innerText ?? '')");
-    let locked = b.until(page, &format!("{sheet}.includes('Apps that can reach your accounts stay private to you and your agents for now.') && !{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
-    s.ok("its Sharing says an app that reaches their accounts stays theirs and their agents', and invites no one", locked, b.eval(page, &sheet)?);
+    let locked = b.until(page, &format!("{sheet}.includes(\"People you add can use this app's keys.\") && {sheet}.includes(\"can't be shared by link or made public for now\") && !!{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
+    s.ok("its Sharing still invites, says once that the people added can use its keys, and why it has no link", locked, b.eval(page, &sheet)?);
 
     b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
     let remove = format!("[...{row}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");

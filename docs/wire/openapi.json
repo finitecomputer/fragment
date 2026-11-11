@@ -574,7 +574,7 @@
           },
           "reach": {
             "default": false,
-            "description": "It holds a secret or a door, so it is shared with no one but its\nowner and their own agents (FIN-352, `Sharing::reach`): the share\nsheet says so. Add-only: left out when false.",
+            "description": "It holds a secret or a door, so it has no share link and is not\npublic, and the people its owner adds can use its keys (FIN-352,\n`Sharing::reach`): the share sheet says so. Add-only: left out when\nfalse.",
             "type": "boolean"
           },
           "repo": {
@@ -2918,7 +2918,7 @@
           },
           "reach": {
             "default": false,
-            "description": "It holds a secret or a door, so it is shared with no one but its\nowner and their own agents (FIN-352: `Reason::PrivateWhileReaching`,\n`Reason::UnshareFirst`). Add-only: left out when false, and a row\nfrom before it reads none.",
+            "description": "It holds a secret or a door, so it has no share link and is not\npublic (FIN-352: `Reason::PrivateWhileReaching`,\n`Reason::UnshareFirst`). Add-only: left out when false, and a row\nfrom before it reads none.",
             "type": "boolean"
           },
           "visibility": {

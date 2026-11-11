@@ -488,7 +488,7 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `owner` | `string` | required |  |
 | `page` | [`PageReport`](#pagereport) or `null` | optional | What the page reported as its last preview card's shot loaded it (docs/api.md, Cards); absent before the first. |
 | `pins` | [`Pins`](#pins) | required |  |
-| `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352, `Sharing::reach`): the share sheet says so. Add-only: left out when false. |
+| `reach` | `boolean` | optional | It holds a secret or a door, so it has no share link and is not public, and the people its owner adds can use its keys (FIN-352, `Sharing::reach`): the share sheet says so. Add-only: left out when false. |
 | `repo` | `string` | required | Its code.storage repo: `""` while not made yet (a chat's, made after the create answers: docs/api.md, Names). |
 | `role` | [`Role`](#role) | required | The caller's role. |
 | `title` | `string` or `null` | optional |  |
@@ -1171,7 +1171,7 @@ out. A fragment's sharing, in its owner's list (the platform's page): who may op
 | `guests` | `integer` | required |  |
 | `invites` | `integer` or `null` | optional |  |
 | `members` | `integer` | required |  |
-| `reach` | `boolean` | optional | It holds a secret or a door, so it is shared with no one but its owner and their own agents (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
+| `reach` | `boolean` | optional | It holds a secret or a door, so it has no share link and is not public (FIN-352: `Reason::PrivateWhileReaching`, `Reason::UnshareFirst`). Add-only: left out when false, and a row from before it reads none. |
 | `visibility` | [`Visibility`](#visibility) | required |  |
 
 ### `Sizes`

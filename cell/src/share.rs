@@ -445,9 +445,10 @@ struct Sheet {
     link: Option<String>,
     /// Its address, which opens it for the people in it.
     canonical: String,
-    /// It holds a key or a door, so it stays its owner's and their agents'
-    /// (reach.rs): the sheet adds no one, and its Copy link is its address,
-    /// never the share link.
+    /// It holds a key or a door, so it has no share link and is not public
+    /// (reach.rs): the sheet offers members only, says once that the people
+    /// added can use its keys, and its Copy link is its address, never the
+    /// share link.
     reach: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
@@ -585,9 +586,13 @@ fn role_buttons(sheet: &Sheet, m: &Member, who: &str) -> String {
     action_form(sheet, "role", &format!("{}{seg}", hidden("member", &m.principal)), "")
 }
 
-/// Why a fragment with reach is shared with no one else (reach.rs), in
-/// the same words as the shell's Apps page.
-const REACH_LINE: &str = "Apps that can reach your accounts stay private to you and your agents for now.";
+/// Why a fragment with reach has no share link and is not public
+/// (reach.rs): beside General access, and a refused change's flash.
+const REACH_LINE: &str = "Apps that can reach your accounts can't be shared by link or made public for now.";
+
+/// What its owner is told once, under the invite form, of a fragment with
+/// reach (Paul, 2026-11-11: "allow it and say so once").
+const KEYS_LINE: &str = "People you add can use this app's keys.";
 
 fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
@@ -612,9 +617,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         Some(Flash::Refused(why)) => out += &format!("<div class=\"flash error\"><p>{}</p></div>", esc(&why)),
         None => {}
     }
-    if sheet.owner() && sheet.reach {
-        out += &format!("<p class=\"hint\">{REACH_LINE}</p>");
-    } else if sheet.owner() {
+    if sheet.owner() {
         let radio = |value: &str, name: &str, checked: bool| {
             format!("<label><input type=\"radio\" name=\"role\" value=\"{value}\"{}><span>{name}</span></label>", if checked { " checked" } else { "" })
         };
@@ -634,6 +637,9 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         // only on a chat, one short line, and no other paragraph here)
         if fragment_core::access::talks_to_owners_agent(sheet.kind, &sheet.members) {
             out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        }
+        if sheet.reach {
+            out += &format!("<p class=\"hint keys\">{KEYS_LINE}</p>");
         }
     }
     out += "<h2>People with access</h2><ul class=\"people\">";
@@ -687,6 +693,9 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         let offered = [Visibility::Members, Visibility::Link, Visibility::Public].into_iter().filter(|v| !sheet.reach || *v == Visibility::Members || *v == sheet.visibility);
         let options = offered.map(option).collect::<String>();
         out += &action_form(sheet, "visibility", &format!("<div class=\"options\" role=\"group\" aria-label=\"general access\">{options}</div>"), "");
+        if sheet.reach {
+            out += &format!("<p class=\"hint\">{REACH_LINE}</p>");
+        }
     } else {
         let (_, named, means) = general(sheet.visibility);
         out += &format!("<div class=\"static\">{}<span><b>{named}</b><span class=\"hint\">{means}</span></span></div>", icon(sheet.visibility));

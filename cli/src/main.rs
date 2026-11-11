@@ -534,8 +534,8 @@ enum OperatorCmd {
         key_file: Option<PathBuf>,
     },
     /// FIN-352's census: of everyone's fragments, how many of each kind
-    /// hold a key or a door, and how many of those are shared beyond their
-    /// owner and their agents. Counts only, no names
+    /// hold a key or a door, and how many of those are open by their link
+    /// or public. Counts only, no names
     Reach {
         #[arg(long)]
         key_file: Option<PathBuf>,
@@ -1561,7 +1561,7 @@ fn run(cli: Cli) -> Result<()> {
             let say = |m: &std::collections::BTreeMap<String, u64>| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ") };
             println!("{people} people, {owned} fragments owned ({unanswered} did not answer)");
             println!("with a key or a door: {}", say(&reaching));
-            println!("of those, shared beyond their owner and their agents: {}", say(&beyond));
+            println!("of those, open by link or public: {}", say(&beyond));
             return Ok(());
         }
         Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
