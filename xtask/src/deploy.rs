@@ -2068,7 +2068,9 @@ mod tests {
         let d = with(note).unwrap();
         let (catalog, _) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
-        assert!(catalog.providers().iter().filter(|p| p.name != "google").all(|p| p.note.is_none()), "the other rows have none");
+        // Microsoft's note is its row's own, uncommented: the others have none
+        assert!(catalog.get("microsoft").unwrap().note.as_deref().is_some_and(|n| n.contains("IT admin")), "Microsoft's says a work account's admin may need to approve");
+        assert!(catalog.providers().iter().filter(|p| !["google", "microsoft"].contains(&p.name.as_str())).all(|p| p.note.is_none()), "the other rows have none");
         let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
         let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");
