@@ -486,7 +486,7 @@ async function open(path, anchor, keep) {
 // A markdown page as the reader shows it: the page, and below it the pages
 // that link to it, once the graph knows them.
 function page(text, path) {
-  const doc = markdown(text, folder(path));
+  const doc = markdown(text, path);
   const from = [...(G.nodes.get(path)?.in ?? [])].sort((a, b) => titleOf(a).localeCompare(titleOf(b), undefined, { numeric: true }));
   if (!from.length) return doc;
   const box = h("nav", { class: "linked", "aria-label": "Linked from" }, el("h2", null, "Linked from"));
@@ -739,12 +739,15 @@ async function status() {
 // readers this way); keeping pictures to the fragment's own files is
 // Paul's call, not made here ----
 
-function markdown(text, at) {
+// The file `self` as the viewer draws it, its links resolved from it (its
+// own headings are its own, whichever page the reader last opened).
+function markdown(text, self) {
+  const at = folder(self);
   const doc = el("article", "doc");
   doc.append(
     render(withoutFrontMatter(text), {
-      resolve: (target, how) => (how === "wiki" ? wikiTarget(target, at) : destination(target, at)),
-      image: (src, how) => picture(src, how, at),
+      resolve: (target, how) => (how === "wiki" ? wikiTarget(target, at, self) : destination(target, at, self)),
+      image: (src, how) => picture(src, how, at, self),
     }),
   );
   return doc;
@@ -754,7 +757,7 @@ function markdown(text, at) {
 // fragment's files, a heading of this one, or an http(s) or mailto URL;
 // anything else (javascript:, data:, a path that names no file here) is no
 // link: null.
-function destination(href, at, self = current) {
+function destination(href, at, self) {
   // the scheme as a browser reads it (the renderer's one reading)
   const s = scheme(href);
   if (s !== null) return ["http", "https", "mailto"].includes(s) ? { href } : null;
@@ -784,19 +787,19 @@ function wiki(target, at) {
 }
 
 // [[name#heading]]: the file it names (`self`, with no name) and the heading.
-function wikiTarget(ref, at, self = current) {
+function wikiTarget(ref, at, self) {
   const [name, anchor] = ref.split("#");
   const path = name.trim() ? wiki(name, at) : self;
   return path ? internal(path, anchor?.trim() || undefined) : null;
 }
 
 // A picture's URL: one of this fragment's pictures, or one on the web.
-function picture(src, how, at) {
+function picture(src, how, at, self) {
   if (how === "wiki") {
     const path = wiki(src, at);
     return path && kind(path) === "image" ? { src: fileUrl(path) } : null;
   }
-  const to = destination(src, at);
+  const to = destination(src, at, self);
   if (to?.path) return { src: fileUrl(to.path) };
   return to && ["http", "https"].includes(scheme(to.href)) ? { src: to.href } : null;
 }
@@ -1005,7 +1008,7 @@ function asksIn(text, path) {
       if (asks.length < GRAPH_LINKS_MAX) asks.push([target, how]);
       return null;
     },
-    image: (src, how) => picture(src, how, folder(path)),
+    image: (src, how) => picture(src, how, folder(path), path),
   });
   const title = doc.querySelector("h1")?.textContent.trim().slice(0, 120) ?? "";
   // an index's heading is its folder's name: the folder says more
@@ -1357,7 +1360,7 @@ async function peek(node) {
   if (kind(path) !== "markdown") return text.append(el("p", null, bytes(index.get(path)?.size ?? 0)));
   const read = await take(path).catch(() => null);
   if (n !== peeking || typeof read !== "string") return;
-  const doc = markdown(read, folder(path));
+  const doc = markdown(read, path);
   const h1 = doc.querySelector("h1");
   if (h1?.textContent.trim()) heading.textContent = h1.textContent.trim();
   let chars = 0;
