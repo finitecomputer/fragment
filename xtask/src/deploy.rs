@@ -121,6 +121,14 @@ struct Deployment {
     /// zone's request body limit on its Cloudflare plan, at most
     /// `BLOB_MAX_BYTES`. Clients read it from the platform.
     upload_max_bytes: Option<u64>,
+    /// The local hosts an operator opens to jobs, push endpoints and
+    /// subscriptions beside the public internet (`FRAGMENT_EGRESS_ALLOW`;
+    /// `fragment_core::egress::Allow`): host names, one-level `*.` globs,
+    /// IP addresses and networks, at most `egress::ALLOW_MAX`. An entry
+    /// naming loopback, link-local, localhost or the platform's own hosts
+    /// is refused before a deploy. Empty, the default: public only.
+    #[serde(default)]
+    egress_allow: Vec<String>,
     /// The address the platform's mail comes from (`FRAGMENT_MAIL_FROM`;
     /// cell/src/mail.rs), on a domain onboarded to Cloudflare Email
     /// Sending (`wrangler email sending enable <domain>`). Without it, the
@@ -735,6 +743,15 @@ fn checked(d: Deployment) -> Result<Deployment> {
     Ok(d)
 }
 
+/// The operator's egress allowlist as the cell's `FRAGMENT_EGRESS_ALLOW`,
+/// checked against this deployment's own hosts (which it never opens), or
+/// none when it lists nothing.
+fn egress_allow(d: &Deployment, n: &Names) -> Result<Option<String>> {
+    use fragment_core::egress::Allow;
+    Allow::parse(&d.egress_allow, &n.platform_host, &n.suffix).map_err(|e| anyhow::anyhow!("egress_allow: {e}"))?;
+    Ok((!d.egress_allow.is_empty()).then(|| Allow::var(&d.egress_allow)))
+}
+
 /// A deploy's or a teardown's arguments.
 struct Args {
     config: PathBuf,
@@ -1168,6 +1185,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         pinned_only(&d)?;
     }
     let n = names(&d, branch.as_deref())?;
+    egress_allow(&d, &n)?;
     // the two local files are read before anything is built or made
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     let test_secret = test_secret_file(&d, branch.as_deref())?.map(read_test_secret).transpose()?;
@@ -1411,6 +1429,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     }
     if let Some(n) = d.upload_max_bytes {
         v.insert("FRAGMENT_UPLOAD_MAX_BYTES".into(), json!(n.to_string()));
+    }
+    if let Some(allow) = egress_allow(d, n)? {
+        v.insert("FRAGMENT_EGRESS_ALLOW".into(), json!(allow));
     }
     if let Some(f) = &d.mail_from {
         v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
@@ -1736,6 +1757,7 @@ mod tests {
             default_plan: None,
             support_url: None,
             upload_max_bytes: None,
+            egress_allow: vec![],
             mail_from: None,
             computers: None,
             connectors: None,
@@ -2642,5 +2664,26 @@ mod tests {
         v["upload_max_bytes"] = json!(200_000_000);
         let d = load(&config_file("upload-named", &v)).unwrap();
         assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_UPLOAD_MAX_BYTES"], "200000000");
+    }
+
+    /// The operator's egress allowlist: none by default (no variable), and
+    /// one that would open the deployment's own hosts or loopback refused
+    /// before a deploy; named, it is the cell's `FRAGMENT_EGRESS_ALLOW`.
+    #[test]
+    fn an_egress_allowlist_is_checked_and_rendered() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let d = load(&config_file("egress-default", &v)).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        assert!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].get("FRAGMENT_EGRESS_ALLOW").is_none(), "the default names none");
+        v["egress_allow"] = json!(["*.corp.internal", "10.20.0.0/16", "100.101.102.103"]);
+        let d = load(&config_file("egress-named", &v)).unwrap();
+        assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_EGRESS_ALLOW"], "*.corp.internal,10.20.0.0/16,100.101.102.103");
+        for (entry, said) in [("127.0.0.0/8", "loopback"), ("p5.finite.place", "the platform's own"), ("*.finite.place", "the platform's own"), ("wiki:80", "no host name")] {
+            v["egress_allow"] = json!([entry]);
+            let d = load(&config_file("egress-refused", &v)).unwrap();
+            let refused = egress_allow(&d, &n).err().map(|e| format!("{e:#}")).unwrap_or_default();
+            assert!(refused.starts_with("egress_allow: ") && refused.contains(said), "{entry}: {refused}");
+        }
     }
 }

@@ -116,6 +116,12 @@ pub struct Config {
     /// addresses (dev and e2e fleets, which call local fakes). Never on a
     /// shared fleet.
     pub egress_local: bool,
+    /// `FRAGMENT_EGRESS_ALLOW` (the deploy config's `egress_allow`, comma
+    /// separated): the local hosts an operator opens to jobs, push
+    /// endpoints and subscriptions (a self-hosted org's intranet), never
+    /// loopback, link-local, localhost or the platform's own
+    /// (`fragment_core::egress::Allow`). Unset: none, public only.
+    pub egress_allow: fragment_core::egress::Allow,
     /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
     /// (default 7 days: a rollback within it still has its bytes).
     pub blob_grace_ms: i64,
@@ -352,6 +358,11 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        // the deploy checked it: one out of shape is a broken deploy
+        let egress_allow = var(env, "FRAGMENT_EGRESS_ALLOW").map_or(fragment_core::egress::Allow::NONE, |l| {
+            let platform = url::Url::parse(&platform_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            fragment_core::egress::Allow::parse(&l.split(',').collect::<Vec<_>>(), &platform, &host_suffix).unwrap_or_else(|e| panic!("FRAGMENT_EGRESS_ALLOW: {e}"))
+        });
         let providers = providers(env);
         let models = fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
             .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}"));
@@ -389,6 +400,7 @@ impl Config {
             },
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
+            egress_allow,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
             delivery_retry_s: pinned_retry_s.unwrap_or(10),
             delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
