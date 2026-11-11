@@ -184,5 +184,11 @@ mod tests {
         // FIN-393: framed in a dialog, an unlink is made sure of in its own step, no browser dialog
         assert!(!PAGE.contains("window.confirm") && PAGE.contains("button(\"Unlink\", \"\", () => act(\"unlink\"))"));
         assert!(PAGE.contains("if (at !== epoch || busy) return;"));
+        // FIN-463: a chat staged by its move is offered first, kept by an
+        // adoption's ticket, or set aside for a new link; while the
+        // computer sleeps, said why
+        assert!(PAGE.contains("button(\"Keep my SimpleX chat\", \"\", () => act(\"adopt\"))") && PAGE.contains("if (view.staged && !fresh) {"));
+        assert!(PAGE.contains("view.phase === \"adopting\"") && PAGE.contains("case \"adopting\":"));
+        assert!(PAGE.contains("if (!view.alwaysOn && view.staged)"));
     }
 }

@@ -765,7 +765,8 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
       frame.contentWindow?.postMessage({ fragment: KIND.simplex, agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
     } catch {}
   }
-  // The link page asks for a ticket to link or unlink its agent (`{fragment:
+  // The link page asks for a ticket to link, unlink or adopt (FIN-463: keep
+  // its owner's SimpleX chat with their old agent) for its agent (`{fragment:
   // "simplex", agent, want}`): only a frame of Settings' dialog onto its computer's
   // port, for its own agent. The platform makes it for the agent's owner
   // alone, signed (an unlink's closes the agent's door at once), and the
@@ -776,7 +777,7 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
   // unlink's takes its home back to its own chat.
   const onMessage = async (e) => {
     const m = e.data;
-    if (m?.fragment !== KIND.simplex || !["link", "unlink"].includes(m.want) || !computer()?.simplex) return;
+    if (m?.fragment !== KIND.simplex || !["link", "unlink", "adopt"].includes(m.want) || !computer()?.simplex) return;
     const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
     if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
     const reply = { fragment: KIND.simplex, agent: m.agent, for: m.want };
@@ -785,7 +786,8 @@ export function createSimplex({ api, el, section, actionLine, named, seg, comput
     } catch (err) {
       reply.error = err.message;
     }
-    const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : false;
+    // an adoption (its chat with their old agent kept) leaves its home be
+    const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : m.want === "unlink" ? false : null;
     if (reply.ticket && home !== null) {
       await setHome(m.agent, home).then(() => { reply.home = home; }, (err) => { reply.homeError = err.message; });
     }

@@ -197,6 +197,21 @@ test("a choice made again after none was: Bring over is offered again", async (t
   assert.equal(p.button("Bring over").disabled, false, "chosen again");
 });
 
+// FIN-463: once a move imports, one calm line says where its SimpleX chat
+// is kept; before, none
+test("a move that imports says, once, that its SimpleX chat is kept in Settings", async (t) => {
+  const p = page(t);
+  const line = () => walk(p.root).filter((n) => n.className.includes("move-simplex")).map((n) => n.textContent);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a is on finite.computer."), offer("c", "staging", "Copying Old c…")] });
+  await settle();
+  assert.deepEqual(line(), [], "nothing carried yet");
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("c", "importing", "Bringing Old c over…"), offer("d", "moved", "Old d is here.")] });
+  await settle();
+  assert.deepEqual(line(), ["If you chatted with it on SimpleX, keep that chat in Settings."]);
+});
+
 test("a choice keeps the page as it is, the box and its focus with it: only Bring over follows it; the box is the platform's check", async (t) => {
   const p = page(t);
   p.ui.open();

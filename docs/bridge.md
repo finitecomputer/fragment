@@ -437,7 +437,9 @@ never reaches another agent's core.
   the agent, checks each whole (its CRC, a SQLite
   database, the contract's three files and no other), and keeps them in
   the agent's SimpleX directory (`staged/`), running nothing. Its link
-  page's view says `staged`. Its owner's adoption ticket (`POST
+  page's view says `staged`, and the page offers it first ("Keep my
+  SimpleX chat", or "Start a new chat" for Link SimpleX); while the
+  computer sleeps, it says the chat can be kept once it stays on. Its owner's adoption ticket (`POST
   /simplex/adopt`) then reads the identity once with its core in
   maintenance mode (`-m`, started with nothing subscribed): their contact
   there and their name, and their chat's newest item, which is marked
