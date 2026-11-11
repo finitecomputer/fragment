@@ -1683,6 +1683,11 @@ impl Manager {
         if let Some(Cmd::SendFile { path, kind, .. }) = &asked {
             self.sent(f, path, *kind, &frame.resp);
         }
+        // a removal answered, done or refused: none to ask again (an `on`
+        // refused needs nothing: its removal's answer settles it)
+        if let Some(Cmd::React { item, on: false, .. }) = &asked {
+            self.apply(f, Input::TakenOff(*item));
+        }
         if let (Some(Cmd::Profile { .. }), Resp::Profile { name, changed }) = (&asked, &frame.resp) {
             crate::ev!("simplex.profile", { "agent": f, "name": name, "changed": changed });
         }
@@ -1997,17 +2002,24 @@ impl Manager {
         let Some(s) = self.slots.get_mut(f) else { return };
         match a {
             Action::Ask(cmd) => {
-                let Some(core) = s.core.as_ref() else {
-                    crate::ev!("simplex.unsent", { "agent": f, "cmd": kind_of(&cmd), "why": "its core does not run" });
-                    return;
-                };
-                s.corr += 1;
-                let corr = s.corr;
-                match core.writer.try_send(cmd.frame(corr)) {
-                    Ok(()) => {
-                        s.pending.insert(corr, cmd);
+                let why = match s.core.as_ref() {
+                    None => "its core does not run",
+                    Some(core) => {
+                        s.corr += 1;
+                        let corr = s.corr;
+                        match core.writer.try_send(cmd.frame(corr)) {
+                            Ok(()) => {
+                                s.pending.insert(corr, cmd);
+                                return;
+                            }
+                            Err(_) => "its core is not taking commands",
+                        }
                     }
-                    Err(_) => crate::ev!("simplex.unsent", { "agent": f, "cmd": kind_of(&cmd), "why": "its core is not taking commands" }),
+                };
+                crate::ev!("simplex.unsent", { "agent": f, "cmd": kind_of(&cmd), "why": why });
+                // a removal not sent is asked again (never dropped: its 🚀 would stay)
+                if let Cmd::React { item, on: false, .. } = cmd {
+                    s.saved.link.apply(Input::NotTakenOff(item));
                 }
             }
             Action::Forward(i) => {
