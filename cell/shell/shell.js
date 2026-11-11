@@ -768,8 +768,8 @@ sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
 sheet.onclose = () => {
   sheet.replaceChildren();
   load().catch(() => {});
-  // the Apps page says who has access as the sheet may have changed it
-  appsPage.shared().catch(() => {});
+  // the Apps and Brains pages say who has access as the sheet may have changed it
+  for (const shelf of Object.values(shelves)) shelf.page.shared().catch(() => {});
 };
 
 // ---- one menu, for whichever button asked ----
@@ -1546,10 +1546,11 @@ function stepMaking(event) {
 // The view a chat being made was started from, back in its place, its
 // address with it (in place of the chat's `/` it was given)
 function restoreView({ page, current }) {
-  const path = { Settings: SETTINGS, Apps: APPS, History: HISTORY, Schedules: SCHEDULES, Move: MOVE }[page] ?? "/";
+  const path = { Settings: SETTINGS, Apps: APPS, Brains: BRAINS, History: HISTORY, Schedules: SCHEDULES, Move: MOVE }[page] ?? "/";
   if (location.pathname !== path) history.replaceState(null, "", path);
   if (page === "Settings") openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (page === "Apps") openApps(false);
+  else if (page === "Brains") openBrains(false);
   else if (page === "History") openHistory(false);
   else if (page === "Schedules") openSchedules(false);
   else if (page === "Move") openMove(false);
@@ -1783,12 +1784,13 @@ function computerIs(v) {
 }
 
 // ---- where the page is: `/` its chats, `/settings` its settings, `/apps`
-// its apps, `/history` every chat they have had, `/schedules` every
+// its apps, `/brains` its brains, `/history` every chat they have had, `/schedules` every
 // scheduled job of theirs, `/welcome` a new person's
 // welcome; each view says so in the address, so a reload or a link stays
 // put ----
 const SETTINGS = "/settings";
 const APPS = "/apps";
+const BRAINS = "/brains";
 const HISTORY = "/history";
 const SCHEDULES = "/schedules";
 const WELCOME = "/welcome";
@@ -1800,6 +1802,7 @@ addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === APPS) openApps(false);
+  else if (shown && location.pathname === BRAINS) openBrains(false);
   else if (shown && location.pathname === HISTORY) openHistory(false);
   else if (shown && location.pathname === SCHEDULES) openSchedules(false);
   else if (shown && location.pathname === MOVE) openMove(false);
@@ -1807,10 +1810,11 @@ addEventListener("popstate", () => {
   else startOrWait();
 });
 
-// ---- the Apps page (apps-page.js): every fragment of theirs but chats
-// and agents, its dock, card, icon and who has access, in the work area
-// as settings are ----
-const appsPage = createAppsPage($("apps-page"), {
+// ---- the Apps and Brains pages (apps-page.js): every fragment of theirs
+// but chats and agents, its dock, card, icon and who has access, in the
+// work area as settings are; a brain on Brains, the rest on Apps, each
+// page one shelf of the same module ----
+const shelfHelpers = {
   api,
   asks,
   el,
@@ -1825,30 +1829,43 @@ const appsPage = createAppsPage($("apps-page"), {
   openApp,
   reload: () => load(),
   state,
-});
-function openApps(push = true) {
-  if (push) at(APPS);
-  if (state.page !== "Apps") newView();
+};
+// by `state.page`: its address, its section, and its page
+const shelves = {
+  Apps: { path: APPS, section: $("apps-page"), page: createAppsPage($("apps-page"), shelfHelpers, "apps") },
+  Brains: { path: BRAINS, section: $("brains-page"), page: createAppsPage($("brains-page"), shelfHelpers, "brains") },
+};
+function openShelf(which, push = true) {
+  const shelf = shelves[which];
+  if (push) at(shelf.path);
+  if (state.page !== which) newView();
   hideNotice();
-  state.page = "Apps";
+  state.page = which;
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   $("settings-page").hidden = true;
+  leaveApps(which);
   leaveHistory();
   leaveSchedules();
   leaveMove();
-  $("apps-page").hidden = false;
+  shelf.section.hidden = false;
   renderHeading();
   renderChats();
   leaveSidebar();
-  appsPage.open().catch((e) => notice("Apps did not open", e.message));
+  shelf.page.open().catch((e) => notice(`${which} did not open`, e.message));
 }
-// a chat or settings in its place
-function leaveApps() {
-  $("apps-page").hidden = true;
-  appsPage.close();
+function openApps(push = true) { openShelf("Apps", push); }
+function openBrains(push = true) { openShelf("Brains", push); }
+// a chat, settings or the other shelf in its place: every shelf but `kept` closes
+function leaveApps(kept = null) {
+  for (const [which, shelf] of Object.entries(shelves)) {
+    if (which === kept) continue;
+    shelf.section.hidden = true;
+    shelf.page.close();
+  }
 }
 $("apps-link").onclick = () => openApps();
+$("brains-link").onclick = () => openBrains();
 
 // ---- the History page (history-page.js): every chat the person has had,
 // archived and imported ones too, and its search, in the work area as the
@@ -2070,7 +2087,7 @@ async function load(changed = false) {
   threads.refresh().catch(() => {});
   sessionArchive.load().catch(() => {});
   renderApps();
-  appsPage.listed().catch(() => {});
+  for (const shelf of Object.values(shelves)) shelf.page.listed().catch(() => {});
   historyPage.listed();
   renderHeading();
   renderComputer();
@@ -2205,12 +2222,13 @@ async function start(open) {
   // of theirs (not the deployment's plan) may reach their ledger a moment
   // after it is given: its first run waits for it (`seatFirst`)
   // settings or the Apps page, as the address asks
-  const settings = !open && [SETTINGS, APPS, HISTORY, SCHEDULES, MOVE].includes(location.pathname);
+  const settings = !open && [SETTINGS, APPS, BRAINS, HISTORY, SCHEDULES, MOVE].includes(location.pathname);
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !state.notices.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings && location.pathname === APPS) openApps(false);
+  else if (settings && location.pathname === BRAINS) openBrains(false);
   else if (settings && location.pathname === HISTORY) openHistory(false);
   else if (settings && location.pathname === SCHEDULES) openSchedules(false);
   else if (settings && location.pathname === MOVE) openMove(false);
