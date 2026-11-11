@@ -362,14 +362,14 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
 /// Standard OAuth code exchange. Called only by the Registry after consuming
 /// the browser/session/provider-bound transaction. No redirects, retries or
 /// response-body diagnostics: these messages carry credentials. Its client
-/// authenticates as its row says (`ClientAuth`): its secret in the form, or
-/// in an HTTP Basic header.
+/// authenticates as its row says (`client_auth`): its secret in the form,
+/// or in an HTTP Basic header.
 pub(super) async fn connection_exchange(env: &Env, provider: &str, o: &fragment_core::catalog::ConnectionOAuth, callback: &str, code: &str, verifier: &str) -> CellResult<(u16, Value)> {
     let cfg = Config::from_env(env);
     if !o.exchange.starts_with("https://") && !cfg.egress_local { return Err(CellError::host("a local OAuth endpoint is disabled on this fleet")); }
     let secret = required(env, &store::connection_secret(provider)).await?;
-    let form = fragment_core::connection_signin::exchange_form(o, callback, code, verifier, &secret);
-    let authorization = fragment_core::connection_signin::client_authorization(o, &secret);
+    let auth = cfg.providers.get(provider).map(|p| p.client_auth).unwrap_or_default();
+    let (authorization, form) = fragment_core::connection_signin::exchange(o, auth, callback, code, verifier, &secret);
     confidential_request(&o.exchange, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), &form).await
 }
 
@@ -480,19 +480,20 @@ pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str, acco
     }
 }
 
-/// A connection's grant revoked at its provider (RFC 7009), at its row's
-/// `revoke`, with `form` (`connection_signin::revoke_form`: an access
-/// token Pipes just minted for it, or one a fenced callback was given):
-/// whether the provider says so (200; a row that names no `revoke` asks
-/// nothing). A row whose client authenticates with HTTP Basic does so
-/// here too (RFC 7009 §2.1; Zoom's refuses a revocation that does not),
-/// which is all its secret is read for. No redirects or retries, and
+/// A connection's grant revoked at its provider (RFC 7009), at `revoke`,
+/// with `form` (`connection_signin::revoke_form`: an access token Pipes
+/// just minted for it, or one a fenced callback was given): whether the
+/// provider says so (200). A row whose client authenticates with HTTP
+/// Basic (`client_auth`) does so here too (RFC 7009 §2.1; Zoom's refuses
+/// a revocation that does not), which is all its secret is read for; any
+/// other sends the token alone, as before. No redirects or retries, and
 /// nothing of its answer is kept: the request carries a credential.
-pub async fn connection_revoke(env: &Env, provider: &str, o: &fragment_core::catalog::ConnectionOAuth, form: &str) -> CellResult<bool> {
-    let Some(revoke) = o.revoke.as_deref() else { return Ok(false) };
-    let authorization = match o.client_auth {
-        fragment_core::catalog::ClientAuth::Basic => fragment_core::connection_signin::client_authorization(o, &required(env, &store::connection_secret(provider)).await?),
-        fragment_core::catalog::ClientAuth::Post => None,
+pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &str) -> CellResult<bool> {
+    use fragment_core::catalog::ClientAuth;
+    let client = Config::from_env(env).providers.get(provider).filter(|p| p.client_auth == ClientAuth::Basic).and_then(|p| p.connection_oauth.as_ref());
+    let authorization = match client {
+        Some(o) => fragment_core::connection_signin::client_authorization(ClientAuth::Basic, &o.client_id, &required(env, &store::connection_secret(provider)).await?),
+        None => None,
     };
     Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), form).await?.0 == 200)
 }

@@ -290,10 +290,10 @@
   // only the one its account's Pipes metadata names (docs/computers.md,
   // "An account's own host"). A connection whose provider wants its OAuth
   // client's secret as an HTTP Basic header (Zoom, Airtable, Xero, Notion),
-  // never in the code exchange's body, names `"client_auth": "basic"` in
-  // its `connection_oauth`: the header goes with its code exchange and its
-  // revocation (docs/pipes-browser-binding.md). Name it only once a
-  // release that knows the field is deployed: an older one refuses the
+  // never in the code exchange's body, names `"client_auth": "basic"`
+  // beside its `connection_oauth`: the header goes with its code exchange
+  // and its revocation (docs/pipes-browser-binding.md). Name it only once
+  // a release that knows the field is deployed: an older one refuses the
   // catalog.
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],

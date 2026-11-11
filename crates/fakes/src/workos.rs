@@ -474,13 +474,12 @@ impl WorkOs {
     }
 
     /// The stand-in provider's connection through its client that
-    /// authenticates with HTTP Basic (`BASIC_CLIENT`, its row's
-    /// `client_auth`): the same consent, its own token and revocation
-    /// endpoints.
+    /// authenticates with HTTP Basic (`BASIC_CLIENT`; its row names
+    /// `"client_auth": "basic"` beside this): the same consent, its own
+    /// token and revocation endpoints.
     pub fn basic_connection_oauth(&self) -> Value {
         let mut o = self.connection_oauth();
         o["client_id"] = BASIC_CLIENT.0.into();
-        o["client_auth"] = "basic".into();
         o["exchange"] = format!("{}/test-oauth/basic/token", self.url).into();
         o["revoke"] = format!("{}/test-oauth/basic/revoke", self.url).into();
         o

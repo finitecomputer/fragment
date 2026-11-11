@@ -30,10 +30,11 @@ back to WorkOS's own authorize URL. The routes are docs/api.md's
 - **The OAuth client** must be the one the deployment's WorkOS
   integration uses, or Pipes cannot refresh. Its secret is a store
   secret (docs/secrets.md). It authenticates to the provider as its row
-  says (`connection_oauth.client_auth`, RFC 6749 §2.3.1): its id and
-  secret in the code exchange's form (`"post"`, a row that names none),
-  or in an HTTP Basic header and in no body (`"basic"`), which is what
-  Zoom's, Airtable's, Xero's and Notion's token endpoints ask.
+  says (`client_auth`, beside its `connection_oauth`; RFC 6749 §2.3.1):
+  its id and secret in the code exchange's form (`"post"`, a row that
+  names none), or in an HTTP Basic header and in no body (`"basic"`),
+  which is what Zoom's, Airtable's, Xero's and Notion's token endpoints
+  ask.
 - **The account's label** is the email of the ID token answered beside
   the grant: read without its signature (it came from the token endpoint
   over TLS: OpenID Connect Core 3.1.3.7), its `aud` checked, an

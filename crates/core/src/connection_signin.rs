@@ -122,16 +122,26 @@ pub fn authorize_url(o: &ConnectionOAuth, grant: &Grant, callback: &str, challen
     u.into()
 }
 
-/// The code exchange's form. Its client's id and secret are in it unless
-/// its row says they go in the header (`client_authorization`): a request
-/// authenticates one way (RFC 6749 §2.3.1).
 pub fn exchange_form(o: &ConnectionOAuth, callback: &str, code: &str, verifier: &str, secret: &str) -> String {
-    let mut form = url::form_urlencoded::Serializer::new(String::new());
-    form.append_pair("grant_type", "authorization_code");
-    if o.client_auth == ClientAuth::Post {
-        form.append_pair("client_id", &o.client_id).append_pair("client_secret", secret);
+    url::form_urlencoded::Serializer::new(String::new()).append_pair("grant_type", "authorization_code")
+        .append_pair("client_id", &o.client_id).append_pair("client_secret", secret).append_pair("redirect_uri", callback)
+        .append_pair("code", code).append_pair("code_verifier", verifier).finish()
+}
+
+/// A code exchange as its row's client authenticates (`ClientAuth`): its
+/// `Authorization` header, and its form. In the body, no header and
+/// `exchange_form`'s; with HTTP Basic, the header
+/// (`client_authorization`) and a form that names neither its id nor its
+/// secret: a request authenticates one way (RFC 6749 §2.3.1).
+pub fn exchange(o: &ConnectionOAuth, auth: ClientAuth, callback: &str, code: &str, verifier: &str, secret: &str) -> (Option<String>, String) {
+    match auth {
+        ClientAuth::Post => (None, exchange_form(o, callback, code, verifier, secret)),
+        ClientAuth::Basic => {
+            let form = url::form_urlencoded::Serializer::new(String::new()).append_pair("grant_type", "authorization_code")
+                .append_pair("redirect_uri", callback).append_pair("code", code).append_pair("code_verifier", verifier).finish();
+            (client_authorization(auth, &o.client_id, secret), form)
+        }
     }
-    form.append_pair("redirect_uri", callback).append_pair("code", code).append_pair("code_verifier", verifier).finish()
 }
 
 /// The `Authorization` header a connection's client authenticates with,
@@ -140,10 +150,10 @@ pub fn exchange_form(o: &ConnectionOAuth, callback: &str, code: &str, verifier: 
 /// a colon and said in base64 (RFC 6749 §2.3.1 and its Appendix B; an id
 /// or a secret of letters, digits and `-._` is left as it is, which every
 /// such provider's are). None where its row puts them in the body.
-pub fn client_authorization(o: &ConnectionOAuth, secret: &str) -> Option<String> {
+pub fn client_authorization(auth: ClientAuth, client_id: &str, secret: &str) -> Option<String> {
     use base64::Engine;
     let encoded = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
-    (o.client_auth == ClientAuth::Basic).then(|| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", encoded(&o.client_id), encoded(secret)))))
+    (auth == ClientAuth::Basic).then(|| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", encoded(client_id), encoded(secret)))))
 }
 
 /// A revocation's form (RFC 7009 §2.1; Google documents `token` alone).
@@ -429,7 +439,7 @@ mod tests {
     fn config() -> ConnectionOAuth {
         let grant = |scopes: &[&str]| Grant { scopes: scopes.iter().map(|s| s.to_string()).collect() };
         let access = catalog::Access { read: Some(grant(&["mail.read", "files.read"])), write: grant(&["mail.read", "mail.send", "files.read"]) };
-        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, revoke: None, client_auth: ClientAuth::Post }
+        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), access, revoke: None }
     }
 
     fn id_token(claims: Value) -> Value {
@@ -488,47 +498,37 @@ mod tests {
         assert_eq!(form, std::collections::BTreeMap::from([("token".to_string(), "a+b/c=".to_string())]));
     }
 
-    /// Goal: a row that says its client authenticates with HTTP Basic (RFC
-    /// 6749 §2.3.1, as Zoom's, Airtable's, Xero's and Notion's token
-    /// endpoints ask) sends its id and secret in the header alone, each
-    /// form-encoded first, and a row that says nothing is as it was.
+    /// Goal: a client that authenticates with HTTP Basic (its row's
+    /// `client_auth`: RFC 6749 §2.3.1, as Zoom's, Airtable's, Xero's and
+    /// Notion's token endpoints ask) sends its id and secret in the header
+    /// alone, each form-encoded first; in the body, an exchange is the
+    /// form it always was, with no header.
     #[test]
     fn a_basic_client_authenticates_in_its_header_and_never_its_body() {
         use base64::Engine;
         let callback = "https://platform.example/api/connections/mail/callback";
-        let fields = |form: String| url::form_urlencoded::parse(form.as_bytes()).map(|(k, _)| k.into_owned()).collect::<std::collections::BTreeSet<_>>();
+        let fields = |form: &str| url::form_urlencoded::parse(form.as_bytes()).map(|(k, _)| k.into_owned()).collect::<std::collections::BTreeSet<_>>();
         let credentials = |header: Option<String>| {
             let header = header.expect("a Basic client's header");
             String::from_utf8(base64::engine::general_purpose::STANDARD.decode(header.strip_prefix("Basic ").expect("the Basic scheme")).expect("base64")).expect("text")
         };
         let mut o = config();
-        assert_eq!(client_authorization(&o, "fake-secret"), None, "in the body, unless its row says otherwise");
-        assert_eq!(fields(exchange_form(&o, callback, "code", "verifier", "fake-secret")), ["client_id", "client_secret", "code", "code_verifier", "grant_type", "redirect_uri"].map(String::from).into());
-        assert!(!serde_json::to_string(&o).unwrap().contains("client_auth"), "a row that names none hashes as it did before the field was");
+        let (header, form) = exchange(&o, ClientAuth::Post, callback, "c+/=&", "verifier", "fake-secret");
+        assert_eq!((header, form.as_str()), (None, exchange_form(&o, callback, "c+/=&", "verifier", "fake-secret").as_str()), "in the body: no header, and the form as it was");
+        assert_eq!(fields(&form), ["client_id", "client_secret", "code", "code_verifier", "grant_type", "redirect_uri"].map(String::from).into());
+        assert_eq!(client_authorization(ClientAuth::Post, "client", "fake-secret"), None);
 
-        o.client_auth = catalog::ClientAuth::Basic;
-        assert!(check(&o).is_ok());
-        assert_eq!(credentials(client_authorization(&o, "fake-secret")), "client:fake-secret");
-        let form = exchange_form(&o, callback, "code", "verifier", "fake-secret");
-        assert_eq!(fields(form.clone()), ["code", "code_verifier", "grant_type", "redirect_uri"].map(String::from).into(), "one authentication method a request: neither its id nor its secret is the body's");
+        let (header, form) = exchange(&o, ClientAuth::Basic, callback, "c+/=&", "verifier", "fake-secret");
+        assert_eq!(credentials(header), "client:fake-secret");
+        assert_eq!(fields(&form), ["code", "code_verifier", "grant_type", "redirect_uri"].map(String::from).into(), "one authentication method a request: neither its id nor its secret is the body's");
         assert!(!form.contains("fake-secret"));
+        let sent: std::collections::BTreeMap<_, _> = url::form_urlencoded::parse(form.as_bytes()).into_owned().collect();
+        assert_eq!((sent["grant_type"].as_str(), sent["redirect_uri"].as_str(), sent["code"].as_str(), sent["code_verifier"].as_str()), ("authorization_code", callback, "c+/=&", "verifier"));
         // each half form-encoded before they are joined, so a colon in an
         // id is never taken for the join
         o.client_id = "cli:ent".into();
-        assert_eq!(credentials(client_authorization(&o, "s e/c+r=t")), "cli%3Aent:s+e%2Fc%2Br%3Dt");
-
-        // on the wire: `"client_auth": "basic"`, or `"post"` as a row that names none
-        let row = |auth: Value| {
-            let mut row = serde_json::to_value(config()).unwrap();
-            row["client_auth"] = auth;
-            serde_json::from_value::<ConnectionOAuth>(row)
-        };
-        assert_eq!(row(json!("basic")).unwrap().client_auth, catalog::ClientAuth::Basic);
-        assert!(serde_json::to_string(&row(json!("basic")).unwrap()).unwrap().contains(r#""client_auth":"basic""#), "a Basic row's hash says so");
-        assert_eq!(row(json!("post")).unwrap(), config());
-        for bad in [json!("digest"), json!("Basic"), json!(""), json!(null), json!(true)] {
-            assert!(row(bad.clone()).is_err(), "{bad}");
-        }
+        assert_eq!(credentials(exchange(&o, ClientAuth::Basic, callback, "code", "verifier", "s e/c+r=t").0), "cli%3Aent:s+e%2Fc%2Br%3Dt");
+        assert_eq!(credentials(client_authorization(ClientAuth::Basic, "cli:ent", "s e/c+r=t")), "cli%3Aent:s+e%2Fc%2Br%3Dt");
     }
 
     #[test]
@@ -878,7 +878,7 @@ mod tests {
         assert_eq!(account_label(&answer, "client").as_deref(), Some("ada@acme.com"));
         // no read-only scope: read and write alone, and no access to tell
         let access = catalog::Access { read: None, write: Grant { scopes: requested.clone() } };
-        let o = ConnectionOAuth { authorize: "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent".into(), exchange: "https://login.salesforce.com/services/oauth2/token".into(), client_id: "client".into(), access, revoke: None, client_auth: ClientAuth::Post };
+        let o = ConnectionOAuth { authorize: "https://login.salesforce.com/services/oauth2/authorize?prompt=login%20consent".into(), exchange: "https://login.salesforce.com/services/oauth2/token".into(), client_id: "client".into(), access, revoke: None };
         assert!(check(&o).is_ok());
         assert_eq!((o.access.offered(), access_of(&o, &granted.scopes)), (vec![ConnectionAccess::Write], None));
     }
@@ -964,7 +964,7 @@ mod tests {
     fn a_grant_of_more_than_was_asked_connects_with_nothing_missing() {
         let linear = |scope: &str| Grant { scopes: vec![scope.into()] };
         let access = catalog::Access { read: Some(linear("read")), write: linear("write") };
-        let o = ConnectionOAuth { authorize: "https://linear.app/oauth/authorize?actor=user&prompt=consent".into(), exchange: "https://api.linear.app/oauth/token".into(), client_id: "client".into(), access, revoke: Some("https://api.linear.app/oauth/revoke".into()), client_auth: ClientAuth::Post };
+        let o = ConnectionOAuth { authorize: "https://linear.app/oauth/authorize?actor=user&prompt=consent".into(), exchange: "https://api.linear.app/oauth/token".into(), client_id: "client".into(), access, revoke: Some("https://api.linear.app/oauth/revoke".into()) };
         assert!(check(&o).is_ok());
         let asked = |access: ConnectionAccess| -> Vec<(String, String)> {
             url::Url::parse(&authorize_url(&o, o.access.of(access).unwrap(), "https://platform.example/api/connections/linear/callback", "challenge", "state")).unwrap().query_pairs().into_owned().collect()
