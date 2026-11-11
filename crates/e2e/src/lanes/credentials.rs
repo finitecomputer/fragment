@@ -273,7 +273,8 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let wrote = say(s, 172, &fetch(s, true))?;
     let at = |s: &Suite, path: &str| format!("fetch http://{KEPT_CONNECTION_HOST}{path} with {}", placeholder(s, w.id, w.agent, KEPT_CONNECTION));
     let elsewhere = say(s, 179, &at(s, "/v1/run"))?;
-    let encoded = say(s, 180, &at(s, "/v1/records%2F..%2Frun"))?;
+    // a segment a pattern's `*` would take, but for its encoded `/`s
+    let encoded = say(s, 180, &at(s, "/v1/records/x%2F..%2F..%2Frun"))?;
     s.ok(
         SWAP_CHECKS[46],
         access_of(&r) == "read" && read.starts_with("fetched 200") && read_swapped

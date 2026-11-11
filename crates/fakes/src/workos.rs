@@ -423,8 +423,8 @@ fn now_s() -> i64 {
 /// (`connection_oauth.access.read`).
 pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
 /// The paths the kept connection's read only reaches (`kept_connection_oauth`):
-/// its records, of any version.
-pub const KEPT_READ_PATHS: [&str; 1] = ["/*/records"];
+/// its records, of any version, and one record.
+pub const KEPT_READ_PATHS: [&str; 2] = ["/*/records", "/*/records/*"];
 /// What it asks for as read and write: read only's, and sending mail.
 pub const CONNECTION_WRITE_SCOPES: [&str; 4] = ["mail.read", "files.read", "mail.send", "openid"];
 

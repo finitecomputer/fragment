@@ -62,8 +62,10 @@ scopes may then be read and write's (the catalog refuses identical scopes
 otherwise, and methods on write). Where a provider's GET may change
 something (Salesforce's Tooling `executeAnonymous` runs Apex on a GET, as
 an org's own Apex REST resources may), it names the paths read only may
-reach too (`read.paths`: patterns of segments, `*` any one, each reaching
-itself and what is under it), and a read-only call is held to both. A path
+reach too (`read.paths`: patterns of whole paths' segments, `*` any one,
+never what is under them: a resource under a reading one may not only
+read, as a Salesforce record's file runs the org's download handler), and
+a read-only call is held to both. A path
 is read as plainly written or not at all: an encoded `/` or `.`, a `\`,
 an empty, `.` or `..` segment reaches no pattern, since a server may read
 it as another path. The platform enforces it, not the provider:

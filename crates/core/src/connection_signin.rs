@@ -146,13 +146,15 @@ fn path_pattern(pattern: &str) -> bool {
     pattern.len() <= 256 && plain_segments(&pattern.replace('*', "x")).is_some() && !pattern.split('/').any(|s| s.contains('*') && s != "*")
 }
 
-/// Whether `path` is one `patterns` reach: a pattern's segments are its
-/// first ones, each the same or the pattern's `*`.
+/// Whether `path` is one `patterns` reach: a pattern names whole paths,
+/// its segments theirs, each the same or the pattern's `*`, and nothing
+/// under them (a resource under a reading one may not only read: a
+/// Salesforce record's file runs the org's download handler).
 fn path_reached(patterns: &[String], path: &str) -> bool {
     let Some(segments) = plain_segments(path) else { return false };
     patterns.iter().any(|p| {
         let want: Vec<&str> = p.trim_start_matches('/').trim_end_matches('/').split('/').collect();
-        want.len() <= segments.len() && want.iter().zip(&segments).all(|(w, s)| *w == "*" || w == s)
+        want.len() == segments.len() && want.iter().zip(&segments).all(|(w, s)| *w == "*" || w == s)
     })
 }
 
@@ -868,12 +870,14 @@ mod tests {
         }
         // where a GET may run code (Salesforce's executeAnonymous), read
         // only is held to the paths that only read, as plainly written
-        o.access.read.paths = Some(vec!["/services/oauth2/userinfo".into(), "/services/data/*/query".into(), "/services/data/*/sobjects".into()]);
+        o.access.read.paths = Some(["/services/oauth2/userinfo", "/services/data/*/query", "/services/data/*/query/*", "/services/data/*/sobjects", "/services/data/*/sobjects/*/*"].map(String::from).to_vec());
         assert!(check(&o).is_ok());
-        for reached in ["/services/oauth2/userinfo", "/services/data/v63.0/query", "/services/data/v63.0/query/", "/services/data/v63.0/query/01gD0000002HU6KIAW-2000", "/services/data/v63.0/sobjects/Account/001xx000003DGb2AAG"] {
+        for reached in ["/services/oauth2/userinfo", "/services/data/v63.0/query", "/services/data/v63.0/query/", "/services/data/v63.0/query/01gD0000002HU6KIAW-2000", "/services/data/v63.0/sobjects", "/services/data/v63.0/sobjects/Account/001xx000003DGb2AAG"] {
             assert!(call_allowed(&o, Read, "GET", reached), "{reached}");
         }
-        for refused in ["/services/data/v63.0/tooling/executeAnonymous/", "/services/apexrest/Orders", "/services/data", "/services/data/v63.0", "/services/data/v63.0/queryAll", "/services/data/v63.0/sobjects%2F..%2Ftooling%2FexecuteAnonymous", "/services/data/v63.0/sobjects/x%2F..%2F..%2Ftooling", "/services/data/v63.0/sobjects/../tooling/executeAnonymous", "/services/data/v63.0//sobjects", "/services/data/v63.0/sobjects/a\\b", "services/data/v63.0/query", "/Services/data/v63.0/query", ""] {
+        // a pattern names whole paths: what is under one is not reached
+        for refused in ["/services/data/v63.0/sobjects/ContentVersion/068xx0000004CxAAI/VersionData", "/services/data/v63.0/query/01gD0000002HU6KIAW-2000/more", "/services/oauth2/userinfo/x",
+                        "/services/data/v63.0/tooling/executeAnonymous/", "/services/apexrest/Orders", "/services/data", "/services/data/v63.0", "/services/data/v63.0/queryAll", "/services/data/v63.0/sobjects%2F..%2Ftooling%2FexecuteAnonymous", "/services/data/v63.0/sobjects/x%2F..%2F..%2Ftooling", "/services/data/v63.0/sobjects/../tooling/executeAnonymous", "/services/data/v63.0//sobjects", "/services/data/v63.0/sobjects/a\\b", "services/data/v63.0/query", "/Services/data/v63.0/query", ""] {
             assert!(!call_allowed(&o, Read, "GET", refused), "{refused:?}");
             assert!(call_allowed(&o, Write, "GET", refused), "read and write reaches any: {refused:?}");
         }
