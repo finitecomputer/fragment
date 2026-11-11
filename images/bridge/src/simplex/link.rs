@@ -83,9 +83,10 @@ pub const OUTBOX_MAX: usize = 32;
 pub const POSTED_KEPT: usize = 32;
 /// Items with `wire::WORKING` on, or not yet answered taken off, at most.
 pub const REACTED_MAX: usize = 2 * POSTED_KEPT;
-/// Reactions one `react` asks of the core, at most: the rest at the next
-/// (each answer is one), so a start's catch-up and leftovers keep their
-/// room in what the core's writer holds (`run::WRITER_MAX`).
+/// Reactions asked of the core and not yet answered, at most: the rest as
+/// each is answered (or not sent), so the link's other commands (a start's
+/// catch-up, an adoption's leftovers) keep their room in what the core's
+/// writer holds (`run::WRITER_MAX`) however many are owed.
 pub const REACT_ASKED: usize = 4;
 /// What an adoption lets go, at most (`Link::leftovers`): past it, another
 /// contact is still let go the moment it writes or connects.
@@ -155,6 +156,10 @@ pub struct Link {
     /// answered yet (not asked twice): in no file, and in no comparison.
     #[serde(skip)]
     pub taking_off: Asked,
+    /// Of those, the ones whose putting on is asked of this core and not
+    /// answered yet: with `taking_off`, at most `REACT_ASKED` under way.
+    #[serde(skip)]
+    pub putting_on: Asked,
     /// What an unlink still has the core let go (the contact, told, or an
     /// unused invitation): asked again at each start until it is done, so
     /// an unlink while the core cannot run (under a hold, not always on)
@@ -302,13 +307,14 @@ pub enum Input<'a> {
     Restarting,
     /// The owner's message of this item was posted on their chat as `seq`.
     Posted { seq: u64, item: i64 },
-    /// The core answered taking `WORKING` off this item: done, or refused
-    /// (off already, the item gone, reactions off), either way none to ask
-    /// again.
-    TakenOff(i64),
-    /// Taking it off this item was not sent (no core, or one not taking
-    /// commands): the next `react` asks again.
-    NotTakenOff(i64),
+    /// The core answered putting `WORKING` on this item (`on`) or taking
+    /// it off: done, or refused (on or off already, the item gone,
+    /// reactions off). A removal answered either way is none to ask again;
+    /// a putting on refused is settled by its removal's answer.
+    Reacted { item: i64, on: bool },
+    /// That was not sent (no core, or one not taking commands): asked
+    /// again at the next `react`.
+    NotReacted { item: i64, on: bool },
 }
 
 /// What the link asks for.
@@ -412,6 +418,7 @@ impl Link {
             Input::Started { rollback } => {
                 // what the last core never answered is asked of this one
                 self.taking_off.0.clear();
+                self.putting_on.0.clear();
                 // an unlink the last life could not finish, first
                 out.extend(self.cleanup.map(|c| Action::Ask(c.cmd())));
                 match &self.phase {
@@ -503,12 +510,20 @@ impl Link {
                     _ => {}
                 }
             }
-            Input::TakenOff(item) => {
+            Input::Reacted { item, on: false } => {
                 self.reacted.retain(|i| *i != item);
                 self.taking_off.0.remove(&item);
             }
-            Input::NotTakenOff(item) => {
+            Input::Reacted { item, on: true } => {
+                self.putting_on.0.remove(&item);
+            }
+            Input::NotReacted { item, on: false } => {
                 self.taking_off.0.remove(&item);
+            }
+            Input::NotReacted { item, on: true } => {
+                if self.putting_on.0.remove(&item) {
+                    self.reacted.retain(|i| *i != item);
+                }
             }
             Input::Posted { seq, item } => {
                 if self.contact().is_some() && item > 0 {
@@ -788,19 +803,24 @@ impl Link {
             return out;
         }
         let wanted: Vec<i64> = self.posted.iter().filter(|(seq, _)| working.contains(seq)).map(|(_, item)| *item).collect();
-        // off: kept as on until the core answers it (`TakenOff`), asked once a core
-        for item in self.reacted.iter().filter(|i| !wanted.contains(i)) {
-            if out.len() < REACT_ASKED && self.taking_off.0.insert(*item) {
-                out.push(Action::Ask(Cmd::React { contact, item: *item, on: false }));
+        let under_way = |l: &Link| l.taking_off.0.len() + l.putting_on.0.len();
+        // off: kept as on until the core answers it (`Reacted`), asked once a
+        // core, and not while its putting on is under way
+        let off: Vec<i64> = self.reacted.iter().filter(|i| !wanted.contains(i) && !self.taking_off.0.contains(i) && !self.putting_on.0.contains(i)).copied().collect();
+        for item in off {
+            if under_way(self) < REACT_ASKED {
+                self.taking_off.0.insert(item);
+                out.push(Action::Ask(Cmd::React { contact, item, on: false }));
             }
         }
-        // on: one whose removal is not answered yet goes on again once it is
-        // (`TakenOff`, then this again); past `REACTED_MAX` not yet taken
-        // off (a core not answering), none: it shows nothing rather than grow
+        // on: one whose removal is not answered yet goes on again once it is;
+        // past `REACTED_MAX` not yet taken off (a core not answering), none:
+        // it shows nothing rather than grow
         for item in wanted {
-            if out.len() < REACT_ASKED && !self.reacted.contains(&item) && self.reacted.len() < REACTED_MAX {
-                out.push(Action::Ask(Cmd::React { contact, item, on: true }));
+            if under_way(self) < REACT_ASKED && !self.reacted.contains(&item) && self.reacted.len() < REACTED_MAX {
+                self.putting_on.0.insert(item);
                 self.reacted.push(item);
+                out.push(Action::Ask(Cmd::React { contact, item, on: true }));
             }
         }
         self.check();
@@ -816,6 +836,7 @@ impl Link {
         self.posted.clear();
         self.reacted.clear();
         self.taking_off.0.clear();
+        self.putting_on.0.clear();
         self.delivered = 0;
         self.scan.items.clear();
         self.scan.running = false;
@@ -843,7 +864,8 @@ impl Link {
         // (an item it reacted to may have aged out of `posted` since: the
         // next `react` takes it off)
         assert!(self.posted.len() <= POSTED_KEPT && self.reacted.len() <= REACTED_MAX, "what it keeps of its owner's messages is bounded");
-        assert!(self.taking_off.0.iter().all(|i| self.reacted.contains(i)), "only what is on is being taken off");
+        assert!(self.taking_off.0.iter().chain(&self.putting_on.0).all(|i| self.reacted.contains(i)), "only what is on is being taken off or put on");
+        assert!(self.taking_off.0.is_disjoint(&self.putting_on.0) && self.taking_off.0.len() + self.putting_on.0.len() <= REACT_ASKED, "a bounded number under way, each one way");
         assert!(self.leftovers.len() <= LEFTOVERS_MAX, "an adoption's leftovers are bounded");
         assert!(self.contact().is_none_or(|c| !self.leftovers.contains(&Leftover::Contact(c))), "the bound contact is never let go as a leftover");
     }
@@ -902,87 +924,113 @@ mod tests {
         actions.iter().filter_map(|a| if let Action::Ask(Cmd::React { contact: 3, item, on }) = a { Some((*item, *on)) } else { None }).collect()
     }
 
+    /// Each reaction asked, answered by the core as done.
+    fn answer(link: &mut Link, asked: &[Action]) -> Vec<(i64, bool)> {
+        let r = reactions(asked);
+        for (item, on) in &r {
+            link.apply(Input::Reacted { item: *item, on: *on });
+        }
+        r
+    }
+
     /// Goal (Paul, 2026-11-11): while its agent works on its owner's
     /// message, its app shows `WORKING` on it, and not once the turn ends,
     /// however it ends. Replay: the same working set again asks nothing,
     /// and a message posted again is one. A removal is kept until the core
-    /// answers it: asked once of a core, asked again when it was not sent,
-    /// and asked of the next core when the last never answered it (Codex's
-    /// review: else a removal lost with its core leaves 🚀 for good). A
-    /// ratchet out of step shows nothing until it is in step. Restart: what
-    /// a life put on, written in its file, is taken off by the next once no
-    /// turn runs on it. An unlink keeps nothing; what it keeps is bounded.
+    /// answers it (Codex's review: else one lost with its core leaves 🚀
+    /// for good): asked once of a core, again when it was not sent, and of
+    /// the next core when the last never answered. At most `REACT_ASKED`
+    /// are under way, however many are owed (Codex's second round: the
+    /// core's writer keeps room for the rest). A ratchet out of step shows
+    /// nothing until it is in step. An unlink keeps nothing; what it keeps
+    /// is bounded.
     #[test]
     fn its_owners_message_shows_the_agent_working_while_its_turn_runs() {
         let mut link = linked();
         let none = BTreeSet::new();
-        assert!(link.react(&BTreeSet::from([7])).is_empty(), "a seq it was never told of: nothing");
+        let on = |seqs: &[u64]| -> BTreeSet<u64> { seqs.iter().copied().collect() };
+        assert!(link.react(&on(&[7])).is_empty(), "a seq it was never told of: nothing");
         link.apply(Input::Posted { seq: 7, item: 41 });
         link.apply(Input::Posted { seq: 7, item: 41 });
         link.apply(Input::Posted { seq: 9, item: 44 });
         assert_eq!(link.posted, VecDeque::from([(7, 41), (9, 44)]), "posted again: one");
-        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, true)], "its turn runs: on");
-        assert!(link.react(&BTreeSet::from([7])).is_empty(), "the same again: nothing");
-        assert_eq!(reactions(&link.react(&BTreeSet::from([9]))), vec![(41, false), (44, true)], "the next one's turn: off the first, on the next");
-        // its removal unanswered: still on, and not asked twice of this core
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "its turn runs: on");
+        assert!(link.react(&on(&[7])).is_empty(), "the same again: nothing");
+        let asked = link.react(&on(&[9]));
+        assert_eq!(reactions(&asked), vec![(41, false), (44, true)], "the next one's turn: off the first, on the next");
+        // unanswered: still on, and not asked twice of this core
         assert_eq!(link.reacted, vec![41, 44]);
-        assert!(link.react(&BTreeSet::from([9])).is_empty(), "under way: not asked again");
-        link.apply(Input::TakenOff(41));
+        assert!(link.react(&on(&[9])).is_empty(), "under way: not asked again");
+        answer(&mut link, &asked);
         assert_eq!(link.reacted, vec![44], "answered: off");
         // ended, its removal lost with its core: kept in its file, asked of the next core
         assert_eq!(reactions(&link.react(&none)), vec![(44, false)]);
         let mut back = Link::from_json(&link.to_json()).expect("its file reads back");
         assert_eq!(back.reacted, vec![44], "kept in its file until answered");
-        link.apply(Input::Started { rollback: false });
-        assert_eq!(reactions(&link.react(&none)), vec![(44, false)], "the next core is asked again");
         back.apply(Input::Started { rollback: false });
-        assert_eq!(reactions(&back.react(&none)), vec![(44, false)], "and so is the next life's");
+        assert_eq!(reactions(&back.react(&none)), vec![(44, false)], "the next life's core is asked again");
+        link.apply(Input::Started { rollback: false });
+        assert_eq!(reactions(&link.react(&none)), vec![(44, false)], "and so is a core started again");
         // not sent (a core not taking commands): asked again at the next react
-        link.apply(Input::NotTakenOff(44));
-        assert_eq!(reactions(&link.react(&none)), vec![(44, false)], "not sent: asked again");
-        link.apply(Input::TakenOff(44));
+        link.apply(Input::NotReacted { item: 44, on: false });
+        let asked = link.react(&none);
+        assert_eq!(answer(&mut link, &asked), vec![(44, false)], "not sent: asked again");
         assert!(link.reacted.is_empty() && link.react(&none).is_empty(), "answered: nothing on, nothing asked");
-        // wanted again while its removal is under way: on again once answered
-        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, true)]);
-        assert_eq!(reactions(&link.react(&none)), vec![(41, false)]);
-        assert!(link.react(&BTreeSet::from([7])).is_empty(), "its removal under way: wait for it");
-        link.apply(Input::TakenOff(41));
-        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, true)], "answered: on again");
-        assert_eq!(reactions(&link.react(&none)), vec![(41, false)]);
-        link.apply(Input::TakenOff(41));
+        // a putting on not sent: not on, asked again
+        assert_eq!(reactions(&link.react(&on(&[7]))), vec![(41, true)]);
+        link.apply(Input::NotReacted { item: 41, on: true });
+        assert!(link.reacted.is_empty(), "not sent: not on");
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "asked again");
+        // its removal wanted while its putting on is under way, and back: each waits for the other
+        let asked = link.react(&none);
+        assert_eq!(reactions(&asked), vec![(41, false)]);
+        assert!(link.react(&on(&[7])).is_empty(), "its removal under way: wait for it");
+        answer(&mut link, &asked);
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "answered: on again");
+        let asked = link.react(&none);
+        answer(&mut link, &asked);
         assert!(link.reacted.is_empty());
         // a ratchet out of step: nothing, until it is in step
         link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
-        assert!(link.react(&BTreeSet::from([7])).is_empty(), "syncing: nothing sent");
+        assert!(link.react(&on(&[7])).is_empty(), "syncing: nothing sent");
         link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
-        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, true)], "in step: on");
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, true)], "in step: on");
         // bounded: the oldest goes, and one it reacted to that went comes off
         for n in 0..POSTED_KEPT as u64 {
             link.apply(Input::Posted { seq: 100 + n, item: 100 + n as i64 });
         }
         assert!(link.posted.len() == POSTED_KEPT && !link.posted.contains(&(7, 41)), "the oldest went");
-        assert_eq!(reactions(&link.react(&BTreeSet::from([7]))), vec![(41, false)], "aged out: off");
-        link.apply(Input::TakenOff(41));
-        // at most REACT_ASKED a react, the rest at the next
+        let asked = link.react(&on(&[7]));
+        assert_eq!(answer(&mut link, &asked), vec![(41, false)], "aged out: off");
+        // many owed: at most REACT_ASKED under way, the next as each is answered
         let all: BTreeSet<u64> = (100..100 + POSTED_KEPT as u64).collect();
-        assert_eq!(reactions(&link.react(&all)).len(), REACT_ASKED);
-        while !link.react(&all).is_empty() {}
-        assert_eq!(link.reacted.len(), POSTED_KEPT, "all on, a few at a time");
-        // a core that answers no removal: past REACTED_MAX, nothing more goes on
-        while !link.react(&none).is_empty() {}
-        assert_eq!(link.taking_off.0.len(), POSTED_KEPT, "all asked off, none answered");
-        for n in 0..POSTED_KEPT as u64 {
-            link.apply(Input::Posted { seq: 300 + n, item: 300 + n as i64 });
+        let asked = link.react(&all);
+        assert_eq!(reactions(&asked).len(), REACT_ASKED);
+        assert!(link.react(&all).is_empty(), "none more until one is answered");
+        link.apply(Input::Reacted { item: 100, on: true });
+        assert_eq!(reactions(&link.react(&all)).len(), 1, "one answered: one more");
+        // answered as they come: all on
+        loop {
+            let pending: Vec<(i64, bool)> = link.putting_on.0.iter().map(|i| (*i, true)).collect();
+            for (item, on) in pending {
+                link.apply(Input::Reacted { item, on });
+            }
+            if link.react(&all).is_empty() && link.putting_on.0.is_empty() {
+                break;
+            }
         }
-        let more: BTreeSet<u64> = (300..300 + POSTED_KEPT as u64).collect();
-        while !link.react(&more).is_empty() {}
-        assert_eq!(link.reacted.len(), REACTED_MAX);
-        link.apply(Input::Posted { seq: 999, item: 999 });
-        assert!(reactions(&link.react(&BTreeSet::from([999]))).iter().all(|(_, on)| !on), "past the bound: none on");
+        assert_eq!(link.reacted.len(), POSTED_KEPT, "all on, a few at a time");
+        // a core that answers nothing: no more than REACT_ASKED asked of it
+        assert_eq!(reactions(&link.react(&none)).len(), REACT_ASKED);
+        assert!(link.react(&none).is_empty(), "nothing more of a core that does not answer");
         // unlinked: nothing kept, and nothing asked
         link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: true }));
-        assert!(link.posted.is_empty() && link.reacted.is_empty() && link.taking_off.0.is_empty());
-        assert!(link.react(&BTreeSet::from([131])).is_empty(), "unlinked: nothing");
+        assert!(link.posted.is_empty() && link.reacted.is_empty() && link.taking_off.0.is_empty() && link.putting_on.0.is_empty());
+        assert!(link.react(&on(&[131])).is_empty(), "unlinked: nothing");
         link.apply(Input::Posted { seq: 200, item: 1 });
         assert!(link.posted.is_empty(), "unlinked: nothing kept");
     }

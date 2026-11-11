@@ -2092,10 +2092,9 @@ impl Manager {
         if let Some(Cmd::SendFile { path, kind, .. }) = &asked {
             self.sent(f, path, *kind, &frame.resp);
         }
-        // a removal answered, done or refused: none to ask again (an `on`
-        // refused needs nothing: its removal's answer settles it)
-        if let Some(Cmd::React { item, on: false, .. }) = &asked {
-            self.apply(f, Input::TakenOff(*item));
+        // a reaction answered, done or refused (`Link::react`)
+        if let Some(Cmd::React { item, on, .. }) = &asked {
+            self.apply(f, Input::Reacted { item: *item, on: *on });
         }
         if let (Some(Cmd::Profile { .. }), Resp::Profile { name, changed }) = (&asked, &frame.resp) {
             crate::ev!("simplex.profile", { "agent": f, "name": name, "changed": changed });
@@ -2426,9 +2425,10 @@ impl Manager {
                     }
                 };
                 crate::ev!("simplex.unsent", { "agent": f, "cmd": kind_of(&cmd), "why": why });
-                // a removal not sent is asked again (never dropped: its 🚀 would stay)
-                if let Cmd::React { item, on: false, .. } = cmd {
-                    s.saved.link.apply(Input::NotTakenOff(item));
+                // a reaction not sent is asked again (a removal never dropped:
+                // its 🚀 would stay)
+                if let Cmd::React { item, on, .. } = cmd {
+                    s.saved.link.apply(Input::NotReacted { item, on });
                 }
             }
             Action::Forward(i) => {
