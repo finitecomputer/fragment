@@ -169,7 +169,18 @@ At the provider, the client's redirect URI is `<platform>/auth/callback`.
 A setting out of shape stops the isolate at its first request, naming it
 (`oidc::Settings::parse`).
 
-**The flow** (`crates/core/src/oidc.rs`, the rules; `cell/src/oidc.rs`, the router):
+**The flow.** Three places:
+- **`crates/core/src/oidc.rs`, the rules:** every decision, pure, with
+  its tests.
+- **`cell/oidc.mjs`, the shim:** what JavaScript does for free. It
+  fetches the provider's documents (bounded, kept per isolate), sends the
+  token request, `JSON.parse`s, chooses the key and verifies with
+  WebCrypto. It answers flat values and decides nothing more, but it
+  refuses any algorithm but RS256 and ES256 on its own. Its tests are
+  `cell/oidc.test.mjs`.
+- **`cell/src/oidc.rs`, the router.**
+
+The steps:
 - **Begin** (`/auth/login`, `/auth/switch`): the provider's metadata
   first, so a provider that cannot answer leaves no pending sign-in. Then
   the registry begins a sign-in, as WorkOS's: its state, bound to the
@@ -183,28 +194,40 @@ A setting out of shape stops the isolate at its first request, naming it
   with the code flow, the S256 challenge, the nonce and a `login_hint`. A
   switch adds `prompt=login`.
 - **The callback**: bound to the browser that began it (`trip_bound`).
-  The code is exchanged form-encoded with the verifier, the client
-  authenticated as chosen. No redirect is followed, and the answer is read
-  (at most 64 KiB) for its id_token alone.
-- **The id_token** (`oidc::signed`, then `Signed::verified`):
-  - RS256 or ES256 only, by a key of the provider's JWKS, never one the
-    token names. No `none`, no HMAC, no `crit`, no access token.
-  - The signature is the runtime's WebCrypto's to check
-    (`js::signature_verifies`): the cell carries no RSA crate.
-  - Only then the claims: `iss` exactly, `aud` (and `azp`), `exp`, `iat`
-    and `nbf` within two minutes, an `iat` at most 15 minutes old, the
-    nonce, and a `sub`.
+  keys.rs makes the token request (form-encoded, the verifier, the client
+  authenticated as chosen, its secret read there), and the shim sends it
+  (`redeem`). No redirect is followed, and the answer is read (at most
+  64 KiB) for its id_token alone.
+- **The id_token**, by the shim:
+  - Its algorithm must be one of the provider's that the rules allow
+    (RS256, ES256), and none but those two in any case: no `none`, no
+    HMAC. No `crit`, and no access token.
+  - The key is from the provider's JWKS, never one the token names. An
+    RSA key is 2048 to 4096 bits, an EC key P-256. The shim imports a JWK
+    made from the key's numbers alone.
+  - The signature is checked by WebCrypto: the cell carries no RSA crate.
+  - Only then are the claims read.
+
+  Then by the rules (`redeemed`):
+  - the algorithm again;
+  - each claim's type;
+  - `iss` exactly, `aud` (and `azp`);
+  - `exp`, `iat` and `nbf` within two minutes, and an `iat` at most 15
+    minutes old;
+  - the nonce, and a `sub`.
 - **Finishing**: the email rule, then the registry spends the sign-in in
-  one statement and sets the session (`calls::OidcSignIn`, made only from
-  the callback's `Bound`, as WorkOS's `Exchange` is).
+  one statement and sets the session, through WorkOS's own exchange call
+  (`calls::Exchange::verified`, made only from the callback's `Bound`) and
+  its own finish.
 - **Refusals**, on a page, with `signin.refused` and why in the node's log:
   - an id_token not to trust: 401;
   - an email absent or unverified: 403;
   - another person's email: 409;
   - a code the provider refuses (spent, expired): 400.
-- **Caches**: the metadata and the JWKS, an hour per isolate. A key the
-  JWKS lacks fetches it again at once (a rotation), then not again for
-  such a key within 15 s.
+- **Caches** (the shim's, per isolate): the metadata and the JWKS, an
+  hour. A key the JWKS lacks fetches it again at once (a rotation), then
+  not again for such a key within 15 s. Every limit is
+  `oidc::SHIM_LIMITS`, handed to the shim, never copied into it.
 - **Logout** ends the platform session here alone. tsidp offers no
   `end_session_endpoint`; RP-initiated logout is not built.
 - **A restart mid-sign-in** finishes, once: the state is the registry's,
@@ -291,10 +314,37 @@ tailnet on this box):
      `OIDC_CLIENT_SECRET`.
    - The email claim stays `email`, and the scopes stay
      `openid email profile`.
-6. **Reachability:** the cell's fetches must reach
-   `idp.<tailnet>.ts.net`, a 100.64/10 address. Where the runtime limits
-   egress to public addresses (celld's egress allowlist, celld#7), allow
-   that host (not verified here).
+6. **Reachability:** the platform's own fetches (the metadata, the keys,
+   the token request: cell/oidc.mjs) must reach `idp.<tailnet>.ts.net`, a
+   100.64/10 address, which celld's `CELLD_EGRESS_PUBLIC_ONLY` refuses.
+   The issuer's host must be open to the platform, and **never to apps**.
+
+   **TODO, once fragment#1239 and futurepaul/celld#7 land** (neither is in
+   this branch's base, and nothing here writes `CELLD_EGRESS_ALLOW` yet):
+
+   - **Where celld's allow list is written,** add the configured issuer's
+     host as one exact name: `url::Url::parse(FRAGMENT_OIDC_ISSUER)`'s
+     `host_str()`, no glob. That list is #1239's
+     `fragment_core::egress::Allow::celld()`, set as the node's
+     `CELLD_EGRESS_ALLOW` beside the other `CELLD_*` variables in
+     `crates/devstack/src/celld.rs` `start()` (and in any self-host
+     launcher). Pass the issuer's host into `start()`, or into the
+     `Allow` it renders.
+   - **Not in the cell's app egress check.** The issuer's host must never
+     be added to `FRAGMENT_EGRESS_ALLOW` or `fragment_core::egress::Allow`'s
+     entries. That list is what `egress::check` holds apps' `job.fetch`,
+     push endpoints and subscriptions to (cell/src/jobs.rs, push.rs,
+     subscriptions.rs).
+   - **Why this keeps apps out:** apps have no network of their own
+     (`globalOutbound: null`), and every fetch they ask for passes
+     `egress::check` first, so a host open at the node is still closed to
+     them.
+   - **tsidp's address:** under tsnet, tsidp has a tailnet address of its
+     own, not one of the box's, so celld#7's own-address rule does not
+     refuse it.
+
+   Not verified here: there is no tailnet on this box, and the celld this
+   branch runs predates celld#7.
 
 **Dev.** The fake:
 - `FRAGMENT_SIGNIN=oidc cargo xtask dev --runtime celld` signs people in

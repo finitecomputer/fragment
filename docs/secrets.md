@@ -33,7 +33,10 @@ only from that computer's egress, toward that provider.
   opens only where it was sealed.
 - **`cell/src/keys.rs` is the one place a store secret is read**, through
   a per-isolate cache (`secrets_store::CACHE_MS_MAX`): a value set again
-  is in use within a minute, with no deploy. A binding whose secret the
+  is in use within a minute, with no deploy. (An OpenID Connect client's
+  secret is read there into the token request keys.rs makes; the
+  platform's own JavaScript, cell/oidc.mjs, sends that request and keeps
+  nothing of it.) A binding whose secret the
   store lacks is an error; nothing falls back to a Worker secret or
   variable.
   On celld, which has no Secrets Store, stand-ins with the same face
