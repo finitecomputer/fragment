@@ -91,6 +91,24 @@ no pinned CA):
   later.
 - Footprint about 32 MB (the phone reports lower than the simulator).
 
+- **Background on the phone:** the app was sent to the background 8 s into
+  a run and came back 127 s later.
+  - The page's WebSocket stayed open the whole time (server side: 134 s, 134
+    ticks sent, closed cleanly by the client after resume).
+  - Both 65 s fetches finished while the app was suspended, and their data
+    arrived on resume.
+  - The first new request after resume took **17 ms**. The loopback SOCKS
+    listener was not reclaimed in those 2 minutes.
+  - The page's own tick count failed only because its timers froze while
+    suspended.
+- **Cold relaunch on the phone** (saved node): tsnet reported up **0.13 s**
+  after process start, but nothing reached the box for about 4–5 s. The
+  first navigation never committed. A reload at 4.1 s finished the signed-in
+  page at 4.28 s; the URLSession check failed (CFNetwork -1000) at 5.2 s.
+  `up()` returning is not "the box is reachable": the app should gate its
+  first load on a probe, with a retry. Cause not pinned (no timestamps in
+  the phone's tsnet log).
+
 ### Identity: WhoIs works; `serve --tcp` adds no identity headers
 
 `ts_user` in the page results was empty because the origin did no lookup.
@@ -104,7 +122,9 @@ address names the node and the person:
 - an address that isn't a peer gives "peer not found".
 
 So the identity door does WhoIs itself (LocalAPI on tailscaled's socket),
-keyed by the PROXY-v2 address. The origin now does the same (`-whois-socket`).
+keyed by the PROXY-v2 address. The origin now does the same
+(`-whois-socket`). Live per request through `serve --tcp 8443
+--proxy-protocol 2`: the Mac's request came back with its node and its owner.
 
 ### Spike-app trap (fixed): a partial bundled config decoded as nothing
 
