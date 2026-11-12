@@ -100,6 +100,19 @@ final class Spike: ObservableObject {
     var pinned: SecCertificate?
     var backgroundedAt: Date?
     var tsnetStarting = false
+    // The phone's events go to the box's /log too (no cable needed to read them).
+    var reportSession: URLSession?
+    var pendingReports: [Data] = []
+    func report(_ data: Data) {
+        guard let s = reportSession, let u = URL(string: config.url), let host = u.host, let to = URL(string: "https://\(host)/log") else {
+            if pendingReports.count < 500 { pendingReports.append(data) }
+            return
+        }
+        var req = URLRequest(url: to)
+        req.httpMethod = "POST"
+        req.httpBody = Data("{\"app_event\":".utf8) + data + Data("}".utf8)
+        s.dataTask(with: req).resume()
+    }
     weak var webView: WKWebView?
     #if canImport(TailscaleKit)
     var node: TailscaleNode?
@@ -118,6 +131,7 @@ final class Spike: ObservableObject {
         osLog.log("SPIKE \(line, privacy: .public)")
         lines.append("\(ms)ms \(event) \(fields.isEmpty ? "" : line.prefix(160).description)")
         if lines.count > 60 { lines.removeFirst(lines.count - 60) }
+        if event != "page-check" && event != "tskit" { report(data) }
         let url = docs.appendingPathComponent("spike.jsonl")
         if let h = try? FileHandle(forWritingTo: url) {
             h.seekToEndOfFile(); h.write(data + Data("\n".utf8)); try? h.close()
@@ -165,6 +179,12 @@ final class Spike: ObservableObject {
         status = "proxy \(hostPort)"
         log("proxy-set", ["proxy": hostPort, "allowFailover": pc.allowFailover, "matchDomains": pc.matchDomains])
         webGeneration += 1
+        let rc = URLSessionConfiguration.ephemeral
+        rc.proxyConfigurations = [pc]
+        reportSession = URLSession(configuration: rc, delegate: NativeTrust(), delegateQueue: nil)
+        let queued = pendingReports
+        pendingReports = []
+        queued.forEach(report)
         Task { await nativeCheck(pc) }
     }
 
