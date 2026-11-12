@@ -146,7 +146,8 @@ pub enum MoveState {
     Staging,
     /// Staged: its new agent is bringing itself over.
     Importing,
-    /// Imported: the mover is told to retire the old one.
+    /// Imported: the old agent, stopped, is retired on staff's word (the
+    /// mover is told to then; until then it holds no command).
     Retiring,
     /// Done: the old agent is retired and marked migrated.
     Moved,

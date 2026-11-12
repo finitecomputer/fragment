@@ -152,7 +152,7 @@ its `kind` (text, one shape for all), and that kind's fields.
 | Command (`kind`) | The mover | Reports (`kind`) |
 |---|---|---|
 | `stop_and_stage`, `phase`, `stage`, `secrets` | Stops the old agent, hands off the `secrets` it names (`POST …/secrets`), then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. | `stopped`; `progress` with `bytes`, `files`; then `staged` with `manifest_sha256`, `bytes`, `files`; or `failed` with `step`, `why` |
-| `retire`, `as` (`migrated` or `archived`) | Retires it (a verified backup first) and marks it moved | `retired` with `receipt` |
+| `retire`, `as` (`migrated` or `archived`) | Retires it (a verified backup first) and marks it moved. As migrated, only on staff's word | `retired` with `receipt` |
 | `restart` | Starts it again (staff gave it back) | `restarted` |
 
 ### The secrets hand-off (F11)
@@ -219,7 +219,7 @@ move in the routine that starts the import.
 |---|---|---|
 | `POST /api/migrations/stages/{stage}/open` | `StageOpened {stage, manifest}` | The manifest as the mover wrote it. |
 | `GET /api/migrations/stages/{stage}/zip` | the zip's bytes | `Range: bytes=…` is answered 206 with that range alone. |
-| `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | `ok` moves it to `retiring`; not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once. A phase 1 stage's objects are deleted; a phase 2 stage's are kept until 90 days after the cutoff (Deletion). |
+| `POST /api/migrations/stages/{stage}/done` | `StageDone {ok, report_sha256?, why?}` → `MoveAt` | Harmless either way. `ok` moves it to `retiring` with no command: its old agent stays stopped until staff's `retire`, and its person reads it as done. Not ok holds it for staff. The same `ok` again changes nothing. Either way the stage's routes refuse at once, and its objects are kept to their keep (Deletion). |
 
 Each is the bound agent's alone (403 for anyone else), for its current
 stage alone (404 for another attempt's), and only while the move is
@@ -317,9 +317,10 @@ bucket is accepted (Paul, 11-09).
 listed ──bind──► open ◄──── 24 h ──── later
                   ├── Not now ──────► later
                   ├── Never ──► never ──Ask again──► open
-                  └── Yes{agent} ──► asked ──stopped──► staging ──staged──► importing ──done ok──► retiring ──retired──► moved
-                                       │                  │                   │  done !ok            │
-                                       └── deadline, or failed ×3 ────────────┴────────► held ◄─────────┘
+                  └── Yes{agent} ──► asked ──stopped──► staging ──staged──► importing ──done ok──► retiring, waiting ──retire──► retiring ──retired──► moved
+                                       │                  │                   │  done !ok            │ retry       → asked (attempt+1)  │
+                                       │                  │                   │                      │ restart-old → open               │
+                                       └── deadline, or failed ×3 ────────────┴────────► held ◄──────────────────────────────────────────┘
                                                                                           │ retry       → asked (attempt+1)
                                                                                           │ restart-old → open (the old agent runs again)
                                                                                           └ retire      → retiring
@@ -341,8 +342,9 @@ waits for it and fewer than 8 archive.
 | asked → staging | the mover's `stopped` | 1 hour | held, `mover_down` |
 | staging → importing | the mover's `staged` | 30 minutes without progress; 12 hours in all | attempt + 1, up to 3, then held `stage_failed` |
 | importing (not opened) | the agent's `open` | 2 hours after the routine | the routine once more, then held `not_opened` |
-| importing → retiring | the agent's `done ok` | 24 hours | held, `import_timed_out` |
-| retiring → moved | the mover's `retired` | 24 hours | held, `retire_timed_out` |
+| importing → retiring, waiting | the agent's `done ok` | 24 hours | held, `import_timed_out` |
+| retiring, waiting → retiring | staff's `retire` (its command then) | none: it waits for staff | nothing |
+| retiring → moved | the mover's `retired` | 24 hours from staff's `retire` | held, `retire_timed_out` |
 | a staged attempt's objects | the alarm | 14 days after `staged` | deleted (the old host's backup remains) |
 | archived → expired | the alarm | cutoff + 90 days | deleted |
 | a phase 2 stage, its move ended any other way | the alarm | cutoff + 90 days | deleted |
@@ -350,21 +352,41 @@ waits for it and fewer than 8 archive.
 A stage's `failed` report counts as an attempt, as a stall does. A
 retirement's `failed` keeps its command for the mover to try again: the
 moved mark it ends in is what finite.computer redirects by, so only its
-day's deadline holds it for staff. Staff act on a
-held move: `retry` (a new attempt; a held phase 2 import, its kept stage
-again, while it is kept), `restart-old` (the old agent runs
-again, the offer is open again), `retire` (the import went well enough
-by hand), and `withdraw` (out of the move).
+day's deadline holds it for staff.
+
+**Waiting for staff.** A good import is `retiring` with no command: its
+old agent stopped, not retired, with no deadline but its stage's keep.
+Its person reads it as done ("Done.") and has their new agent. The `done`
+comes from an agent following a skill, so nothing irreversible follows
+it: staff check the import, then `retire` (the mover told to retire it
+and mark it moved, its day from then), `retry` (a new attempt into the
+same new agent, as after a held import), or `restart-old` (the old agent
+runs again, the offer is open again). Until staff retire it, its old
+agent has no moved mark, so finite.computer does not redirect its person
+yet. Staff find them in `fragment operator moves --json`: `retiring`
+with no `command`.
+
+The release before this one reads such a row as a `retiring` move whose
+command is lost: its staff ops refuse it, and past its stage's keep its
+`retry` would retire the old agent. So the release that writes it is
+forward only (Migrations step 7, docs/MODEL.md "Schemas"): the object
+refuses the older code, and a failed deploy is fixed forward, never
+rolled back across it.
+
+Staff act on a held move: `retry` (a new attempt; a held phase 2 import,
+its kept stage again, while it is kept), `restart-old` (the old agent
+runs again, the offer is open again), `retire` (the import went well
+enough by hand), and `withdraw` (out of the move).
 
 ## Deletion
 
 | When | What |
 |---|---|
-| `done`, either way, in phase 1 | that attempt's prefix: its routes refuse at once, its objects go from the alarm, at most 1,000 a pass |
-| 14 days after `staged` (phase 1, done or not) | the same |
-| a superseded attempt | its prefix, and its unfinished upload aborted |
+| `done`, either way, and staff's `retire` | nothing: its routes refuse at once, and its objects are kept to their keep, for staff's retry or restart |
+| 14 days after `staged` (phase 1, done or not, retired or not) | that attempt's prefix, from the alarm, at most 1,000 objects a pass |
+| a superseded attempt (a retry, `restart-old`, `withdraw`) | its prefix, and its unfinished upload aborted |
 | Never | nothing: Never only stops the asking |
-| 90 days after the cutoff (phase 2), whatever its import did | the same. A phase 2 stage is the only copy left (its old agent was retired as archived), so it is kept until then: after a good import as after a failed one (for staff's retry). Its `done` ends only its reads |
+| 90 days after the cutoff (phase 2), whatever its import did | its prefix. A phase 2 stage is the only copy left (its old agent was retired as archived), so it is kept until then: after a good import as after a failed one (for staff's retry). Its `done` ends only its reads |
 | Backstop | the bucket's lifecycle rules: `p1/` after 16 days, `p2/` after 100, and incomplete multipart uploads after 1 |
 
 `/data` saves never hold a stage: the importer reads it by ranges into
@@ -379,7 +401,7 @@ staff read a move's state and act on it here.
 | Route | Answer |
 |---|---|
 | `GET /api/admin/migrations[?after=<old>]` | `AdminMoves`: each move by old id, a page at a time, with staff's `why` on each they withdrew |
-| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move asked again, as a new attempt), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
+| `POST /api/admin/migrations/{old}` `AdminAct {op, why?}` | `AdminMove`, after `op`: `retry` (a held move, or a good import waiting for staff, asked again as a new attempt), `restart-old` (the old agent started again, the move offered again), `retire` (the old agent retired as migrated: a good import waiting for staff's word, or a held move), `withdraw` with `why` (the move out of the roster's hands: offered no more), or `include` (staff's withdrawal taken back); `null` once the move is gone |
 
 ### The will-not-move list
 
