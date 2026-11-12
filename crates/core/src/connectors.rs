@@ -68,7 +68,7 @@ impl Policy {
             }
             let mut targets = std::collections::BTreeSet::new();
             for t in &row.relay_targets {
-                let public = crate::egress::check(&format!("https://{}", t.host), false).is_ok_and(|u| matches!(u.host(), Some(url::Host::Domain(_))));
+                let public = crate::egress::check(&format!("https://{}", t.host), false, &crate::egress::Allow::NONE).is_ok_and(|u| matches!(u.host(), Some(url::Host::Domain(_))));
                 if t.port == 0 || !crate::catalog::valid_host(&t.host) || !public || !targets.insert((&t.host, t.port)) {
                     return Err(format!("{}: {}:{} is no exact public DNS name on a nonzero port, or is named twice", row.id, t.host, t.port));
                 }

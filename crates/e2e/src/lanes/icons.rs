@@ -55,12 +55,12 @@ fn route(fragment: &str) -> String {
     format!("/api/f/{fragment}/icon")
 }
 
-fn make(api: &Api, keys: &Keys, fragment: &str, body: Value) -> Result<Reply> {
+pub(super) fn make(api: &Api, keys: &Keys, fragment: &str, body: Value) -> Result<Reply> {
     api.signed(keys, "POST", &format!("{}/make", route(fragment)), Some(&body))
 }
 
 /// `PUT` an image's bytes as its icon, signed over them.
-fn put(api: &Api, keys: &Keys, fragment: &str, bytes: &[u8]) -> Result<Reply> {
+pub(super) fn put(api: &Api, keys: &Keys, fragment: &str, bytes: &[u8]) -> Result<Reply> {
     let url = format!("{}{}", api.base, route(fragment));
     api.call(Call { method: "PUT", url, body: Some(bytes.to_vec()), content_type: Some("application/octet-stream"), keys: Some(keys), ..Call::default() })
 }
