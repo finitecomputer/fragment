@@ -574,6 +574,10 @@ unfinished design, not debt.
   is removed (FIN-463's debt entry). First candidates: the Migrations
   object, the export's archive builder, the Computer DO's routes.
 
+## Self-host branches: Wasm budget 10 MB
+
+- Self-host branches: Wasm budget 10 MB (Paul 2026-11-12) until the cell is split (FIN-475).
+
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
 - **Shortcut:** wrangler's teardown removes containers by image ID (other

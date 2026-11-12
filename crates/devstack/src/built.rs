@@ -30,7 +30,8 @@ pub const RELEASE: &str = "release";
 /// The most a mark may hold: a profile's name and a hash.
 const MARK_MAX_BYTES: u64 = 256;
 /// The most Wasm a mark is checked against: far over any build's (the
-/// release's is held to 7.5 MB, dev's is about 7.7 MB).
+/// release's is held to 10 MB on the self-host branches, 7.5 MB on master;
+/// dev's is about 7.7 MB).
 const WASM_MAX_BYTES: u64 = 64 << 20;
 
 #[derive(Debug)]
