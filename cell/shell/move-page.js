@@ -147,9 +147,11 @@ export function createMovePage(root, h) {
     root.replaceChildren(wrap);
   }
 
-  // an import begun since the page opened: its agent's chat, the page left
+  // an import begun since the page opened: its agent's chat, the page left.
+  // None before this opening's first answered read: what the page holds
+  // until then is an earlier opening's, and no news
   function arrive() {
-    if (!shown || busy) return false;
+    if (!shown || busy || !importingAtOpen) return false;
     const o = offers?.find((x) => x.state === "importing" && !importingAtOpen?.has(x.old) && x.agent && h.chatOf(x.agent));
     if (!o) return false;
     h.openChat(h.chatOf(o.agent));

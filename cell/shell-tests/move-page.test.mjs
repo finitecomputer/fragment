@@ -306,6 +306,27 @@ test("a read the person left before it answered is not this opening's: an import
   assert.deepEqual(p.rows()[0].buttons, ["Open chat"]);
 });
 
+test("reads that fail as the person comes back are no news: a move importing before is never taken for one just begun", async (t) => {
+  const own = { agents: [], ids: new Map(), chats: new Map([["npub1juniper", "juniper-chat--k3x9"]]) };
+  const p = page(t, own);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  p.ui.close();
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").fail(Object.assign(new Error("offline"), { status: 503 }));
+  await settle();
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").fail(Object.assign(new Error("offline"), { status: 503 }));
+  await settle();
+  assert.deepEqual(p.opened, [], "no read of this opening answered: nothing is new");
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.deepEqual(p.opened, [], "importing at this opening's first answer: the page stays");
+  assert.deepEqual(p.rows()[0].buttons, ["Open chat"]);
+});
+
 test("an opening the person left before its first read answered goes no further: no read again on its behalf", async (t) => {
   const p = page(t);
   p.ui.open();
