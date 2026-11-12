@@ -1459,7 +1459,7 @@ mod tests {
         while main().ticks == before.ticks {
             assert!(t0.elapsed() < Duration::from_secs(10), "a busy loop's CPU time never grew");
         }
-        let _ = Command::new("kill").args(["-STOP", &pid.to_string()]).status();
+        assert!(Command::new("kill").args(["-STOP", &pid.to_string()]).status().is_ok_and(|s| s.success()), "the shell stops");
         while main().state != 'T' {}
         let stopped = main();
         assert_eq!((main().ticks, main().faults), (stopped.ticks, stopped.faults), "a stopped thread does nothing");
