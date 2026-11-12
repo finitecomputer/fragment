@@ -28,6 +28,7 @@ pub mod node;
 mod node_release;
 pub mod openbao;
 mod openbao_release;
+pub mod sandcastle;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -443,6 +444,10 @@ pub struct Fleet {
     /// policy's JSON; `None`: the cell's default). A self-hosted stack's
     /// leaves Telegram out (`celld::connectors`).
     pub connectors: Option<String>,
+    /// The sandcastle nodes its computers run on (`FRAGMENT_NODES`, and
+    /// each node's secret: docs/self-host.md, seam 2), in place of the
+    /// runtime's own containers. `None`: the runtime's.
+    pub nodes: Option<sandcastle::NodesVars>,
     /// Where its secrets are (`Secrets`): the runtime's.
     pub secrets: Secrets,
 }
@@ -500,6 +505,7 @@ impl Fleet {
         bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
         bound.observability_read = self.observability.as_ref().map(|_| OBSERVABILITY_READ_NAME.to_string());
+        bound.node_secrets = self.nodes.iter().flat_map(|n| &n.secrets).map(|(id, _)| (fragment_core::placement::secret_binding(id), sandcastle::secret_store_name(id))).collect();
         bound
     }
 
@@ -531,6 +537,9 @@ impl Fleet {
         }
         if let (Some(name), Some(o)) = (&bound.observability_read, &self.observability) {
             values.push((name.as_str(), o.key.as_str()));
+        }
+        for ((_, name), (_, value)) in bound.node_secrets.iter().zip(self.nodes.iter().flat_map(|n| &n.secrets)) {
+            values.push((name.as_str(), value.as_str()));
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         Ok(values)
@@ -691,6 +700,9 @@ impl Fleet {
         }
         if let Some(c) = &self.connectors {
             vars.push(("FRAGMENT_CONNECTORS", c.as_str()));
+        }
+        if let Some(n) = &self.nodes {
+            vars.push(("FRAGMENT_NODES", n.nodes.as_str()));
         }
         vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)

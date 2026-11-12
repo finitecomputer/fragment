@@ -421,6 +421,9 @@ pub struct Bound {
     /// A read-only key to the account's Workers Observability, which the
     /// operators' glance reads its logs with (none: the glance says so).
     pub observability_read: Option<String>,
+    /// Each sandcastle node's secret (docs/self-host.md, seam 2): its
+    /// binding (`placement::secret_binding`) and its secret's name.
+    pub node_secrets: Vec<(String, String)>,
 }
 
 /// The model key's name in the store that deploy/example.jsonc's tiers
@@ -443,6 +446,7 @@ impl Bound {
             connection_secrets: vec![],
             model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
             observability_read: None,
+            node_secrets: vec![],
         }
     }
 
@@ -475,7 +479,12 @@ impl Bound {
         for (provider, name) in &self.connection_secrets {
             bound.push((bindings::connection_secret(provider), name.as_str()));
         }
-        assert!(bound.len() <= bindings::CACHE_ENTRIES_MAX, "the cell's cache holds every binding");
+        // read by the cell's JavaScript (node.mjs), never keys.rs's cache
+        let cached = bound.len();
+        for (binding, name) in &self.node_secrets {
+            bound.push((binding.clone(), name.as_str()));
+        }
+        assert!(cached <= bindings::CACHE_ENTRIES_MAX, "the cell's cache holds every binding it reads");
         bound
     }
 

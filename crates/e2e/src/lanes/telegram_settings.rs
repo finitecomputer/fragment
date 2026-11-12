@@ -344,6 +344,12 @@ fn first_set_up(s: &mut Suite, b: &mut Browser, api: &Api, owner: &Keys, agent: 
 /// of the setup, and its owner's message from Telegram reaching the agent,
 /// is the same for every runtime: `from_settings`, for the stub agent.
 pub(super) fn set_up_offered(s: &mut Suite, api: &Api, owner: &Keys, agent: &str) -> Result<()> {
+    if s.on_celld() {
+        // the shell offers Telegram by an agent's runtime, not by the
+        // deployment's policy: its row shows, and its door is refused
+        s.skip("a Claude Code agent's Telegram set up from Settings (its chat made, bound as its door, its setup page asking for the bot)", "a self-hosted stack does not allow Telegram, whose webhook needs inbound internet: its door is refused, though Settings still offers the row (docs/self-host.md)");
+        return Ok(());
+    }
     let Some(mut b) = s.browser()? else {
         s.ok("Chrome is installed for Settings' Telegram (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());

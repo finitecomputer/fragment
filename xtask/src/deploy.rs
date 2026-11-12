@@ -397,6 +397,8 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         connection_secrets,
         model_keys,
         observability_read: d.observability_read.clone(),
+        // a Cloudflare deployment's computers are its own containers'
+        node_secrets: vec![],
     })
 }
 

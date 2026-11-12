@@ -27,6 +27,17 @@
 //! Rendering), each saying why. Its secrets are OpenBao's, behind the
 //! cell's stand-ins (docs/self-host.md, seam 12), unless
 //! `FRAGMENT_E2E_SECRETS=vars` puts them in `.dev.vars`.
+//!
+//! `FRAGMENT_E2E_NODES=real` runs the run's computers on this machine's
+//! sandcastle engine (docs/self-host.md, seam 2; `SANDCASTLE_NODE`, and
+//! `SANDCASTLE_ENGINE_DIR` unless /var/lib/sandcastle): its images built
+//! and loaded into the engine by digest, one `sandcastle-node` in front of
+//! it, and every container that node starts labelled with the run's name,
+//! so the run destroys its own alone, at its end or on a signal. With
+//! `FRAGMENT_MODELS_FILE` too (`cargo xtask e2e` reads it, as `xtask dev`
+//! does: `FRAGMENT_E2E_MODELS`), on celld, its computers run our Hermes
+//! image on that file's real models: a real agent, as a preview's, its
+//! people signed in through the levers and lent paid calls (`agent-app`).
 
 mod api;
 mod browser;
@@ -467,7 +478,28 @@ pub struct Suite {
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
     containers_removed: bool,
+    /// The sandcastle node in front of this machine's engine that its
+    /// computers run on (`FRAGMENT_E2E_NODES=real`), and the list the cell
+    /// reads (its images loaded into the engine, by digest).
+    sandcastle: Option<devstack::sandcastle::SandcastleNode>,
+    nodes: Option<devstack::sandcastle::NodesVars>,
+    /// A real agent's models on celld's nodes (`FRAGMENT_E2E_MODELS`): the
+    /// text tiers on them, and new computers on our Hermes image.
+    real_models: Option<RealModels>,
 }
+
+/// The text tiers on real models (`FRAGMENT_E2E_MODELS`: a models file
+/// `cargo xtask e2e` rendered as a deploy does), each slot on its
+/// OpenAI-compatible API calling with the key in `FRAGMENT_MODEL_KEY_FILE`.
+pub struct RealModels {
+    models: String,
+    slots: Vec<String>,
+    key: String,
+}
+
+/// The paid calls a run with a real agent lends its people (`agent-app`'s
+/// 30, and room).
+const REAL_AGENT_PAID_CALLS: u64 = 40;
 
 impl Drop for Suite {
     /// A run that ends early (an error out of `local`, a panic) leaves
@@ -477,6 +509,10 @@ impl Drop for Suite {
         drop(self.node.take());
         if let Err(e) = self.remove_containers() {
             println!("      could not remove this run's containers: {e:#}");
+        }
+        // its node stops, and the containers its run started are destroyed
+        if let Some(Err(e)) = self.sandcastle.take().map(devstack::sandcastle::SandcastleNode::stop) {
+            println!("      could not stop this run's sandcastle node: {e:#}");
         }
     }
 }
@@ -530,6 +566,12 @@ impl Suite {
     /// Whether the local node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
     pub fn on_celld(&self) -> bool {
         self.celld.is_some()
+    }
+
+    /// Whether its computers run on this machine's sandcastle engine
+    /// (`FRAGMENT_E2E_NODES=real`), not the runtime's own containers.
+    pub fn on_nodes(&self) -> bool {
+        self.nodes.is_some()
     }
 
     /// Whether the node runs its Worker and every object in one isolate
@@ -819,6 +861,7 @@ impl Suite {
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
             models: match self.shape {
+                Shape::Plain if self.real_models.is_some() => self.real_models.as_ref().map(|m| m.models.clone()),
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
                 Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
@@ -826,6 +869,10 @@ impl Suite {
             model_keys: {
                 let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
                 match self.shape {
+                    Shape::Plain if self.real_models.is_some() => {
+                        let real = self.real_models.as_ref().expect("checked");
+                        real.slots.iter().map(|slot| key(slot, devstack::store::MODEL_KEY, &real.key)).collect()
+                    }
                     Shape::PrivateTier => vec![
                         key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         // OpenRouter's, the key the model fake lets in for every model but Tinfoil's
@@ -875,9 +922,15 @@ impl Suite {
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            // celld runs no computers: they need the runtime's egress
-            // intercepts and snapshots (docs/self-host.md, seam 2)
-            computer_image: (!self.on_celld()).then(|| "stub".into()),
+            // celld runs no computers of its own: they need the runtime's
+            // egress intercepts and snapshots, which a node's engine has
+            // (docs/self-host.md, seam 2)
+            computer_image: match (&self.real_models, !self.on_celld() || self.on_nodes()) {
+                // a real agent's: our Hermes image, as a preview's
+                (Some(_), _) => Some("hermes".into()),
+                (None, true) => Some("stub".into()),
+                (None, false) => None,
+            },
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -898,6 +951,7 @@ impl Suite {
             swap_upstream: Some(self.upstream.node().url.clone()),
             // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
             connectors: self.on_celld().then(devstack::celld::connectors),
+            nodes: self.nodes.clone(),
             // wrangler's local store in the node's own state (seeded once a
             // state, bound by name as a deploy binds them); celld has none,
             // and the cell's stand-ins read OpenBao or .dev.vars (seam 12)
@@ -950,6 +1004,7 @@ impl Suite {
     /// dropping, for `public_dns_asked`.
     pub fn drop_public_dns(&self) -> Result<Vec<String>> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane reaches no container: a section that does declares Need::Node");
+        anyhow::ensure!(!self.on_nodes(), "a node's computers have no workerd sidecar: its VMs resolve through the engine's own DNS");
         devstack::containers::drop_public_dns(&self.project)
     }
 
@@ -1299,19 +1354,47 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
+    // its computers on this machine's sandcastle engine (docs/self-host.md, seam 2)
+    let on_nodes = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
+        Err(_) => false,
+        Ok("real") if rehearse.is_some() => bail!("a rehearsal keeps a preview's rules, its computers the runtime's: drop FRAGMENT_E2E_NODES"),
+        Ok("real") => true,
+        Ok(other) => bail!("FRAGMENT_E2E_NODES is real, not {other}"),
+    };
+    let engine = devstack::sandcastle::engine_dir();
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
-    // kills it and all else it started (the Chromes: `on_termination`),
-    // then removes the containers it left
+    // kills it and all else it started (the Chromes, a sandcastle node:
+    // `on_termination`), then removes the containers it left, on the
+    // engine those carrying its run's label alone
     let leftovers = project.clone();
+    let engine_run = on_nodes.then(|| (engine.join("engine.sock"), run.clone()));
     devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers");
         match devstack::containers::remove(&leftovers) {
             Ok(r) => println!("      (removed {} containers of this run)", r.containers),
             Err(e) => println!("      could not remove this run's containers: {e:#}"),
         }
+        if let Some((sock, run)) = &engine_run {
+            match devstack::sandcastle::destroy_run(sock, run) {
+                Ok(n) => println!("      (destroyed {n} of this run's containers on the sandcastle engine)"),
+                Err(e) => println!("      could not destroy this run's containers on the sandcastle engine: {e:#}"),
+            }
+        }
     })?;
-    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
+    // a real agent's models, rendered by `cargo xtask e2e` from FRAGMENT_MODELS_FILE
+    let real_models = match std::env::var("FRAGMENT_E2E_MODELS") {
+        Err(_) => None,
+        Ok(models) => {
+            anyhow::ensure!(on_nodes && std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() == Ok("celld"), "a local real agent runs on celld, its computers on this machine's engine: FRAGMENT_E2E_RUNTIME=celld FRAGMENT_E2E_NODES=real");
+            let slots: Vec<String> = std::env::var("FRAGMENT_E2E_MODEL_SLOTS").unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+            let key_file = std::env::var_os("FRAGMENT_MODEL_KEY_FILE").context("FRAGMENT_MODEL_KEY_FILE names the file of the key the models call with")?;
+            let key = std::fs::read_to_string(&key_file).with_context(|| format!("read {}", Path::new(&key_file).display()))?.trim().to_string();
+            anyhow::ensure!(!slots.is_empty() && !key.is_empty(), "a real agent's models name their slots and a key");
+            Some(RealModels { models, slots, key })
+        }
+    };
+    if real_models.is_some() || only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
     let test_secret = devstack::random_hex(32);
@@ -1335,7 +1418,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
-        None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
+        // a real agent's people sign in as a preview's, through the levers, lent paid calls
+        None if real_models.is_some() => (needs::Rung::Celld { nodes: true, real_agent: true }, api::Run::signing_in_by_levers(test_secret.clone(), REAL_AGENT_PAID_CALLS)),
+        None if celld.is_some() => (needs::Rung::Celld { nodes: on_nodes, real_agent: false }, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
@@ -1346,6 +1431,13 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
     let listener = devstack::hold_port(0)?;
+    let (sandcastle, nodes) = match on_nodes {
+        true => {
+            let (node, nodes) = run_on_nodes(&project, &scratch, &engine, &run, listener.local_addr()?.port())?;
+            (Some(node), Some(nodes))
+        }
+        false => (None, None),
+    };
     let mut s = Suite {
         only,
         except,
@@ -1393,6 +1485,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         project,
         shape: Shape::Plain,
         containers_removed: false,
+        sandcastle,
+        nodes,
+        real_models,
     };
     if let Some(k) = s.shard {
         println!("shard {k}/{}: {}", lanes::SHARDS.len(), lanes::SHARDS[k as usize - 1].join(", "));
@@ -1412,6 +1507,37 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         });
     }
     finish(&mut s)
+}
+
+/// The run's computers on this machine's sandcastle engine
+/// (`FRAGMENT_E2E_NODES=real`; docs/self-host.md, seam 2): the staged
+/// project's images (the stub's, and Hermes' when its lane runs) built here
+/// and loaded into the engine at `engine`, named by digest, and one node in
+/// front of it, its intercepts to the platform at `port`, every container
+/// it starts labelled `run`. Its sockets and state under the runtime
+/// directory, which keeps their paths within `sun_path`.
+fn run_on_nodes(project: &Path, scratch: &Path, engine: &Path, run: &str, port: u16) -> Result<(devstack::sandcastle::SandcastleNode, devstack::sandcastle::NodesVars)> {
+    use devstack::sandcastle;
+    let bin = sandcastle::node_bin()?;
+    let t0 = Instant::now();
+    // one tag for every run: the engine knows each image by its digest
+    let built = sandcastle::build_images(&sandcastle::cell_images(project)?, "e2e")?;
+    let pinned = sandcastle::load_images(engine, &built, &scratch.join("images"))?;
+    println!("nodes: {} built and loaded into the engine at {} in {:.1?}", pinned.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "), engine.display(), t0.elapsed());
+    let short = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(|| scratch.to_path_buf(), PathBuf::from);
+    let spec = sandcastle::NodeSpec {
+        id: "box".into(),
+        port: devstack::free_port()?,
+        engine: engine.to_path_buf(),
+        dir: short.join(format!("fragment-e2e-{run}")),
+        platform: format!("http://127.0.0.1:{port}"),
+        log_dir: scratch.to_path_buf(),
+        run: run.to_string(),
+    };
+    let node = sandcastle::SandcastleNode::start(&bin, &spec)?;
+    let vars = sandcastle::vars(&[&node], &pinned)?;
+    println!("nodes: sandcastle-node box on 127.0.0.1:{} in front of the engine, its containers labelled {}={run}", node.port, sandcastle::RUN_LABEL);
+    Ok((node, vars))
 }
 
 /// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
@@ -1462,6 +1588,14 @@ fn finish(s: &mut Suite) -> Result<()> {
         Ok(Some(r)) => println!("      (removed {} containers of this run in {:.1?})", r.containers, t0.elapsed()),
         Ok(None) => {}
         Err(e) => s.fail("the run removes the containers its nodes left", format!("{e:#}")),
+    }
+    // on the sandcastle engine: its node, and the containers it started
+    if let Some(node) = s.sandcastle.take() {
+        let t0 = Instant::now();
+        match node.stop() {
+            Ok(()) => println!("      (its sandcastle node stopped and its containers destroyed in {:.1?})", t0.elapsed()),
+            Err(e) => s.fail("the run stops its sandcastle node and destroys its containers", format!("{e:#}")),
+        }
     }
     let t0 = Instant::now();
     s.chrome.close();

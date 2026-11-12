@@ -968,6 +968,15 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     let made = api.create_with(c.owner, json!({ "name": name, "template": "telegram" }))?;
     anyhow::ensure!(made.status == 200, "making the Telegram connector: {made}");
     s.owned(&made.body, c.owner);
+    if s.on_celld() {
+        // a self-hosted stack's connectors are SimpleX alone (devstack's
+        // `celld::connectors`: Telegram's webhook needs inbound internet):
+        // the policy refuses its door, saying so, and nothing after it runs
+        let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": c.agent })))?;
+        s.ok("a self-hosted stack links no Telegram: its owner's binding of the connector as their agent's door is refused, 403, as a connector the deployment does not allow", r.status == 403 && r.text.contains("does not allow"), &r);
+        s.skip("the Telegram connector end to end (its setup, pairing, door, replies, a release later, and Settings' Telegram)", "a self-hosted stack does not allow Telegram, whose webhook needs inbound internet (docs/self-host.md); its asked replies are not asked for");
+        return Ok(0);
+    }
     // its secrets as its owner's page sets them (`__secrets`), toward the fake's host
     for (key, value) in [("TELEGRAM_BOT_TOKEN", TOKEN), ("TELEGRAM_WEBHOOK_SECRET", HOOK)] {
         let r = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/{key}"), Some(&json!({ "value": value, "hosts": ["127.0.0.1"] })))?;
@@ -1390,6 +1399,12 @@ fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32
 /// …/blobs/{sha256}` (past the 32 MiB the egress reads whole: 413 before),
 /// its pointer in git. One reply.
 fn large_sync_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, identity: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let label = "a 40 MB file its agent syncs from its computer streams through its egress: its bytes the app's blob, its pointer in git";
+    if s.on_nodes() {
+        // its one reply is never asked for: the lane's count stays as it is
+        s.skip(label, "a sandcastle node reads an intercepted request whole, at most 32 MiB, where Cloudflare's egress streams a blob's upload: a larger file is refused 413 on a node (docs/self-host.md, found 55)");
+        return Ok(0);
+    }
     let r = api.signed(owner, "POST", "/api/fragments", Some(&json!({ "label": "bigsync", "template": "blank", "title": "Big sync" })))?;
     anyhow::ensure!(r.status == 200, "the app it syncs into: {r}");
     let name = r.body["name"].as_str().unwrap_or("").to_string();
@@ -1402,7 +1417,7 @@ fn large_sync_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, iden
     let listed = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "big.bin").cloned()).unwrap_or(Value::Null);
     let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
     s.ok(
-        "a 40 MB file its agent syncs from its computer streams through its egress: its bytes the app's blob, its pointer in git",
+        label,
         said == format!("synced {sha} {size}") && listed["blob"] == true && listed["sha256"] == sha.as_str() && listed["size"] == size && blob.status == 200 && fragment_core::blob::sha256_hex(&blob.bytes) == sha,
         json!({ "said": said, "listed": listed, "blob": blob.status, "bytes": blob.bytes.len() }),
     );
@@ -2738,8 +2753,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let api = s.start(false)?;
     // from here its computer's sidecar drops any query it would send public
     // DNS: a run must not need it (#1017, where public DNS did not answer
-    // after this crash and every save of the boot failed)
-    let dropping = s.drop_public_dns()?;
+    // after this crash and every save of the boot failed). A node's VM has
+    // no such sidecar: the engine's own DNS answers its intercepted hosts
+    let dropping = if s.on_nodes() { vec![] } else { s.drop_public_dns()? };
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies
@@ -2782,12 +2798,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
-    let asked = s.public_dns_asked(&dropping)?;
-    s.ok(
-        "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped",
-        !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep",
-        json!({ "sidecars": dropping.len(), "asked": asked }),
-    );
+    let label = "after the crash its computer asked public DNS nothing: the hosts the platform intercepts are answered at once, and its sleep's save went on with public DNS dropped";
+    if s.on_nodes() {
+        s.skip(label, "a node's VM has no workerd sidecar: the engine's own DNS answers the hosts it intercepts, and the run's computers have no internet (docs/self-host.md, seam 2)");
+    } else {
+        let asked = s.public_dns_asked(&dropping)?;
+        s.ok(label, !dropping.is_empty() && asked == 0 && r.body["phase"] == "asleep", json!({ "sidecars": dropping.len(), "asked": asked }));
+    }
     made_while_its_seat_sync_fails(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an

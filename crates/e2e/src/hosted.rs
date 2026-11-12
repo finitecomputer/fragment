@@ -343,6 +343,10 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         project: PathBuf::new(),
         shape: Shape::Plain,
         containers_removed: false,
+        // a preview runs its own computers
+        sandcastle: None,
+        nodes: None,
+        real_models: None,
     }
 }
 

@@ -20,7 +20,16 @@
 //!                    on, or with FRAGMENT_SECRETS_BACKEND=vars in .dev.vars
 //!                    (seam 12); FRAGMENT_MODELS_FILE and
 //!                    FRAGMENT_MODEL_KEY_FILE put the text tiers on this
-//!                    machine's own models (seam 3)
+//!                    machine's own models (seam 3); FRAGMENT_NODES_FILE puts
+//!                    its computers on sandcastle nodes (seam 2): a node list,
+//!                    each node's secret in the file its "secret_file" names
+//!   node-images [stub|hermes ...]
+//!                    build the stub and our Hermes image (or those named),
+//!                    load them into this machine's sandcastle engine
+//!                    (SANDCASTLE_ENGINE_DIR, /var/lib/sandcastle), and print
+//!                    each pinned by the digest the engine gives it, as a node
+//!                    list's "images" names them; also written to
+//!                    target/devstack/node-images-<arch>.json
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -240,7 +249,7 @@ fn dev_args(args: &[String]) -> Result<DevArgs> {
         bail!("--models picks --real-agent's models: name --real-agent too");
     }
     if out.celld && out.real_agent {
-        bail!("--real-agent runs computers on our Hermes image, and celld runs no computers here (docs/self-host.md, seam 2)");
+        bail!("--real-agent runs computers on our Hermes image in the runtime's containers, and celld has none: on celld, computers run on sandcastle nodes ({}, docs/self-host.md, seam 2)", devstack::sandcastle::NODES_FILE_VAR);
     }
     Ok(out)
 }
@@ -259,6 +268,16 @@ fn dev(args: &[String]) -> Result<()> {
     }
     // the text tiers' models and their key: --real-agent's, or the file's
     let named = real.as_ref().map(|r| (&r.models, &r.slots, &r.key)).or(file.as_ref().map(|f| (&f.models, &f.slots, &f.key)));
+    // its computers on sandcastle nodes (docs/self-host.md, seam 2): the list
+    // read and checked before anything builds
+    let nodes = match std::env::var_os(devstack::sandcastle::NODES_FILE_VAR) {
+        Some(path) => Some(devstack::sandcastle::NodesFile::read(Path::new(&path))?),
+        None => None,
+    };
+    if nodes.is_some() && real.is_some() {
+        bail!("--real-agent runs our Hermes image in the runtime's containers, and {} puts computers on nodes: one or the other", devstack::sandcastle::NODES_FILE_VAR);
+    }
+    let node_image = nodes.as_ref().map(devstack::sandcastle::NodesVars::default_image).transpose()?;
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -371,14 +390,20 @@ fn dev(args: &[String]) -> Result<()> {
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        // celld runs no computers here: they need the runtime's egress
-        // intercepts and snapshots (docs/self-host.md, seam 2)
-        computer_image: celld.is_none().then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        // on nodes, their list's (hermes when it names it); celld runs none
+        // of its own: they need the runtime's egress intercepts and
+        // snapshots, which its Docker engine lacks (docs/self-host.md, seam 2)
+        computer_image: match (&node_image, &celld) {
+            (Some(image), _) => Some(image.clone()),
+            (None, Some(_)) => None,
+            (None, None) => Some(if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        },
         images: match &real {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
         },
-        computer_snapshots: false,
+        // a node's engine takes snapshots; local workerd takes none
+        computer_snapshots: nodes.is_some(),
         computer_internet: true,
         computer_unsaved_max_ms: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
@@ -389,6 +414,7 @@ fn dev(args: &[String]) -> Result<()> {
         swap_upstream: None,
         // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
         connectors: celld.as_ref().map(|_| devstack::celld::connectors()),
+        nodes: nodes.clone(),
         // wrangler's local store under cell/.wrangler/state; celld has none,
         // and the cell's stand-ins read .dev.vars or OpenBao (seam 12)
         secrets: match (&celld, &openbao) {
@@ -414,7 +440,12 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     match &celld {
         None => println!("  runtime:      wrangler dev (workerd)"),
-        Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
+        Some(c) => println!("  runtime:      celld dev ({}): no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
+    }
+    match (&nodes, &node_image) {
+        (Some(n), Some(image)) => println!("  computers:    on sandcastle nodes ({}: {}), new ones on {image}", devstack::sandcastle::NODES_FILE_VAR, n.secrets.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")),
+        _ if celld.is_some() => println!("  computers:    none ({} names none)", devstack::sandcastle::NODES_FILE_VAR),
+        _ => {}
     }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
@@ -469,6 +500,37 @@ fn dev(args: &[String]) -> Result<()> {
         let removed = devstack::containers::remove(&devstack::cell_dir())?;
         println!("removed {} containers the dev node left", removed.containers);
     }
+    Ok(())
+}
+
+/// `cargo xtask node-images [stub|hermes ...]` (docs/self-host.md, seam 2):
+/// the stub (the cell's config's) and our Hermes image (`hermes_image`), or
+/// those named, built here into local Docker, loaded into this machine's
+/// sandcastle engine, and each named by the digest the engine gives it
+/// (`sandcastle::load_images`), as a node list's `images` names them:
+/// printed, and written to `target/devstack/node-images-<arch>.json`.
+fn node_images(args: &[String]) -> Result<()> {
+    let mut all = devstack::sandcastle::cell_images(&devstack::cell_dir())?;
+    all.retain(|(name, _)| name == "stub");
+    all.push(("hermes".into(), devstack::hermes_image()));
+    let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+    if let Some(bad) = args.iter().find(|a| !names.contains(&a.as_str())) {
+        bail!("node-images builds {}, not {bad:?}", names.join(" and "));
+    }
+    let images: Vec<(String, serde_json::Value)> = all.into_iter().filter(|(n, _)| args.is_empty() || args.contains(n)).collect();
+    let engine = devstack::sandcastle::engine_dir();
+    let t0 = std::time::Instant::now();
+    let built = devstack::sandcastle::build_images(&images, "node")?;
+    println!("built {} in {:.1?}", built.iter().map(|(n, t)| format!("{n} ({t})")).collect::<Vec<_>>().join(", "), t0.elapsed());
+    let pinned = devstack::sandcastle::load_images(&engine, &built, &devstack::repo_root().join("target/devstack/node-images"))?;
+    let record = devstack::repo_root().join(format!("target/devstack/node-images-{}.json", std::env::consts::ARCH));
+    let mut kept: serde_json::Map<String, serde_json::Value> = std::fs::read(&record).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    for (name, reference) in &pinned {
+        kept.insert(name.clone(), serde_json::Value::String(reference.clone()));
+    }
+    let text = serde_json::to_string_pretty(&kept)?;
+    std::fs::write(&record, format!("{text}\n")).with_context(|| format!("write {}", record.display()))?;
+    println!("a node list's \"images\" ({}):\n{text}", record.display());
     Ok(())
 }
 
@@ -601,13 +663,21 @@ fn e2e(args: &[String]) -> Result<()> {
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
+    // a real agent's models on celld's nodes (docs/self-host.md, seam 2):
+    // the file read and checked as `xtask dev` reads it, before anything builds
+    let models = dev_agent::ModelsFile::read()?;
     if !no_build {
         build_e2e()?;
     }
     if build_only {
         return Ok(());
     }
-    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
+    let mut suite = Command::new(devstack::repo_root().join(E2E_BIN));
+    if let Some(m) = models {
+        println!("models: {} on {}'s real models (its key: {})", m.slots.join(", "), m.from.display(), dev_agent::MODEL_KEY_FILE_ENV);
+        suite.env("FRAGMENT_E2E_MODELS", &m.models).env("FRAGMENT_E2E_MODEL_SLOTS", m.slots.join(","));
+    }
+    run(suite.args(suite_args))
 }
 
 /// The suite alone, for this machine.
@@ -623,8 +693,9 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// ahead beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
-    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
-    // no images (docs/self-host.md, seam 2)
+    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers of its
+    // own, so no images here: with nodes, the suite builds and loads its
+    // own into the engine (docs/self-host.md, seam 2)
     let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
         let built_images = images.then(|| s.spawn(build::images));
@@ -778,6 +849,7 @@ fn main() -> Result<()> {
         Some("build") => build_cmd(&args[1..]),
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
+        Some("node-images") => node_images(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
