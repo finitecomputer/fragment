@@ -562,16 +562,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // (miniflare's engine: no alarm behind it), so one sleeping through a
     // crash of `wrangler dev` never wakes; Cloudflare's do, and celld's
     // (each instance a cell, its sleep an alarm: docs/self-host.md, seam 1).
-    let nap = match s.durable_workflows() {
-        true => {
-            let (jobs, _) = jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?;
-            let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
-            let started = jobs::started(&r);
-            // running, its sleep under way, before the crash
-            let running = s.eventually(Duration::from_secs(10), || jobs::run(&api, &owner, &jobs, started).is_ok_and(|r| r.body["status"] == "running"));
-            anyhow::ensure!(running, "the nap runs before the crash");
-            Some((jobs, started))
-        }
+    let napper = match s.durable_workflows() {
+        true => Some(jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?.0),
         false => {
             s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
             None
@@ -604,6 +596,19 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let unkept = kept_then_refused(s, &api, &owner, "restart-unkept", br#"{"operations":3}"#, "site/assets/new-B4k9Qz2m.js")?;
     let moved = kept_then_refused(s, &api, &owner, "restart-moved", br#"{"immutable":["fonts/**"],"operations":3}"#, "site/fonts/new.woff2")?;
     let blobbed = blobs_never_kept(s, &api, &owner)?;
+    // the nap starts last, just before the crash: running, its sleep under
+    // way and its record not yet written when the node dies
+    let nap = match napper {
+        Some(jobs) => {
+            let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
+            let started = jobs::started(&r);
+            let running = s.eventually(Duration::from_secs(10), || jobs::run(&api, &owner, &jobs, started).is_ok_and(|r| r.body["status"] == "running"));
+            let asleep = running && !jobs::records(&api, &owner, &jobs, "feed").iter().any(|r| r["kind"] == "nap");
+            anyhow::ensure!(asleep, "the nap sleeps when the node crashes");
+            Some((jobs, started))
+        }
+        None => None,
+    };
     s.crash()?;
     let api = s.start(false)?;
     if let Some((jobs, started)) = nap {
