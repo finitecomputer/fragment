@@ -519,7 +519,27 @@ impl Oidc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fragment_core::oidc::{self as rules, Authorize, Expect, Jwks, Provider, Settings, SignInSecrets, Vars};
+    use fragment_core::oidc::{self as rules, Authorize, Expect, Field, Provider, Settings, SignInSecrets, Vars};
+
+    /// `names`' values in a JSON object, as the cell's shim (cell/oidc.mjs)
+    /// reads them: here with serde_json, the shim's own reading being its
+    /// tests' (cell/oidc.test.mjs) and the e2e's.
+    fn fields_of(bytes: &[u8], names: &[&str]) -> Option<Vec<Field>> {
+        let o: serde_json::Map<String, Value> = serde_json::from_slice(bytes).ok()?;
+        Some(
+            names
+                .iter()
+                .map(|n| match o.get(*n) {
+                    None => Field::Absent,
+                    Some(Value::String(s)) => Field::Str(s.clone()),
+                    Some(Value::Number(n)) => Field::Num(n.as_f64().unwrap_or(f64::NAN)),
+                    Some(Value::Bool(b)) => Field::Bool(*b),
+                    Some(Value::Array(a)) if a.iter().all(Value::is_string) => Field::List(a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()),
+                    Some(_) => Field::Other,
+                })
+                .collect(),
+        )
+    }
 
     /// An answer: its status, its `location`, and its body.
     struct Answer {
@@ -568,7 +588,7 @@ mod tests {
     fn its_id_tokens_verify_by_the_cells_rules() {
         let fake = Oidc::start("client-1", "secret-1").unwrap();
         let settings = Settings::parse(Vars { issuer: Some(&fake.url), client_id: Some("client-1"), ..Vars::default() }).unwrap().unwrap();
-        let provider = || Provider::parse(&fake.url, &get(&rules::discovery_url(&fake.url)).body).unwrap();
+        let provider = || Provider::from_fields(&fake.url, fields_of(&get(&rules::discovery_url(&fake.url)).body, &rules::DISCOVERY_FIELDS).unwrap()).unwrap();
         let callback = "http://127.0.0.1:1/auth/callback";
         let host = "a host secret of at least thirty-two bytes, for tests";
         let authorize = |hint: Option<&str>, state: &str, prompt: bool| {
@@ -597,14 +617,25 @@ mod tests {
             let r = call("POST", &provider().token_endpoint, &headers, req.body.as_bytes());
             let again = call("POST", &provider().token_endpoint, &headers, req.body.as_bytes());
             assert_eq!(again.status, 400, "a code is spent once");
-            (rules::id_token_of(r.status, &r.body).unwrap(), secrets.nonce)
+            assert_eq!(r.status, 200, "the token answer");
+            let answer: Value = serde_json::from_slice(&r.body).unwrap();
+            (answer["id_token"].as_str().expect("an id_token").to_string(), secrets.nonce)
         };
-        // the signature itself is the runtime's WebCrypto to check: the
-        // e2e's, through this fake, on workerd and celld
+        // the key's choice and the signature are the shim's to check (its
+        // tests, and the e2e's through this fake on workerd and celld): here,
+        // the key it names is one the JWKS publishes, then the rules
         let verify = |(token, nonce): (String, String)| {
-            let keys = Jwks::parse(&get(&provider().jwks_uri).body).unwrap();
-            let s = rules::signed(&token, &keys, &provider().algs)?;
-            s.verified(Ok(true), &Expect { settings: &settings, nonce: &nonce, now_s: now_s() })
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let part = |i: usize| b64.decode(token.split('.').nth(i).unwrap()).unwrap();
+            let header: Value = serde_json::from_slice(&part(0)).unwrap();
+            let keys: Value = serde_json::from_slice(&get(&provider().jwks_uri).body).unwrap();
+            let kid = header["kid"].as_str().unwrap().to_string();
+            if !keys["keys"].as_array().unwrap().iter().any(|k| k["kid"] == kid.as_str()) {
+                return Err(rules::IdTokenError::UnknownKey(Some(kid)));
+            }
+            let values = fields_of(&part(1), &rules::claim_names(&settings));
+            let claims = rules::id_token_claims("ok", header["alg"].as_str().unwrap().to_string(), values, &provider().algs)?;
+            rules::verified(claims, &Expect { settings: &settings, nonce: &nonce, now_s: now_s() })
         };
         let st = |c: char| c.to_string().repeat(64);
         let v = verify(sign_in("Jane@Corp.Example", &st('1'))).unwrap();

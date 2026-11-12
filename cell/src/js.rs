@@ -832,44 +832,75 @@ impl Laps {
     }
 }
 
-/// Whether an id_token's signature is its key's over its signing input
-/// (`fragment_core::oidc::Signed`), by the runtime's WebCrypto: the key
-/// imported as a JWK made from its numbers alone, never the provider's
-/// (RSASSA-PKCS1-v1_5 or ECDSA P-256, each over SHA-256), then `verify`.
-/// `Err`: the runtime would not import the key (an EC point off the
-/// curve), or threw: why.
-pub async fn signature_verifies(s: &fragment_core::oidc::Signed<'_, '_>) -> Result<bool, String> {
-    use fragment_core::oidc::{Alg, Public};
-    use fragment_core::own_signin::b64url;
-    let (jwk, import, verify) = (Object::new(), Object::new(), Object::new());
-    match (s.alg, s.key) {
-        (Alg::Rs256, Public::Rsa { n, e }) => {
-            set(&jwk, "kty", "RSA");
-            set(&jwk, "n", b64url(n));
-            set(&jwk, "e", b64url(e));
-            set(&import, "name", "RSASSA-PKCS1-v1_5");
-            set(&import, "hash", "SHA-256");
-            set(&verify, "name", "RSASSA-PKCS1-v1_5");
-        }
-        (Alg::Es256, Public::Ec { x, y }) => {
-            set(&jwk, "kty", "EC");
-            set(&jwk, "crv", "P-256");
-            set(&jwk, "x", b64url(x));
-            set(&jwk, "y", b64url(y));
-            set(&import, "name", "ECDSA");
-            set(&import, "namedCurve", "P-256");
-            set(&verify, "name", "ECDSA");
-            set(&verify, "hash", "SHA-256");
-        }
-        _ => return Err("the key is not of the token's algorithm".into()),
+// Sign-in by an OpenID Connect provider's JavaScript (cell/oidc.mjs:
+// docs/self-host.md, seam 4): it fetches, sends, parses and verifies, and
+// answers flat values; every decision on them is `fragment_core::oidc`'s,
+// whose limits it is handed (`SHIM_LIMITS`).
+#[wasm_bindgen(module = "/oidc.mjs")]
+extern "C" {
+    #[wasm_bindgen(js_name = discover)]
+    fn oidc_discover_js(url: &str, names: &Array, limits: &Array) -> Promise;
+    #[wasm_bindgen(js_name = redeem)]
+    fn oidc_redeem_js(token_endpoint: &str, body: &str, authorization: &str, jwks_uri: &str, algs: &Array, names: &Array, limits: &Array) -> Promise;
+}
+
+fn oidc_field(v: JsValue) -> fragment_core::oidc::Field {
+    use fragment_core::oidc::Field;
+    if v.is_undefined() {
+        return Field::Absent;
     }
-    let subtle = get(&js_sys::global(), "crypto").and_then(|c| get(&c, "subtle")).map_err(|e| e.message)?;
-    let thrown = |e: JsValue| js_message(&e);
-    let usages = Array::of1(&JsValue::from_str("verify"));
-    let key = settle(call(&subtle, "importKey", &["jwk".into(), jwk.into(), import.into(), false.into(), usages.into()]).map_err(thrown)?).await.map_err(thrown)?;
-    let (signature, input) = (js_sys::Uint8Array::from(s.signature.as_slice()), js_sys::Uint8Array::from(s.input));
-    let verified = settle(call(&subtle, "verify", &[verify.into(), key, signature.into(), input.into()]).map_err(thrown)?).await.map_err(thrown)?;
-    verified.as_bool().ok_or_else(|| "verify answered no boolean".into())
+    if let Some(s) = v.as_string() {
+        return Field::Str(s);
+    }
+    if let Some(n) = v.as_f64() {
+        return Field::Num(n);
+    }
+    if let Some(b) = v.as_bool() {
+        return Field::Bool(b);
+    }
+    match Array::is_array(&v) {
+        // the shim answers a list only when each of its items is a string
+        true => Field::List(Array::from(&v).iter().filter_map(|x| x.as_string()).collect()),
+        false => Field::Other,
+    }
+}
+
+fn oidc_names(names: &[&str]) -> Array {
+    names.iter().map(|n| JsValue::from_str(n)).collect()
+}
+
+fn oidc_limits() -> Array {
+    fragment_core::oidc::SHIM_LIMITS.iter().map(|n| JsValue::from_f64(*n as f64)).collect()
+}
+
+/// The shim's answer, `[code, detail, values]`, read.
+pub type OidcAnswer = (String, String, Option<Vec<fragment_core::oidc::Field>>);
+
+async fn oidc_answer(p: Promise) -> OidcAnswer {
+    match JsFuture::from(p).await {
+        Ok(v) => {
+            let a = Array::from(&v);
+            let values = a.get(2);
+            let values = Array::is_array(&values).then(|| Array::from(&values).iter().map(oidc_field).collect());
+            (a.get(0).as_string().unwrap_or_default(), a.get(1).as_string().unwrap_or_default(), values)
+        }
+        Err(e) => ("unchecked".into(), js_message(&e), None),
+    }
+}
+
+/// The provider's metadata at `url`, fetched (or the isolate's copy) and
+/// read by the shim: `ok` and `DISCOVERY_FIELDS`' values, or `fetch` and why.
+pub async fn oidc_discover(url: &str) -> OidcAnswer {
+    oidc_answer(oidc_discover_js(url, &oidc_names(&fragment_core::oidc::DISCOVERY_FIELDS), &oidc_limits())).await
+}
+
+/// A sign-in's code redeemed by the shim: the token request keys.rs made
+/// sent to `token_endpoint`, and the id_token answered checked against the
+/// JWKS at `jwks_uri` under `algs`, its claims (`names`) read
+/// (`fragment_core::oidc::redeemed` decides on the answer).
+pub async fn oidc_redeem(token_endpoint: &str, request: &fragment_core::oidc::TokenRequest, jwks_uri: &str, algs: &[&str], names: &[&str]) -> OidcAnswer {
+    let authorization = request.authorization.as_deref().unwrap_or("");
+    oidc_answer(oidc_redeem_js(token_endpoint, &request.body, authorization, jwks_uri, &oidc_names(algs), &oidc_names(names), &oidc_limits())).await
 }
 
 #[wasm_bindgen]

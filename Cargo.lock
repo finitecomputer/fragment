@@ -657,8 +657,6 @@ dependencies = [
  "icu_normalizer",
  "p256",
  "png",
- "rand_core 0.6.4",
- "rsa",
  "rusqlite",
  "serde",
  "serde_json",

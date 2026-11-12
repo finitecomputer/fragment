@@ -257,30 +257,15 @@ pub async fn oidc_secrets(env: &Env, state: &str) -> CellResult<fragment_core::o
     Ok(fragment_core::oidc::SignInSecrets::of(current, state))
 }
 
-/// An OpenID Connect provider's code exchanged at its token endpoint
+/// The token request for an OpenID Connect provider's code
 /// (`fragment_core::oidc::token_request`), the client authenticated with
-/// its secret (bound as `OIDC_CLIENT_SECRET`; none bound: a public client):
-/// (status, the answer's bytes, none when it was over
-/// `oidc::METADATA_MAX_BYTES`). No redirect is followed, nothing is tried
-/// again, and the answer is read for its id_token alone.
-pub async fn oidc_token(env: &Env, provider: &fragment_core::oidc::Provider, settings: &fragment_core::oidc::Settings, code: &str, redirect_uri: &str, verifier: &str) -> CellResult<(u16, Vec<u8>)> {
-    use fragment_core::oidc;
+/// its secret (bound as `OIDC_CLIENT_SECRET`; none bound: a public client).
+/// The shim sends it (`js::oidc_redeem`): no redirect followed, nothing
+/// tried again, the answer bounded and read for its id_token alone.
+pub async fn oidc_token_request(env: &Env, provider: &fragment_core::oidc::Provider, settings: &fragment_core::oidc::Settings, code: &str, redirect_uri: &str, verifier: &str) -> CellResult<fragment_core::oidc::TokenRequest> {
     let secret = secret(env, store::OIDC_CLIENT_SECRET).await?;
     let auth = provider.client_auth(settings.auth, secret.is_some()).map_err(|e| CellError::host(e.to_string()))?;
-    let req = oidc::token_request(auth, &settings.client_id, secret.as_deref(), code, redirect_uri, verifier);
-    let headers = Headers::new();
-    headers.set("content-type", "application/x-www-form-urlencoded")?;
-    headers.set("accept", "application/json")?;
-    if let Some(a) = &req.authorization {
-        headers.set("authorization", a)?;
-    }
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(req.body.into()));
-    let req = Request::new_with_init(&provider.token_endpoint, &init)?;
-    let a = crate::cs::fetch_all(req, VENDOR_TIMEOUT, oidc::METADATA_MAX_BYTES)
-        .await
-        .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token endpoint did not answer: {}", e.message)))?;
-    Ok((a.status, if a.cut { vec![] } else { a.body }))
+    Ok(fragment_core::oidc::token_request(auth, &settings.client_id, secret.as_deref(), code, redirect_uri, verifier))
 }
 
 /// POSTs `body` as JSON with a bearer key: (status, JSON answer or null),

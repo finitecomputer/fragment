@@ -771,8 +771,11 @@ impl Call for Begin {
 
 /// `POST /login/exchange`: WorkOS's code, exchanged through KEYS, and the
 /// sign-in finished (`switching`: one `/auth/switch` began, to use another
-/// account). It is a finished round trip, so the router makes one only
-/// with `of`, from the `Bound` of the browser that began it: its fields
+/// account); or an OpenID Connect provider's sign-in, which the router
+/// verified (cell/oidc.rs: docs/self-host.md, seam 4), finished alike
+/// (`signed_in`: the subject and the email the provider gave). It is a
+/// finished round trip, so the router makes one only with `of` or
+/// `verified`, from the `Bound` of the browser that began it: its fields
 /// are private and it is not `Deserialize` (the Registry decodes the same
 /// body as an `ExchangeIn`, which is its own).
 #[derive(Serialize)]
@@ -783,6 +786,8 @@ pub(crate) struct Exchange {
     client_id: String,
     issuer: String,
     switching: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signed_in: Option<(String, String)>,
 }
 
 impl Exchange {
@@ -791,7 +796,17 @@ impl Exchange {
     pub(crate) fn of(bound: crate::auth::Bound, code: String, client_id: String, issuer: String) -> Exchange {
         use fragment_core::roundtrip::Trip;
         assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a WorkOS code finishes a sign-in or a switch");
-        Exchange { state: bound.state().to_string(), code, client_id, issuer, switching: bound.trip() == Trip::Switch }
+        Exchange { state: bound.state().to_string(), code, client_id, issuer, switching: bound.trip() == Trip::Switch, signed_in: None }
+    }
+
+    /// An OpenID Connect provider's sign-in (or a switch's), its id_token
+    /// verified, coming back to the browser that began it: the provider's
+    /// issuer URL, the `sub`, and the email it gave.
+    pub(crate) fn verified(bound: crate::auth::Bound, issuer: &str, verified: fragment_core::oidc::Verified, email: &str) -> Exchange {
+        use fragment_core::roundtrip::Trip;
+        assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a provider's sign-in finishes a sign-in or a switch");
+        let signed_in = Some((verified.subject, email.to_string()));
+        Exchange { state: bound.state().to_string(), code: String::new(), client_id: String::new(), issuer: issuer.to_string(), switching: false, signed_in }
     }
 }
 
@@ -804,6 +819,9 @@ pub(in crate::registry) struct ExchangeIn {
     pub(in crate::registry) client_id: String,
     pub(in crate::registry) issuer: String,
     pub(in crate::registry) switching: bool,
+    /// An OpenID Connect provider's verified sign-in: its subject and email.
+    #[serde(default)]
+    pub(in crate::registry) signed_in: Option<(String, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -820,47 +838,6 @@ pub(crate) enum Exchanged {
 
 impl Call for Exchange {
     const PATH: &'static str = "/login/exchange";
-    type Answer = Exchanged;
-}
-
-/// `POST /login/oidc`: an OpenID Connect provider's sign-in finished
-/// (docs/self-host.md, seam 4). The router exchanged its code and verified
-/// its id_token (cell/src/oidc.rs), so it names the person's `(issuer,
-/// subject)` and the email the provider gave as theirs; the registry spends
-/// the sign-in and signs them in as WorkOS's exchange does. A finished
-/// round trip, as `Exchange` is: made only with `of`, from the `Bound` of
-/// the browser that began it, its fields private, never `Deserialize`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OidcSignIn {
-    state: String,
-    issuer: String,
-    subject: String,
-    email: String,
-}
-
-impl OidcSignIn {
-    /// A provider's verified sign-in (or a switch's), coming back to the
-    /// browser that began it: the only way to make one.
-    pub(crate) fn of(bound: crate::auth::Bound, issuer: &str, verified: fragment_core::oidc::Verified, email: &str) -> OidcSignIn {
-        use fragment_core::roundtrip::Trip;
-        assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a provider's sign-in finishes a sign-in or a switch");
-        OidcSignIn { state: bound.state().to_string(), issuer: issuer.to_string(), subject: verified.subject, email: email.to_string() }
-    }
-}
-
-/// `OidcSignIn`'s body as the Registry decodes it.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(in crate::registry) struct OidcSignInIn {
-    pub(in crate::registry) state: String,
-    pub(in crate::registry) issuer: String,
-    pub(in crate::registry) subject: String,
-    pub(in crate::registry) email: String,
-}
-
-impl Call for OidcSignIn {
-    const PATH: &'static str = "/login/oidc";
     type Answer = Exchanged;
 }
 

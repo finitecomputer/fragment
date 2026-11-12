@@ -40,11 +40,6 @@ sqlite = ["dep:rusqlite"]
 
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
-# signs the id_tokens `oidc`'s tests verify, and stands in for the runtime's
-# WebCrypto check of an RS256 signature (the cell has no RSA crate)
-rsa = "0.9"
-rand_core = { version = "0.6", features = ["getrandom"] }
-sha2 = { version = "0.10", features = ["oid"] }
 # reads back the archives `export` writes
 tar = { version = "0.4", default-features = false }
 # a real SQLite (the bundled one) for `migrate`'s tests, as images/hermes/boot pins it

@@ -59,7 +59,7 @@ use sha2::{Digest, Sha256};
 
 use super::calls::{
     ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, ExchangeIn, Exchanged, KeyAdded,
-    LiveSession, LoggedOut, Logout, Mint, Minted, OidcSignInIn, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
+    LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
@@ -470,6 +470,9 @@ impl RegistryCell {
     /// WorkOS's code, exchanged with the deployment's API key, then the sign-in
     /// finished. A code is single-use at WorkOS; the state here.
     pub(super) async fn exchange(&self, b: ExchangeIn) -> CellResult<Exchanged> {
+        if let Some((subject, email)) = &b.signed_in {
+            return self.oidc_sign_in(&b.state, &b.issuer, subject, email).await;
+        }
         if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
             return Err(CellError::invalid("an exchange names its state, code, and client"));
         }
@@ -497,7 +500,13 @@ impl RegistryCell {
         let Some(email) = email_of(&raw).filter(|_| signed_in.user.email_verified) else {
             return Err(CellError::new(ErrorCode::Forbidden, format!("WorkOS has not verified the email {raw:?}: verify it there, then sign in again")));
         };
-        self.signed_in(&b.state, &b.issuer, &signed_in.user.id, &email, claims.sid.as_deref()).await
+        let key = PersonKey::make(&self.env).await?;
+        self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
+        let done = self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, claims.sid.as_deref(), key)?;
+        let person = self.person_by_email(&email)?.ok_or_else(|| CellError::host("a sign-in's email names no one after it"))?;
+        self.meet_invites(&email, &person).await?;
+        self.arm_syncs().await?;
+        Ok(done)
     }
 
     /// An OpenID Connect provider's sign-in, its id_token verified by the
@@ -505,28 +514,23 @@ impl RegistryCell {
     /// WorkOS's is: its email checked as an address, the sign-in spent, and
     /// the person signed in. Only the deployment's own issuer signs anyone
     /// in this way.
-    pub(super) async fn oidc_sign_in(&self, b: OidcSignInIn) -> CellResult<Exchanged> {
+    async fn oidc_sign_in(&self, state: &str, issuer: &str, subject: &str, email: &str) -> CellResult<Exchanged> {
         let o = self.cfg.oidc.as_ref().ok_or_else(|| CellError::host("an OpenID Connect sign-in finished where none is configured (FRAGMENT_OIDC_ISSUER)"))?;
-        if b.issuer != o.issuer {
+        if issuer != o.issuer {
             return Err(CellError::host("an OpenID Connect sign-in names another issuer than the deployment's"));
         }
-        if b.state.is_empty() || b.subject.is_empty() || b.subject.len() > fragment_core::oidc::SUBJECT_MAX {
+        if state.is_empty() || subject.is_empty() || subject.len() > fragment_core::oidc::SUBJECT_MAX {
             return Err(CellError::invalid("a provider's sign-in names its state and subject"));
         }
-        let Some(email) = email_of(&b.email) else {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("the sign-in provider gave {:?} as your email, which is no address", b.email.chars().take(EMAIL_MAX).collect::<String>())));
+        let Some(email) = email_of(email) else {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("the sign-in provider gave {:?} as your email, which is no address", email.chars().take(EMAIL_MAX).collect::<String>())));
         };
-        self.signed_in(&b.state, &b.issuer, &b.subject, &email, None).await
-    }
-
-    /// A verified sign-in finished, whoever vouched for it: the person
-    /// made or found (`finish`), a session, and their invitations met.
-    async fn signed_in(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>) -> CellResult<Exchanged> {
+        // then as WorkOS's exchange finishes, with no provider session
         let key = PersonKey::make(&self.env).await?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
-        let done = self.finish(state, issuer, subject, email, sid, key)?;
-        let person = self.person_by_email(email)?.ok_or_else(|| CellError::host("a sign-in's email names no one after it"))?;
-        self.meet_invites(email, &person).await?;
+        let done = self.finish(state, issuer, subject, &email, None, key)?;
+        let person = self.person_by_email(&email)?.ok_or_else(|| CellError::host("a sign-in's email names no one after it"))?;
+        self.meet_invites(&email, &person).await?;
         self.arm_syncs().await?;
         Ok(done)
     }
