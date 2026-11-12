@@ -406,7 +406,13 @@ person is mailed a link to `/settings`, and it is kept
 
 A verified `(issuer, subject)` signs a person in: the issuer
 `workos:<client id>`, the subject WorkOS's user id. The first makes the
-person (Identities). WorkOS must have verified the email (403); it names
+person (Identities). A self-hosted deployment may name an OpenID Connect
+provider in WorkOS's place (docs/self-host.md, seam 4): then the issuer
+is its URL and the subject its `sub`; `/auth/login` goes to its
+authorization endpoint with PKCE (S256), the state and a nonce, and
+ignores `screen_hint`; its email must be verified or vouched for (403); an
+id_token it refuses is 401, on a page; logout ends the session here
+alone. WorkOS must have verified the email (403); it names
 at most one person, so a sign-in whose email is another's is 409, never
 merged. No route links a second sign-in to a person: AuthKit answers one
 begun in a signed-in browser with the session it holds there. Browser

@@ -12,6 +12,11 @@ d8e0f86b of 2026-10-06), is the reference implementation and is
 superseded by this one. Where this disagrees with `docs/cloudflare-v1.md`,
 that doc wins for master.
 
+Seam 4, sign-in by OpenID Connect (below), is on `selfhost-2-oidc`, a
+draft into `selfhost-2` (2026-11-11): Paul's "OIDC everywhere, with tsidp
+as the tailnet default", since identity must not depend on the network
+(a true intranet has no Tailscale).
+
 ## The rule: one cell, interfaces, placement as configuration
 
 The cell is written against Cloudflare's runtime APIs (Durable Objects,
@@ -29,7 +34,8 @@ its bindings. A mode flag is a design bug.
 | 1 | The runtime: celld | **done** (below) |
 | 2 | Computers on sandcastle nodes | out of scope: no computers on celld here (below) |
 | 3 | Models from a file | **done** (below) |
-| 4, 9 | Sign-in by OpenID Connect; LAN mode and Dex | out of scope: a tailnet front door replaces them; locally, dev's WorkOS fake |
+| 4 | Sign-in by OpenID Connect | **done** (below): tsidp the tailnet's default, an org's own IdP on an intranet |
+| 9 | LAN mode and Dex | out of scope: a tailnet front door replaces them |
 | 5 | Files: macrofiche, the code-store contract | out of scope: the code.storage fake |
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer over chrome-headless-shell | out of scope: a card is skipped, saying why |
@@ -117,6 +123,209 @@ is master's now), zero for the box's own:
   "medium": { … the same }
 }
 ```
+
+## 4. Sign-in: OpenID Connect
+
+Any OpenID Connect provider signs people in where a deployment names
+one: on a tailnet, Tailscale's tsidp (the default, below); on an
+intranet, the org's own IdP (Entra, Okta, Google Workspace, Keycloak,
+Authentik). It takes WorkOS's place, chosen by configuration, and never
+stands beside it as a fallback. WorkOS stays finite.chat's sign-in, a
+separate implementation (Paul, October): no migration between them.
+Without `FRAGMENT_OIDC_ISSUER`, nothing here runs and master's WorkOS
+path is as it was.
+
+**Who a person is** (decisions 45 to 50, unchanged):
+- A sign-in is `(issuer URL, sub)`. The first makes a person, named by
+  the npub the registry makes and seals for them (`person_for`, the same
+  function as WorkOS's).
+- The email the provider gives is their handle. It must be there, and
+  either verified (`email_verified: true`) or vouched for by the
+  deployment (`FRAGMENT_OIDC_EMAIL_VOUCHED=on`).
+- An email names one person: another person's is refused (409), never
+  merged. The latest sign-in's email is the one shown.
+- Sessions, the CLI's `/cli` approval, invites met at a first sign-in,
+  fragments' redemptions and frames, and logout are WorkOS's own code,
+  unchanged.
+- A person a provider signs in has no WorkOS user, so no Pipes
+  connections (direct OAuth connections are a later seam).
+- A WorkOS person's email is refused to a provider (409, decision 45):
+  nothing moves people between them.
+
+**Settings**: Worker variables, the secret a store binding (OpenBao on
+self-host, seam 12).
+
+| Setting | What |
+|---|---|
+| `FRAGMENT_OIDC_ISSUER` | the issuer URL exactly as its id_tokens' `iss` (https; http only on loopback). Its metadata is at `<issuer>/.well-known/openid-configuration` |
+| `FRAGMENT_OIDC_CLIENT_ID` | the client |
+| `OIDC_CLIENT_SECRET` | the client's secret, a store binding read only by keys.rs (devstack's store name: `fragment-oidc-client-secret`). Unbound: a public client, PKCE its only proof |
+| `FRAGMENT_OIDC_SCOPES` | default `openid email profile`; `openid` required |
+| `FRAGMENT_OIDC_EMAIL_CLAIM` | default `email`. Another claim (ADFS's or Entra's `upn`) only when vouched for: `email_verified` speaks for `email` alone |
+| `FRAGMENT_OIDC_EMAIL_VOUCHED` | `on`: the provider's word for the email is enough, as an org's own directory's is (tsidp's; below). Never for a provider whose people choose their own addresses (a multi-tenant or social one) |
+| `FRAGMENT_OIDC_AUTH` | `client_secret_basic`, `client_secret_post` or `none`; default, with a secret, the first of the two the provider lists |
+
+At the provider, the client's redirect URI is `<platform>/auth/callback`.
+A setting out of shape stops the isolate at its first request, naming it
+(`oidc::Settings::parse`).
+
+**The flow** (`crates/core/src/oidc.rs`, the rules; `cell/src/oidc.rs`, the router):
+- **Begin** (`/auth/login`, `/auth/switch`): the provider's metadata
+  first, so a provider that cannot answer leaves no pending sign-in. Then
+  the registry begins a sign-in, as WorkOS's: its state, bound to the
+  browser by `fragment_login`.
+- **The verifier and the nonce** are derived from the host secret and the
+  state (`SignInSecrets`: HKDF, then an HMAC of the state for each).
+  Nothing is stored, and only the platform can make the verifier. A
+  sign-in that spans a host-secret rotation fails at the provider and
+  starts again.
+- **To the provider**: the browser goes to its `authorization_endpoint`
+  with the code flow, the S256 challenge, the nonce and a `login_hint`. A
+  switch adds `prompt=login`.
+- **The callback**: bound to the browser that began it (`trip_bound`).
+  The code is exchanged form-encoded with the verifier, the client
+  authenticated as chosen. No redirect is followed, and the answer is read
+  (at most 64 KiB) for its id_token alone.
+- **The id_token** (`oidc::signed`, then `Signed::verified`):
+  - RS256 or ES256 only, by a key of the provider's JWKS, never one the
+    token names. No `none`, no HMAC, no `crit`, no access token.
+  - The signature is the runtime's WebCrypto's to check
+    (`js::signature_verifies`): the cell carries no RSA crate.
+  - Only then the claims: `iss` exactly, `aud` (and `azp`), `exp`, `iat`
+    and `nbf` within two minutes, an `iat` at most 15 minutes old, the
+    nonce, and a `sub`.
+- **Finishing**: the email rule, then the registry spends the sign-in in
+  one statement and sets the session (`calls::OidcSignIn`, made only from
+  the callback's `Bound`, as WorkOS's `Exchange` is).
+- **Refusals**, on a page, with `signin.refused` and why in the node's log:
+  - an id_token not to trust: 401;
+  - an email absent or unverified: 403;
+  - another person's email: 409;
+  - a code the provider refuses (spent, expired): 400.
+- **Caches**: the metadata and the JWKS, an hour per isolate. A key the
+  JWKS lacks fetches it again at once (a rotation), then not again for
+  such a key within 15 s.
+- **Logout** ends the platform session here alone. tsidp offers no
+  `end_session_endpoint`; RP-initiated logout is not built.
+- **A restart mid-sign-in** finishes, once: the state is the registry's,
+  and the verifier and nonce are derived again.
+
+**tsidp, the tailnet's default.** Tailscale's own OIDC server, which signs
+in a device's person from their tailnet identity. Experimental, by its own
+README.
+- **The pin:** v0.0.18 (2026-10-21, commit 4047a40f), image
+  `ghcr.io/tailscale/tsidp:v0.0.18`, index digest
+  `sha256:3b39de93c1dd1a6bd6923b8871957ab938d049128035634b2b7204a900fb4661`.
+- **Why not newer:** v0.0.19 and v0.0.20 (2026-11-11 and -12) add only the
+  `offline_access` scope and a version bump, and are younger than the
+  two-week dependency cooldown.
+
+What it does, read from its source at v0.0.18 (not run here: there is no
+tailnet on this box):
+- **The issuer** is `https://<TS_HOSTNAME>.<tailnet>.ts.net`, with
+  `:<port>` added off 443. It serves on Tailscale's HTTPS certificates
+  (`ListenTLS`), so MagicDNS and HTTPS must be on in the tailnet.
+- **Signing:** RS256 alone, one 2048-bit key with a `kid`, never rotated.
+  Its discovery lists `client_secret_basic` and `client_secret_post`,
+  PKCE `plain` and `S256`, and no `end_session_endpoint`.
+- **PKCE:** with no `code_challenge_method`, it assumes `plain`.
+  Fragment always sends `S256`.
+- **A client secret is required** at `/token`: it takes no public client.
+  Redirect URIs are matched exactly.
+- **The id_token's claims:**
+  - `sub`: `userid:<n>`, the Tailscale user's id, stable.
+  - `aud`: the client id, as a string.
+  - `nonce`: echoed.
+  - `exp` is `iat` plus 5 minutes; `nbf` is `iat` less 5 minutes.
+  - `email`, only with the `email` scope: the user's login name, except
+    that a `@github` or `@passkey` login becomes `<login>.<tsidp's
+    host>`, such as `alice@github.idp.tail1234.ts.net`. That is not a
+    mailbox.
+  - **No `email_verified`, ever.** So a deployment on tsidp sets
+    `FRAGMENT_OIDC_EMAIL_VOUCHED=on`: the tailnet's control plane vouches
+    for its login names, and nobody picks another's. Instead, an admin
+    may add `"extraClaims": {"email_verified": true}` to a
+    `tailscale.com/cap/tsidp` grant, for people whose login names are
+    real addresses (claims it does not list may be added so).
+- **It ignores `prompt` and `login_hint`:** whoever owns the device signs
+  in, with no screen. "Use another account" signs the same person in
+  again.
+- **The browser must be on the tailnet:** `/authorize` names the device
+  by WhoIs on its address, and refuses a tagged device (it has no
+  person). The cell's own calls to `/token` and the JWKS need no WhoIs:
+  the box's node reaching tsidp's is enough.
+- **Restarts:** codes live in tsidp's memory, so a tsidp restart in the
+  middle of a sign-in fails it, and the person starts again.
+
+**Setting it up** (an org's IT person):
+1. **The tailnet:** MagicDNS and HTTPS certificates on. Make an auth key
+   with a tag for tsidp (`tag:tsidp`).
+2. **The policy:** people's devices, and the fragment box, reach the
+   tsidp node on tcp:443 (`tag:tsidp` in `tagOwners`). The admin UI is
+   for the IT person alone. This policy is written from Tailscale's grant
+   syntax and tsidp's README, not tried on a tailnet:
+   ```hujson
+   "grants": [
+     { "src": ["autogroup:member"], "dst": ["tag:tsidp"], "ip": ["tcp:443"] },
+     { "src": ["autogroup:admin"], "dst": ["tag:tsidp"],
+       "app": { "tailscale.com/cap/tsidp": [{ "allow_admin_ui": true }] } }
+   ]
+   ```
+3. **Run tsidp** beside fragment, its state on a volume:
+   ```sh
+   docker run -d --name tsidp --restart unless-stopped -v tsidp-data:/data \
+     -e TAILSCALE_USE_WIP_CODE=1 -e TS_STATE_DIR=/data -e TS_HOSTNAME=idp \
+     -e TS_AUTHKEY="$(cat tsidp-authkey)" \
+     ghcr.io/tailscale/tsidp:v0.0.18@sha256:3b39de93c1dd1a6bd6923b8871957ab938d049128035634b2b7204a900fb4661
+   ```
+   Its first start can take minutes, while its certificate is issued.
+4. **Register fragment** at `https://idp.<tailnet>.ts.net/` (the admin
+   UI): a new client named `fragment`, its redirect URI
+   `https://<platform>/auth/callback`. tsidp shows its id (32 hex) and its
+   secret (64 hex) once.
+5. **Configure fragment:**
+   - `FRAGMENT_OIDC_ISSUER=https://idp.<tailnet>.ts.net`;
+   - `FRAGMENT_OIDC_CLIENT_ID=<the id>`;
+   - `FRAGMENT_OIDC_EMAIL_VOUCHED=on`;
+   - the secret in OpenBao, under the store name bound as
+     `OIDC_CLIENT_SECRET`.
+   - The email claim stays `email`, and the scopes stay
+     `openid email profile`.
+6. **Reachability:** the cell's fetches must reach
+   `idp.<tailnet>.ts.net`, a 100.64/10 address. Where the runtime limits
+   egress to public addresses (celld's egress allowlist, celld#7), allow
+   that host (not verified here).
+
+**Dev.** The fake:
+- `FRAGMENT_SIGNIN=oidc cargo xtask dev --runtime celld` signs people in
+  through the OpenID Connect fake on :8804, a strict provider (any email,
+  verified).
+- `FRAGMENT_SIGNIN=tsidp` runs it shaped as tsidp: RS256 alone, no
+  `email_verified`, vouched for.
+- The fake's subjects come from its people's emails, so a restart of dev
+  hands each email the subject it had before.
+
+A real provider: `FRAGMENT_OIDC_ISSUER`, `FRAGMENT_OIDC_CLIENT_ID`,
+`FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and `FRAGMENT_OIDC_EMAIL_VOUCHED=on`
+or `FRAGMENT_OIDC_EMAIL_CLAIM` as needed. Its redirect URI is
+`http://127.0.0.1:8790/auth/callback`. WorkOS's fake runs beside it for
+Pipes alone.
+
+**The e2e:** the `oidc` section starts its node shaped to sign in through
+the provider fake, then shapes the fake as tsidp, then goes back to a
+plain node. Its checks are in `crates/e2e/src/lanes/oidc.rs`; the core
+rules' tests are in `oidc::tests`.
+
+**Not built:**
+- admins from a groups claim (operators stay `FRAGMENT_OPERATORS`);
+- `private_key_jwt`, the userinfo endpoint, refresh tokens, RP-initiated
+  and back-channel logout;
+- an `oidc` block in `xtask deploy`'s config: a Cloudflare deploy signs
+  people in through WorkOS alone.
+
+The platform's session lasts 30 days whatever the provider says, so a
+person disabled at the provider keeps theirs until it ends or they sign
+out.
 
 ## 12. Secrets: the store's bindings, stood in for
 
@@ -303,10 +512,10 @@ New in this phase:
 
 **A working list** (2026-11-11), of master at 8bc07e62, for one box on a
 tailnet with outbound internet, no inbound internet, and the cell on
-celld. Revisit after the tailnet design: it would remove step 4 (the
-org's own WorkOS: the tailnet's identity instead), and change steps 1 and
-2 (MagicDNS names and a box CA pinned in the apps, the org's own domain
-optional) and the iOS row (the app's own trust and tailnet).
+celld. Revisit after the tailnet design: it would change steps 1 and 2
+(MagicDNS names and a box CA pinned in the apps, the org's own domain
+optional) and the iOS row (the app's own trust and tailnet). Sign-in is
+seam 4's: tsidp on the tailnet, or the org's own IdP.
 
 ### Works unchanged, given outbound internet
 
@@ -328,7 +537,7 @@ optional) and the iOS row (the app's own trust and tailnet).
 
 | Feature | Finite's today | What the org brings |
 |---|---|---|
-| Sign-in | Finite's WorkOS AuthKit | its own WorkOS environment: redirect `https://<platform>/auth/callback`, invite URL `/auth/login`, logout `/`; `workos.client_id`, `workos.api_key` |
+| Sign-in | Finite's WorkOS AuthKit | an OpenID Connect provider (seam 4): tsidp on its tailnet, or its own IdP; redirect `https://<platform>/auth/callback` |
 | Fragment files (git) | Finite's code.storage org | its own code.storage org and PEM key (`codestorage.*`); its files then live at that vendor, off the box, so macrofiche (seam 5) matters |
 | Text models | OpenRouter on Finite's key, or Finite Private | an OpenAI-compatible endpoint and key for every slot (`cheap`, `medium`, `fallback`, `vision`, Deep), each priced; a slot left out falls back to Workers AI, which celld lacks. A deployment's `base_url` is https on a host name, no port; dev's models file takes this machine's `http://127.0.0.1:<port>` (seam 3) |
 | Semantic search (embeddings) | Workers AI bge-m3 | an OpenAI-compatible `/embeddings` endpoint, such as TEI (`models.embeddings`) |
@@ -380,7 +589,8 @@ through the person's browser, so the tailnet is enough.
 4. Secrets: OpenBao (or the org's own Vault), its unseal key kept
    safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
    random bytes, among the platform's root secrets there (seam 12).
-5. WorkOS: its own environment and the redirects.
+5. Sign-in: tsidp on the tailnet, or the org's own IdP, with fragment as
+   its client (seam 4).
 6. code.storage: its own org and key (or macrofiche, once ported).
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
@@ -410,6 +620,11 @@ CELLD_BIN=…/celld cargo xtask dev --runtime celld
 FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
 # its text tiers on this machine's own model: a deployment's `models` in a file, its key in another
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model.key CELLD_BIN=… cargo xtask dev --runtime celld
+# sign-in through the OpenID Connect fake (seam 4), or the fake shaped as tsidp
+FRAGMENT_SIGNIN=oidc CELLD_BIN=… cargo xtask dev --runtime celld
+FRAGMENT_SIGNIN=tsidp CELLD_BIN=… cargo xtask dev --runtime celld
+# a real provider: its issuer, its client, its secret in a file
+FRAGMENT_OIDC_ISSUER=https://idp.<tailnet>.ts.net FRAGMENT_OIDC_CLIENT_ID=… FRAGMENT_OIDC_CLIENT_SECRET_FILE=… FRAGMENT_OIDC_EMAIL_VOUCHED=on CELLD_BIN=… cargo xtask dev --runtime celld
 # the e2e on celld (OpenBao behind the stand-ins unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 ```
@@ -419,8 +634,7 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 - Computers (seam 2): none on celld here. celld's Docker engine has no
   egress intercepts or snapshots, which a computer needs; its krun engine
   (sandcastle's) has both, and is the next phase's.
-- Sign-in by OpenID Connect and the LAN mode (seams 4, 9): a tailnet front
-  door replaces them.
+- The LAN mode and Dex (seam 9): a tailnet front door replaces them.
 - BYOC pairing, own hardware in points (10), cards (7), macrofiche (5).
 - Model URLs under `*.localhost` (the old found 36, which Paul answered
   yes): master's rule takes `http://127.0.0.1:<port>` alone.
