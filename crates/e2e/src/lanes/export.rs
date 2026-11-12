@@ -254,15 +254,24 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
         held && mid["state"] == "building" && mid_bytes > PART && mid_bytes < big.len() as u64 && mid["progress"]["done"].as_u64().unwrap_or(0) < mid["progress"]["total"].as_u64().unwrap_or(0),
         &mid,
     );
-    s.crash()?;
-    let restarted = s.start(false)?;
-    let api = &restarted;
-    let after = view(api, &paul);
-    s.ok(
-        "after a crash of the node, the export is the same one, where it was",
-        after["id"] == id.as_str() && after["state"] == "building" && after["progress"]["bytes"].as_u64() >= mid["progress"]["bytes"].as_u64(),
-        format!("{after} after {mid}"),
-    );
+    // celld resumes an R2 multipart upload only on the node that began it,
+    // never after its restart: there the build goes on uncrashed
+    let restarted = if s.on_celld() {
+        s.skip("after a crash of the node, the export is the same one, where it was", "celld resumes an R2 multipart upload only within the node process that began it, not after a restart (docs/self-host.md)");
+        None
+    } else {
+        s.crash()?;
+        Some(s.start(false)?)
+    };
+    let api = restarted.as_ref().unwrap_or(api);
+    if restarted.is_some() {
+        let after = view(api, &paul);
+        s.ok(
+            "after a crash of the node, the export is the same one, where it was",
+            after["id"] == id.as_str() && after["state"] == "building" && after["progress"]["bytes"].as_u64() >= mid["progress"]["bytes"].as_u64(),
+            format!("{after} after {mid}"),
+        );
+    }
     pace(api, &paul_id, None)?;
     let done = built(s, api, &paul);
     api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": paul_id, "op": "piece", "steps": null })))?;

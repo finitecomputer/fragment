@@ -30,7 +30,7 @@ in the cell: a self-host change to master does not touch `cell/`,
 | # | Seam | On master |
 |---|---|---|
 | 1 | The runtime: celld | dev and the e2e (below) |
-| 2 | Computers on sandcastle nodes | not yet: no computers on celld |
+| 2 | Computers on the box's microVM engine | dev and the e2e, on celld's krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`) |
 | 3 | Models from a file | dev's `FRAGMENT_MODELS_FILE` |
 | 4, 9 | Sign-in by OpenID Connect; LAN mode | not yet; locally, dev's WorkOS fake |
 | 5 | Files: macrofiche, the code-store contract | not yet: the code.storage fake |
@@ -49,8 +49,8 @@ Cloudflare's binding surface) runs the cell from the config a local
 wrangler node runs (`wrangler.local.jsonc`, its secrets bound by name),
 less `build` (`crates/devstack/src/celld.rs`, `DROPPED`), written beside
 the cell's own as `wrangler.celld.jsonc`. Its node's settings are celld's
-own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and no container
-engine (`CELLD_CONTAINER_ENGINE=none`). One `devstack::Node` runs either runtime behind the
+own: its secrets backend (`CELLD_SECRETS_FILE`, seam 12) and its container
+engine (`CELLD_CONTAINER_ENGINE`: `none`, or the box's krun engine, seam 2). One `devstack::Node` runs either runtime behind the
 node's front door (front.rs): celld listens on a port of its own, which
 the front door is told, as it learns workerd's from wrangler's. Stop
 (SIGINT), crash (the group SIGKILLed) and the e2e's signal handler serve
@@ -62,7 +62,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | Binding or API | On celld | Class | How the cell runs |
 |---|---|---|---|
 | `durable_objects`: Fragment, Principal, Registry, Ledger, SearchIndex, Vault | yes | works | |
-| `durable_objects`: Computer | the class runs, its `ctx.container` not running | off | no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host finds no container running, so a person's wipe still empties their computer's rows |
+| `durable_objects`: Computer | yes; with no engine, its `ctx.container` not running | works on the krun engine | seam 2. With no engine, no computers: `FRAGMENT_COMPUTER_IMAGE` unset, so a computer is refused, typed ("this deployment makes no computers"); its container host finds no container running, so a person's wipe still empties their computer's rows |
 | `durable_objects`: Migrations, and R2 `STAGE` | yes | off | the finite.computer move: unconfigured (`FRAGMENT_MIGRATIONS_MOVER` unset), as on any deployment but finite.chat's |
 | `migrations` (`new_sqlite_classes`, v1 to v4) | yes | works | |
 | `durable_objects.code_update_strategy` | accepted, no effect | works | celld reads the bindings alone; `celld dev` deploys once (`--no-watch`), and the e2e's reload restarts the node |
@@ -77,12 +77,13 @@ Every binding and runtime API master's cell uses, against the fork's
 | `send_email` (`EMAIL`) | bound (`SendEmail`); every send rejects, `E_NO_MAILER` | degraded | a failed send: Mail, below. Dev and the e2e keep the mail fake (`FRAGMENT_MAIL_URL`) |
 | `browser` (`BROWSER`) | bound (`Fetcher`); every fetch rejects, "this node has no Browser Rendering" | degraded | a card's shot fails, as one Browser Rendering fails. Seam 7 brings a renderer |
 | `images` (`IMAGES`) | bound (`ImagesBindingImpl`); every output rejects, "this node has no Images" | degraded | an icon's making offers no candidate, and an upload that needs fitting fails (`host_failed`); a PNG at the icon's size is kept as it is |
-| `containers` | accepted; a node with no engine (`CELLD_CONTAINER_ENGINE=none`) builds no image, and each object's `ctx.container` is there, not running, its start throwing "this node runs no computers" | off | celld's Docker engine has no egress intercepts or snapshots, which a computer needs; seam 2 places computers on sandcastle nodes |
+| `containers` | yes on the krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`); a node with no engine (`none`) builds no image, and each object's `ctx.container` is there, not running, its start throwing "this node runs no computers" | works on the krun engine | seam 2. celld's Docker engine has no egress intercepts or snapshots, which a computer needs, so devstack refuses it |
 | `ctx.exports` | yes (`DurableObjectState.exports`) | works | used only by a computer's container host |
-| `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | off | with computers (seam 2) |
-| `connect()` (`cloudflare:sockets`) | yes | off | the XFTP relay is a computer's |
+| `interceptOutboundHttp`, `interceptOutboundHttps`, `snapshotContainer` | krun engine only | works on the krun engine | seam 2: an intercept set during a start, a host intercepted again, a WebSocket and a streamed body through one, all as on Cloudflare |
+| The Sandbox SDK's `DirectoryBackup` | `exec()` and an intercept of `backups.sandbox.internal`; no `snapshotDirectory()` | works on the krun engine | a computer's saves and restores |
+| `connect()` (`cloudflare:sockets`) | yes | works on the krun engine | the XFTP relay is a computer's |
 | `compatibility_flags`: `nodejs_compat` | partial (its `node:` modules) | works | the Sandbox SDK's imports load |
-| `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | off | with computers |
+| `compatibility_flags`: `containers_pid_namespace` | accepted, no effect | works | each krun container is a VM of its own |
 | `build` | refused | n/a | dropped by the render (`DROPPED`): worker-build has run (`cargo xtask build`) |
 | A streamed request body forwarded to an object | its length carried, as workerd's (found 47, fixed in the fork) | works | |
 | `CF-Connecting-IP` | not set | degraded | every CLI code's ask counts as one address, `unnamed`, unless a front proxy sets the header (found 48) |
@@ -90,17 +91,74 @@ Every binding and runtime API master's cell uses, against the fork's
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
   worker-build's cache or `CELLD_ESBUILD`): the same fakes and settings as
-  on wrangler, no computers, the secrets bound as on wrangler and read by
-  the node from OpenBao.
-- **The e2e:** `FRAGMENT_E2E_RUNTIME=celld`. Its rung (`needs::Rung::Celld`)
-  has everything a local run has but the runtime's containers and the
-  finite.computer move: a section that needs computers is a skip saying
+  on wrangler, the secrets bound as on wrangler and read by the node from
+  OpenBao, and computers when `CELLD_CONTAINER_ENGINE` names the krun
+  engine (seam 2).
+- **The e2e:** `FRAGMENT_E2E_RUNTIME=celld`. Its rung
+  (`needs::Rung::Celld`) has everything a local run has but the
+  finite.computer move, and the runtime's containers only on the krun
+  engine: without one, a section that needs computers is a skip saying
   seam 2. Checks celld cannot make are skips saying why (a card's shot,
-  an icon's making; found 31's 413); the check local workerd cannot make
-  runs (a job sleeping through a crash). The build makes no computer
-  images.
+  an icon's making; found 31's 413; Telegram, below); the check local
+  workerd cannot make runs (a job sleeping through a crash).
 - **Master's path is unchanged:** nothing here branches on the runtime,
   and the cell has no code of celld's.
+
+## 2. Computers: the box's microVM engine
+
+A computer is the `Computer` class's container, as on Cloudflare: the cell
+calls `ctx.container` and the Sandbox SDK's `DirectoryBackup`, and celld
+runs them on the box's krun engine (sandcastle's `sandcastle-engine`,
+root, a jailed microVM per container), which speaks Cloudflare's container
+API. `CELLD_CONTAINER_ENGINE=krun:<the engine's socket>` names it; the
+cell, the core and the wire know nothing of it, and nothing sits between
+celld and the engine. The fork's fixes for it (futurepaul/celld#14 to #20,
+a stack) are each a gap the e2e's computer lanes found: a dev node's images,
+the intercept socket's path, intercepts set during a start or set again, a
+WebSocket and a large body through one, a `monitor()` whose event had
+answered, and an `exec()` during a start.
+
+- **Images:** `celld dev` builds the config's images with Docker, as it
+  does for its Docker engine, and loads each into the krun engine under
+  its content key (`celld-image:<sha256>` of its layers and config), so a
+  computer is pinned to an image by its digest. An unchanged image is not
+  loaded again.
+- **Egress:** each start's intercepts (the platform's API and model
+  routes, a connection's hosts, `backups.sandbox.internal`) go from the
+  engine's egress proxy to celld's socket and on to `ComputerEgress`, a
+  WebSocket (`__live`, the keepalive, the XFTP relay) and a body past
+  1 MiB (a 40 MB sync) as on Cloudflare. The run's computers have no
+  internet (`FRAGMENT_COMPUTER_INTERNET=off`): the engine resolves only
+  the hosts they intercept.
+- **Saves:** `DirectoryBackup`'s shim runs through `exec()`, its parts
+  through the backups intercept; `snapshotDirectory()` is never called.
+  Dev and the e2e sleep unsnapshotted (`FRAGMENT_COMPUTER_SNAPSHOTS=off`),
+  as on wrangler.
+- **Crashes:** a container that stops is heard at the Computer object's
+  next event (a request, its alarm), where Cloudflare's `monitor()` settles
+  at once.
+- **Cleanup:** a node reaps its VMs when it stops and when it starts again
+  on its project; a run killed outright has devstack destroy its node's by
+  celld's naming (`celld::Engine::remove`; docs/technical-debt-ledger.md).
+- **Skips on celld,** each a gap of celld's:
+  - a turn's keepalive across a deploy: the e2e's reload of `celld dev`
+    restarts its node, which reaps its VMs. A deploy to a running celld
+    node swaps its generation and keeps them, so the fix is a `celld dev`
+    reload that does the same;
+  - a takeover after a crash of the node: a celld node that starts again
+    reaps the VMs it left, so a box's restart restarts every computer from
+    its last save. The fix is a node that keeps them for the cells that
+    come back to it, and reaps the rest after a while;
+  - an export across a crash of the node: celld resumes an R2 multipart
+    upload only in the process that began it;
+  - Telegram (below).
+- **Not yet:** the platform's own hosts from a computer (found 40: an
+  agent opening its app at the box's address, which its VM does not
+  reach): celld would intercept the names a node's config gives and answer
+  them from the Worker. Dev's `.localhost` names are the guest's own
+  loopback (RFC 6761), so that needs a non-loopback dev name too. A real
+  agent (`--real-agent`, our Hermes image) on the krun engine is not run
+  here.
 
 ## 3. Models from a file
 
@@ -324,7 +382,7 @@ optional) and the iOS row (the app's own trust and tailnet).
 | Feature | Inbound need | Alternative |
 |---|---|---|
 | A fragment's inbox (apps' webhooks, the `inbox` template) | `POST /api/f/<name>/inbox` | poll from a cron trigger, or expose that path alone through a tunnel (not checked) |
-| Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`). `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy, so once computers come to self-host, hiding its row is a wire change (today no agent runs on celld) |
+| Telegram connector | its webhook into the chat's inbox | **off on self-host:** a self-hosted stack's connectors are SimpleX alone (`FRAGMENT_CONNECTORS`; devstack's `celld::connectors`), and its door is refused. `getUpdates` long-polling from the computer is not built. The shell offers Telegram by an agent's runtime, not by the deployment's policy: with computers on celld (seam 2) Settings still shows the row, and hiding it is a wire change, not made |
 | Public and "anyone with the link" sharing | visitors outside the tailnet | "public" means the tailnet |
 | Stripe | `/api/stripe/webhook` | left out |
 
@@ -362,8 +420,8 @@ through the person's browser, so the tailnet is enough.
 7. Models: endpoints for every slot, and embeddings.
 8. Plans and operators: `fragment operator key`; `operators`;
    `default_plan`.
-9. Computers: the Hermes image built (with `FRAGMENT_HOST`) and loaded
-   into the engine (seam 2).
+9. Computers: the krun engine installed and running; the Hermes image
+   built (with `FRAGMENT_HOST`) and loaded into it (seam 2).
 10. Providers: rows dropped or keys brought; OAuth clients for Google,
     Linear and Salesforce.
 11. Connectors: SimpleX alone, for now.
@@ -387,14 +445,15 @@ CELLD_BIN=…/celld cargo xtask dev --runtime celld
 FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
 # the e2e on celld (its node reads OpenBao unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
+# with computers on the box's krun engine (seam 2)
+CELLD_CONTAINER_ENGINE=krun:/var/lib/sandcastle/engine.sock \
+  FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only computers,…
 ```
 
 ## Not yet
 
-- Computers (seam 2): none on celld. devstack's node has no engine
-  (`CELLD_CONTAINER_ENGINE=none`); celld's Docker engine has no egress
-  intercepts or snapshots, which a computer needs; its krun engine
-  (sandcastle's) has both.
+- Computers (seam 2): the platform's own hosts from a computer (found
+  40), and a real agent proven on the krun engine.
 - Sign-in by OpenID Connect (seams 4, 9).
 - Own hardware in points (10), cards (7), macrofiche (5).
 - `celld deploy`: no xtask path yet; this is the dev stack and the e2e.

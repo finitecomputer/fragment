@@ -10,9 +10,12 @@
 //! backend (`secrets_file`: a file of their values, or OpenBao); and the
 //! services it does not run (Email Sending, Images, Browser Rendering,
 //! Workers AI), each with workerd's class, every call rejecting, saying the
-//! node has none. Its node runs no computers (`CELLD_CONTAINER_ENGINE=none`):
-//! the `Computer` class's container is there, not running, and a start
-//! throws (docs/self-host.md, seam 2).
+//! node has none. Its computers run on the container engine
+//! `CELLD_CONTAINER_ENGINE` names (`Engine`): this machine's sandcastle
+//! engine, a microVM per container with the egress intercepts and
+//! snapshots a computer needs, or none, where the `Computer` class's
+//! container is there, not running, and a start throws (docs/self-host.md,
+//! seam 2).
 //!
 //! The node's port is its front door's (front.rs), as on wrangler: celld
 //! listens on a port of its own, which the front door learns from its
@@ -114,17 +117,163 @@ pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".celld/dev")
 }
 
-/// What a celld stack runs on: celld itself (`CELLD_BIN`), and the esbuild
-/// it bundles the cell's entry with (`CELLD_ESBUILD`, else the newest in
-/// worker-build's cache).
+/// The celld node's container engine, from celld's own setting
+/// `CELLD_CONTAINER_ENGINE` (docs/self-host.md, seam 2): `none`, the
+/// default, where it runs no computers; or `krun:<socket>`, this machine's
+/// sandcastle engine (its `engine.sock`), where each computer is a microVM
+/// with the egress intercepts and snapshots the cell's computers use, and
+/// `celld dev` loads into it the images it builds. celld's Docker engine has
+/// neither intercepts nor snapshots, so it is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Engine {
+    None,
+    Krun(PathBuf),
+}
+
+impl Engine {
+    pub const VAR: &'static str = "CELLD_CONTAINER_ENGINE";
+
+    pub fn parse(value: Option<&str>) -> Result<Engine> {
+        match value {
+            None | Some("" | "none") => Ok(Engine::None),
+            Some(v) => match v.strip_prefix("krun:") {
+                Some(socket) if Path::new(socket).is_absolute() => Ok(Engine::Krun(PathBuf::from(socket))),
+                _ if v == "docker" => bail!("{} is none or krun:<socket>: celld's Docker engine has no egress intercepts or snapshots, which a computer needs (docs/self-host.md, seam 2)", Self::VAR),
+                _ => bail!("{} is none or krun:<the absolute path of the engine's socket>, not {v:?}", Self::VAR),
+            },
+        }
+    }
+
+    /// Whether the node runs computers.
+    pub fn computers(&self) -> bool {
+        matches!(self, Engine::Krun(_))
+    }
+
+    /// The value the node is given.
+    pub fn value(&self) -> String {
+        match self {
+            Engine::None => "none".into(),
+            Engine::Krun(socket) => format!("krun:{}", socket.display()),
+        }
+    }
+
+    /// Checks that the engine answers its health (`GET /v1/health`), so a
+    /// stopped engine or a socket this user may not open stops the run at
+    /// once, naming it, and not at a computer's first start.
+    fn check(&self) -> Result<()> {
+        let Engine::Krun(socket) = self else { return Ok(()) };
+        match engine_call(socket, "GET", "/v1/health") {
+            Ok((200, _)) => Ok(()),
+            Ok((status, body)) => bail!("the krun engine at {} answers its health with {status}: {}", socket.display(), String::from_utf8_lossy(&body)),
+            Err(e) => bail!("the krun engine at {} ({}): {e:#} (is its service running, and is this user its client?)", socket.display(), Self::VAR),
+        }
+    }
+
+    /// Destroys the containers a `celld dev` node on `project` left on the
+    /// krun engine, and answers how many: a node that stops reaps its own,
+    /// and one that starts again on the project reaps what it left, but a
+    /// run killed outright (a signal's `kill_started`) left its node no
+    /// chance to, and the engine keeps a VM until it is told. Only this
+    /// project's node's containers are touched (`container_prefix`): the
+    /// engine serves every stack and person on the machine.
+    pub fn remove(&self, project: &Path) -> Result<u32> {
+        let Engine::Krun(socket) = self else { return Ok(0) };
+        let prefix = container_prefix(&dev_node(project)?);
+        let (status, body) = engine_call(socket, "GET", "/v1/containers")?;
+        anyhow::ensure!(status == 200, "the krun engine's containers: {status} {}", String::from_utf8_lossy(&body));
+        let listed: serde_json::Value = serde_json::from_slice(&body).context("the krun engine's containers are JSON")?;
+        let mut removed = 0;
+        // bounded: the engine's containers (at most its VMs)
+        for name in listed.as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()).filter(|n| n.starts_with(&prefix)) {
+            let (status, body) = engine_call(socket, "POST", &format!("/v1/containers/{name}/destroy"))?;
+            anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {name}: {status} {}", String::from_utf8_lossy(&body));
+            removed += 1;
+        }
+        Ok(removed)
+    }
+}
+
+/// The name `celld dev` gives its node on `project` (the fork's dev.rs):
+/// `dev-` and the first 12 hex digits of the SHA-256 of the project's
+/// canonical path. It names the node's containers (`container_prefix`).
+fn dev_node(project: &Path) -> Result<String> {
+    let project = fs::canonicalize(project).with_context(|| format!("resolve {}", project.display()))?;
+    Ok(dev_node_of(&project))
+}
+
+/// `dev_node` of a path already canonical.
+fn dev_node_of(canonical: &Path) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    format!("dev-{}", &format!("{digest:x}")[..12])
+}
+
+/// The start of the name of every container of celld's node `node` (the
+/// fork's container.rs `node_prefix`): `celld-`, the first 6 hex digits of
+/// the SHA-256 of the node's name, and `-`. Leans on celld's naming at the
+/// pinned version (docs/technical-debt-ledger.md).
+fn container_prefix(node: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(node.as_bytes());
+    format!("celld-{}-", &format!("{digest:x}")[..6])
+}
+
+/// An engine answer, at most: its container list is at most its VMs'.
+const ENGINE_ANSWER_BYTES_MAX: u64 = 1 << 20;
+
+/// One call to the krun engine's API on its unix socket (a body-less
+/// request; a POST sends `{}`), within 30 s: its status and body.
+fn engine_call(socket: &Path, method: &str, path: &str) -> Result<(u16, Vec<u8>)> {
+    use std::io::{Read as _, Write as _};
+    let mut c = std::os::unix::net::UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
+    c.set_read_timeout(Some(Duration::from_secs(30)))?;
+    c.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let body: &[u8] = if method == "POST" { b"{}" } else { b"" };
+    write!(c, "{method} {path} HTTP/1.1\r\nhost: engine\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n", body.len())?;
+    c.write_all(body)?;
+    let mut answer = vec![];
+    c.take(ENGINE_ANSWER_BYTES_MAX).read_to_end(&mut answer)?;
+    let end = answer.windows(4).position(|w| w == b"\r\n\r\n").context("the engine's answer has a head")?;
+    let head = String::from_utf8_lossy(&answer[..end]).to_ascii_lowercase();
+    let status = head.split(' ').nth(1).and_then(|s| s.parse().ok()).context("the engine's answer has a status")?;
+    let rest = answer[end + 4..].to_vec();
+    if head.contains("transfer-encoding: chunked") {
+        return Ok((status, unchunk(&rest)?));
+    }
+    Ok((status, rest))
+}
+
+/// A chunked body, joined; one cut short is refused.
+fn unchunk(mut b: &[u8]) -> Result<Vec<u8>> {
+    let mut out = vec![];
+    // bounded by the body: each pass consumes one chunk
+    loop {
+        let line = b.windows(2).position(|w| w == b"\r\n").context("a chunk's size line")?;
+        let size = usize::from_str_radix(String::from_utf8_lossy(&b[..line]).split(';').next().unwrap_or("").trim(), 16).context("a chunk's size")?;
+        b = &b[line + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        anyhow::ensure!(b.len() >= size + 2, "a chunk shorter than its size");
+        out.extend_from_slice(&b[..size]);
+        b = &b[size + 2..];
+    }
+}
+
+/// What a celld stack runs on: celld itself (`CELLD_BIN`), the esbuild it
+/// bundles the cell's entry with (`CELLD_ESBUILD`, else the newest in
+/// worker-build's cache), and the engine its computers run on (`Engine`).
 #[derive(Debug, Clone)]
 pub struct CelldTools {
     pub celld: PathBuf,
     pub esbuild: PathBuf,
+    pub engine: Engine,
 }
 
 impl CelldTools {
     pub fn locate() -> Result<CelldTools> {
+        let engine = Engine::parse(std::env::var(Engine::VAR).ok().as_deref())?;
+        engine.check()?;
         let celld = std::env::var_os("CELLD_BIN")
             .map(PathBuf::from)
             .context("set CELLD_BIN to a celld built from github.com/futurepaul/celld's selfhost line (cargo build --release -p celld)")?;
@@ -138,7 +287,7 @@ impl CelldTools {
         if !esbuild.is_file() {
             bail!("no esbuild at {} (CELLD_ESBUILD)", esbuild.display());
         }
-        Ok(CelldTools { celld, esbuild })
+        Ok(CelldTools { celld, esbuild, engine })
     }
 }
 
@@ -204,10 +353,10 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
         .env("CELLD_FACET_MAX_BYTES", FACET_MAX_BYTES.to_string())
         .env("CELLD_DYNAMIC_LOCKDOWN", "1")
         .env("CELLD_MAX_CELL_REQUESTS", CELL_REQUESTS_MAX.to_string())
-        // the node's own settings: its secrets backend, and no computers
-        // here (seam 2), so its deploy builds no image
+        // the node's own settings: its secrets backend, and its computers'
+        // engine (seam 2): with none, its deploy builds no image
         .env("CELLD_SECRETS_FILE", &secrets)
-        .env("CELLD_CONTAINER_ENGINE", "none")
+        .env(Engine::VAR, tools.engine.value())
         .env("NO_COLOR", "1");
     cmd.current_dir(&opts.project);
     let t0 = Instant::now();
@@ -253,6 +402,68 @@ mod tests {
         fs::write(&users, "{}").unwrap();
         assert!(workos_users_kept(&dir, &users).is_ok(), "its file kept: it starts");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: the node's engine is none unless named, the krun engine by its
+    /// socket's absolute path, given back as celld takes it; celld's Docker
+    /// engine (no intercepts, no snapshots) and anything else are refused,
+    /// saying what is taken. Replay: parsed again, the same.
+    #[test]
+    fn the_engine_is_none_or_krun() {
+        for _ in 0..2 {
+            for none in [None, Some(""), Some("none")] {
+                let e = Engine::parse(none).unwrap();
+                assert_eq!((e.clone(), e.computers(), e.value()), (Engine::None, false, "none".to_string()));
+            }
+            let krun = Engine::parse(Some("krun:/var/lib/sandcastle/engine.sock")).unwrap();
+            assert_eq!(krun, Engine::Krun(PathBuf::from("/var/lib/sandcastle/engine.sock")));
+            assert!(krun.computers());
+            assert_eq!(krun.value(), "krun:/var/lib/sandcastle/engine.sock");
+            let e = Engine::parse(Some("docker")).unwrap_err().to_string();
+            assert!(e.contains("intercepts") && e.contains("snapshots"), "{e}");
+            for bad in ["krun:", "krun:engine.sock", "podman", "krun"] {
+                let e = Engine::parse(Some(bad)).unwrap_err().to_string();
+                assert!(e.contains("krun:<") && e.contains(bad), "{bad}: {e}");
+            }
+        }
+    }
+
+    /// Goal: a project's celld node and its containers are named as celld
+    /// names them (values from the fork's dev.rs and container.rs, for this
+    /// path), so `remove` finds that project's containers and no other's.
+    #[test]
+    fn a_projects_containers_are_named_as_celld_names_them() {
+        assert_eq!(dev_node_of(Path::new("/srv/fragment/target/e2e/0123456789/cell")), "dev-3d91734ffb1d");
+        assert_eq!(container_prefix("dev-3d91734ffb1d"), "celld-0f30ad-");
+        let dir = std::env::temp_dir().join(format!("celld-names-{}", crate::random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        let node = dev_node(&dir).unwrap();
+        assert!(node.starts_with("dev-") && node.len() == 16, "{node}");
+        assert_eq!(dev_node(&dir.join(".")).unwrap(), node, "the canonical path's");
+        let other = dir.join("other");
+        fs::create_dir_all(&other).unwrap();
+        assert_ne!(container_prefix(&dev_node(&other).unwrap()), container_prefix(&node));
+        assert!(dev_node(&dir.join("missing")).is_err());
+        assert_eq!(Engine::None.remove(&dir).unwrap(), 0, "no engine, nothing to remove");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Goal: an engine's chunked answer is joined; one cut short is refused.
+    #[test]
+    fn chunked_answers() {
+        assert_eq!(unchunk(b"4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\n\r\n").unwrap(), b"Wikipedia");
+        assert!(unchunk(b"9\r\nWiki\r\n").is_err());
+        assert!(unchunk(b"zz\r\n").is_err());
+    }
+
+    /// Goal: a krun engine that does not answer stops a stack at once,
+    /// naming its socket; no engine needs no check.
+    #[test]
+    fn an_engine_that_does_not_answer_is_refused() {
+        assert!(Engine::None.check().is_ok());
+        let missing = std::env::temp_dir().join(format!("no-engine-{}.sock", crate::random_hex(6)));
+        let e = Engine::Krun(missing.clone()).check().unwrap_err().to_string();
+        assert!(e.contains(&missing.display().to_string()) && e.contains(Engine::VAR), "{e}");
     }
 
     /// Goal: a self-hosted stack's connectors are the default's but
