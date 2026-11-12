@@ -850,16 +850,27 @@ impl ComputerCell {
     }
 
     async fn call(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-        self.pinned().await?;
         js::invoke(&self.host()?, method, args).await
     }
 
     /// On sandcastle nodes (docs/self-host.md, seam 2), this isolate's host
-    /// pinned to the node its computer was placed on (entry.mjs `pin`),
-    /// once, before any other call reaches it: its container is that node's.
-    /// Not placed yet, nothing runs, and the host answers so; nor on a node
-    /// the deployment no longer lists, whose container no call reaches (a
-    /// wipe then empties its rows, and a start is refused: `place`).
+    /// pinned to the node its computer was placed on (`pinned`), once, where
+    /// everything that reaches the host begins: a request's route and an
+    /// event's drive. Boxed: the rare first time, never a copy in each.
+    async fn pin_host(&self) -> CellResult<()> {
+        if self.cfg.nodes.is_none() || self.pinned.get() {
+            return Ok(());
+        }
+        let pinning: std::pin::Pin<Box<dyn std::future::Future<Output = CellResult<()>> + '_>> = Box::pin(self.pinned());
+        pinning.await
+    }
+
+    /// This isolate's host pinned to the node its computer was placed on
+    /// (entry.mjs `pin`), before any other call reaches it: its container
+    /// is that node's. Not placed yet, nothing runs, and the host answers
+    /// so; nor on a node the deployment no longer lists, whose container no
+    /// call reaches (a wipe then empties its rows, and a start is refused:
+    /// `place`).
     async fn pinned(&self) -> CellResult<()> {
         let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
         if self.pinned.get() {
@@ -884,10 +895,12 @@ impl ComputerCell {
             let probed = js::invoke(&self.host()?, "probe", &[js::to_js(&nodes.probes())]).await?;
             let text = probed.as_string().ok_or_else(|| CellError::host("the nodes' probes answered no JSON text"))?;
             let probes: Vec<fragment_core::placement::Probe> = crate::json_text(&text).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
-            let ranked = fragment_core::placement::rank(nodes, image, &probes).map_err(|why| CellError::new(ErrorCode::UpstreamFailed, why))?;
-            let node = ranked.first().expect("a ranking names a node or says why none");
+            let node = fragment_core::placement::choose(nodes, image, &probes).map_err(|why| CellError::new(ErrorCode::UpstreamFailed, why))?;
             self.set_meta(MetaKey::Node, node)?;
-            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "placed": node, "image": image, "ranked": ranked, "probes": text }));
+            // one line per placement (lesson 14): the computer's id, a node's
+            // id and an image's name are checked tokens, and the probes JSON
+            let id = self.meta(MetaKey::Id)?.unwrap_or_default();
+            console_log!("{{\"computer\":\"{id}\",\"placed\":\"{node}\",\"image\":\"{image}\",\"probes\":{text}}}");
         }
         // pinned for life: a node no longer listed runs it nowhere else
         // (moving one is not built)
@@ -1109,6 +1122,7 @@ impl ComputerCell {
     /// make the start and its `Ready` while the request awaited that).
     async fn drive_events(&self, first: Option<Event>, mut answer: Option<&mut Option<ComputerView>>) -> CellResult<Option<String>> {
         let mut queue: Vec<Event> = first.into_iter().collect();
+        self.pin_host().await?;
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
             queue.push(exited);
@@ -1569,8 +1583,12 @@ impl ComputerCell {
     /// way. Nothing awaits between reading the saves and recording it.
     async fn plan(&self, generation: u64) -> CellResult<Planned> {
         let image = self.must(MetaKey::Image)?;
-        // on sandcastle nodes it is placed first (docs/self-host.md, seam 2)
-        self.place(&image).await?;
+        // on sandcastle nodes it is placed first (docs/self-host.md, seam
+        // 2); boxed, so a start on the runtime's containers carries none of it
+        if self.cfg.nodes.is_some() {
+            let placing: std::pin::Pin<Box<dyn std::future::Future<Output = CellResult<()>> + '_>> = Box::pin(self.place(&image));
+            placing.await?;
+        }
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
@@ -2723,6 +2741,9 @@ impl ComputerCell {
         if !wipe && path != "/computer/test" {
             self.schema.ready()?;
         }
+        if self.schema.ready().is_ok() {
+            self.pin_host().await?;
+        }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
             Some("node-egress") => return self.node_egress(req).await,
@@ -2946,7 +2967,9 @@ impl ComputerCell {
                         Some(why) => self.set_meta(MetaKey::NodeNote, why)?,
                         None => self.delete_meta(MetaKey::NodeNote)?,
                     }
-                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "node": self.meta(MetaKey::Node)?, "generation": b.generation, "down": b.down }));
+                    let (id, node) = (self.meta(MetaKey::Id)?.unwrap_or_default(), self.meta(MetaKey::Node)?.unwrap_or_default());
+                    let down = b.down.as_deref().map_or_else(|| "null".to_string(), |d| serde_json::to_string(d).expect("a string encodes"));
+                    console_log!("{{\"computer\":\"{id}\",\"node\":\"{node}\",\"generation\":{},\"down\":{down}}}", b.generation);
                     if had != b.down {
                         self.tell_owner().await;
                     }
@@ -3497,7 +3520,9 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::NotFound, "this deployment runs no computers on nodes"));
         }
         if !self.adopted.get() {
-            self.drive_events(None, None).await?;
+            // boxed: the take-over is `drive_events`', never a copy of it here
+            let taking: std::pin::Pin<Box<dyn std::future::Future<Output = CellResult<Option<String>>> + '_>> = Box::pin(self.drive_events(None, None));
+            taking.await?;
         }
         let out = self.call("nodeEgress", &[JsValue::from(req.inner())]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the node's egress answered no Response"))?;

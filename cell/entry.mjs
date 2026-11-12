@@ -340,12 +340,13 @@ class ContainerHost {
 
   // This host runs its container on node `p` from now on (fragment_core::
   // placement `Pin`: the node computer.rs placed the computer on, what
-  // this needs of it, and the container's name there), and has its node's
-  // word on that container first. Pinned already, the same node or a refusal.
+  // this needs of it, the container's name there, and the images it runs
+  // as [name, reference] pairs), and has its node's word on that container
+  // first. Pinned already, the same node or a refusal.
   async pin(p) {
     if (!this.#node) {
       const node = nodeOf(this.#env, p);
-      const container = new NodeContainer(node, p.container, p.images);
+      const container = new NodeContainer(node, p.container, Object.fromEntries(p.images));
       await container.refresh();
       // a call that pinned it meanwhile keeps its own
       if (!this.#node) {

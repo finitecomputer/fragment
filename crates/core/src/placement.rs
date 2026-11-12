@@ -21,7 +21,7 @@
 //!   tell its owner an update is ready.
 //!
 //! A computer is placed at its first start and stays on that node for its
-//! life: its snapshots are the node's. The rule (`rank`): of the nodes that
+//! life: its snapshots are the node's. The rule (`choose`): of the nodes that
 //! answer their health, report the architecture they are listed with and
 //! have an image for the computer's name, the one with the most room among
 //! its VMs (its engine's `vms_max` less its `vms`); a tie goes to the node
@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 /// The most nodes a deployment lists: every one is probed at once.
 pub const NODES_MAX: usize = 16;
@@ -87,12 +88,13 @@ pub struct Node {
     pub arch: Arch,
 }
 
-/// A deployment's nodes and images, checked.
+/// A deployment's nodes and images, checked. Plain lists, in the order the
+/// list names them (images by name): a few of each, read by a scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nodes {
     nodes: Vec<Node>,
     /// Each image's reference by architecture.
-    images: BTreeMap<String, BTreeMap<Arch, String>>,
+    images: Vec<(String, Vec<(Arch, String)>)>,
 }
 
 /// Why `FRAGMENT_NODES` is refused: the cell refuses every computer's
@@ -128,9 +130,12 @@ impl fmt::Display for NodesError {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Wire {
+struct Wire<'a> {
     nodes: Vec<WireNode>,
-    images: BTreeMap<String, WireRefs>,
+    /// Each image's reference(s), read by `refs`: one for every
+    /// architecture, or an object of one per architecture.
+    #[serde(borrow)]
+    images: BTreeMap<String, &'a RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -141,11 +146,16 @@ struct WireNode {
     arch: Arch,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WireRefs {
-    Every(String),
-    ByArch(BTreeMap<Arch, String>),
+/// An image's reference(s) as the list writes them: a string, the one for
+/// every architecture; or an object, one for each architecture it names.
+fn refs(raw: &RawValue) -> Result<Vec<(Arch, String)>, String> {
+    let text = raw.get().as_bytes();
+    if text.first() == Some(&b'"') {
+        let every: String = serde_json::from_slice(text).map_err(|e| e.to_string())?;
+        return Ok(Arch::ALL.iter().map(|a| (*a, every.clone())).collect());
+    }
+    let by_arch: BTreeMap<Arch, String> = serde_json::from_slice(text).map_err(|e| format!("a reference, or one per architecture (x86_64, aarch64): {e}"))?;
+    Ok(by_arch.into_iter().collect())
 }
 
 /// A node's id: 1 to 32 of a-z, 0-9 and `-` (sandcastle's ids are these).
@@ -209,23 +219,20 @@ impl Nodes {
         if wire.images.is_empty() || wire.images.len() > IMAGES_MAX {
             return Err(NodesError::Image { image: String::new(), why: format!("1 to {IMAGES_MAX} images, not {}", wire.images.len()) });
         }
-        let mut images = BTreeMap::new();
-        for (name, refs) in wire.images {
+        let mut images = Vec::with_capacity(wire.images.len());
+        for (name, raw) in wire.images {
             let bad = |why: String| NodesError::Image { image: name.clone(), why };
             if !valid_image_name(&name) {
                 return Err(bad(format!("a name is 1 to {IMAGE_NAME_BYTES_MAX} of a-z, 0-9 and ._-")));
             }
-            let by_arch: BTreeMap<Arch, String> = match refs {
-                WireRefs::Every(r) => Arch::ALL.into_iter().map(|a| (a, r.clone())).collect(),
-                WireRefs::ByArch(m) => m,
-            };
+            let by_arch = refs(raw).map_err(bad)?;
             if by_arch.is_empty() {
                 return Err(bad("a reference, or one for at least one architecture".into()));
             }
-            if let Some(r) = by_arch.values().find(|r| !pinned_by_digest(r)) {
+            if let Some((_, r)) = by_arch.iter().find(|(_, r)| !pinned_by_digest(r)) {
                 return Err(bad(format!("{r:?} is not pinned by its digest (<name>@sha256:<64 hex>, at most {REFERENCE_BYTES_MAX} bytes)")));
             }
-            images.insert(name, by_arch);
+            images.push((name, by_arch));
         }
         Ok(Nodes { nodes, images })
     }
@@ -241,12 +248,13 @@ impl Nodes {
 
     /// The image names computers may be pinned to.
     pub fn image_names(&self) -> Vec<&str> {
-        self.images.keys().map(String::as_str).collect()
+        self.images.iter().map(|(n, _)| n.as_str()).collect()
     }
 
     /// What `image` is on a node of `arch`, if the deployment names one.
     pub fn reference(&self, image: &str, arch: Arch) -> Option<&str> {
-        self.images.get(image)?.get(&arch).map(String::as_str)
+        let (_, refs) = self.images.iter().find(|(n, _)| n == image)?;
+        refs.iter().find(|(a, _)| *a == arch).map(|(_, r)| r.as_str())
     }
 
     /// What `image` is on the node a computer is placed on (`placed`), or,
@@ -264,7 +272,7 @@ impl Nodes {
     /// images it runs by name. None for a node the deployment no longer lists.
     pub fn pin(&self, id: &str, container: &str) -> Option<Pin> {
         let node = self.get(id)?;
-        let images = self.images.iter().filter_map(|(name, refs)| refs.get(&node.arch).map(|r| (name.clone(), r.clone()))).collect();
+        let images = self.images.iter().filter_map(|(name, _)| self.reference(name, node.arch).map(|r| (name.clone(), r.to_string()))).collect();
         Some(Pin { id: node.id.clone(), url: node.url.clone(), secret: secret_binding(&node.id), container: container.to_string(), images })
     }
 
@@ -283,8 +291,9 @@ pub struct Pin {
     pub secret: String,
     /// The container's name on the node: the computer's id.
     pub container: String,
-    /// Each image it runs, by name.
-    pub images: BTreeMap<String, String>,
+    /// Each image it runs: its name and reference, as pairs (entry.mjs
+    /// makes them an object).
+    pub images: Vec<(String, String)>,
 }
 
 /// A node as a probe asks it.
@@ -314,13 +323,13 @@ pub struct Probe {
     pub vms_max: Option<u32>,
 }
 
-/// The nodes a computer pinned to `image` may be placed on, best first
-/// (the module's rule), or why none: each node's reason, in the list's
-/// order.
-pub fn rank(nodes: &Nodes, image: &str, probes: &[Probe]) -> Result<Vec<String>, String> {
-    let mut able: Vec<(usize, u32, String)> = vec![];
+/// The node a computer pinned to `image` is placed on (the module's rule),
+/// or why none: each node's reason, in the list's order.
+pub fn choose<'a>(nodes: &'a Nodes, image: &str, probes: &[Probe]) -> Result<&'a str, String> {
+    // the most room so far, and its node: a tie keeps the one listed first
+    let mut best: Option<(u32, &str)> = None;
     let mut why: Vec<String> = vec![];
-    for (order, node) in nodes.nodes.iter().enumerate() {
+    for node in &nodes.nodes {
         let probe = probes.iter().find(|p| p.id == node.id);
         let reason = match probe {
             None => Some("not probed".to_string()),
@@ -329,7 +338,9 @@ pub fn rank(nodes: &Nodes, image: &str, probes: &[Probe]) -> Result<Vec<String>,
             Some(_) if nodes.reference(image, node.arch).is_none() => Some(format!("the deployment names no {image} image for {}", node.arch.name())),
             Some(Probe { vms: Some(vms), vms_max: Some(max), .. }) if vms >= max => Some(format!("full: {vms} of {max} VMs")),
             Some(Probe { vms: Some(vms), vms_max: Some(max), .. }) => {
-                able.push((order, max - vms, node.id.clone()));
+                if best.is_none_or(|(room, _)| max - vms > room) {
+                    best = Some((max - vms, &node.id));
+                }
                 None
             }
             Some(_) => Some("its health names no VMs".to_string()),
@@ -338,12 +349,7 @@ pub fn rank(nodes: &Nodes, image: &str, probes: &[Probe]) -> Result<Vec<String>,
             why.push(format!("{}: {r}", node.id));
         }
     }
-    if able.is_empty() {
-        return Err(format!("no node can run it ({})", why.join("; ")));
-    }
-    // the most room first; a tie to the one listed first
-    able.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    Ok(able.into_iter().map(|(_, _, id)| id).collect())
+    best.map(|(_, id)| id).ok_or_else(|| format!("no node can run it ({})", why.join("; ")))
 }
 
 #[cfg(test)]
@@ -424,6 +430,8 @@ mod tests {
             assert!(e.to_string().contains("pinned by its digest"), "{reference}: {e}");
         }
         assert!(matches!(with(&|v| v["images"]["hermes"] = serde_json::json!({})), NodesError::Image { .. }));
+        assert!(matches!(with(&|v| v["images"]["hermes"] = serde_json::json!({ "sparc": format!("x@sha256:{}", digest('b')) })), NodesError::Image { .. }));
+        assert!(matches!(with(&|v| v["images"]["hermes"] = serde_json::json!(7)), NodesError::Image { .. }));
     }
 
     /// Goal: a node's secret is bound by a name the id names alone, one to
@@ -436,7 +444,7 @@ mod tests {
         let pin = n.pin("mac-1", "computer:00").unwrap();
         assert_eq!((pin.url.as_str(), pin.secret.as_str(), pin.container.as_str()), ("https://mac.lan:9400", "FRAGMENT_NODE_SECRET_MAC_1", "computer:00"));
         // a node runs the images of its architecture alone
-        assert_eq!(pin.images.keys().collect::<Vec<_>>(), ["stub"]);
+        assert_eq!(pin.images.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["stub"]);
         assert_eq!(n.pin("box", "c").unwrap().images.len(), 2);
         assert!(n.pin("gone", "c").is_none());
         assert_eq!(n.probes().iter().map(|a| a.secret.as_str()).collect::<Vec<_>>(), ["FRAGMENT_NODE_SECRET_BOX", "FRAGMENT_NODE_SECRET_MAC_1"]);
@@ -450,21 +458,21 @@ mod tests {
     fn the_rule() {
         let n = Nodes::parse(&list()).unwrap();
         let both = [up("box", "x86_64", 3, 16), up("mac-1", "aarch64", 1, 8)];
-        assert_eq!(rank(&n, "stub", &both).unwrap(), ["box", "mac-1"], "13 free before 7");
+        assert_eq!(choose(&n, "stub", &both).unwrap(), "box", "13 free before 7");
         let even = [up("box", "x86_64", 8, 16), up("mac-1", "aarch64", 0, 8)];
-        assert_eq!(rank(&n, "stub", &even).unwrap(), ["box", "mac-1"], "a tie to the first listed");
+        assert_eq!(choose(&n, "stub", &even).unwrap(), "box", "a tie to the first listed");
         let roomier = [up("box", "x86_64", 15, 16), up("mac-1", "aarch64", 0, 8)];
-        assert_eq!(rank(&n, "stub", &roomier).unwrap(), ["mac-1", "box"]);
+        assert_eq!(choose(&n, "stub", &roomier).unwrap(), "mac-1");
         // hermes is the box's alone
-        assert_eq!(rank(&n, "hermes", &roomier).unwrap(), ["box"]);
-        let e = rank(&n, "hermes", &[up("box", "x86_64", 16, 16), up("mac-1", "aarch64", 0, 8)]).unwrap_err();
+        assert_eq!(choose(&n, "hermes", &roomier).unwrap(), "box");
+        let e = choose(&n, "hermes", &[up("box", "x86_64", 16, 16), up("mac-1", "aarch64", 0, 8)]).unwrap_err();
         assert!(e.contains("box: full: 16 of 16 VMs") && e.contains("mac-1: the deployment names no hermes image for aarch64"), "{e}");
         let down = Probe { id: "box".into(), down: Some("no answer within 6 s".into()), arch: None, vms: None, vms_max: None };
-        let e = rank(&n, "stub", &[down.clone(), up("mac-1", "x86_64", 0, 8)]).unwrap_err();
+        let e = choose(&n, "stub", &[down.clone(), up("mac-1", "x86_64", 0, 8)]).unwrap_err();
         assert!(e.contains("box: down: no answer within 6 s") && e.contains("mac-1: it reports x86_64, not aarch64 as listed"), "{e}");
-        assert_eq!(rank(&n, "stub", &[down, up("mac-1", "aarch64", 7, 8)]).unwrap(), ["mac-1"]);
+        assert_eq!(choose(&n, "stub", &[down, up("mac-1", "aarch64", 7, 8)]).unwrap(), "mac-1");
         let silent = Probe { vms: None, ..up("box", "x86_64", 0, 0) };
-        assert!(rank(&n, "stub", &[silent]).unwrap_err().contains("box: its health names no VMs"));
-        assert!(rank(&n, "stub", &[]).unwrap_err().contains("box: not probed"));
+        assert!(choose(&n, "stub", &[silent]).unwrap_err().contains("box: its health names no VMs"));
+        assert!(choose(&n, "stub", &[]).unwrap_err().contains("box: not probed"));
     }
 }
