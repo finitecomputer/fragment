@@ -1233,7 +1233,7 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 
     // Hermes shrinks a screenshot a call refused as too large to 5 MiB of
     // data URL and tries once more: that call fits
-    let calls = s.ai.calls().len();
+    let (calls, charged) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
     let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
     let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
@@ -1242,7 +1242,12 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && sent == Some(shrunk.len()),
         json!({ "status": r.status, "sent": sent, "message": r.message() }),
     );
-    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    // its charge lands through the ledger's queue after its answer (on celld
+    // more than a second after): the count the next call is held to is
+    // taken once it has landed
+    let landed = s.eventually(wait, || aig().len() == charged + 1);
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    anyhow::ensure!(landed, "the shrunk call's charge lands: {before} rows, {charged} before it");
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
     let sent = api.signed(hand, "POST", route, Some(&look(&over)));
     let untouched = s.ai.calls().len() == calls && aig().len() == before;
