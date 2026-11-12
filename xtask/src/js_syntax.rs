@@ -323,7 +323,7 @@ mod tests {
         // tests, and the board's, brain's and Telegram connector's apps' and the slides'
         // build's and presenter's (beside the templates crate: a file under templates/
         // would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs", "cell/secrets.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs", "cell/node.test.mjs", "cell/secrets.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");
