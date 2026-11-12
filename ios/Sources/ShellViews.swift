@@ -159,7 +159,7 @@ struct SidebarView: View {
         // scroll edge), never a hard cut where the list ends; the first agent
         // starts at the top, the sidebar closed by a swipe or by going somewhere.
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]) {
+            LazyVStack(alignment: .leading, spacing: 4, pinnedViews: [.sectionHeaders]) {
                 ForEach(library.sidebarAgents) { agent in
                     // its row pinned at the top while its chats scroll under it
                     Section {
@@ -263,7 +263,7 @@ struct SidebarView: View {
     }
     private func chatRow(_ chat: FragmentSummary) -> some View {
         Button { navigate(.chat(chat.name)) } label: {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(chat.displayTitle).font(.subheadline.weight(.medium)).lineLimit(1)
                     Spacer(minLength: 4)
@@ -275,7 +275,7 @@ struct SidebarView: View {
                     }
                     Text(chat.preview ?? "No messages yet").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-            }.padding(.horizontal, 12).padding(.vertical, 9).frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(.horizontal, 12).padding(.vertical, 8).frame(maxWidth: .infinity, alignment: .leading)
                 .background(page == .chat(chat.name) ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }.buttonStyle(.plain).accessibilityIdentifier("sidebarChat-\(chat.name)")
         .contextMenu { chatActions(chat) }
