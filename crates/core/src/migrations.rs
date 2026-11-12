@@ -1899,4 +1899,48 @@ mod tests {
             }
         }
     }
+
+    /// Goal: a good import waiting for staff (`retiring`, no command)
+    /// never reaches the release before #1263, which reads that row but
+    /// not its meaning: its staff ops refuse it, and once its stage's
+    /// keep passes it holds it `retire_timed_out`, whose `retry` retires
+    /// the old agent. Its object holds step 7, which that release refuses
+    /// before it reads a row, at every call and alarm (`schema_refused`),
+    /// whether the stage was kept or swept; nothing changes, and rolled
+    /// forward, staff's retry imports again. Method: a waiting move, before
+    /// and after its keep, written as the cell writes it on this code's
+    /// object; started by the code of six steps; then by this code again.
+    #[test]
+    fn a_move_waiting_for_staff_is_refused_by_the_release_before() {
+        use crate::migrate::{self, host::Lite, Db, Ran, SchemaError, MIGRATIONS};
+        let before = migrate::Class { steps: &MIGRATIONS.steps[..6], ..MIGRATIONS };
+        let newest = MIGRATIONS.steps.len() as u32;
+        let waiting = to(done(&importing(), AGENT, "prj_1.p1.1", &ok(), T0 + 100));
+        assert_eq!((waiting.state, waiting.command, waiting.deadline()), (MoveState::Retiring, None, Some(T0 + 10 + KEEP_MS)));
+        let swept = tick(&waiting, T0 + 10 + KEEP_MS).expect("its keep").to;
+        assert_eq!((swept.state, swept.command, swept.deadline()), (MoveState::Retiring, None, None), "its stage gone, no deadline left");
+        let literal = |c: Col| match c {
+            Col::Null => "NULL".to_string(),
+            Col::Int(n) => n.to_string(),
+            Col::Text(t) => format!("'{}'", t.replace('\'', "''")),
+        };
+        for m in [waiting, swept] {
+            let db = Lite::new();
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &MIGRATIONS, T0)), Ok(Ran::Made { version: newest }));
+            let values: Vec<String> = m.values().into_iter().map(literal).collect();
+            db.exec(&format!("INSERT INTO moves ({}, offer) VALUES ({}, '')", COLUMNS.join(", "), values.join(", "))).expect("written as this code writes it");
+            let refused = db.transaction(|db| migrate::migrate(db, &before, T0 + 200));
+            assert_eq!(refused, Err(SchemaError::Newer { class: "Migrations", held: newest, known: 6 }), "the release before refuses the object");
+            assert_eq!(migrate::held(&db, &MIGRATIONS).expect("held").len() as u32, newest, "unchanged");
+            // rolled forward: this code takes it, the move as it was
+            assert_eq!(db.transaction(|db| migrate::migrate(db, &MIGRATIONS, T0 + 300)), Ok(Ran::Current { version: newest }));
+            let rows = db.rows("SELECT * FROM moves").expect("its moves");
+            let back = Move::read(&rows[0]).expect("a move reads back");
+            assert_eq!(back, m, "nothing changed");
+            // and staff's retry imports again, never retires
+            let again = to(retry(&back, T0 + 400));
+            assert_eq!((again.state, again.phase, again.attempt), (MoveState::Asked, Phase::P1, m.attempt + 1));
+            assert!(!matches!(again.command, Some(Act::Retire(_))), "{:?}", again.command);
+        }
+    }
 }

@@ -366,6 +366,13 @@ agent has no moved mark, so finite.computer does not redirect its person
 yet. Staff find them in `fragment operator moves --json`: `retiring`
 with no `command`.
 
+The release before this one reads such a row as a `retiring` move whose
+command is lost: its staff ops refuse it, and past its stage's keep its
+`retry` would retire the old agent. So the release that writes it is
+forward only (Migrations step 7, docs/MODEL.md "Schemas"): the object
+refuses the older code, and a failed deploy is fixed forward, never
+rolled back across it.
+
 Staff act on a held move: `retry` (a new attempt; a held phase 2 import,
 its kept stage again, while it is kept), `restart-old` (the old agent
 runs again, the offer is open again), `retire` (the import went well
