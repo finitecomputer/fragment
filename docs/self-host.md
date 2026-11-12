@@ -145,7 +145,8 @@ The old lane's numbering is kept.
 49. **The dev WorkOS fake's adoption reads wrangler's state layout**
     (`devstack::signed_in_subjects`): on celld it finds no one, so a dev
     stack on celld keeps its fake's subjects in the fake's own file alone.
-    A celld state that outlived that file is refused at start
+    Both runtimes' stacks share that file, so a celld state that outlived
+    it is refused at any dev start, on either runtime
     (`celld::workos_users_kept`; `--clean` starts afresh): a fresh fake
     would hand a known subject to another email.
 50. **celld caps an object's requests in flight at 64**

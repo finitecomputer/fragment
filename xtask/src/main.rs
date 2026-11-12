@@ -278,19 +278,7 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
-            // on celld, its users file is the fake's only record of the
-            // subjects it handed out (`celld::workos_users_kept`)
-            if celld.is_some() {
-                devstack::celld::workos_users_kept(&devstack::cell_dir(), &workos_users)?;
-            }
-            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
-            // its users kept as the node keeps its people (who sign in by
-            // subject), and every subject the node signs someone in by taken
-            // as it is (a node from before the file, or one whose file
-            // went): a fake made new each start would give the first email
-            // to sign in the subject of whoever had it before
-            fake.keep_users_in(&workos_users)?;
-            fake.adopt(&devstack::signed_in_subjects(&devstack::cell_dir(), &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
+            let fake = dev_workos_fake(&devstack::cell_dir(), &workos_users, DEV_WORKOS_PORT)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
@@ -437,6 +425,23 @@ fn dev(args: &[String]) -> Result<()> {
         println!("removed {} containers the dev node left", removed.containers);
     }
     Ok(())
+}
+
+/// Dev's WorkOS fake on `port`, its users kept in `users_file`, and every
+/// subject `project`'s node signs someone in by taken as it is (a node from
+/// before the file, or one whose file went): a fake made new each start
+/// would give the first email to sign in the subject of whoever had it
+/// before. A celld state's subjects are in that file alone (devstack reads
+/// wrangler's state, not celld's), and both runtimes' stacks share it, so a
+/// celld state that outlived it is refused whichever runtime starts
+/// (`celld::workos_users_kept`): a start on wrangler would otherwise make the
+/// file afresh, for celld to take as its record.
+fn dev_workos_fake(project: &Path, users_file: &Path, port: u16) -> Result<fragment_fakes::workos::WorkOs> {
+    devstack::celld::workos_users_kept(project, users_file)?;
+    let fake = fragment_fakes::workos::WorkOs::start_on(port, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+    fake.keep_users_in(users_file)?;
+    fake.adopt(&devstack::signed_in_subjects(project, &format!("workos:{DEV_WORKOS_CLIENT}"))?)?;
+    Ok(fake)
 }
 
 /// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
@@ -730,6 +735,36 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a celld state that outlived dev's WorkOS users file is
+    /// refused whichever runtime starts next, so a start on wrangler never
+    /// makes the shared file afresh for celld to take as its record (a
+    /// review of #1253: a known subject handed to another email). Method:
+    /// a project with celld's state and the fake's file; the file lost;
+    /// starts as each runtime would; then `--clean`'s clearing. Replay: the
+    /// refusal again, and the file still not made.
+    #[test]
+    fn a_lost_users_file_beside_celld_state_is_refused_on_either_runtime() {
+        let dir = std::env::temp_dir().join(format!("dev-workos-{}", super::devstack::random_hex(6)));
+        let (project, users) = (dir.join("cell"), dir.join("workos.json"));
+        std::fs::create_dir_all(&project).unwrap();
+        // a first celld stack: its fake's file, then its node's state
+        let alice = super::dev_workos_fake(&project, &users, 0).expect("a first start").user("alice@example.com").id;
+        std::fs::create_dir_all(super::devstack::celld::state_dir(&project)).unwrap();
+        assert!(users.exists(), "the fake kept its users");
+        assert!(super::dev_workos_fake(&project, &users, 0).is_ok_and(|f| f.user("alice@example.com").id == alice), "a restart with both");
+        std::fs::remove_file(&users).unwrap();
+        // a start on wrangler, then celld, then wrangler again: one path
+        for start in ["wrangler", "celld", "wrangler"] {
+            let refused = super::dev_workos_fake(&project, &users, 0).map(|f| f.user("bob@example.com").id);
+            assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("--clean")), "{start}: {refused:?} (alice was {alice})");
+            assert!(!users.exists(), "a refused start makes no users file for the next to take");
+        }
+        // --clean clears both runtimes' state and the file: a fresh start
+        super::devstack::clear_state(&project).unwrap();
+        assert!(super::dev_workos_fake(&project, &users, 0).is_ok(), "after --clean, a fresh start");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
     /// `--models` without its config, and `--models` without `--real-agent`
     /// are refused before anything builds.
