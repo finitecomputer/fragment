@@ -274,6 +274,14 @@ pub const SEVERAL_ENV: &str = "E2E_SEVERAL_TOKEN";
 /// (`fragment_fakes::workos::ACCOUNT_HOSTS_UNDER`), each account's own host
 /// the one its Pipes metadata names.
 pub const ORG_CONNECTION: &str = "e2e-org";
+/// A connection whose OAuth client authenticates with HTTP Basic (its
+/// row's `client_auth`, as Zoom's, Airtable's, Xero's and Notion's token
+/// endpoints ask), through the WorkOS fake's stand-in provider's client
+/// that takes its header alone (`fragment_fakes::workos::BASIC_CLIENT`);
+/// `e2e-oauth`'s authenticates in the body, so both run.
+pub const BASIC_CONNECTION: &str = "e2e-basic";
+pub const BASIC_CONNECTION_HOST: &str = "basic.test";
+pub const BASIC_CONNECTION_ENV: &str = "E2E_BASIC_TOKEN";
 pub const ORG_CONNECTION_HOST: &str = "login.org.test";
 pub const ORG_CONNECTION_ENV: &str = "E2E_ORG_TOKEN";
 pub const SWAP_OWN: &str = "e2e-mail";
@@ -896,13 +904,14 @@ impl Suite {
                 rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
                 rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().one_access_connection_oauth(), "accounts_max": SEVERAL_MAX }));
                 rows.as_array_mut().expect("catalog").push(json!({ "name": ORG_CONNECTION, "kind": "connection", "hosts": [ORG_CONNECTION_HOST], "account_host": { "metadata": "instance_url", "under": fragment_fakes::workos::ACCOUNT_HOSTS_UNDER }, "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [ORG_CONNECTION_ENV], "connection_oauth": self.workos.node().connection_oauth() }));
+                rows.as_array_mut().expect("catalog").push(json!({ "name": BASIC_CONNECTION, "kind": "connection", "hosts": [BASIC_CONNECTION_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [BASIC_CONNECTION_ENV], "client_auth": "basic", "connection_oauth": self.workos.node().basic_connection_oauth() }));
                 if self.shape == Shape::OneKeyMore {
                     rows.as_array_mut().expect("catalog").push(added_key_row());
                 }
                 rows.to_string()
             }),
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
-            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
+            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into()), (BASIC_CONNECTION.into(), fragment_fakes::workos::BASIC_CLIENT.1.into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
             // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
             connectors: self.on_celld().then(devstack::celld::connectors),

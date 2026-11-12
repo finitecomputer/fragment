@@ -1791,6 +1791,13 @@ mod tests {
         let bound = bound_for(&d, None).unwrap();
         assert!(bound.operator_keys.is_empty());
         assert!(bound.cell().contains(&("CONNECTION_SECRET_GOOGLE".into(), "fragment-google-oauth-secret")));
+        // how its client authenticates reaches the cell's catalog as its row says it
+        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("client_auth"), "a row that names none is as it was");
+        d.providers[0]["client_auth"] = "basic".into();
+        assert!(serde_json::to_string(catalog_of(&d).unwrap().0.providers()).unwrap().contains(r#""client_auth":"basic""#));
+        d.providers[0]["client_auth"] = "digest".into();
+        assert!(catalog_of(&d).is_err(), "a way to authenticate the catalog does not know");
+        d.providers[0].as_object_mut().unwrap().remove("client_auth");
         d.providers[0].as_object_mut().unwrap().remove("key");
         assert!(catalog_of(&d).is_err(), "configured OAuth needs its secret binding");
         d.providers[0].as_object_mut().unwrap().remove("connection_oauth");
