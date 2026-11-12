@@ -25,6 +25,7 @@ mod export;
 mod faces;
 mod deliver;
 mod doc;
+mod door;
 mod finite_private;
 mod search;
 mod search_across;
