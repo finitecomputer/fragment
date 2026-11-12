@@ -355,6 +355,7 @@ fn dev(args: &[String]) -> Result<()> {
         operator_key_values: DEV_OPERATOR_KEYS.iter().map(|(name, _, key)| (name.to_string(), key.to_string())).collect(),
         connection_secret_values: workos_fake.as_ref().map(|_| vec![(DEV_CONNECTION.into(), "mock-connection-secret".into())]).unwrap_or_default(),
         swap_upstream: None,
+        unbound: &[],
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;

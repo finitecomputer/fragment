@@ -15,6 +15,11 @@ supplies other implementations of the same interfaces. The cell never
 asks "am I self-hosted?": it reads what it has from its configuration and
 its bindings. A mode flag is a design bug.
 
+The e2e checks the cell without a service on wrangler too: its `unbound`
+section restarts the node with those bindings left out of its config
+(`devstack::Fleet::unbound`), so master's own runs keep each degradation
+working.
+
 ## 3. Models from a file
 
 `cargo xtask dev` reads `FRAGMENT_MODELS_FILE`: a deployment's `models`
@@ -38,3 +43,13 @@ self-hosted model names its price in its slot, zero for the box's own:
 ```sh
 FRAGMENT_MODELS_FILE=models.jsonc FRAGMENT_MODEL_KEY_FILE=model-key cargo xtask dev
 ```
+
+## Mail
+
+Master mails through Email Sending's binding (`EMAIL`), or in dev and the
+e2e through the fake. A self-hosted deployment has neither: `mail::send`
+sends nothing, logs one `mail.unsent` warning ("email not sent: this
+runtime has no mailer, not yet implemented") and answers no message id,
+never an error. An invite still waits for its person's yes; a key is still
+added; an org's `mailed` and a trial's `sent` say false. Debt:
+docs/technical-debt-ledger.md, "No mail without Email Sending".
