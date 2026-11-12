@@ -278,7 +278,7 @@ pub(crate) type SlotKeys = Vec<(String, String)>;
 /// The deployment's models (`models`, `models_cell`), when it names them.
 fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     let Some(models) = &d.models else { return Ok((None, vec![])) };
-    let (cell, keys) = models_cell(models)?;
+    let (cell, keys) = models_cell(models, false)?;
     Ok((Some(cell), keys))
 }
 
@@ -286,9 +286,10 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
 /// slot's upstream less its key) and the store secret each slot on an
 /// OpenAI-compatible API names for its key. Such a slot names one; a
 /// Workers AI slot names none. Checked as the cell checks them
-/// (`fragment_core::models::Models::parse`), on no local address. `cargo
-/// xtask dev --real-agent` reads one too (dev_agent.rs).
-pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
+/// (`fragment_core::models::Models::parse`), on no local address unless
+/// `local` (a local fleet's models file, whose egress reaches this
+/// machine). `cargo xtask dev --real-agent` reads one too (dev_agent.rs).
+pub(crate) fn models_cell(models: &Value, local: bool) -> Result<(Value, SlotKeys)> {
     let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
     let mut cell = serde_json::Map::new();
     let mut keys = vec![];
@@ -310,7 +311,7 @@ pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
     }
     let cell = Value::Object(cell);
     let text = cell.to_string();
-    fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), false).map_err(|e| anyhow::anyhow!("{e}"))?;
+    fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), local).map_err(|e| anyhow::anyhow!("{e}"))?;
     if text.len() > WORKER_VAR_MAX_BYTES {
         bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
     }

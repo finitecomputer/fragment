@@ -36,6 +36,11 @@ only from that computer's egress, toward that provider.
   is in use within a minute, with no deploy. A binding whose secret the
   store lacks is an error; nothing falls back to a Worker secret or
   variable.
+  On celld, which has no Secrets Store, stand-ins with the same face
+  (`get()`) take the bindings' places, named by the Worker variable
+  `FRAGMENT_SECRETS` and backed by OpenBao or by variables
+  (cell/secrets.mjs; docs/self-host.md, seam 12); unset, as on
+  Cloudflare, the bindings are the store's.
 - **App code holds no key.** It runs in a loader isolate whose env the
   platform builds (`js::app_env`), so it names no deployment secret. A
   job's `job.fetch` names a fragment secret as `{{NAME}}` in a header or

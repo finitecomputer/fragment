@@ -35,7 +35,7 @@ fn person(workos_id: &str, olds: &[&str]) -> RosterPerson {
 }
 
 pub fn moves(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move", &[Need::Fakes, Need::Deployment, Need::Levers]) {
+    if !s.section("move", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Move]) {
         return Ok(());
     }
     let mover = Mover::new(&api.base, s.mover.clone());
@@ -643,7 +643,7 @@ fn offer(s: &mut Suite, api: &Api, mover: &Mover, run: &str, later_by: &dyn Fn(i
 pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
     use super::computers::{agent_replies, phase, turn_of, AGENT_JSON, CHAT_JSON};
     use super::jobs::records;
-    if !s.section("move-import", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Computers]) {
+    if !s.section("move-import", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Computers, Need::Move]) {
         return Ok(());
     }
     const WAKE: Duration = Duration::from_secs(90);
@@ -768,7 +768,7 @@ pub fn move_import(s: &mut Suite, api: &Api) -> Result<()> {
 /// `/move` here; Not now answered there, the page is theirs. Its pictures,
 /// at 1280 and 390 px, light and dark.
 pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move-ui", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Chrome, Need::LocalDocker, Need::Computers]) {
+    if !s.section("move-ui", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Chrome, Need::LocalDocker, Need::Computers, Need::Move]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -832,7 +832,7 @@ pub fn move_ui(s: &mut Suite, api: &Api) -> Result<()> {
 /// node restarts, nothing more. One who holds a seat keeps theirs, and gets
 /// the credit. A comp with an end (`untilMs`) ends by itself then.
 pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node]) {
+    if !s.section("move-comp", &[Need::Fakes, Need::Deployment, Need::Levers, Need::Node, Need::Move]) {
         return Ok(());
     }
     let mover = Mover::new(&api.base, s.mover.clone());

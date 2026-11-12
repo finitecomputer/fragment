@@ -1,8 +1,11 @@
 //! The local stack: one `wrangler dev` process serving the platform Worker
 //! (`cell/`), its variables rendered into its `.dev.vars` and its secrets
 //! seeded into wrangler's local Secrets Store, bound by name as a deploy
-//! binds them (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
-//! crashes, and restarts it.
+//! binds them (store.rs); or one `celld dev` process (celld.rs;
+//! docs/self-host.md, seam 1), its secrets behind the cell's stand-ins for
+//! the store's bindings, in `.dev.vars` (`Secrets::Shim`) or in OpenBao
+//! (openbao.rs, `Secrets::OpenBao`). `xtask dev` runs it in the
+//! foreground; the e2e starts, crashes, and restarts it.
 
 use std::fs;
 use std::io::Write;
@@ -17,11 +20,14 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 pub mod built;
+pub mod celld;
 pub mod containers;
 mod framing;
 mod front;
 pub mod node;
 mod node_release;
+pub mod openbao;
+mod openbao_release;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -110,7 +116,7 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
 /// The cell's shim, as a staged copy needs it: `entry.mjs` and each module
 /// it imports from beside it (a deploy runs it from the source tree, so
 /// only a staged copy can miss one: `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 2] = ["entry.mjs", "backup-reads.mjs"];
+pub const SHIM_FILES: [&str; 3] = ["entry.mjs", "backup-reads.mjs", "secrets.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -211,13 +217,14 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     Ok(path)
 }
 
-/// Discards a project's local state (its Durable Objects, R2, Workflows,
-/// queues, and the local store's secrets): before its fleet is configured,
-/// which seeds the store again.
+/// Discards a project's local state on either runtime (its Durable
+/// Objects, R2, Workflows, queues, and the local store's secrets): before
+/// its fleet is configured, which seeds the store again.
 pub fn clear_state(project: &Path) -> Result<()> {
-    let state = state_dir(project);
-    if state.exists() {
-        fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+    for state in [state_dir(project), celld::state_dir(project)] {
+        if state.exists() {
+            fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+        }
     }
     Ok(())
 }
@@ -302,14 +309,32 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+/// Where a local node's secrets are, for the bindings the cell reads them
+/// through (cell/src/keys.rs: `await env.<BINDING>.get()`, either way).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Secrets {
+    /// wrangler's local Secrets Store in the node's state directory, bound
+    /// by name as a deploy binds the account's (`wrangler dev`).
+    Store,
+    /// The cell's stand-ins for the store's bindings (cell/secrets.mjs;
+    /// docs/self-host.md, seam 12), backed by Worker variables of the
+    /// bindings' own names in `.dev.vars`: a runtime with no Secrets Store
+    /// (celld).
+    Shim,
+    /// The same stand-ins, backed by OpenBao (openbao.rs): each secret
+    /// seeded under its store name, and the cell given a token that reads
+    /// them (`FRAGMENT_SECRETS_TOKEN`), and nothing else, in `.dev.vars`.
+    OpenBao(openbao::Target),
+}
+
 /// What a local deployment is configured with. The cell reads its
-/// settings as Worker variables, from `.dev.vars` (mode 600) under
-/// `wrangler dev`, and its keys from Secrets Store bindings
-/// (cell/src/keys.rs), which a local node reads from wrangler's local
-/// store in its state directory: `configure` seeds it with these values,
-/// under the names `store::Bound::conventional` gives them, and binds
-/// them as a deploy does. A dev or test deployment points code.storage at
-/// the fake in `crates/fakes`.
+/// settings as Worker variables, from `.dev.vars` (mode 600), and its keys
+/// from Secrets Store bindings (cell/src/keys.rs): under `wrangler dev`
+/// from wrangler's local store in its state directory, which `configure`
+/// seeds with these values, under the names `store::Bound::conventional`
+/// gives them, and binds as a deploy does; on celld from the cell's
+/// stand-ins for them (`Secrets::Shim`). A dev or test deployment points
+/// code.storage at the fake in `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -414,6 +439,12 @@ pub struct Fleet {
     pub operator_key_values: Vec<(String, String)>,
     pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// The connectors its people may link (`FRAGMENT_CONNECTORS`, the
+    /// policy's JSON; `None`: the cell's default). A self-hosted stack's
+    /// leaves Telegram out (`celld::connectors`).
+    pub connectors: Option<String>,
+    /// Where its secrets are (`Secrets`): the runtime's.
+    pub secrets: Secrets,
 }
 
 /// A Stripe account as the cell reads it.
@@ -472,13 +503,8 @@ impl Fleet {
         bound
     }
 
-    /// Renders the deployment for a node on `project`: its settings into
-    /// the project's `.dev.vars`, its secrets into wrangler's local store
-    /// in the project's state directory (`store::seed_local`, which skips
-    /// values it holds already), and their bindings into its local config
-    /// (`local_config`). Clear the state first (`clear_state`), not after.
-    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
-        let bound = self.bound();
+    /// Each store secret's name, and its value, once each.
+    fn values<'a>(&'a self, bound: &'a store::Bound) -> Result<Vec<(&'a str, &'a str)>> {
         let mut values: Vec<(&str, &str)> = vec![(bound.host_secret.as_str(), self.host_secret.as_str()), (bound.codestorage_key.as_str(), self.codestorage_key_pem.as_str())];
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
@@ -507,8 +533,55 @@ impl Fleet {
             values.push((name.as_str(), o.key.as_str()));
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
-        store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell(), &self.images)?;
+        Ok(values)
+    }
+
+    /// The stand-ins' variables (`Secrets::Shim`): `FRAGMENT_SECRETS`,
+    /// naming each binding, its secret's name and the backend
+    /// (cell/secrets.mjs), and each value as the variable of its binding's
+    /// name. Two bindings may name one secret: each gets its value.
+    fn shim_vars(&self, bound: &store::Bound) -> Result<Vec<(String, String)>> {
+        let values = self.values(bound)?;
+        let value = |name: &str| values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string()).expect("every bound secret has its value");
+        let bindings = bound.cell();
+        let named: Vec<serde_json::Value> = bindings.iter().map(|(binding, name)| serde_json::json!({ "binding": binding, "secret_name": name })).collect();
+        let mut vars = vec![("FRAGMENT_SECRETS".to_string(), serde_json::json!({ "backend": "vars", "secrets": named }).to_string())];
+        vars.extend(bindings.iter().map(|(binding, name)| (binding.clone(), value(name))));
+        Ok(vars)
+    }
+
+    /// The stand-ins' variables backed by OpenBao (`Secrets::OpenBao`):
+    /// `FRAGMENT_SECRETS`, naming each binding, its secret's store name and
+    /// where OpenBao is, and the cell's token (renewed, or made when it has
+    /// lapsed). No value is a variable.
+    fn openbao_vars(target: &openbao::Target, bound: &store::Bound) -> Result<Vec<(String, String)>> {
+        let token = target.cell_token().map_err(|e| anyhow::anyhow!("the cell's OpenBao token: {e}"))?;
+        Ok(vec![("FRAGMENT_SECRETS".to_string(), target.shim_config(&bound.cell()).to_string()), (openbao::TOKEN_VAR.to_string(), token)])
+    }
+
+    /// Renders the deployment for a node on `project`: its settings into
+    /// the project's `.dev.vars`, and its secrets where `secrets` says:
+    /// into wrangler's local store in the project's state directory
+    /// (`store::seed_local`, which skips values it holds already), their
+    /// bindings into its local config (`local_config`); for the cell's
+    /// stand-ins, into `.dev.vars` beside the settings; or into OpenBao
+    /// (`openbao::Target::seed`, which writes only what changed), the cell's
+    /// token into `.dev.vars`. Clear the state first (`clear_state`), not
+    /// after.
+    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
+        let bound = self.bound();
+        let shim = match &self.secrets {
+            Secrets::Store => {
+                store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
+                write_local_config(project, &bound.cell(), &self.images)?;
+                vec![]
+            }
+            Secrets::Shim => self.shim_vars(&bound)?,
+            Secrets::OpenBao(target) => {
+                target.seed(&self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed OpenBao: {e}"))?;
+                Self::openbao_vars(target, &bound)?
+            }
+        };
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a
@@ -616,6 +689,10 @@ impl Fleet {
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
+        if let Some(c) = &self.connectors {
+            vars.push(("FRAGMENT_CONNECTORS", c.as_str()));
+        }
+        vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)
     }
 }
@@ -670,6 +747,12 @@ impl NodeOptions {
     pub fn port(&self) -> u16 {
         self.listener.local_addr().expect("a bound listener's address").port()
     }
+}
+
+/// A port free on 127.0.0.1 now, for a process that binds it itself
+/// (OpenBao, celld's own listener): picked and let go just before it binds.
+pub fn free_port() -> Result<u16> {
+    Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
 /// 127.0.0.1:`port` (0: one the kernel picks), bound for a node's
@@ -791,14 +874,17 @@ pub(crate) fn kill_started() {
     }
 }
 
-/// One `wrangler dev` process, which runs workerd as its child: in a
-/// process group of its own (`NodeOptions::own_group`), so a crash kills
-/// both, or in the terminal's. Its port is its front door's (front.rs),
-/// which passes each connection to the runtime, past wrangler's own proxy
-/// (on a port of wrangler's, which no client is given).
+/// One node's process: `wrangler dev`, which runs workerd as its child, or
+/// `celld dev` (celld.rs), which supervises its own: in a process group of
+/// its own (`NodeOptions::own_group`), so a crash kills the whole node, or
+/// in the terminal's. Its port is its front door's (front.rs), which passes
+/// each connection to the runtime, past wrangler's own proxy (on a port of
+/// wrangler's, which no client is given), or to celld's port.
 pub struct Node {
     child: Child,
     own_group: bool,
+    /// What runs it, as errors name it (`wrangler dev`, `celld dev`).
+    what: &'static str,
     pub base: String,
     pub port: u16,
     /// This boot's log.
@@ -819,6 +905,56 @@ const RUNTIME_NAMED_WAIT: Duration = Duration::from_secs(30);
 /// `NODE_OPTIONS`, which no JavaScript process here inherits
 /// (`node::VARS_CLEARED`). So wrangler never gets it.
 const WRANGLER_VARS_CLEARED: [&str; 1] = ["VSCODE_INSPECTOR_OPTIONS"];
+
+/// A process this one started and stops itself (OpenBao): a termination
+/// signal's `kill_started` reaches it as it reaches every process below
+/// this one (tree.rs), so it needs no list of its own.
+pub struct Started(Child);
+
+impl std::ops::Deref for Started {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Started {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+/// Spawns `cmd` (`Started`); refused once the process is ending, when
+/// nothing would stop it.
+pub fn spawn(cmd: &mut Command) -> std::io::Result<Started> {
+    // held across the spawn: `kill_started` either finds the child below
+    // this process or has already refused it
+    let live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    if live.ending {
+        return Err(std::io::Error::other("this process is ending (a signal): nothing more starts"));
+    }
+    Ok(Started(cmd.spawn()?))
+}
+
+/// Spawns a node's process (`cmd`: wrangler's or celld's), in a group of
+/// its own when `opts` says, its output heard line by line into the boot's
+/// log `out` and by the front door (`hear`).
+fn spawn_node(mut cmd: Command, opts: &NodeOptions, out: Arc<Mutex<fs::File>>, heard: Arc<front::Heard>) -> Result<Child> {
+    if opts.own_group {
+        cmd.process_group(0);
+    }
+    // held across the spawn: `kill_started` either finds this node's
+    // group or has already refused it
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).spawn().with_context(|| format!("start {}", cmd.get_program().to_string_lossy()))?;
+    hear(&mut child, out, heard)?;
+    if opts.own_group {
+        assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
+        live.groups.push(child.id());
+    }
+    Ok(child)
+}
 
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
@@ -852,24 +988,9 @@ impl Node {
         for var in WRANGLER_VARS_CLEARED {
             cmd.env_remove(var);
         }
-        if opts.own_group {
-            cmd.process_group(0);
-        }
         let t0 = Instant::now();
-        let child = {
-            // held across the spawn: `kill_started` either finds this node's
-            // group or has already refused it
-            let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
-            anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
-            let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).spawn()?;
-            hear(&mut child, out, heard.clone())?;
-            if opts.own_group {
-                assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
-                live.groups.push(child.id());
-            }
-            child
-        };
-        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
+        let child = spawn_node(cmd, opts, out, heard.clone())?;
+        let mut node = Node { child, own_group: opts.own_group, what: "wrangler dev", base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
         let proxied = loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             if let Some(proxied) = ready_port(&text) {
@@ -898,8 +1019,8 @@ impl Node {
         Ok((node, t0.elapsed()))
     }
 
-    /// Signals its group when it has one of its own, else wrangler alone
-    /// (which stops workerd).
+    /// Signals its group when it has one of its own, else its process
+    /// alone (wrangler stops workerd; celld its node).
     fn signal_group(&self, signal: &str) -> Result<()> {
         let target = if self.own_group { format!("-{}", self.child.id()) } else { self.child.id().to_string() };
         let status = Command::new("kill").args([signal, "--", &target]).status()?;
@@ -907,15 +1028,15 @@ impl Node {
         Ok(())
     }
 
-    /// SIGINT, as Ctrl-C stops it: wrangler shuts workerd down, and every
-    /// write already answered is on disk.
+    /// SIGINT, as Ctrl-C stops it (celld dev, too, stops on it): wrangler
+    /// shuts workerd down, and every write already answered is on disk.
     pub fn stop(mut self) -> Result<()> {
         self.signal_group("-INT")?;
         let t0 = Instant::now();
         while !exited_unreaped(self.child.id(), false)? {
             if t0.elapsed() > STOP_TIMEOUT {
                 self.kill();
-                bail!("wrangler dev did not stop within {STOP_TIMEOUT:?}");
+                bail!("{} did not stop within {STOP_TIMEOUT:?}", self.what);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -930,7 +1051,7 @@ impl Node {
         Ok(())
     }
 
-    /// Waits for `wrangler dev` to exit (the foreground `xtask dev`).
+    /// Waits for the node's process to exit (the foreground `xtask dev`).
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         exited_unreaped(self.child.id(), true)?;
         self.reap()
@@ -1080,7 +1201,7 @@ mod tests {
         let log = std::env::temp_dir().join(format!("devstack-node-{}.log", child.id()));
         let file = Arc::new(Mutex::new(fs::File::create(&log).unwrap()));
         let front = front::Front::serve(listener, Arc::new(front::Heard::default()), file).unwrap();
-        (Node { child, own_group: true, base: format!("http://127.0.0.1:{port}"), port, log, reaped: false, _front: front }, member)
+        (Node { child, own_group: true, what: "a test node", base: format!("http://127.0.0.1:{port}"), port, log, reaped: false, _front: front }, member)
     }
 
     /// Whether `pid` runs (a zombie does not).

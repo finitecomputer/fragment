@@ -4,7 +4,7 @@
 //!                    --dev is `dev`'s build (cell/wrangler.jsonc's rebuild):
 //!                    no fat LTO and no wasm-opt, so a change to a file of the
 //!                    release rebuilds in seconds; deploys and the e2e refuse it
-//!   dev [--clean] [--real-agent [--models <config>]]
+//!   dev [--clean] [--real-agent [--models <config>]] [--runtime wrangler|celld]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
@@ -12,7 +12,15 @@
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
 //!                    credit); --real-agent runs computers on our Hermes image
-//!                    and text on real models (xtask/src/dev_agent.rs)
+//!                    and text on real models (xtask/src/dev_agent.rs);
+//!                    --runtime celld runs it on `celld dev` (CELLD_BIN;
+//!                    docs/self-host.md, seam 1): no computers, no cards,
+//!                    the secrets behind the cell's stand-ins for the
+//!                    store's bindings, in OpenBao on :8802, its audit log
+//!                    on, or with FRAGMENT_SECRETS_BACKEND=vars in .dev.vars
+//!                    (seam 12); FRAGMENT_MODELS_FILE and
+//!                    FRAGMENT_MODEL_KEY_FILE put the text tiers on this
+//!                    machine's own models (seam 3)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -148,6 +156,9 @@ const DEV_MAIL_PORT: u16 = 8798;
 /// The Stripe fake (docs/billing.md): dev never charges a card; its
 /// Checkout is a page with a Pay button.
 const DEV_STRIPE_PORT: u16 = 8800;
+/// OpenBao, on loopback, where the cell's secrets are (on celld, unless
+/// `FRAGMENT_SECRETS_BACKEND=vars`: `dev_openbao`).
+const DEV_OPENBAO_PORT: u16 = 8802;
 const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
@@ -199,34 +210,55 @@ fn build_cmd(args: &[String]) -> Result<()> {
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
-/// `--models <config>` with it.
+/// `--models <config>` with it; `--runtime celld` (docs/self-host.md, seam 1).
 struct DevArgs {
     clean: bool,
     real_agent: bool,
     models: Option<std::path::PathBuf>,
+    celld: bool,
 }
 
 fn dev_args(args: &[String]) -> Result<DevArgs> {
-    let mut out = DevArgs { clean: false, real_agent: false, models: None };
+    let mut out = DevArgs { clean: false, real_agent: false, models: None, celld: false };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--clean" => out.clean = true,
             "--real-agent" => out.real_agent = true,
             "--models" => out.models = Some(it.next().context("--models names a deployment's config")?.into()),
-            other => bail!("dev takes --clean, --real-agent and --models <config>, not {other:?}"),
+            "--runtime" => {
+                out.celld = match it.next().map(String::as_str) {
+                    Some("wrangler") => false,
+                    Some("celld") => true,
+                    other => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
+                }
+            }
+            other => bail!("dev takes --clean, --real-agent, --models <config> and --runtime <wrangler|celld>, not {other:?}"),
         }
     }
     if out.models.is_some() && !out.real_agent {
         bail!("--models picks --real-agent's models: name --real-agent too");
+    }
+    if out.celld && out.real_agent {
+        bail!("--real-agent runs computers on our Hermes image, and celld runs no computers here (docs/self-host.md, seam 2)");
     }
     Ok(out)
 }
 
 fn dev(args: &[String]) -> Result<()> {
     let args = dev_args(args)?;
+    // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
+    // seam 1), located first: a missing CELLD_BIN stops the run at once
+    let celld = args.celld.then(devstack::celld::CelldTools::locate).transpose()?;
     // its models and key are read before anything builds
     let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
+    // a self-hosted stack's own models (FRAGMENT_MODELS_FILE; docs/self-host.md, seam 3)
+    let file = dev_agent::ModelsFile::read()?;
+    if real.is_some() && file.is_some() {
+        bail!("--real-agent's models and {}'s are one or the other: unset {} or drop --real-agent", dev_agent::MODELS_FILE_ENV, dev_agent::MODELS_FILE_ENV);
+    }
+    // the text tiers' models and their key: --real-agent's, or the file's
+    let named = real.as_ref().map(|r| (&r.models, &r.slots, &r.key)).or(file.as_ref().map(|f| (&f.models, &f.slots, &f.key)));
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -260,6 +292,11 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
+            // on celld, its users file is the fake's only record of the
+            // subjects it handed out (`celld::workos_users_kept`)
+            if celld.is_some() {
+                devstack::celld::workos_users_kept(&devstack::cell_dir(), &workos_users)?;
+            }
             let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
             // its users kept as the node keeps its people (who sign in by
             // subject), and every subject the node signs someone in by taken
@@ -278,6 +315,9 @@ fn dev(args: &[String]) -> Result<()> {
     let operator = devstack::dev_secret("operator-key", || fragment_nip98::Keys::generate().secret_hex())?;
     let operator = fragment_nip98::Keys::from_secret_hex(operator.trim()).with_context(|| format!("{} holds an operator key (64 hex)", operator_file.display()))?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    // the cell's own secrets: wrangler's local store, or on celld the
+    // stand-ins' variables or OpenBao behind them (docs/self-host.md, seam 12)
+    let openbao = dev_openbao(celld.is_some(), clean, DEV_OPENBAO_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
     stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
@@ -302,11 +342,10 @@ fn dev(args: &[String]) -> Result<()> {
         // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: real.as_ref().map(|r| r.models.clone()),
+        models: named.map(|(models, _, _)| models.clone()),
         // its slots on an OpenAI-compatible API, each on the one key dev binds
-        model_keys: real
-            .as_ref()
-            .map(|r| r.slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: r.key.clone() }).collect())
+        model_keys: named
+            .map(|(_, slots, key)| slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: key.clone() }).collect())
             .unwrap_or_default(),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
@@ -332,7 +371,9 @@ fn dev(args: &[String]) -> Result<()> {
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        computer_image: Some(if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        // celld runs no computers here: they need the runtime's egress
+        // intercepts and snapshots (docs/self-host.md, seam 2)
+        computer_image: celld.is_none().then(|| if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
         images: match &real {
             Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
             None => vec![],
@@ -346,9 +387,19 @@ fn dev(args: &[String]) -> Result<()> {
         operator_key_values: DEV_OPERATOR_KEYS.iter().map(|(name, _, key)| (name.to_string(), key.to_string())).collect(),
         connection_secret_values: workos_fake.as_ref().map(|_| vec![(DEV_CONNECTION.into(), "mock-connection-secret".into())]).unwrap_or_default(),
         swap_upstream: None,
+        // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
+        connectors: celld.as_ref().map(|_| devstack::celld::connectors()),
+        // wrangler's local store under cell/.wrangler/state; celld has none,
+        // and the cell's stand-ins read .dev.vars or OpenBao (seam 12)
+        secrets: match (&celld, &openbao) {
+            (None, _) => devstack::Secrets::Store,
+            (Some(_), None) => devstack::Secrets::Shim,
+            (Some(_), Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
+        },
     };
-    // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
+    // the cell's token, renewed while the stack runs (each start renews it too)
+    let _renewer = openbao.as_ref().map(|(bao, _)| devstack::openbao::Renewer::start(bao.target(), devstack::openbao::RENEW_EVERY));
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         listener: devstack::hold_port(DEV_PORT)?,
@@ -356,8 +407,15 @@ fn dev(args: &[String]) -> Result<()> {
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
-    let (node, took) = devstack::Node::start(&tools, &opts)?;
+    let (node, took) = match &celld {
+        None => devstack::Node::start(&tools, &opts)?,
+        Some(celld) => devstack::celld::start(celld, &opts)?,
+    };
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
+    match &celld {
+        None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no icons drawn (docs/self-host.md)", c.celld.display()),
+    }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
@@ -366,9 +424,23 @@ fn dev(args: &[String]) -> Result<()> {
             println!("  models:       {} on real models, {}'s (paid by {}'s key); the rest on the Workers AI fake at {}", r.slots.join(", "), r.from.display(), dev_agent::KEY_FILE_ENV, ai.url);
             println!("  computers:    our Hermes image, built from the tree (its first build takes a while)");
         }
-        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+        None => match &file {
+            Some(f) => println!("  models:       {} on {}'s models (its key: {}); the rest on the Workers AI fake at {}", f.slots.join(", "), f.from.display(), dev_agent::MODEL_KEY_FILE_ENV, ai.url),
+            None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+        },
     }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
+    match &openbao {
+        Some((bao, took)) => println!(
+            "  secrets:      OpenBao {} at {} on loopback (ready in {took:.1?}; its state {}, its log {})",
+            devstack::openbao::OPENBAO_VERSION,
+            bao.target().addr,
+            bao.layout().dir.display(),
+            bao.layout().log().display()
+        ),
+        None if celld.is_some() => println!("  secrets:      the cell's variables (.dev.vars, FRAGMENT_SECRETS_BACKEND=vars: a local fleet's alone)"),
+        None => println!("  secrets:      wrangler's local Secrets Store"),
+    }
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     if workos_fake.is_some() {
@@ -391,10 +463,44 @@ fn dev(args: &[String]) -> Result<()> {
         }
     })?;
     let status = node.wait()?;
-    println!("wrangler dev exited: {status}");
-    let removed = devstack::containers::remove(&devstack::cell_dir())?;
-    println!("removed {} containers the dev node left", removed.containers);
+    println!("the node exited: {status}");
+    // the runtime's own containers: celld runs none here
+    if celld.is_none() {
+        let removed = devstack::containers::remove(&devstack::cell_dir())?;
+        println!("removed {} containers the dev node left", removed.containers);
+    }
     Ok(())
+}
+
+/// The dev stack's OpenBao (docs/self-host.md, seam 12), where the cell's
+/// secrets are: on celld, `FRAGMENT_SECRETS_BACKEND` is `openbao` (the
+/// default, as on any self-hosted deployment) or `vars` (the stand-ins'
+/// variables in .dev.vars, a local fleet's convenience); on wrangler, which
+/// has a Secrets Store of its own, unset. The pinned OpenBao (or
+/// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`, its audit log on,
+/// its state in `target/devstack/openbao-<port>` (cleared by `--clean`,
+/// after which every secret is seeded again). With it, how long its start
+/// took.
+fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
+    let var = std::env::var("FRAGMENT_SECRETS_BACKEND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if !celld {
+        if let Some(v) = var {
+            bail!("FRAGMENT_SECRETS_BACKEND={v} is celld's: wrangler dev has a Secrets Store of its own (drop it, or add --runtime celld)");
+        }
+        return Ok(None);
+    }
+    match var.as_deref().unwrap_or("openbao") {
+        "vars" => return Ok(None),
+        "openbao" => {}
+        other => bail!("FRAGMENT_SECRETS_BACKEND is vars or openbao, not {other:?}"),
+    }
+    let dir = devstack::repo_root().join(format!("target/devstack/openbao-{port}"));
+    if clean && dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+    }
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir, port, audit: true };
+    Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
 }
 
 /// Dev's provider catalog: its connection (`DEV_CONNECTION`) where its
@@ -517,13 +623,17 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// ahead beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
+    // a run on celld (FRAGMENT_E2E_RUNTIME=celld) makes no computers, so
+    // no images (docs/self-host.md, seam 2)
+    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let images = s.spawn(build::images);
+        let built_images = images.then(|| s.spawn(build::images));
         let native = s.spawn(build_native);
         let cell = build::cell();
-        cell.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
+        cell.and(native.join().expect("the native build does not panic")).and(built_images)
     });
-    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
     built
 }
 
