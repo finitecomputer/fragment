@@ -354,6 +354,12 @@ pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
     Ok(())
 }
 
+/// Whether the runtime binds `name`: a runtime without a service has no
+/// binding for it (docs/self-host.md).
+pub fn has_binding(env: &JsValue, name: &str) -> bool {
+    get(env, name).is_ok_and(|b| !b.is_undefined())
+}
+
 /// A binding of the node's; `section` is where wrangler.jsonc declares it.
 fn binding(env: &JsValue, name: &str, section: &str) -> CellResult<JsValue> {
     let binding = get(env, name)?;

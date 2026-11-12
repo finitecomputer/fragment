@@ -189,8 +189,8 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// binds them in the account's, `images` beside its own computer images,
 /// and every one built from a Dockerfile of its own
 /// (`containers::scope_images`), so that no other stack's teardown removes
-/// its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
+/// its computers; less `unbound` (`Fleet::unbound`).
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)], unbound: &[&str]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     if !images.is_empty() {
         let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
@@ -203,6 +203,9 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(Str
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
+    }
+    for b in unbound {
+        anyhow::ensure!(obj.remove(*b).is_some(), "{} has no `{b}` to leave out", project.join("wrangler.jsonc").display());
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
@@ -414,6 +417,11 @@ pub struct Fleet {
     pub operator_key_values: Vec<(String, String)>,
     pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// The project's bindings its local config leaves out (`send_email`),
+    /// as a deployment on a runtime without that service runs: a
+    /// self-hosted one (docs/self-host.md). The e2e checks the cell
+    /// without them on wrangler, where every one is otherwise bound.
+    pub unbound: &'static [&'static str],
 }
 
 /// A Stripe account as the cell reads it.
@@ -508,7 +516,7 @@ impl Fleet {
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell(), &self.images)?;
+        write_local_config(project, &bound.cell(), &self.images, self.unbound)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a
