@@ -1,37 +1,40 @@
-//! A fragment with reach stays private (Paul, 2026-11-01, FIN-352): "as an
-//! extra safety right now we should disallow sharing for apps that have
-//! reach. When we grow in confidence we can lift that restriction. But for
-//! now it should just be the user and their agent, nobody outside."
+//! A fragment with reach has no share link and is not public (Paul,
+//! 2026-11-01, FIN-352): "as an extra safety right now we should disallow
+//! sharing for apps that have reach". Narrowed 2026-11-11: "this needs to
+//! only apply to public and anyone with the link. restricted will be used
+//! for brain sharing and brains really need those connections for
+//! workflows." The people its owner names, at any role, may use its keys,
+//! and the share sheet says so to its owner, once.
 //!
 //! It has reach when it holds a secret (its jobs may send one to a host) or
 //! a door (a connector bound as one, doors.rs; an agent's SimpleX door,
-//! runs_on.rs). While it has reach it is shared with no one but its owner
-//! and their own agents (`Sharing::beyond`), whichever comes first:
+//! runs_on.rs). While it has reach its link does not open it
+//! (`Sharing::beyond`), whichever comes first:
 //!
-//! - sharing it further is refused (403, `Reason::PrivateWhileReaching`):
-//!   anyone else added or given a role, an invite or its yes, its link or
-//!   public visibility;
-//! - giving it reach while it is shared is refused (403,
+//! - its link or public visibility is refused (403,
+//!   `Reason::PrivateWhileReaching`);
+//! - giving it reach while its link opens it is refused (403,
 //!   `Reason::UnshareFirst`): a secret set, a connector bound, an agent's
 //!   door linked.
 //!
-//! What narrows it is never refused (members only, removing someone,
-//! revoking an invite, deleting a secret, unlinking), and one shared before
-//! the rule keeps serving as it was. Its owner's list rows and its status
-//! say it (`reach`), and the share sheet locks (share.rs). A public address
-//! is the same fragment's other origin, its members and visibility the
-//! same, so it is no sharing here. Temporary: docs/technical-debt-ledger.md.
+//! People named (added, given a role, invited, an invite's yes) are never
+//! refused, nor what narrows it (members only, deleting a secret,
+//! unlinking), and one opened by its link before the rule keeps serving as
+//! it was. Its owner's list rows and its status say it (`reach`), and the
+//! share sheet offers members only (share.rs). A public address is the
+//! same fragment's other origin, its members and visibility the same, so it
+//! is no sharing here. Temporary: docs/technical-debt-ledger.md.
 
 use fragment_proto::{ErrorCode, Reason};
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 
-/// Why sharing it further is refused.
-const PRIVATE: &str = "it holds a key or a door, so for now it stays private to its owner and their own agents: no one else is added or invited, and it has no share link";
+/// Why its link or public is refused.
+const PRIVATE: &str = "it holds a key or a door, so for now it is not shared by link or made public: add people by name instead";
 
 /// Why reach is refused.
-const UNSHARE_FIRST: &str = "it is shared beyond its owner and their own agents (its link, someone else in it, or an invite waiting), so for now it holds no key and no door: make it private first (`fragment visibility <name> members`, remove the others, revoke the invites)";
+const UNSHARE_FIRST: &str = "it is shared by link or public, so for now it holds no key and no door: make it members only first (`fragment visibility <name> members`)";
 
 impl FragmentCell {
     /// Whether it has reach: a secret, or a door.
@@ -53,7 +56,7 @@ impl FragmentCell {
         self.set_meta(MetaKey::ReachTold, "1")
     }
 
-    /// Sharing it further, refused while it has reach.
+    /// Its link or public, refused while it has reach.
     pub(crate) fn share_while_private(&self) -> CellResult<()> {
         match self.reaches()? {
             true => Err(CellError::new(ErrorCode::Forbidden, PRIVATE).because(Reason::PrivateWhileReaching)),
@@ -61,7 +64,7 @@ impl FragmentCell {
         }
     }
 
-    /// Reach, refused while it is shared beyond its owner and their agents.
+    /// Reach, refused while its link opens it.
     pub(crate) fn reach_while_private(&self) -> CellResult<()> {
         match self.sharing_counts()?.beyond() {
             true => Err(CellError::new(ErrorCode::Forbidden, UNSHARE_FIRST).because(Reason::UnshareFirst)),
@@ -72,8 +75,8 @@ impl FragmentCell {
 
 /// `GET /api/admin/people/{person}/reach`, an operator's: of the fragments
 /// `person` owns, how many of each kind have reach, and how many of those
-/// are shared beyond their owner and their agents (from before the rule:
-/// they keep serving, nothing more is shared or added). Counts alone, no
+/// are open by their link or public (from before the rule: they keep
+/// serving, and stay so until made members only). Counts alone, no
 /// names; `fragment operator reach` sums them over everyone.
 pub(crate) async fn census(env: &worker::Env, person: &str) -> CellResult<serde_json::Value> {
     use std::collections::BTreeMap;

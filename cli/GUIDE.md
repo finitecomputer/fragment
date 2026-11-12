@@ -310,7 +310,7 @@ from their label instead of a template placeholder such as "Blank".
 fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
-fragment icon remove meal-planner                  # restore the default glyph
+fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
 fragment preview meal-planner                     # request a new screenshot, returns immediately
 fragment address meal-planner                     # read its optional public address
 fragment address meal-planner family-meals        # claim one, first come first served
@@ -1148,12 +1148,12 @@ variable of its name, else stdin, never the command line. A secret set
 before secrets named hosts fills nowhere until it is set again with
 `--to`. Never write secret values into files.
 
-A fragment holding a secret (or a door) stays its owner's and their own
-agents' for now: make it private first (`fragment visibility my-thing
-members`, no one else in it, no invite waiting), and while it holds one
-it gets no share link, no one else, and no invite (403
-`private_while_reaching`; a secret on a shared one is 403
-`unshare_first`).
+A fragment holding a secret (or a door) has no share link and is not
+public for now: make it members only first (`fragment visibility
+my-thing members`), and while it holds one it gets no link and is not
+made public (403 `private_while_reaching`; a secret on one its link
+opens is 403 `unshare_first`). People you add by name, at any role, are
+fine, and they can use its keys.
 
 ## Rules of the road
 
@@ -1223,7 +1223,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
-fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many shared beyond (counts only)
+fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a door, by kind, and how many open by link or public (counts only)
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]

@@ -119,6 +119,7 @@ comes before `/move` makes the new ones.
 | `PUT /api/migrations/mover/roster` | `Roster` → `RosterTaken` | A snapshot replaces the last. The same `snapshot` id again changes nothing (`replay`). A row in `listed`, `open`, `later` or `never` that is missing from it is `withdrawn`; a row in flight is left as it is, and one staff withdrew stays theirs (the will-not-move list). A person is bound by their first notices read (the WorkOS user they signed in as, asked of the registry then: "The offer"); a new row of a person bound already is offered at once (`bound`). Pushed every 10 minutes. |
 | `GET /api/migrations/mover/mailbox` | → `Mailbox` | Each command stays until a report on it is taken, so reading again is the retry. Polled every 10 seconds. |
 | `POST /api/migrations/mover/agents/{old}/report` | `Report` → `Reported` | Taken only for the old agent's current command. Any other command id is 409 `conflict`, changing nothing. `seq` grows per command: a `seq` taken already is a 200 with `taken: false`. |
+| `POST /api/migrations/mover/agents/{old}/secrets` | `Handoff` → `HandedOff` | The old agent's secrets, once it is stopped, each into its person's Vault within the call: "The secrets hand-off". |
 | `PUT /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>` | the part's bytes → `StagePart {n, bytes, sha256, etag}` | One part of the zip (1 to `PARTS_MAX`, at most `PART_MAX_BYTES`, each but the last at least `PART_MIN_BYTES`), streamed unread straight into the stage's multipart upload in `STAGE`. Its SHA-256, which the signed URL names, is kept with it for the mover's resume; the zip's own SHA-256 in the manifest is what the importer checks. The same part again replaces it. |
 | `GET /api/migrations/mover/stages/{stage}/parts` | → `StageParts {parts}` | The parts taken so far: their numbers, sizes, hashes and etags, never their bytes. What a resumed upload sends next. |
 | `POST /api/migrations/mover/stages/{stage}/complete` | `StageComplete {manifest}` → `StageCompleted {manifest_sha256, zip_bytes}` | The zip made whole from the parts taken (their bytes in all the manifest's `zip_bytes`; R2 refuses a part too small), then `manifest.json` written, last. Then the mover reports `staged` with that SHA-256. The same complete again answers the same. One cut off between the zip and its manifest is not made again: its attempt stalls, and the next stages afresh. |
@@ -144,12 +145,60 @@ its `kind` (text, one shape for all), and that kind's fields.
 
 | Command (`kind`) | The mover | Reports (`kind`) |
 |---|---|---|
-| `stop_and_stage`, `phase`, `stage`, `secrets` | Stops the old agent, then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. `secrets` is empty until the vault (FIN-466). | `stopped`; `progress` with `bytes`, `files`; then `staged` with `manifest_sha256`, `bytes`, `files`; or `failed` with `step`, `why` |
+| `stop_and_stage`, `phase`, `stage`, `secrets` | Stops the old agent, hands off the `secrets` it names (`POST …/secrets`), then uploads its zip as `stage` in parts (resuming from `GET …/parts`), then completes it with its manifest. | `stopped`; `progress` with `bytes`, `files`; then `staged` with `manifest_sha256`, `bytes`, `files`; or `failed` with `step`, `why` |
 | `retire`, `as` (`migrated` or `archived`) | Retires it (a verified backup first) and marks it moved | `retired` with `receipt` |
 | `restart` | Starts it again (staff gave it back) | `restarted` |
 
-The secrets hand-off (`POST …/agents/{old}/secrets`, `Handoff`) waits
-for the vault (FIN-466): its types are here, its route is not.
+### The secrets hand-off (F11)
+
+A person's Yes brings their old agent's own keys to their Vault
+(FIN-466; docs/secrets.md, "A person's Vault"), so its Telegram bot
+keeps talking in the same chat after the move, with no token pasted or
+revoked.
+
+- **What.** A phase 1 `stop_and_stage` names in `secrets` every kind the
+  old agent has (the roster's `has`): `telegram_bot_token`,
+  `openrouter_key`, `nostr_nsec`. A Yes hands them all off, with no
+  question of its own: the Vault is the person's, and nothing uses an
+  entry until they set something up. Phase 2 names none (no one said
+  Yes): its secrets stay in the old host's backup.
+- **When.** Once the mover stopped the old agent, before it stages:
+  the route takes only the old agent's current `stop_and_stage`, the one
+  `command` names (409 otherwise), only for the kinds it asks for (400),
+  while it is asked or staging (409). Each kind once, a value at most
+  `HANDOFF_VALUE_MAX_BYTES` (4 KiB).
+- **Where.** The router reads the values; `Migrations` sees only their
+  kinds, and says whose Vault and agent they are for. Each value goes
+  from the router straight into the person's Vault (`vault::hand_off`),
+  in the call, and is never stored, logged or echoed on the way; a body
+  that does not read is refused in words of its own. The mover reads
+  them in memory (`finite-mover-host secrets`), never on disk or in a
+  log.
+- **Once.** The Vault keeps a receipt for each old agent and kind
+  (`<old> <kind>`, its `receipts` table), in the turn that puts the
+  secret. A hand-off whose receipt is there puts nothing: a retry, one
+  cut short and sent again, or two at once never put back a secret its
+  person removed, moved into a connector or set since. The receipt
+  outlives the secret; a wipe empties it.
+- **The entries** (`fragment_core::migrations::vault_secret`), each
+  bound to the new agent's fragment, named `<kind>-<fragment>`, or, when
+  that is over 32 bytes, `<kind>-<label…>-<hash>--<suffix>` (the label
+  cut short beside 6 hex of the fragment name's SHA-256). A hand-off
+  never takes the name of a secret bound to other agents (the Vault
+  refuses it, 409):
+
+  | Kind | Hosts | Place |
+  |---|---|---|
+  | Telegram's bot token | `api.telegram.org` | the default (Settings moves it into the agent's Telegram connector, `fromVault`) |
+  | OpenRouter's key | `openrouter.ai` | `Authorization: Bearer` |
+  | The Nostr key, as 64 hex | none: kept, sent nowhere | `{"sign": "nip98"}`, for a signer set up later (FIN-486) |
+
+- **Answers.** `HandedOff {handed}`: the kinds the Vault holds a
+  receipt for. One it refuses (its rules, a full Vault, another agent's
+  name) is left out, and stays on the old platform. A Vault that could
+  not be asked fails the call, and the mover tries again. The same
+  hand-off again answers the same and puts nothing; once the stage is
+  staged, its command is done and a hand-off is 409.
 
 ## A new agent's stage
 

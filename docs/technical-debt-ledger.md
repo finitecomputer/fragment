@@ -5,6 +5,26 @@ Each entry says what the shortcut is, where and why, its risk, and the
 condition that deletes it. An entry without a delete condition is
 unfinished design, not debt.
 
+## No mail without Email Sending
+
+- **Shortcut:** the platform's mail (invites, a key added, an org's seat,
+  an export ready, a trial code) goes through Cloudflare Email Sending's
+  binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the e2e to the
+  mail fake (`FRAGMENT_MAIL_URL`). A self-hosted runtime has no Email
+  Sending (celld's deploy refuses `send_email`), and its deployment no
+  fake (docs/self-host.md). With neither, `mail::send` sends nothing, logs one
+  warning per message (`mail.unsent`: "email not sent: this runtime has
+  no mailer, not yet implemented"), and answers no message id, never an
+  error, so the flow around it goes on: an invite still waits for its
+  person's yes; a key is still added. An org's `mailed` and a trial's
+  `sent` say false. Paul, 2026-10-22: not solved in this pass.
+- **Risk:** no one hears of what was meant for them: an invitee learns of
+  an invite only from the sharer, and the share sheet still says it
+  mailed a link.
+- **Delete when:** a self-hosted deployment names a mailer of its own
+  (SMTP, or a company's relay, behind the same `send`), or the share sheet
+  and its kin say plainly that nothing was mailed.
+
 ## A computer's lifecycle writes its old flags too
 
 - **Shortcut:** FIN-395 C moved what sat beside a computer's lifecycle
@@ -69,18 +89,22 @@ unfinished design, not debt.
 - **Delete when:** Paul reprices the default instance with its 20 GB (a
   new `DEFAULT_INSTANCES` row and `DEFAULT_BOOK_VERSION`).
 
-## A fragment with reach is shared with no one else
+## A fragment with reach has no link and is not public
 
 - **Shortcut:** Paul, 2026-11-01 (FIN-352): "as an extra safety right now
-  we should disallow sharing for apps that have reach". A fragment holding
-  a secret or a door is its owner's and their own agents' alone
-  (`cell/src/reach.rs`), both ways: sharing it further is refused
-  (`Reason::PrivateWhileReaching`), and reach on one shared beyond them
-  (`Reason::UnshareFirst`). Fragments shared before the rule keep serving,
-  counted by `fragment operator reach`.
-- **Risk:** a person cannot share an app that holds a key, even with
-  someone they trust; an agent building an app with a key makes it
-  private first.
+  we should disallow sharing for apps that have reach". Narrowed
+  2026-11-11 to link and public alone: "restricted will be used for brain
+  sharing and brains really need those connections for workflows." A
+  fragment holding a secret or a door is never opened by its link or
+  public (`cell/src/reach.rs`), both ways: its link or public is refused
+  (`Reason::PrivateWhileReaching`), and reach on one its link opens
+  (`Reason::UnshareFirst`). People its owner names, at any role, are in as
+  ever, and can use its keys; the share sheet says so once. Fragments
+  opened by their link before the rule keep serving, counted by
+  `fragment operator reach`.
+- **Risk:** a person cannot give an app that holds a key a share link or
+  make it public; an agent building one with a key makes it members only
+  first.
 - **Delete when:** temporary: lift after the FIN-354 audit. Then drop
   reach.rs's two refusals and their call sites, the share sheet's lock,
   the two reasons (kept on the wire as add-only names), the census route
@@ -658,7 +682,10 @@ unfinished design, not debt.
   `fragment_core::migrations`, the `STAGE` R2 bucket and its lifecycle
   rules in `xtask deploy`, the stage's reads (one zip by ranges; no
   mount), the mover's npub in the config (`migrations.mover`; it signs
-  with its own key, so fragment holds no secret for it), the e2e lane `move` and the fake mover;
+  with its own key, so fragment holds no secret for it), the secrets
+  hand-off (F11: the Vault entries it made are their person's, and stay;
+  the Vault's `receipts` table is the move's),
+  the e2e lane `move` and the fake mover;
   and, from its other PRs, the page `/move`, the welcome's slot, the
   notices owner, the sign-in call (`signin.rs`), `Source::Stage` and
   `fragment stage` in the CLI, the `finite-computer` layout and profile
@@ -682,7 +709,8 @@ unfinished design, not debt.
   5. Remove `Source::Stage`, `fragment stage`, and the `finite-computer`
      layout and profile.
   6. Remove `finite-chat-archive/1` once phase 0 ends.
-  7. Remove the vault's `nostr_nsec` purpose and what it holds.
+  7. Remove the vault's `nostr_nsec` purpose and what it holds, and the
+     Vault's `receipts` table (a step that drops it) with `vault/handoff`.
   8. Delete the `STAGE` bucket (Paul).
   9. Remove the SPECIAL-CASE-INVENTORY row and this entry.
   10. In finite-mono: the mover, the host reader, the database role and

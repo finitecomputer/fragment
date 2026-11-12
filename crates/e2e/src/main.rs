@@ -19,6 +19,14 @@
 //! a branch deployment on real vendors: each section says what it needs
 //! (needs.rs), and one that needs what a preview lacks (a fake, the node,
 //! the whole deployment, local Docker) is a skip that says why.
+//!
+//! `FRAGMENT_E2E_RUNTIME=celld` runs the local node on `celld dev` instead
+//! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes: a section
+//! that needs the runtime's own containers is a skip (needs.rs), and so is
+//! a check of what celld has no part in (a card's shot: no Browser
+//! Rendering), each saying why. Its secrets are OpenBao's, behind the
+//! cell's stand-ins (docs/self-host.md, seam 12), unless
+//! `FRAGMENT_E2E_SECRETS=vars` puts them in `.dev.vars`.
 
 mod api;
 mod browser;
@@ -75,6 +83,11 @@ enum Shape {
     /// (`repinned_models`): another space, as a deployment that moved its
     /// embeddings model is.
     EmbeddingsRepinned,
+    /// As `Plain`, without the services a self-hosted runtime lacks
+    /// (docs/self-host.md): no Email Sending (no `send_email`, and no mail
+    /// fake: no mailer at all), no Browser Rendering, no Images, and no
+    /// containers (so it makes no computers).
+    Unbound,
 }
 
 /// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
@@ -261,6 +274,14 @@ pub const SEVERAL_ENV: &str = "E2E_SEVERAL_TOKEN";
 /// (`fragment_fakes::workos::ACCOUNT_HOSTS_UNDER`), each account's own host
 /// the one its Pipes metadata names.
 pub const ORG_CONNECTION: &str = "e2e-org";
+/// A connection whose OAuth client authenticates with HTTP Basic (its
+/// row's `client_auth`, as Zoom's, Airtable's, Xero's and Notion's token
+/// endpoints ask), through the WorkOS fake's stand-in provider's client
+/// that takes its header alone (`fragment_fakes::workos::BASIC_CLIENT`);
+/// `e2e-oauth`'s authenticates in the body, so both run.
+pub const BASIC_CONNECTION: &str = "e2e-basic";
+pub const BASIC_CONNECTION_HOST: &str = "basic.test";
+pub const BASIC_CONNECTION_ENV: &str = "E2E_BASIC_TOKEN";
 pub const ORG_CONNECTION_HOST: &str = "login.org.test";
 pub const ORG_CONNECTION_ENV: &str = "E2E_ORG_TOKEN";
 pub const SWAP_OWN: &str = "e2e-mail";
@@ -399,6 +420,13 @@ pub struct Suite {
     chrome: browser::Shared,
     /// The local node's tools (`None`: a hosted run, which starts no node).
     tools: Option<devstack::Tools>,
+    /// celld's, when the local node runs on it (`FRAGMENT_E2E_RUNTIME=celld`).
+    celld: Option<devstack::celld::CelldTools>,
+    /// OpenBao, the cell's secrets behind its stand-ins (celld's default,
+    /// or `FRAGMENT_E2E_SECRETS=openbao`; `vars` for the stand-ins'
+    /// variables: docs/self-host.md, seam 12), its state and audit log in
+    /// the run's scratch.
+    openbao: Option<devstack::openbao::OpenBao>,
     node: Option<devstack::Node>,
     /// The node's port, held for the whole run: each of the node's lives
     /// listens on it (`devstack::NodeOptions::listener`), so no other socket
@@ -446,6 +474,9 @@ pub struct Suite {
     project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
+    /// Where the node's secrets are (`FRAGMENT_E2E_SECRETS`, `secrets_of`):
+    /// wrangler's local store, or the cell's stand-ins for its bindings.
+    secrets: devstack::Secrets,
     /// Whether the containers the run's nodes left are removed
     /// (`remove_containers`): at its end, or as it drops.
     containers_removed: bool,
@@ -476,6 +507,30 @@ impl Suite {
             ("WorkOS API key", WORKOS_KEY.into()),
             ("test secret", self.test_secret.clone()),
         ]
+        .into_iter()
+        // the cell's OpenBao token: secret zero, the one given outside it
+        .chain(self.openbao.as_ref().and_then(|b| std::fs::read_to_string(b.layout().cell_token()).ok()).map(|t| ("OpenBao token", t.trim().to_string())))
+        .collect()
+    }
+
+    /// Whether the cell's secrets are OpenBao's, behind its stand-ins.
+    pub fn has_openbao(&self) -> bool {
+        self.openbao.is_some()
+    }
+
+    /// OpenBao stops: to the cell, its secrets' service is down.
+    pub fn openbao_down(&mut self) -> Result<()> {
+        Ok(self.openbao.as_mut().context("the run's secrets are OpenBao's")?.down()?)
+    }
+
+    /// OpenBao starts again on its state: unsealed by its static seal.
+    pub fn openbao_up(&mut self) -> Result<Duration> {
+        Ok(self.openbao.as_mut().context("the run's secrets are OpenBao's")?.up()?)
+    }
+
+    /// How many times the run's OpenBao initialised its state.
+    pub fn openbao_initialisations(&self) -> Result<usize> {
+        Ok(devstack::openbao::initialisations(self.openbao.as_ref().context("the run's secrets are OpenBao's")?.layout())?)
     }
 
     /// Whether the run keeps the hosted lane's rules (on a preview, or its
@@ -483,6 +538,39 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
+    }
+
+    /// Whether the local node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+    pub fn on_celld(&self) -> bool {
+        self.celld.is_some()
+    }
+
+    /// Whether the node runs its Worker and every object in one isolate
+    /// (local workerd), so a lever that reads or clears one isolate's
+    /// memory (the ledger gate's) reaches the caller's. celld runs each
+    /// object in an isolate of its own, as Cloudflare may: there a check
+    /// keeps what callers see, not what a lever reads of the gate.
+    pub fn one_isolate(&self) -> bool {
+        !self.on_celld()
+    }
+
+    /// Whether a job's sleep outlives a crash of the node: celld's
+    /// Workflows keep it (each instance a cell, its sleep an alarm); local
+    /// workerd's hold it as a timer in the process.
+    pub fn durable_workflows(&self) -> bool {
+        self.on_celld()
+    }
+
+    /// Whether the node shoots preview cards: celld has no Browser
+    /// Rendering, and the cell skips every shot there (`card.skipped`,
+    /// `no_browser`, which the unbound section checks).
+    pub fn shoots_cards(&self) -> bool {
+        !self.on_celld()
+    }
+
+    /// A check of a card's shot on a node that takes none: a skip.
+    pub fn skip_card(&mut self, label: &str) {
+        self.skip(label, "celld has no Browser Rendering, so the node shoots no cards (docs/self-host.md)");
     }
 
     /// Whether the node's vendors are the fakes: a local run, or its
@@ -684,6 +772,20 @@ impl Suite {
         started
     }
 
+    /// Starts the node without what a self-hosted runtime lacks
+    /// (`Shape::Unbound`).
+    pub fn start_unbound(&mut self) -> Result<Api> {
+        self.shape = Shape::Unbound;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
+    /// This node boot's log, as written so far (`None`: no node runs).
+    pub fn node_log(&self) -> Option<String> {
+        self.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default())
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -692,6 +794,7 @@ impl Suite {
         self.shape = Shape::Plain;
         started
     }
+
 
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
@@ -732,7 +835,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Unbound => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -750,8 +853,8 @@ impl Suite {
                     _ => vec![],
                 }
             },
-            mail_url: Some(self.mail.node().url.clone()),
-            mail_from: Some(MAIL_FROM.into()),
+            mail_url: (self.shape != Shape::Unbound).then(|| self.mail.node().url.clone()),
+            mail_from: (self.shape != Shape::Unbound).then(|| MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
@@ -774,18 +877,23 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Unbound => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
             ),
-            // the move, its cutoff far off: the move lane moves its object's clock past it
-            migrations: Some((fragment_core::npub::encode(self.mover.pubkey_hex()), MIGRATIONS_CUTOFF_MS.to_string())),
+            // the move, its cutoff far off: the move lane moves its object's
+            // clock past it. Off on celld, as on any self-hosted deployment
+            // (needs.rs `Need::Move`)
+            migrations: (!self.on_celld()).then(|| (fragment_core::npub::encode(self.mover.pubkey_hex()), MIGRATIONS_CUTOFF_MS.to_string())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            computer_image: Some("stub".into()),
+            // celld runs no computers: they need the runtime's egress
+            // intercepts and snapshots (docs/self-host.md, seam 2); the unbound
+            // section's node has no containers
+            computer_image: (!self.on_celld() && self.shape != Shape::Unbound).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -796,17 +904,28 @@ impl Suite {
                 rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
                 rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().one_access_connection_oauth(), "accounts_max": SEVERAL_MAX }));
                 rows.as_array_mut().expect("catalog").push(json!({ "name": ORG_CONNECTION, "kind": "connection", "hosts": [ORG_CONNECTION_HOST], "account_host": { "metadata": "instance_url", "under": fragment_fakes::workos::ACCOUNT_HOSTS_UNDER }, "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [ORG_CONNECTION_ENV], "connection_oauth": self.workos.node().connection_oauth() }));
+                rows.as_array_mut().expect("catalog").push(json!({ "name": BASIC_CONNECTION, "kind": "connection", "hosts": [BASIC_CONNECTION_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [BASIC_CONNECTION_ENV], "client_auth": "basic", "connection_oauth": self.workos.node().basic_connection_oauth() }));
                 if self.shape == Shape::OneKeyMore {
                     rows.as_array_mut().expect("catalog").push(added_key_row());
                 }
                 rows.to_string()
             }),
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
-            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
+            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into()), (BASIC_CONNECTION.into(), fragment_fakes::workos::BASIC_CLIENT.1.into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
+            // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
+            connectors: self.on_celld().then(devstack::celld::connectors),
+            // wrangler's local store, the cell's stand-ins over variables, or
+            // over OpenBao (`secrets_of`; celld has no store: seam 12)
+            secrets: match &self.openbao {
+                Some(bao) => devstack::Secrets::OpenBao(bao.target()),
+                None => self.secrets.clone(),
+            },
+            unbound: match self.shape {
+                Shape::Unbound => &["send_email", "browser", "images", "containers"],
+                _ => &[],
+            },
         };
-        // its secrets go to wrangler's local store in the node's own state
-        // (seeded once a state, bound by name as a deploy binds them)
         fleet.configure(tools, &self.project)?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
@@ -817,7 +936,10 @@ impl Suite {
             // a crash kills wrangler and workerd as one
             own_group: true,
         };
-        let (node, _) = devstack::Node::start(tools, &opts)?;
+        let (node, _) = match &self.celld {
+            None => devstack::Node::start(tools, &opts)?,
+            Some(celld) => devstack::celld::start(celld, &opts)?,
+        };
         self.node = Some(node);
         // Stripe's events go to the platform's host, as its endpoint would
         self.stripe.node().set_endpoint(&format!("{}/api/stripe/webhook", fleet.platform_url), STRIPE_WEBHOOK);
@@ -828,7 +950,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Unbound => SUFFIX,
         }
     }
 
@@ -858,8 +980,15 @@ impl Suite {
     /// Reloads the node's Worker as a deploy does: a new build of its shim
     /// (a comment more), which `wrangler dev` runs as a new version, every
     /// Durable Object starting again; back once wrangler says it is ready.
+    /// On celld (run with `--no-watch`), a graceful restart of the node:
+    /// every object starts again there too.
     pub fn reload(&mut self) -> Result<()> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane reloads no node: a section that does declares Need::Node");
+        if self.on_celld() {
+            self.stop()?;
+            self.start(false)?;
+            return Ok(());
+        }
         let log = self.node.as_ref().context("a running node")?.log.clone();
         let ready = || std::fs::read_to_string(&log).map(|t| t.matches("Local server updated and ready").count()).unwrap_or(0);
         let before = ready();
@@ -1164,6 +1293,22 @@ fn make_scratch(dir: &Path) -> Result<()> {
     std::fs::create_dir(dir).with_context(|| format!("{}: this run's scratch, made by another run first", dir.display()))
 }
 
+/// The node's secrets by `FRAGMENT_E2E_SECRETS`, and whether OpenBao holds
+/// them: `store`, wrangler's local Secrets Store, as a deploy binds the
+/// account's (wrangler's default); `vars`, the cell's stand-ins for its
+/// bindings (cell/secrets.mjs) over variables; `openbao`, the stand-ins
+/// over OpenBao (celld's default, as a self-hosted deployment's:
+/// docs/self-host.md, seam 12). celld has no store.
+fn secrets_of(celld: bool, var: Option<&str>) -> Result<(devstack::Secrets, bool)> {
+    match (celld, var) {
+        (false, None | Some("store")) => Ok((devstack::Secrets::Store, false)),
+        (true, Some("store")) => bail!("FRAGMENT_E2E_SECRETS=store is wrangler's: celld has no Secrets Store"),
+        (_, Some("vars")) => Ok((devstack::Secrets::Shim, false)),
+        (true, None) | (_, Some("openbao")) => Ok((devstack::Secrets::Shim, true)),
+        (_, Some(other)) => bail!("FRAGMENT_E2E_SECRETS is store, vars or openbao, not {other:?}"),
+    }
+}
+
 /// A local run's settings beside its sections (hosted.rs `Args`).
 struct LocalRun {
     /// A rehearsal of the hosted lane, lending at most this many paid calls.
@@ -1205,9 +1350,24 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         lanes::hermes::stage_images(&project)?;
     }
     let test_secret = devstack::random_hex(32);
+    // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
+    let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
+        Err(_) | Ok("wrangler") => None,
+        Ok("celld") if rehearse.is_some() => bail!("a rehearsal keeps a preview's rules on wrangler dev: drop FRAGMENT_E2E_RUNTIME=celld"),
+        Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
+        Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
+    };
+    if let Some(c) = &celld {
+        println!("runtime: celld dev ({})", c.celld.display());
+    }
+    // the cell's secrets: the store, or behind its stand-ins, over
+    // variables or OpenBao (celld's default)
+    let (secrets, with_openbao) = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
+    let openbao = with_openbao.then(|| openbao(&scratch)).transpose()?;
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
+        None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
@@ -1239,6 +1399,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cron: None,
         chrome: browser::Shared::new(&scratch),
         tools: Some(tools),
+        celld,
+        openbao,
         node: None,
         port: listener.local_addr()?.port(),
         listener: Some(listener),
@@ -1262,6 +1424,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         scratch,
         project,
         shape: Shape::Plain,
+        secrets,
         containers_removed: false,
     };
     if let Some(k) = s.shard {
@@ -1282,6 +1445,27 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         });
     }
     finish(&mut s)
+}
+
+/// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
+/// state in the run's scratch, on a free loopback port, every request in
+/// its audit log (read at the run's end: `openbao_reads`).
+fn openbao(scratch: &Path) -> Result<devstack::openbao::OpenBao> {
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir: scratch.join("openbao"), port: devstack::free_port()?, audit: true };
+    let (bao, took) = devstack::openbao::OpenBao::start(&bin, opts)?;
+    println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret behind the cell's stand-ins)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
+    Ok(bao)
+}
+
+/// What the run asked of OpenBao, from its audit log: the cell's reads of
+/// the secrets, and the log's size.
+fn openbao_reads(s: &Suite) {
+    let Some(bao) = &s.openbao else { return };
+    match devstack::openbao::audited(bao.layout()) {
+        Ok(a) => println!("      (OpenBao: {} reads of the secrets by the cell's token, {} requests in all, {} KiB of audit log)", a.cell_reads, a.requests, a.bytes / 1024),
+        Err(e) => println!("      (OpenBao's audit log: {e})"),
+    }
 }
 
 /// A run's end: a name `--only` or `--except` gave that no section has
@@ -1315,7 +1499,13 @@ fn finish(s: &mut Suite) -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
-    let skipped = match s.hosted() {
+    openbao_reads(s);
+    if let Some(mut bao) = s.openbao.take() {
+        if let Err(e) = bao.down() {
+            s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
+        }
+    }
+    let skipped = match s.hosted() || s.on_celld() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
     };

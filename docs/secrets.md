@@ -36,6 +36,10 @@ only from that computer's egress, toward that provider.
   is in use within a minute, with no deploy. A binding whose secret the
   store lacks is an error; nothing falls back to a Worker secret or
   variable.
+  On a runtime with no Secrets Store (a self-hosted one), stand-ins with
+  the same face (`get()`) take the bindings' places, named by the Worker
+  variable `FRAGMENT_SECRETS` (cell/secrets.mjs; docs/self-host.md, seam
+  12); unset, as on Cloudflare, the bindings are the store's.
 - **App code holds no key.** It runs in a loader isolate whose env the
   platform builds (`js::app_env`), so it names no deployment secret. A
   job's `job.fetch` names a fragment secret as `{{NAME}}` in a header or
@@ -97,6 +101,12 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   whole (not an event stream, at most 8 MiB) and each value it echoes
   named `{{name}}`, as a job's fetch names its own.
 - **A wipe empties it** with their ledger, and keeps the row that says so.
+- **An old finite.computer agent's keys come in once** (FIN-463 F11;
+  docs/migrations.md, "The secrets hand-off"): on its person's Yes, the
+  move puts each into their Vault, bound to the new agent
+  (`vault/handoff`), and keeps a receipt in the same turn, so a retry
+  never puts back one they removed or moved since. A hand-off never
+  takes the name of another agent's secret.
 - **A secret moves out once, whole**: its person may move one into a
   fragment they edit as that fragment's secret (`fromVault` on `PUT
   /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as

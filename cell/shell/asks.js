@@ -6,13 +6,14 @@
 // #1052…).
 //
 //   view           the middle column given a view (a chat, Settings, Apps,
-//                  History, a chat being made): the launcher's late answer
+//                  Brains, History, a chat being made): the launcher's late answer
 //                  changes the screen only if none was given since
 //   notice         the page-wide notice shown or taken away: what finishes
 //                  later says or takes one away only under its own
 //   computer       a view of the computer taken in from an action's answer:
 //                  a list read asked before it never shows the computer as it was
 //   apps           a visit to the Apps page (its open, its close)
+//   brains         a visit to the Brains page, as the Apps page's
 //   settings       a visit to Settings from another page: an action's
 //                  failure is said only in the visit it was pressed in
 //   settings-load  one load of Settings: only the latest renders
@@ -24,7 +25,7 @@
 // Pure (no page, no timers); a page has one (shell.js). Nothing is stored:
 // a reload starts every kind afresh, as the page does.
 
-export const KINDS = ["view", "notice", "computer", "apps", "settings", "settings-load"];
+export const KINDS = ["view", "notice", "computer", "apps", "brains", "settings", "settings-load"];
 export const HOLDS = ["start", "title"];
 
 export function createAsks() {

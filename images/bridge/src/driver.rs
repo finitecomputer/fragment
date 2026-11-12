@@ -400,7 +400,25 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
+    // what each agent linked to SimpleX works on in its SimpleX chat, as its
+    // link was told last: told again whenever it changes, so its owner's app
+    // shows it working (simplex/link.rs, `Link::react`)
+    let shown: Mutex<BTreeMap<String, BTreeSet<u64>>> = Default::default();
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
+        if let (true, Some(h)) = (step.dirty, &simplex) {
+            let mut shown = shown.lock().expect("shown");
+            for a in engine.agents() {
+                let working = engine.working(&a.fragment);
+                if shown.get(&a.fragment) != Some(&working) {
+                    // not taken (the manager busy): said again at the next step
+                    if h.working(&a.fragment, working.clone()) {
+                        shown.insert(a.fragment.clone(), working);
+                    } else {
+                        shown.remove(&a.fragment);
+                    }
+                }
+            }
+        }
         if step.dirty {
             save(&cfg.state_dir, engine.state())?;
             // a turn over lets its files go (bounded: the turns open)
@@ -1353,7 +1371,7 @@ async fn work(lanes: Lanes, fragment: String, lane: Arc<Lane>) {
             Job::Post { agent, channel, id, body, files, relay, answers } => {
                 let turn = body["turn"].as_str().map(str::to_string);
                 // what goes back over SimpleX goes only once it is on the chat
-                let (sent, refs) = post_attached(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
+                let (sent, refs, _) = post_attached(&api, &fragment, &agent, channel, &id, body, &files, None, limits::POST_TRIES_MAX, stop.clone()).await;
                 if let (Some(text), true, Some(sx)) = (relay, sent.on_chat(), claims.simplex.as_ref()) {
                     sx.reply(&agent, &text, &files).await;
                 }
@@ -1519,13 +1537,21 @@ impl Sent {
 /// its files' refs in it (simplex/door.rs).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> Sent {
-    post_attached(api, fragment, agent, channel, id, body, files, door, tries, stop).await.0
+    post_seq(api, fragment, agent, channel, id, body, files, door, tries, stop).await.0
 }
 
-/// `post`, and the refs its files went as on the record posted (none when
-/// it was not posted, or they were refused).
+/// `post`, and the record's seq on its channel when `Posted`: what a
+/// SimpleX link shows its agent working on is named by it (simplex/link.rs).
 #[allow(clippy::too_many_arguments)]
-async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Vec<AttachmentRef>) {
+pub(crate) async fn post_seq(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Option<u64>) {
+    let (sent, _, seq) = post_attached(api, fragment, agent, channel, id, body, files, door, tries, stop).await;
+    (sent, seq)
+}
+
+/// `post`, the refs its files went as on the record posted (none when it
+/// was not posted, or they were refused), and its seq (when `Posted`).
+#[allow(clippy::too_many_arguments)]
+async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, tries: u32, stop: watch::Receiver<bool>) -> (Sent, Vec<AttachmentRef>, Option<u64>) {
     assert!(tries >= 1, "a post is tried");
     let mut backoff = Backoff::default();
     // its files refused here (an agent that is a viewer of a connector's
@@ -1584,12 +1610,12 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
         match result {
             Ok(posted) => {
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
-                return (Sent::Posted, attached);
+                return (Sent::Posted, attached, posted.seq);
             }
             Err(e) if e.retryable() && attempt < tries => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
-                    return (Sent::Stopped, Vec::new());
+                    return (Sent::Stopped, Vec::new(), None);
                 }
             }
             Err(e) if e.status() == Some(409) => {
@@ -1597,13 +1623,13 @@ async fn post_attached(api: &Api, fragment: &str, agent: &str, channel: &str, id
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return (Sent::Taken, Vec::new());
+                return (Sent::Taken, Vec::new(), None);
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
                 // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return (Sent::Refused, Vec::new());
+                return (Sent::Refused, Vec::new(), None);
             }
         }
     }

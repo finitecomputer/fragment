@@ -581,19 +581,21 @@ only by the platform's own pages, severs its opener, loads scripts,
 styles and images only from the platform (`Content-Security-Policy`), and
 sends `Referrer-Policy: same-origin`.
 
-**Reach stays private** (Paul, 2026-11-01, FIN-352; temporary:
-docs/technical-debt-ledger.md). A fragment holding a secret or a door
-(a connector bound, an agent's SimpleX door) has reach (`status.reach`,
-`Sharing.reach` in its owner's row), and is shared with no one but its
-owner and their own agents. While it has reach, anyone else added or
-given a role, an invite or its yes, and `link` or `public` visibility are
-403 `reason: private_while_reaching`; while it is shared beyond them
-(`Sharing::beyond`: not `members`, someone else in it, or an invite
-waiting), `PUT secrets`, `__secrets`, a connector's link and an agent's
-door ticket are 403 `reason: unshare_first`. Narrowing it is never
-refused, and one shared before the rule keeps serving. The sheet then adds
-no one and offers `members` only. A public address is the same members
-and visibility, so no sharing.
+**Reach has no link** (Paul, 2026-11-01 and 2026-11-11, FIN-352;
+temporary: docs/technical-debt-ledger.md). A fragment holding a secret or
+a door (a connector bound, an agent's SimpleX door) has reach
+(`status.reach`, `Sharing.reach` in its owner's row), and is never opened
+by its link or public. While it has reach, `link` or `public` visibility
+is 403 `reason: private_while_reaching`; while its link opens it
+(`Sharing::beyond`: not `members`), `PUT secrets`, `__secrets`, a
+connector's link and an agent's door ticket are 403 `reason:
+unshare_first`. People named are never refused: its owner adds them at
+any role, invites them, and they accept, and they can use its keys as
+their role allows. Narrowing it is never refused, and one opened by its
+link before the rule keeps serving. The sheet then offers `members` only
+and tells its owner, once, under the invite form: "People you add can
+use this app's keys." A public address is the same members and
+visibility, so no sharing.
 
 On a chat one of the owner's agents is in, the sheet, and `fragment
 members add`, say "People in this chat can talk to your agent."
@@ -1001,10 +1003,12 @@ agent, or carrying code, keeps the last good code and says to fork it.
   triggered run started, or that run did not succeed, with none queued or
   running; its input `{}`, its run's `via` `woke`).
 - `files` (optional, FIN-372): `{"page": true, "home": <path>, "status":
-  <query>}`, each optional. `page`: the fragment's page (`/`) is the files
-  view (`__files`), with its Open Graph tags. `home`: the content file it
-  opens first. `status`: a query it declares, whose answer's `line` (text)
-  and `busy` the view shows as a status line, asking again while busy.
+  <query>, "graph": true}`, each optional. `page`: the fragment's page (`/`)
+  is the files view (`__files`), with its Open Graph tags. `home`: the
+  content file it opens first. `status`: a query it declares, whose
+  answer's `line` (text) and `busy` the view shows as a status line, asking
+  again while busy. `graph`: with no file named, the view opens on its
+  graph (below), over `home`.
   Unknown keys are refused at deploy; a fragment on a blessed template
   declares none (its template's applies).
 - `immutable` (optional, FIN-391): at most `IMMUTABLE_MAX` paths under
@@ -1151,7 +1155,7 @@ none (its picture is its `avatar.png`): a making or `PUT` on one is 400.
 | `POST /api/f/{name}/icon/make` | editors | `{hint?}` (at most `icon::HINT_MAX_CHARS`) → `{subject, candidates: [{png, score}], flaws}` |
 | `PUT /api/f/{name}/icon` | editors | the image's bytes → `{icon, sha256, size}` |
 | `GET /api/f/{name}/icon` | viewers | the PNG (`ETag` its SHA-256), or 404 |
-| `DELETE /api/f/{name}/icon` | editors | → `{icon: null}` |
+| `DELETE /api/f/{name}/icon` | editors | → `{icon}`: the icon it shows now, or `null` |
 
 - **A making** names one object for the fragment's title, description and
   the hint (the object a hint names, without its writing or negations, as
@@ -1171,6 +1175,10 @@ none (its picture is its `avatar.png`): a making or `PUT` on one is 400.
 - **Kept** as one of its blobs, named in its meta. Its members' rows show it
   as `picture`, `/api/f/<name>/icon?v=<12 hex of its SHA-256>`, cacheable a
   day; a stale version is 404 `no-store`.
+- **A template's.** One with no icon of its own, on a blessed template
+  that carries `icon.png` (the brain's), shows that one, read from the
+  release at the same addresses (`v` its SHA-256's). `DELETE` removes only
+  its own.
 - **Its pages' favicon.** A `GET` or `HEAD` of `favicon.ico` on its origin,
   where live has no such file and the app answers 404 there, is answered
   the icon, `no-cache`, its SHA-256 the `ETag`.
@@ -1708,7 +1716,7 @@ fragment's, `/api/…` included.
 | `__fragment.css` | the platform's stylesheet (below) |
 | `__markdown.js` | a module: `markdown(text, options)` → a DocumentFragment, `inline(parent, text, options)`; markdown to DOM only (HTML in the text is text; nesting stops at 32). Options: `resolve(target, kind)` → `{href, path?}` or null, `image(src, kind)` → `{src, href?}` or null, `code(text, lang)`, `breaks`; links stay http(s), mailto or relative, pictures http(s) or relative |
 | `__people?id=…&id=…` | anyone who may see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for at most 64 identities: `email` only between members (decision 48); `picture` an absolute platform URL; an agent's `fragment`, its label as `name`, its `title` and `picture` (An agent's name and picture); an unknown id left out |
-| `__files` | the files view (`__files.js`, `__files.css`), titled by `meta.title`; asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}], searchable?, home?, status?}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data; `searchable: true` when the fragment has a search index; `home` and `status` its manifest's `files`). With no file named it opens `home`, else `README.md` at the root when it says more than headings, else `index.md` at the root, else the first markdown file by path. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
+| `__files` | the files view (`__files.js`, `__files.css`), titled by `meta.title`; asked for `application/json`, `{type: "files", count, files: [{path, size, commit?}], searchable?, home?, status?, graph?}` (`commit` its version, for `__file?path=&v=`; none for its blessed template's data; `searchable: true` when the fragment has a search index; `home`, `status` and `graph` its manifest's `files`). With no file named it opens its graph when `graph`, else `home`, else `README.md` at the root when it says more than headings, else `index.md` at the root, else the first markdown file by path. Its graph (`#graph`, `#graph/<path>` with a page chosen) draws the markdown pages (at most 2000, each under 256 KiB) and the links between them, as its reader resolves them, read from each page at its version; a page chosen there is previewed with what it links to and what links to it, and a page read lists what links to it below it. Framed, it asks its parent to open a file as a window (`{fragment: "open", url, title}`) |
 | `POST __search` | its own index, from its page: `application/json` `Query` → `Found`, as `POST /api/f/{name}/search` (viewers and up, the share link too; the asker pays for the question's embedding, an anonymous one is searched by its words) |
 | `__live` | WebSocket, anyone who may see the fragment (below); its accept's waits in `Server-Timing`: `identity`, `accept` |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
@@ -1904,7 +1912,7 @@ is what other parties rely on.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `/settings`, `/apps`, `/history`, `/schedules`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
+| `GET /`, `/settings`, `/apps`, `/brains`, `/history`, `/schedules`, `/welcome` | the shell's page, for anyone; signed out it offers Sign Up and Sign In (`/auth/login?screen_hint=…`, back to the same address). It reads `/welcome?trial=<code>`, `/welcome?checkout=<id>\|canceled`, `/settings?pack=<id>\|canceled` (Billing) and `/?chat=<name>` |
 | `GET /about`, `/privacy`, `/terms` | static pages, for anyone |
 | `GET /admin` | the operators' page (Operators: the admin) |
 | `GET /share/<name>` | the share sheet (Sharing) |

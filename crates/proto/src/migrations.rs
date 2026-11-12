@@ -55,6 +55,9 @@ pub const PARTS_MAX: u32 = 10_000;
 /// Why staff withdrew a move (`AdminAct`'s `why`), in bytes: a line the
 /// will-not-move list shows, never empty.
 pub const WHY_MAX_BYTES: usize = 200;
+/// A secret's value in a hand-off (`HandoffItem`), at most: the most a
+/// person's Vault keeps (`fragment_core::vault::VALUE_MAX_BYTES`).
+pub const HANDOFF_VALUE_MAX_BYTES: usize = 4096;
 
 /// Whether `id` is an old agent's id (`OLD_ID_MAX_BYTES`).
 pub fn valid_old(id: &str) -> bool {
@@ -393,7 +396,10 @@ pub struct Command {
     #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub mark: Option<Mark>,
-    /// `stop_and_stage`: the secrets to hand on (none until the vault: FIN-466).
+    /// `stop_and_stage` after a person's Yes (phase 1): the secrets the
+    /// old agent has (the roster's `has`), each to hand to its person's
+    /// Vault (`POST …/agents/{old}/secrets`) once it is stopped. None in
+    /// phase 2: no one said Yes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
     pub secrets: Vec<SecretKind>,
@@ -498,49 +504,66 @@ pub struct Reported {
     pub taken: bool,
 }
 
-/// A secret an old agent holds that its person may bring (FIN-466's vault;
-/// not handed on yet).
+/// A secret an old agent holds that its person's Yes brings to their
+/// Vault (FIN-466), each kind an entry there (`fragment_core::migrations::vault_secret`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretKind {
+    /// Its Telegram bot's token: the same bot, moved to the new agent's
+    /// Telegram connector from Settings.
     TelegramBotToken,
     OpenrouterKey,
-    /// The old agent's Nostr key: it signs for the old platform's services alone.
+    /// The old agent's Nostr key, an `nsec` (or 64 hex): kept, never sent.
     NostrNsec,
 }
 
-/// `POST /api/migrations/mover/agents/{old}/secrets` (F11, once the vault
-/// lands; no route yet): the values the person said yes to, forwarded to
-/// the vault within the call and never stored, logged or echoed here.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+impl SecretKind {
+    pub const ALL: [SecretKind; 3] = [SecretKind::TelegramBotToken, SecretKind::OpenrouterKey, SecretKind::NostrNsec];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SecretKind::TelegramBotToken => "telegram_bot_token",
+            SecretKind::OpenrouterKey => "openrouter_key",
+            SecretKind::NostrNsec => "nostr_nsec",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<SecretKind> {
+        SecretKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+}
+
+/// `POST /api/migrations/mover/agents/{old}/secrets` (F11): the old
+/// agent's secrets, read once it is stopped, for the `stop_and_stage`
+/// that `command` names (its `secrets`, each kind once, a value at most
+/// `HANDOFF_VALUE_MAX_BYTES`). Each goes into its person's Vault within
+/// the call, and is never stored, logged or echoed on the way. Its
+/// `Debug` is derived, as the wire's checker needs, and prints its values:
+/// nothing formats one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct Handoff {
     pub command: String,
     pub items: Vec<HandoffItem>,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct HandoffItem {
     pub kind: SecretKind,
     pub value: String,
 }
 
-/// Never shows a value.
-impl std::fmt::Debug for Handoff {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kinds: Vec<SecretKind> = self.items.iter().map(|i| i.kind).collect();
-        f.debug_struct("Handoff").field("command", &self.command).field("kinds", &kinds).finish()
-    }
-}
-
-impl std::fmt::Debug for HandoffItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HandoffItem").field("kind", &self.kind).finish_non_exhaustive()
-    }
-}
-
-/// Its answer: the kinds handed to the vault.
+/// Its answer: the kinds its person's Vault holds, each put once per old
+/// agent (the Vault's receipt). One the Vault refused (its rules, a full
+/// Vault, a name another agent's secret holds) is left out, and stays on
+/// the old platform. The same hand-off again answers the same, and puts
+/// nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HandedOff {
     pub handed: Vec<SecretKind>,
 }
@@ -807,14 +830,6 @@ mod tests {
         let a: RosterAgent = serde_json::from_value(json!({ "old": "o", "name": "Ada", "sizes": { "cache": 1, "history": 2, "work": 3, "move": 5, "total": 6 }, "has": { "telegram": true, "openrouter": false, "nostr": true } })).unwrap();
         assert_eq!(a.sizes.staged, 5);
         assert!(a.brains.is_empty() && a.sites.is_empty() && a.picture_url.is_none());
-    }
-
-    /// A hand-off's values never show in its `Debug`.
-    #[test]
-    fn a_handoff_never_shows_a_value() {
-        let h = Handoff { command: "c".into(), items: vec![HandoffItem { kind: SecretKind::TelegramBotToken, value: "123:SECRET".into() }] };
-        let shown = format!("{h:?} {:?}", h.items[0]);
-        assert!(!shown.contains("SECRET") && shown.contains("TelegramBotToken"), "{shown}");
     }
 
     /// Each state and reason reads back from its name.

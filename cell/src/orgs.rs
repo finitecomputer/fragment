@@ -272,7 +272,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
         (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
-        // FIN-352's census: reach shared beyond, counted (reach.rs)
+        // FIN-352's census: reach open by link or public, counted (reach.rs)
         (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
@@ -309,9 +309,9 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
                 code.code
             );
             let mail = crate::mail::Mail { to: send.email.trim().to_ascii_lowercase(), subject: format!("Try {PRODUCT}"), text };
-            crate::mail::send(env, cfg, &mail).await?;
+            let sent = crate::mail::send(env, cfg, &mail).await?.is_some();
             ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to), request: None }).await?;
-            json_answer(&serde_json::json!({ "sent": true, "to": mail.to }))
+            json_answer(&serde_json::json!({ "sent": sent, "to": mail.to }))
         }
         // the recovery of an org with no content admin (a sole admin's
         // wipe; decision 69): its governance log and the operators' name it,
@@ -405,7 +405,7 @@ async fn mail_offer(env: &Env, cfg: &Config, added: &Added) -> bool {
     };
     let mail = crate::mail::Mail { to: m.email.clone(), subject, text };
     match crate::mail::send(env, cfg, &mail).await {
-        Ok(_) => true,
+        Ok(sent) => sent.is_some(),
         Err(e) => {
             console_error!("{}", serde_json::json!({ "offer-mail": m.id, "failed": e.message }));
             false
@@ -428,7 +428,7 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
     let text = format!("You have {kind} on {PRODUCT}, in {}.\n\n{held}: {}/\n", comped.org.name, cfg.platform());
     let mail = crate::mail::Mail { to: comped.seat.email.clone(), subject: format!("You have a seat on {PRODUCT}"), text };
     match crate::mail::send(env, cfg, &mail).await {
-        Ok(_) => true,
+        Ok(sent) => sent.is_some(),
         Err(e) => {
             console_error!("{}", serde_json::json!({ "comp-mail": comped.seat.id, "failed": e.message }));
             false

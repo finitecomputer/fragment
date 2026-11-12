@@ -65,7 +65,7 @@ impl FragmentCell {
         if npub::is_identity(who) && who != principal {
             return Err(CellError::new(ErrorCode::Forbidden, "a who that is an identity (an npub) is the subscriber's own: sign in as them to subscribe for them"));
         }
-        let url = egress::check(endpoint, self.cfg.egress_local).map_err(|e| CellError::invalid(format!("endpoint: {e}")))?;
+        let url = egress::check(endpoint, self.cfg.egress_local, &self.cfg.egress_allow).map_err(|e| CellError::invalid(format!("endpoint: {e}")))?;
         if url.scheme() != "https" && !self.cfg.egress_local {
             return Err(CellError::invalid("a push endpoint is https"));
         }

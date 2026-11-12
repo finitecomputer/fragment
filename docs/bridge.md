@@ -403,6 +403,15 @@ never reaches another agent's core.
   card's question with its choices. An unlink stops the mirror and keeps
   the chat; a link again is that chat. `state.json` holds nothing of
   SimpleX.
+- **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
+  carries no typing, so while the agent's turn runs on a message from
+  their app (the engine's `working`: its own turn phases, whatever the
+  runtime), the link reacts 🚀 to that message, and takes it off when the
+  turn ends, with a reply or without. A refusal (their reactions off)
+  shows nothing and is not retried, and a ratchet out of step waits until
+  it is in step; `link.json`
+  keeps what it reacted to, so a later start takes off what an earlier
+  one left on.
 - **The agent is told in that chat alone**, as the chat's topic on every
   inbound there (Relay's `chat_topic`). Hermes reads a topic as a label,
   never as an instruction. Its name in their app is the agent's title,
@@ -449,7 +458,9 @@ never reaches another agent's core.
   the agent, checks each whole (its CRC, a SQLite
   database, the contract's three files and no other), and keeps them in
   the agent's SimpleX directory (`staged/`), running nothing. Its link
-  page's view says `staged`. Its owner's adoption ticket (`POST
+  page's view says `staged`, and the page offers it first ("Keep my
+  SimpleX chat", or "Start a new chat" for Link SimpleX); while the
+  computer sleeps, it says the chat can be kept once it stays on. Its owner's adoption ticket (`POST
   /simplex/adopt`) then reads the identity once with its core in
   maintenance mode (`-m`, started with nothing subscribed): their contact
   there and their name, and their chat's newest item, which is marked

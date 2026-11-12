@@ -637,11 +637,6 @@ impl FragmentCell {
             }));
         }
         self.connector_role(body.role)?;
-        // anyone but the owner's own agents, added or given a role, is
-        // sharing (reach.rs)
-        if target.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
-            self.share_while_private()?;
-        }
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
         }
@@ -839,8 +834,6 @@ impl FragmentCell {
             Err(e) => return Err(e),
         }
         self.drop_spent_invites().await?;
-        // an invite is sharing (reach.rs), decided in the write's own turn
-        self.share_while_private()?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} invites waiting", limits::INVITES_MAX)));
@@ -974,10 +967,6 @@ impl FragmentCell {
         let kept = current.is_some_and(|c| c >= role);
         // the owner is in already, with their agents as they chose them
         let owner = current == Some(Role::Owner);
-        // anyone else's yes is sharing (reach.rs): the invite waits on
-        if !owner {
-            self.share_while_private()?;
-        }
         let agents: &[String] = if owner { &[] } else { &claim.agents };
         self.room_for(u64::from(current.is_none()) + self.not_members(agents)?)?;
         self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
@@ -1136,7 +1125,7 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; a link or public is sharing (reach.rs)
+        // members only narrows it; its link or public, not with reach (reach.rs)
         if body.visibility != Visibility::Members {
             self.share_while_private()?;
         }
@@ -1232,8 +1221,8 @@ impl FragmentCell {
         // the write below share one turn
         let sealed = crate::keys::seal(&self.env, &self.scope(), put.value.as_bytes()).await?;
         self.require(caller, false, Role::Editor)?;
-        // a key is reach: none while it is shared beyond its owner and
-        // their agents (reach.rs), decided in the write's own turn
+        // a key is reach: none while its link opens it (reach.rs), decided
+        // in the write's own turn
         self.reach_while_private()?;
         let exists = self.secret_room(key)?;
         let by = self.caller_id(caller)?;

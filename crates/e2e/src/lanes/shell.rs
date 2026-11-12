@@ -191,7 +191,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && row(crate::SWAP_ROUTER)["state"] == "not_set"
             && row(crate::SWAP_ROUTER)["signIn"]["manage"].is_string()
             && row(crate::SWAP_ROUTER)["models"].as_array().is_some_and(|m| !m.is_empty())
-            && rows.len() == crate::SWAP_KEYS.len() + 6,
+            && rows.len() == crate::SWAP_KEYS.len() + 7,
         &r,
     );
     let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
@@ -4188,7 +4188,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // each row: its provider, kind, state, agents allowed, and uses
     let rows = "[...document.querySelectorAll('#settings-connections [data-provider]')].map((r) => [r.dataset.provider, r.dataset.kind, r.dataset.state, \
                 r.querySelectorAll('[data-agent][aria-pressed=true]').length, [...r.querySelectorAll('[data-use]')].map((u) => [u.dataset.use, Number(u.dataset.calls), Number(u.dataset.micros)])])";
-    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 6, row("perplexity")), wait);
+    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 7, row("perplexity")), wait);
     let got = b.eval(page, rows)?;
     let of = |p: &str| got.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
     let perplexity_charge = 7_500; // $0.005 a call at list, and the margin
@@ -4205,6 +4205,21 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
+    // each row's tile: its provider, its letter, and whether it holds a mark
+    // filled with the tile's own text colour, unstroked (provider-marks.js)
+    let tiles = b.eval(
+        page,
+        "[...document.querySelectorAll('#settings-connections [data-provider] .provider-tile')].map((t) => { const m = t.querySelector('svg.provider-mark path'); \
+         return [t.closest('[data-provider]').dataset.provider, t.textContent, !!m && getComputedStyle(m).fill === getComputedStyle(t).color && getComputedStyle(m).stroke === 'none']; })",
+    )?;
+    let tile = |p: &str| tiles.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
+    let marked = ["google", "openrouter", "x", "perplexity", "google-places", "elevenlabs"];
+    let lettered = [("firecrawl", "F"), ("fal", "F"), ("browser-use", "B"), ("xai", "x"), (crate::SWAP_OWN, "E")];
+    s.ok(
+        "a provider with a mark shows it in its tile, in the theme's text colour, and no letter; one without keeps its name's first letter",
+        marked.iter().all(|p| tile(p) == json!([p, "", true])) && lettered.iter().all(|(p, l)| tile(p) == json!([p, l, false])),
+        &tiles,
+    );
     let accounts = b.eval(page, "[...document.querySelectorAll('#settings-connections [data-account]')].map((a) => [a.closest('[data-provider]').dataset.provider, a.textContent])")?;
     s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
     // each note: its row, its text, and whether it is the line under the
@@ -4229,7 +4244,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let list = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["connections"].clone()).unwrap_or(Value::Null);
-    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER, "e2e-oauth", crate::SEVERAL, crate::ORG_CONNECTION]).collect();
+    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER, "e2e-oauth", crate::SEVERAL, crate::ORG_CONNECTION, crate::BASIC_CONNECTION]).collect();
     s.ok(
         "pressing an agent takes that provider from it (a narrowing of the rest), and the page says so",
         narrowed && list.as_array().is_some_and(|l| l.len() == others.len() && others.iter().all(|p| l.iter().any(|x| x == p))),
@@ -7941,6 +7956,56 @@ fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str
     Ok(())
 }
 
+/// Goal: a brain is on a page of its own, the Brains page (`/brains`,
+/// apps-page.js's brains shelf), and on the dock until taken off, as an app
+/// is. Valid: a brain made while Apps is open goes on the dock, and the
+/// sidebar's Brains lists it with its Dock switch on; its switch takes it
+/// off the dock and puts it back. Invalid: the Apps page never lists it,
+/// nor the Brains page an app. Replay: Back and Forward go between the two
+/// pages by their addresses, each listing what it did. Apps is open again
+/// at the end, and the brain gone.
+fn brains_page_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let in_page = |method: &str, path: &str, body: &str| {
+        format!("fetch({}, {{ method: {}, headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: {body}, credentials: 'same-origin' }}).then(async (r) => ({{ status: r.status, body: await r.json().catch(() => null) }}))", js(path), js(method))
+    };
+    let made = b.eval(page, &in_page("POST", "/api/fragments", &js(&json!({ "label": "shelved-brain", "template": "brain", "title": "Shelved brain" }).to_string())))?;
+    let brain = made["body"]["name"].as_str().unwrap_or_default().to_string();
+    anyhow::ensure!(made["status"] == 200 && !brain.is_empty(), "the brain was not made: {made}");
+    let on_page = |page_id: &str, name: &str| format!("!!document.querySelector({})", js(&format!("#{page_id} .app-row[data-fragment=\"{name}\"]")));
+    let docked = format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{brain}\"]")));
+    let dock = format!("document.querySelector({})", js(&format!("#brains-page .app-row[data-fragment=\"{brain}\"] [data-action=dock]")));
+
+    let off_apps = b.until(page, &format!("location.pathname === '/apps' && {docked} && {} && !{}", on_page("apps-page", app), on_page("apps-page", &brain)), wait);
+    s.ok("a brain made while Apps is open goes on the dock, and the Apps page never lists it", off_apps, b.eval(page, "document.getElementById('apps-page')?.innerText ?? null")?);
+
+    b.eval(page, "(document.getElementById('brains-link').click(), true)")?;
+    let listed = b.until(
+        page,
+        &format!("location.pathname === '/brains' && document.getElementById('apps-page').hidden && !document.getElementById('brains-page').hidden && document.querySelector('#brains-page h1')?.textContent === 'Brains' && {} && !{} && {dock}?.getAttribute('aria-checked') === 'true'", on_page("brains-page", &brain), on_page("brains-page", app)),
+        wait,
+    );
+    s.ok("the sidebar's Brains opens the Brains page (/brains): the brain, its Dock switch on, and no app", listed, b.eval(page, "document.getElementById('brains-page')?.innerText ?? null")?);
+
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    let off = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'false' && !{dock}?.disabled && !{docked}"), wait);
+    b.eval(page, &format!("({dock}?.click(), true)"))?;
+    let back_on = b.until(page, &format!("{dock}?.getAttribute('aria-checked') === 'true' && !{dock}?.disabled && {docked}"), wait);
+    s.ok("a brain's Dock switch on the Brains page takes it off the dock and pins it back", off && back_on, b.eval(page, &format!("{dock}?.getAttribute('aria-checked') ?? null"))?);
+
+    b.eval(page, "(history.back(), true)")?;
+    let apps_again = b.until(page, &format!("location.pathname === '/apps' && document.getElementById('brains-page').hidden && {} && !{}", on_page("apps-page", app), on_page("apps-page", &brain)), wait);
+    b.eval(page, "(history.forward(), true)")?;
+    let brains_again = b.until(page, &format!("location.pathname === '/brains' && document.getElementById('apps-page').hidden && {}", on_page("brains-page", &brain)), wait);
+    s.ok("Back and Forward go between Apps and Brains by their addresses, each listing what it did", apps_again && brains_again, json!({ "apps": apps_again, "brains": brains_again }));
+
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let gone = b.eval(page, &in_page("DELETE", &format!("/api/f/{brain}"), "undefined"))?;
+    anyhow::ensure!(gone["status"] == 200, "{brain} was not deleted: {gone}");
+    anyhow::ensure!(b.until(page, &format!("location.pathname === '/apps' && {} && !{docked}", on_page("apps-page", app)), wait), "Apps did not open again with the brain gone");
+    Ok(())
+}
+
 /// An app created while Apps is open appears from the list, and its card is
 /// read then. Its first reads are 404; the bounded retry shows the card the
 /// platform has since made, byte for byte, without another list change.
@@ -7978,11 +8043,12 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
 }
 
 /// Goal: an app's Reaches shows only on one that reaches the person's
-/// accounts, and such an app says it stays theirs and their agents' alone
-/// (Paul on FIN-352; the cell's rule, reach.rs). Invalid: an app with no key
-/// and no door has no Reaches tab. Valid: one given a key while the page is
-/// open gets the tab, its key by name and host, never its value, and its
-/// Sharing (its share sheet, share.rs) says why it is not shared; a
+/// accounts, and such an app has no share link and is not public (Paul on
+/// FIN-352; the cell's rule, reach.rs). Invalid: an app with no key and no
+/// door has no Reaches tab. Valid: one given a key while the page is open
+/// gets the tab, its key by name and host, never its value, and its
+/// Sharing (its share sheet, share.rs) still invites, says once that the
+/// people added can use its keys, and why it has no link; a
 /// connector bound as their agent's door is listed, its Reaches the door
 /// with Unlink, and their agents never are (an agent's own door is
 /// Settings': Alex on #918). Replay: its key removed from its Reaches
@@ -8019,8 +8085,8 @@ fn apps_reach_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Resu
     );
     b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "sharing")))?;
     let sheet = format!("({row}?.querySelector('.app-row-panel iframe')?.contentDocument?.body?.innerText ?? '')");
-    let locked = b.until(page, &format!("{sheet}.includes('Apps that can reach your accounts stay private to you and your agents for now.') && !{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
-    s.ok("its Sharing says an app that reaches their accounts stays theirs and their agents', and invites no one", locked, b.eval(page, &sheet)?);
+    let locked = b.until(page, &format!("{sheet}.includes(\"People you add can use this app's keys.\") && {sheet}.includes(\"can't be shared by link or made public for now\") && !!{row}.querySelector('.app-row-panel iframe').contentDocument.querySelector('input[type=email]')"), wait);
+    s.ok("its Sharing still invites, says once that the people added can use its keys, and why it has no link", locked, b.eval(page, &sheet)?);
 
     b.eval(page, &format!("({}?.click(), true)", tab_of(&name, "reach")))?;
     let remove = format!("[...{row}?.querySelectorAll('.app-reach [data-action=reach]') ?? []]");
@@ -8309,6 +8375,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
     s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
 
+    brains_page_ui(s, b, page, app)?;
     apps_dock_visit_ui(s, b, page, app)?;
     apps_sharing_refresh_ui(s, b, page, app)?;
     apps_response_races_ui(s, b, page, app)?;

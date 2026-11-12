@@ -8,8 +8,10 @@ the platform's release serves the rest, so every brain runs the same code
 and one deploy updates them all. The platform knows nothing of brains:
 everything here is this template's app code and files.
 
-Make one with the CLI (yours, or your agent's) or the API; the shell
-makes none (its Add suggests what to ask an agent for: `APP_PROMPTS` in
+The shell lists a person's brains on its Brains page (`/brains`), apart
+from their apps, and keeps each on their dock until they take it off
+(apps-page.js's shelves). Make one with the CLI (yours, or your agent's)
+or the API; the shell makes none (its Add suggests what to ask an agent for: `APP_PROMPTS` in
 cell/shell/shell.js):
 
     fragment create garden --template brain --title Garden
@@ -118,12 +120,14 @@ indexing, waiting_ms, hint?}`.
 ## The page
 
 A brain has no page of its own: its manifest makes the platform's files
-view its page (`"files": {"page": true, "status": "index_status"}`,
-FIN-372). That is the tree and reader every fragment has (`__files`), with
-the fragment's own search above the tree and `index_status`'s `line` as
-its status line. With no file named, it opens the brain's front page:
-the release's `index.md` (beside `AGENTS.md`, the template's data), unless
-the brain holds an `index.md` of its own.
+view its page (`"files": {"page": true, "status": "index_status", "graph":
+true}`, FIN-372). That is the tree and reader every fragment has
+(`__files`), with the fragment's own search above the tree and
+`index_status`'s `line` as its status line. With no file named, it opens
+on the graph of the brain's pages and their links, coloured by wiki (a
+page chosen there is previewed beside it, its links listed); the brain's
+front page is the release's `index.md` (beside `AGENTS.md`, the
+template's data), unless the brain holds an `index.md` of its own.
 
 ## Parent brains
 
