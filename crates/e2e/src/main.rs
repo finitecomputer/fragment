@@ -77,7 +77,8 @@ enum Shape {
     EmbeddingsRepinned,
     /// As `Plain`, without the services a self-hosted runtime lacks
     /// (docs/self-host.md): no Email Sending (no `send_email`, and no mail
-    /// fake: no mailer at all).
+    /// fake: no mailer at all), no Browser Rendering, no Images, and no
+    /// containers (so it makes no computers).
     Unbound,
 }
 
@@ -803,7 +804,7 @@ impl Suite {
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            computer_image: Some("stub".into()),
+            computer_image: (self.shape != Shape::Unbound).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -823,7 +824,7 @@ impl Suite {
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
             unbound: match self.shape {
-                Shape::Unbound => &["send_email"],
+                Shape::Unbound => &["send_email", "browser", "images", "containers"],
                 _ => &[],
             },
         };
