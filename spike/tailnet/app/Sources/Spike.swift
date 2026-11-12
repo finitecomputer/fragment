@@ -22,6 +22,7 @@ struct SpikeConfig: Codable {
     var authKey = ""             // optional; else interactive login URL
     var store = "ephemeral"      // ephemeral | default
     var matchDomains = ""        // comma list: proxy only these domains (empty: all)
+    var control = ""             // control server URL (empty: Tailscale's)
 
     static let key = "spikeConfig"
     static func load() -> SpikeConfig {
@@ -31,7 +32,7 @@ struct SpikeConfig: Codable {
         for (k, apply) in [("url", { c.url = $0 }), ("mode", { c.mode = $0 }), ("proxy", { c.proxy = $0 }),
                            ("pass", { c.pass = $0 }), ("ca", { c.ca = $0 }), ("pin", { c.pin = $0 }),
                            ("hostname", { c.hostname = $0 }), ("store", { c.store = $0 }),
-                           ("matchDomains", { c.matchDomains = $0 })] as [(String, (String) -> Void)] {
+                           ("matchDomains", { c.matchDomains = $0 }), ("control", { c.control = $0 })] as [(String, (String) -> Void)] {
             if let v = d.volatileDomain(forName: UserDefaults.argumentDomain)[k] as? String { apply(v) }
         }
         return c
@@ -54,6 +55,7 @@ struct SpikeConfig: Codable {
             case "authKey": authKey = v
             case "store": store = v
             case "matchDomains": matchDomains = v
+            case "control": control = v
             default: break
             }
         }
@@ -94,6 +96,7 @@ final class Spike: ObservableObject {
     @Published var webGeneration = 0
     var pinned: SecCertificate?
     var backgroundedAt: Date?
+    var tsnetStarting = false
     weak var webView: WKWebView?
     #if canImport(TailscaleKit)
     var node: TailscaleNode?
@@ -131,7 +134,13 @@ final class Spike: ObservableObject {
         case "probe":
             setProxy(hostPort: config.proxy, password: config.pass)
         case "tsnet":
-            Task { await startTsnet() }
+            // one node per process: a deep link at launch must not start a second
+            if tsnetStarting {
+                if proxy != nil { webGeneration += 1 }
+            } else {
+                tsnetStarting = true
+                Task { await startTsnet() }
+            }
         default:
             proxy = nil
             status = "direct"
@@ -174,7 +183,10 @@ final class Spike: ObservableObject {
 
     func startTsnet() async {
         #if canImport(TailscaleKit)
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("tailscale")
+        // one state dir per control server, so switching never reuses a node
+        let ctl = config.control.isEmpty ? kDefaultControlURL : config.control
+        let tag = ctl.replacingOccurrences(of: #"[^A-Za-z0-9]+"#, with: "_", options: .regularExpression)
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(config.control.isEmpty ? "tailscale" : "tailscale-" + tag)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let goLog = docs.appendingPathComponent("go.log")
         FileManager.default.createFile(atPath: goLog.path, contents: nil)
@@ -186,14 +198,14 @@ final class Spike: ObservableObject {
         #endif
         let cfg = Configuration(hostName: config.hostname.isEmpty ? defaultName : config.hostname,
                                 path: dir.path, authKey: config.authKey.isEmpty ? nil : config.authKey,
-                                controlURL: kDefaultControlURL, ephemeral: false)
+                                controlURL: ctl, ephemeral: false)
         status = "tsnet starting"
-        log("tsnet-new")
+        log("tsnet-new", ["control": ctl, "state": dir.lastPathComponent])
         let watcher = Task.detached { [goLog] in
             // The interactive login URL appears in tsnet's log while up() waits.
             for _ in 0..<1200 {
                 if let s = try? String(contentsOf: goLog, encoding: .utf8),
-                   let r = s.range(of: #"https://login\.tailscale\.com/a/[A-Za-z0-9]+"#, options: .regularExpression) {
+                   let r = s.range(of: #"https?://[^\s"]+/(a|register)/[A-Za-z0-9_-]+"#, options: .regularExpression) {
                     let u = String(s[r])
                     await MainActor.run { Spike.shared.loginURL = URL(string: u); Spike.shared.log("login-url", ["url": u]) }
                     return

@@ -52,7 +52,7 @@ targets:
         UIApplicationSceneManifest: {UIApplicationSupportsMultipleScenes: false}
         CFBundleURLTypes: [{CFBundleURLSchemes: [tsspike]}]
         NSLocalNetworkUsageDescription: The spike reaches tailnet peers on your network directly.
-        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
+        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, sslip.io: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
     dependencies:
       - framework: Frameworks/TailscaleKit.xcframework
         embed: true
@@ -87,7 +87,7 @@ targets:
       properties:
         CFBundleDisplayName: TS Spike
         CFBundleURLTypes: [{CFBundleURLSchemes: [tsspike]}]
-        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
+        NSAppTransportSecurity: {NSExceptionDomains: {ts.net: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, tsspike.test: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}, sslip.io: {NSIncludesSubdomains: true, NSExceptionAllowsInsecureHTTPLoads: true}}}
     dependencies:
       - framework: Frameworks/mac/TailscaleKit.framework
         embed: true

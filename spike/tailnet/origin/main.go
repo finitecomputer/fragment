@@ -40,7 +40,7 @@ var (
 	plain    = flag.String("plain", "", "optional plaintext listen address (behind a TLS-terminating proxy)")
 	proxyPro = flag.Bool("proxy-protocol", false, "expect a PROXY v1/v2 header on each connection")
 	certDir  = flag.String("certs", "certs", "dir of <name>.crt (full chain) + <name>.key pairs")
-	platform = flag.String("platform", "", "platform host P; fragments are <name>.P")
+	platform = flag.String("platform", "", "platform hosts P (comma list); fragments are <name>.P")
 	logDir   = flag.String("logs", "logs", "dir for access.jsonl and results.jsonl")
 )
 
@@ -72,6 +72,7 @@ func main() {
 	if *platform == "" {
 		log.Fatal("-platform is required")
 	}
+	platforms = strings.Split(*platform, ",")
 	os.MkdirAll(*logDir, 0o755)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", route)
@@ -268,11 +269,28 @@ func hostOf(r *http.Request) string {
 	return strings.ToLower(h)
 }
 
-func isFragment(h string) bool { return strings.HasSuffix(h, "."+*platform) }
+var platforms []string
+
+// platformOf: the platform host h is, or is a fragment of ("" if neither).
+func platformOf(h string) string {
+	h = strings.ToLower(h)
+	if i := strings.LastIndexByte(h, ':'); i > 0 && !strings.Contains(h[i:], "]") {
+		h = h[:i]
+	}
+	for _, p := range platforms {
+		if h == p || strings.HasSuffix(h, "."+p) {
+			return p
+		}
+	}
+	return ""
+}
+
+func isFragment(h string) bool { p := platformOf(h); return p != "" && h != p }
 
 func route(w http.ResponseWriter, r *http.Request) {
 	h := hostOf(r)
-	if h != *platform && !isFragment(h) {
+	P := platformOf(h)
+	if P == "" {
 		http.Error(w, "unknown host "+h, http.StatusMisdirectedRequest)
 		return
 	}
@@ -297,14 +315,14 @@ func route(w http.ResponseWriter, r *http.Request) {
 		results(w, r)
 	case strings.HasPrefix(p, "/static/"):
 		static(w, r)
-	case h == *platform && p == "/login":
+	case h == P && p == "/login":
 		login(w, r)
-	case h == *platform && p == "/":
+	case h == P && p == "/":
 		page(w, r)
 	case isFragment(h) && p == "/frame":
 		frame(w, r)
 	case isFragment(h) && p == "/":
-		fmt.Fprintf(w, "fragment %s\n", strings.TrimSuffix(h, "."+*platform))
+		fmt.Fprintf(w, "fragment %s\n", strings.TrimSuffix(h, "."+P))
 	default:
 		http.NotFound(w, r)
 	}
@@ -316,8 +334,7 @@ func cors(w http.ResponseWriter, r *http.Request) {
 	if o == "" {
 		return
 	}
-	oh := strings.TrimPrefix(o, "https://")
-	if oh == *platform || strings.HasSuffix(oh, "."+*platform) {
+	if oP := platformOf(strings.TrimPrefix(o, "https://")); oP != "" && oP == platformOf(hostOf(r)) {
 		w.Header().Set("Access-Control-Allow-Origin", o)
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Headers", "content-type")

@@ -17,7 +17,9 @@ struct TSSpikeApp: App {
                     c.apply(u)
                     c.save()
                     spike.config = c
-                    spike.log("deeplink", ["url": u.absoluteString.prefix(300).description])
+                    // never log credentials (the probe's password, an auth key)
+                    let redacted = u.absoluteString.replacingOccurrences(of: #"(pass|authKey)=[^&]*"#, with: "$1=REDACTED", options: .regularExpression)
+                    spike.log("deeplink", ["url": redacted.prefix(300).description])
                     spike.start()
                 }
         }

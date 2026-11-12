@@ -9,7 +9,7 @@ import (
 func page(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprint(w, strings.ReplaceAll(pageHTML, "{{P}}", *platform))
+	fmt.Fprint(w, strings.ReplaceAll(pageHTML, "{{P}}", platformOf(hostOf(r))))
 }
 
 func frame(w http.ResponseWriter, r *http.Request) {
@@ -23,7 +23,7 @@ func frame(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprint(w, strings.ReplaceAll(frameHTML, "{{P}}", *platform))
+	fmt.Fprint(w, strings.ReplaceAll(frameHTML, "{{P}}", platformOf(hostOf(r))))
 }
 
 const pageHTML = `<!doctype html><html><head><meta charset="utf-8">
