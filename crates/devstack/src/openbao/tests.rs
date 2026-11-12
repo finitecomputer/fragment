@@ -146,6 +146,35 @@ fn only_the_pinned_tarball_and_its_bao_are_taken() {
     fs::remove_dir_all(&tools).unwrap();
 }
 
+// Goal: a cached `bao` that is not the pinned bytes is refused before
+// anything runs it, `bao version` included (Codex round 1 on #1254: a
+// replaced cache executable ran as the developer, printed the pin's
+// version, and was launched as the secrets server), whether it is found
+// by `locate` or handed to `OpenBao::start`. Method: an impostor in the
+// pinned cache directory that writes a marker and prints what the pin
+// prints. Replay: refused again, the marker never written.
+#[test]
+fn a_cached_bao_that_is_not_the_pinned_bytes_is_refused_unrun() {
+    let tools = scratch("impostor");
+    let tarball = tarball_for(std::env::consts::OS, std::env::consts::ARCH).unwrap();
+    let home = tools.join(tarball.dir_name());
+    fs::create_dir_all(&home).unwrap();
+    let marker = tools.join("impostor-ran");
+    let impostor = home.join(BINARY);
+    fs::write(&impostor, format!("#!/bin/sh\ntouch '{}'\necho 'OpenBao v{OPENBAO_VERSION} (0000000000000000000000000000000000000000), built 2026-10-26T00:00:00Z'\n", marker.display())).unwrap();
+    fs::set_permissions(&impostor, fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..2 {
+        let e = locate_from(&tools, None).expect_err("a cached bao that is not the pin");
+        assert!(e.to_string().contains(&impostor.display().to_string()), "it names the path: {e}");
+        assert!(!marker.exists(), "refused unrun: {e}");
+    }
+    let dir = scratch("impostor-state");
+    let started = OpenBao::start(&impostor, Options { dir: dir.clone(), port: 0, audit: false });
+    assert!(started.is_err() && !marker.exists(), "start refuses it unrun too: {:?}", started.err());
+    let _ = fs::remove_dir_all(&dir);
+    fs::remove_dir_all(&tools).unwrap();
+}
+
 /// What one request to the scripted server carried.
 #[derive(Debug, Clone)]
 struct Hit {

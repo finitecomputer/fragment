@@ -109,6 +109,8 @@ pub enum OpenBaoError {
     Unpack { file: String, detail: String },
     /// The binary does not answer as the pin.
     Corrupt { bin: PathBuf, detail: String },
+    /// The binary is not the pinned bytes: refused, never run.
+    NotPinned { bin: PathBuf, expected: String, actual: String },
     Io { what: String, source: io::Error },
     /// A secret file others may read, or one that is not what it must be.
     BadFile { path: PathBuf, detail: String },
@@ -135,6 +137,12 @@ impl fmt::Display for OpenBaoError {
             OpenBaoError::Corrupt { bin, detail } => {
                 write!(f, "{} is not the pinned OpenBao {OPENBAO_VERSION} ({detail}): remove its directory, and the next run fetches it again", bin.display())
             }
+            OpenBaoError::NotPinned { bin, expected, actual } => write!(
+                f,
+                "{} has SHA-256 {actual}, not the pinned OpenBao {OPENBAO_VERSION}'s {expected}: refused, never run. Remove its directory ({}), and the next run fetches and verifies it again",
+                bin.display(),
+                bin.parent().map(|d| d.display().to_string()).unwrap_or_default()
+            ),
             OpenBaoError::Io { what, source } => write!(f, "{what}: {source}"),
             OpenBaoError::BadFile { path, detail } => write!(f, "{}: {detail}", path.display()),
             OpenBaoError::BadPath(p) => write!(f, "{} cannot be OpenBao's state directory: its path holds a quote, a backslash, a control character or a template sequence", p.display()),
@@ -190,8 +198,7 @@ pub fn locate(tools: &Path) -> Result<PathBuf, OpenBaoError> {
 
 /// `locate`, the tarball from `given` (by path) when it must be installed.
 fn locate_from(tools: &Path, given: Option<PathBuf>) -> Result<PathBuf, OpenBaoError> {
-    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
-    let tarball = tarball_for(os, arch).ok_or(OpenBaoError::UnsupportedPlatform { os, arch })?;
+    let tarball = this_tarball()?;
     let home = tools.join(tarball.dir_name());
     if !home.is_dir() {
         let _lock = node::lock_tools(tools, "OpenBao").map_err(|(what, source)| OpenBaoError::Io { what, source })?;
@@ -211,8 +218,34 @@ fn locate_from(tools: &Path, given: Option<PathBuf>) -> Result<PathBuf, OpenBaoE
         }
     }
     let bin = home.join(BINARY);
+    // its bytes before anything runs it, `bao version` included
+    pinned_bytes(&bin, tarball)?;
     answers_pin(&bin)?;
     Ok(bin)
+}
+
+/// Whether the file at `bin` is the pinned `bao`, by its SHA-256
+/// (`Tarball::bao_sha256`), read at most `BINARY_BYTES_MAX` bytes: a cache
+/// replaced or restored from elsewhere is refused, never run. Checked just
+/// before each run (`locate`, every `OpenBao::up`): a process of the
+/// developer's own that swaps the file between the check and the exec
+/// could still slip one in, but it already holds their permissions.
+fn pinned_bytes(bin: &Path, tarball: &Tarball) -> Result<(), OpenBaoError> {
+    use sha2::{Digest, Sha256};
+    let file = fs::File::open(bin).map_err(io_error(format!("open {}", bin.display())))?;
+    let mut hasher = Sha256::new();
+    let read = io::copy(&mut file.take(BINARY_BYTES_MAX + 1), &mut hasher).map_err(io_error(format!("read {}", bin.display())))?;
+    let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    match read <= BINARY_BYTES_MAX && actual == tarball.bao_sha256 {
+        true => Ok(()),
+        false => Err(OpenBaoError::NotPinned { bin: bin.to_path_buf(), expected: tarball.bao_sha256.to_string(), actual }),
+    }
+}
+
+/// This machine's pinned tarball (`tarball_for`).
+fn this_tarball() -> Result<&'static Tarball, OpenBaoError> {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    tarball_for(os, arch).ok_or(OpenBaoError::UnsupportedPlatform { os, arch })
 }
 
 /// A tarball an operator supplied, whole, when it is at most `TARBALL_BYTES_MAX`.
@@ -251,6 +284,10 @@ fn install(bytes: &[u8], tarball: &Tarball, tools: &Path) -> Result<PathBuf, Ope
         return Err(OpenBaoError::HashMismatch { file, expected: tarball.sha256.to_string(), actual });
     }
     let binary = binary_from(bytes, &file)?;
+    let unpacked = node::sha256_hex(&binary);
+    if unpacked != tarball.bao_sha256 {
+        return Err(OpenBaoError::Unpack { file, detail: format!("its {BINARY} has SHA-256 {unpacked}, not the pinned {}", tarball.bao_sha256) });
+    }
     let partial = tools.join(".partial-openbao");
     let _ = fs::remove_dir_all(&partial);
     fs::create_dir_all(&partial).map_err(io_error(format!("create {}", partial.display())))?;
@@ -695,6 +732,8 @@ impl OpenBao {
     /// static seal, never initialised again.
     pub fn up(&mut self) -> Result<Duration, OpenBaoError> {
         assert!(self.child.is_none(), "one OpenBao at a time on a state");
+        // the pinned bytes, at every start: nothing else is run as the secrets server
+        pinned_bytes(&self.bin, this_tarball()?)?;
         let layout = prepare(&self.layout.dir)?;
         let config = render_config(&layout, self.opts.port, self.opts.audit)?;
         let tmp = layout.config().with_extension("hcl.new");
