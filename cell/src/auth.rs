@@ -1,6 +1,10 @@
 //! Sign-in at the router (phase 4 slice B; the registry's half is
 //! `registry/signin.rs`). WorkOS AuthKit authenticates people on the
 //! platform origin; the platform holds no key for them, only sessions.
+//! Where the deployment names an OpenID Connect provider (`Config::oidc`:
+//! docs/self-host.md, seam 4), it does in WorkOS's place: `/auth/login`,
+//! `/auth/switch`'s sign-in and `/auth/callback` are oidc.rs's, on the
+//! same round trips and sessions, and logout ends the session here alone.
 //!
 //! Platform origin (`/`, `/settings` and `/welcome` are the shell's page: shell.rs):
 //!
@@ -99,7 +103,7 @@ pub const SIGNIN_HEADER: &str = "x-fragment-signin";
 /// asked beside the registry's Redeem, before it takes the check hop as
 /// if anyone may read it.
 const VISIBILITY_WAIT_MS: u64 = 2_000;
-const LOGIN_HINT_MAX: usize = 320;
+pub(crate) const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
 /// `/cli`'s forms: a form token and a code, or what a person typed.
 const CLI_FORM_MAX_BYTES: usize = 1024;
@@ -215,7 +219,7 @@ pub(crate) fn esc(s: &str) -> String {
 
 /// Where a browser that signed in goes back to: the path it brought, on
 /// `base`'s origin and never another (`site::return_url`).
-fn back_to(base: &str, raw: Option<&str>) -> CellResult<String> {
+pub(crate) fn back_to(base: &str, raw: Option<&str>) -> CellResult<String> {
     let base = Url::parse(base).map_err(|e| CellError::host(format!("{base}: {e}")))?;
     Ok(site::return_url(&base, raw).into())
 }
@@ -324,7 +328,7 @@ fn workos_logout(api: &str, sid: &str, platform: &str) -> String {
 
 // Commit a page before leaving: Chromium applies the shell's
 // form-action 'self' to a POST's HTTP redirects.
-fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response> {
+pub(crate) fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response> {
     let mut resp = page(200, title, &format!("<p><a href=\"{}\">Continue</a></p>", esc(to)))?;
     resp.headers_mut().set("refresh", &format!("0; url={to}"))?;
     resp.headers_mut().set("referrer-policy", "no-referrer")?;
@@ -338,6 +342,12 @@ fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response>
 /// `trip`'s: a sign-in's, or a switch's.
 async fn begin(env: &Env, cfg: &Config, url: &Url, trip: Trip) -> CellResult<Response> {
     assert!(matches!(trip, Trip::SignIn | Trip::Switch), "a sign-in is begun as one, or as a switch");
+    if let Some(o) = &cfg.oidc {
+        // a future of its own behind a pointer, not more states in the
+        // router's (`crate::platform_answer`), which awaits this from two arms
+        let begun: futures_util::future::LocalBoxFuture<'_, CellResult<Response>> = Box::pin(crate::oidc::begin(env, cfg, o, url, trip));
+        return begun.await;
+    }
     let workos = crate::keys::workos(env, cfg).await?;
     let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
@@ -369,6 +379,10 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, trip: Trip) -> CellResult<Res
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    if let Some(o) = &cfg.oidc {
+        let done: futures_util::future::LocalBoxFuture<'_, CellResult<Response>> = Box::pin(crate::oidc::callback(req, env, cfg, o, url));
+        return done.await;
+    }
     let workos = crate::keys::workos(env, cfg).await?;
     if let Some(error) = query(url, "error") {
         let why = query(url, "error_description").unwrap_or_default();

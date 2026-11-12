@@ -1682,7 +1682,8 @@ pub struct Identity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subject {
-    /// `workos:<client id>`: the environment that vouches for it.
+    /// `workos:<client id>`: the environment that vouches for it; or, on a
+    /// self-hosted deployment, its OpenID Connect provider's issuer URL.
     pub issuer: String,
     pub email: Option<String>,
     pub linked_at: i64,

@@ -76,6 +76,10 @@ mod tests {
         assert!(calls.contains("#[derive(Serialize)]\n#[serde(rename_all = \"camelCase\")]\npub(crate) struct Exchange {\n    state: String,"), "Exchange is Serialize only, its fields private");
         assert_eq!(uses(&files, "Exchange { state"), only("registry/calls.rs", 1), "an Exchange is made in Exchange::of alone");
         assert!(calls.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
+        // an OpenID Connect provider's sign-in (docs/self-host.md, seam 4), as WorkOS's exchange
+        assert!(calls.contains("#[derive(Serialize)]\n#[serde(rename_all = \"camelCase\")]\npub(crate) struct OidcSignIn {\n    state: String,"), "OidcSignIn is Serialize only, its fields private");
+        assert_eq!(uses(&files, "OidcSignIn { state"), only("registry/calls.rs", 1), "an OidcSignIn is made in OidcSignIn::of alone");
+        assert_eq!(uses(&files, "OidcSignIn::of("), only("oidc.rs", 1), "by the provider's callback, from its Bound");
         assert!(calls.contains("#[derive(Serialize)]\npub(crate) struct FinishConnection {\n    state: String,"), "connection completion is Serialize only with private fields");
         assert_eq!(uses(&files, "FinishConnection::of("), only("connections.rs", 1));
         assert_eq!(uses(&files, "keys::connection_exchange("), only("registry/connection_signin.rs", 1));

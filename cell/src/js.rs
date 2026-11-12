@@ -832,6 +832,46 @@ impl Laps {
     }
 }
 
+/// Whether an id_token's signature is its key's over its signing input
+/// (`fragment_core::oidc::Signed`), by the runtime's WebCrypto: the key
+/// imported as a JWK made from its numbers alone, never the provider's
+/// (RSASSA-PKCS1-v1_5 or ECDSA P-256, each over SHA-256), then `verify`.
+/// `Err`: the runtime would not import the key (an EC point off the
+/// curve), or threw: why.
+pub async fn signature_verifies(s: &fragment_core::oidc::Signed<'_, '_>) -> Result<bool, String> {
+    use fragment_core::oidc::{Alg, Public};
+    use fragment_core::own_signin::b64url;
+    let (jwk, import, verify) = (Object::new(), Object::new(), Object::new());
+    match (s.alg, s.key) {
+        (Alg::Rs256, Public::Rsa { n, e }) => {
+            set(&jwk, "kty", "RSA");
+            set(&jwk, "n", b64url(n));
+            set(&jwk, "e", b64url(e));
+            set(&import, "name", "RSASSA-PKCS1-v1_5");
+            set(&import, "hash", "SHA-256");
+            set(&verify, "name", "RSASSA-PKCS1-v1_5");
+        }
+        (Alg::Es256, Public::Ec { x, y }) => {
+            set(&jwk, "kty", "EC");
+            set(&jwk, "crv", "P-256");
+            set(&jwk, "x", b64url(x));
+            set(&jwk, "y", b64url(y));
+            set(&import, "name", "ECDSA");
+            set(&import, "namedCurve", "P-256");
+            set(&verify, "name", "ECDSA");
+            set(&verify, "hash", "SHA-256");
+        }
+        _ => return Err("the key is not of the token's algorithm".into()),
+    }
+    let subtle = get(&js_sys::global(), "crypto").and_then(|c| get(&c, "subtle")).map_err(|e| e.message)?;
+    let thrown = |e: JsValue| js_message(&e);
+    let usages = Array::of1(&JsValue::from_str("verify"));
+    let key = settle(call(&subtle, "importKey", &["jwk".into(), jwk.into(), import.into(), false.into(), usages.into()]).map_err(thrown)?).await.map_err(thrown)?;
+    let (signature, input) = (js_sys::Uint8Array::from(s.signature.as_slice()), js_sys::Uint8Array::from(s.input));
+    let verified = settle(call(&subtle, "verify", &[verify.into(), key, signature.into(), input.into()]).map_err(thrown)?).await.map_err(thrown)?;
+    verified.as_bool().ok_or_else(|| "verify answered no boolean".into())
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = crypto, js_name = getRandomValues)]

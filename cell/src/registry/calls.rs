@@ -823,6 +823,47 @@ impl Call for Exchange {
     type Answer = Exchanged;
 }
 
+/// `POST /login/oidc`: an OpenID Connect provider's sign-in finished
+/// (docs/self-host.md, seam 4). The router exchanged its code and verified
+/// its id_token (cell/src/oidc.rs), so it names the person's `(issuer,
+/// subject)` and the email the provider gave as theirs; the registry spends
+/// the sign-in and signs them in as WorkOS's exchange does. A finished
+/// round trip, as `Exchange` is: made only with `of`, from the `Bound` of
+/// the browser that began it, its fields private, never `Deserialize`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OidcSignIn {
+    state: String,
+    issuer: String,
+    subject: String,
+    email: String,
+}
+
+impl OidcSignIn {
+    /// A provider's verified sign-in (or a switch's), coming back to the
+    /// browser that began it: the only way to make one.
+    pub(crate) fn of(bound: crate::auth::Bound, issuer: &str, verified: fragment_core::oidc::Verified, email: &str) -> OidcSignIn {
+        use fragment_core::roundtrip::Trip;
+        assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a provider's sign-in finishes a sign-in or a switch");
+        OidcSignIn { state: bound.state().to_string(), issuer: issuer.to_string(), subject: verified.subject, email: email.to_string() }
+    }
+}
+
+/// `OidcSignIn`'s body as the Registry decodes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::registry) struct OidcSignInIn {
+    pub(in crate::registry) state: String,
+    pub(in crate::registry) issuer: String,
+    pub(in crate::registry) subject: String,
+    pub(in crate::registry) email: String,
+}
+
+impl Call for OidcSignIn {
+    const PATH: &'static str = "/login/oidc";
+    type Answer = Exchanged;
+}
+
 /// `POST /session`: the identity a live session names (401 when it is
 /// not live): the platform's (`fragment` none) or one fragment's (or one
 /// share sheet's: `sheet`), a frame's (`frame`: made in a frame, for the

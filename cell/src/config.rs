@@ -142,6 +142,11 @@ pub struct Config {
     /// boundary, which never sends it.
     pub mail_url: Option<String>,
     workos: Option<WorkOsConfig>,
+    /// Sign-in by an OpenID Connect provider (`FRAGMENT_OIDC_*`: docs/self-host.md,
+    /// seam 4), in WorkOS's place; none: WorkOS signs people in, as on
+    /// finite.chat. Its client's secret is a Secrets Store binding
+    /// (`OIDC_CLIENT_SECRET`), read only by keys.rs.
+    pub oidc: Option<fragment_core::oidc::Settings>,
     stripe: Option<StripeConfig>,
     /// The logs the glance reads; none: not configured.
     pub observability: Option<ObservabilityConfig>,
@@ -395,6 +400,19 @@ impl Config {
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
+            oidc: {
+                let (issuer, client_id, scopes) = (var(env, "FRAGMENT_OIDC_ISSUER"), var(env, "FRAGMENT_OIDC_CLIENT_ID"), var(env, "FRAGMENT_OIDC_SCOPES"));
+                let (email_claim, vouched, auth) = (var(env, "FRAGMENT_OIDC_EMAIL_CLAIM"), var(env, "FRAGMENT_OIDC_EMAIL_VOUCHED"), var(env, "FRAGMENT_OIDC_AUTH"));
+                let vars = fragment_core::oidc::Vars {
+                    issuer: issuer.as_deref(),
+                    client_id: client_id.as_deref(),
+                    scopes: scopes.as_deref(),
+                    email_claim: email_claim.as_deref(),
+                    vouched: vouched.as_deref(),
+                    auth: auth.as_deref(),
+                };
+                fragment_core::oidc::Settings::parse(vars).unwrap_or_else(|e| panic!("{e}"))
+            },
             observability: var(env, "FRAGMENT_ACCOUNT_ID")
                 .filter(|a| !a.is_empty() && crate::keys::bound(env, fragment_core::secrets_store::OBSERVABILITY_READ))
                 .zip(var(env, "FRAGMENT_WORKER_NAME").filter(|w| fragment_core::glance::valid_script(w)))

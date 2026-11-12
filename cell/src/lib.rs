@@ -64,6 +64,7 @@ mod meter;
 mod migrations;
 mod models;
 mod notices;
+mod oidc;
 mod ops;
 mod orgs;
 mod plane;

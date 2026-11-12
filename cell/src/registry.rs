@@ -58,7 +58,7 @@ mod signin;
 mod connection_signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, OidcSignIn, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeBilling, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
@@ -865,6 +865,7 @@ impl RegistryCell {
             SetPicture::PATH => reply::<SetPicture>(self.set_picture(body(&bytes)?)),
             Begin::PATH => reply::<Begin>(self.begin(body(&bytes)?).await),
             Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),
+            OidcSignIn::PATH => reply::<OidcSignIn>(self.oidc_sign_in(body(&bytes)?).await),
             Session::PATH => reply::<Session>(self.session(body(&bytes)?)),
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
