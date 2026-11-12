@@ -910,8 +910,11 @@ pub fn move_comp(s: &mut Suite, api: &Api) -> Result<()> {
 /// the cover standing aside there; the one question (which, by what
 /// name); Bring over makes the guest's comp, then a new agent (its chat not
 /// opened), then posts its Yes; then the move as the server says it goes:
-/// stopping, then (the fake mover staging it) bringing it over. Pictures
-/// at 1280 and 390 px, light and dark.
+/// stopping, then (the fake mover staging it) its import begun, which takes
+/// the person to the new agent's own chat (FIN-463: the agent tells its
+/// move there, and asks there). The page opened again then says it is
+/// being brought over, a tap from that chat. Pictures at 1280 and 390 px,
+/// light and dark.
 fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover: &Mover, session: &str, old: &str, shots: &std::path::Path) -> Result<()> {
     let wait = Duration::from_secs(30);
     let agent_wait = Duration::from_secs(180);
@@ -968,6 +971,11 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
     let list = super::shell::shell(api, session, "GET", "/api/fragments", None, &[])?;
     let kinds: Vec<String> = list.body["fragments"].as_array().map(|l| l.iter().filter_map(|f| f["kind"].as_str().map(str::to_string)).collect()).unwrap_or_default();
     let one_each = kinds.iter().filter(|k| *k == "agent").count() == 1 && kinds.iter().filter(|k| *k == "chat").count() == 1;
+    let its_chat = list.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == "chat")).and_then(|f| f["name"].as_str()).unwrap_or_default().to_string();
+    let shown_chat = format!(
+        "(location.pathname === '/' && document.getElementById('move-page').hidden && new URLSearchParams((document.querySelector('#frames iframe:not([hidden])')?.dataset.src ?? '?').split('?')[1]).get('name') === {})",
+        serde_json::to_string(&its_chat)?
+    );
     let _ = b.screenshot(&page, &shots.join("move-asked-1280-light.png"));
     s.ok(
         "Bring over: the guest is given the comp (a comped seat, $25), one new agent is made, with its one chat, not opened (the page stays), and its Yes starts the move: stopping, in the server's words",
@@ -975,24 +983,45 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
             && ledger.body["purchasedMicros"] == 25_000_000 && seat.body["seat"]["comped"] == true,
         json!({ "move": m, "ledger": ledger.body["purchasedMicros"], "seat": seat.body["seat"], "path": still, "kinds": kinds }),
     );
-    // the mover stops it and stages it: the page follows, read again
+    // the mover stops it and stages it: the page follows, read again, and
+    // once its import begins the person is in the new agent's own chat
     mover.run_once()?;
-    let importing = b.until(&page, &format!("{said} === 'Bringing Juniper over…'"), Duration::from_secs(60));
-    let _ = b.screenshot(&page, &shots.join("move-importing-1280-light.png"));
-    s.ok("the move as it goes, read again while under way: the mover staged it, and the page says it is being brought over", importing, b.eval(&page, &said)?);
-    // FIN-463: where its SimpleX chat is kept, said once, calmly
-    let simplex = b.eval(&page, "[...document.querySelectorAll('#move-page .move-simplex')].map((p) => p.textContent)")?;
-    s.ok("as it imports, one line says its SimpleX chat, if it had one, is kept in Settings", simplex == json!(["If you chatted with it on SimpleX, keep that chat in Settings."]), &simplex);
-    for (width, height, phone, scheme) in [(1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
+    let arrived = b.until(&page, &shown_chat, Duration::from_secs(60));
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = b.screenshot(&page, &shots.join("move-arrived-1280-light.png"));
+    s.ok(
+        "its import begun while the page shows, the person is taken to the new agent's own chat, where it says how the move goes and asks what it needs",
+        arrived,
+        json!({ "path": b.eval(&page, "location.pathname")?, "chat": its_chat }),
+    );
+    b.close(page)?;
+    let open_chat = format!("[...({row}?.querySelectorAll('button') ?? [])].map((b) => b.textContent)");
+    for (width, height, phone, scheme) in [(1280, 800, false, "light"), (1280, 800, false, "dark"), (390, 844, true, "light"), (390, 844, true, "dark")] {
         let p = b.open(&format!("{}/move", api.base))?;
         b.viewport(&p, width, height, phone)?;
         b.color_scheme(&p, scheme)?;
-        let _ = b.until(&p, &format!("{said} === 'Bringing Juniper over…'"), wait);
+        let importing = b.until(&p, &format!("{said} === 'Bringing Juniper over…' && {open_chat}.includes('Open chat')"), wait);
         std::thread::sleep(Duration::from_millis(300));
         let _ = b.screenshot(&p, &shots.join(format!("move-importing-{width}-{scheme}.png")));
+        if (width, scheme) == (1280, "light") {
+            s.ok(
+                "come back to the page as it imports: it stays, says it is being brought over, and its row opens the new agent's chat",
+                importing && b.eval(&p, "location.pathname")? == "/move",
+                json!({ "said": b.eval(&p, &said)?, "buttons": b.eval(&p, &open_chat)? }),
+            );
+            // FIN-463: where its SimpleX chat is kept, said once, calmly
+            let simplex = b.eval(&p, "[...document.querySelectorAll('#move-page .move-simplex')].map((p) => p.textContent)")?;
+            s.ok("as it imports, one line says its SimpleX chat, if it had one, is kept in Settings", simplex == json!(["If you chatted with it on SimpleX, keep that chat in Settings."]), &simplex);
+        }
+        b.eval(&p, &format!("([...{row}.querySelectorAll('button')].find((b) => b.textContent === 'Open chat').click(), true)"))?;
+        let tapped = b.until(&p, &shown_chat, wait);
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = b.screenshot(&p, &shots.join(format!("move-chat-{width}-{scheme}.png")));
+        if (width, scheme) == (1280, "light") {
+            s.ok("its Open chat is the new agent's own chat", tapped, b.eval(&p, "location.pathname")?);
+        }
         b.close(p)?;
     }
-    b.close(page)?;
     Ok(())
 }
 

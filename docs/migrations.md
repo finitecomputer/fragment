@@ -95,6 +95,12 @@ it, the offer's cover stands aside: it is answered there.
   reload, or a lost answer never makes a second. An agent.json that could
   not be read (not missing) makes nothing: the page stops, to be tried
   again. A refusal shows the server's words.
+- Once its new agent exists, a move is that agent's to tell: it imports
+  in its own chat, and asks its person there. Each row with a new agent
+  (the offer's `agent`) has Open chat, that agent's own chat. An import
+  that starts while the page shows takes the person to its agent's chat
+  (the first, if several start between two reads); one already importing
+  when the page opens leaves the page as it is.
 
 ## The comp (F5)
 
