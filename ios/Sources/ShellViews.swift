@@ -120,7 +120,7 @@ private struct StatusBarBlur: View {
     var body: some View {
         GeometryReader { proxy in
             let top = proxy.safeAreaInsets.top
-            Rectangle().fill(.regularMaterial)
+            Rectangle().fill(.ultraThinMaterial)
                 .mask(LinearGradient(stops: [.init(color: .black, location: 0),
                                              .init(color: .black, location: top / (top + 20)),
                                              .init(color: .clear, location: 1)],
@@ -235,8 +235,11 @@ struct SidebarView: View {
                 .padding(.bottom, 4)
             }.padding(12)
         }
-        // the whole screen, its words clear of the status bar and home indicator
-        .background(.regularMaterial)
+        // the whole screen, its words clear of the status bar and home indicator,
+        // over the launcher's wallpaper frosted: its colors come through the glass
+        .background {
+            DesktopWallpaper().overlay { Rectangle().fill(.regularMaterial).ignoresSafeArea() }
+        }
         .alert("Name this chat", isPresented: Binding(get: { renamingChat != nil }, set: { if !$0 { renamingChat = nil } })) {
             TextField("Chat name", text: $chatTitle)
             Button("Save") {
