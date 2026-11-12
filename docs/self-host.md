@@ -29,3 +29,16 @@ runtime has no mailer, not yet implemented") and answers no message id,
 never an error. An invite still waits for its person's yes; a key is still
 added; an org's `mailed` and a trial's `sent` say false. Debt:
 docs/technical-debt-ledger.md, "No mail without Email Sending".
+
+## Bindings a runtime may lack, or class differently
+
+A self-hosted runtime binds what it has. The cell reads a binding by what
+it does, or whether it is there, and never asks which runtime it is on:
+
+| Binding | Without it | How the cell runs |
+|---|---|---|
+| `r2_buckets` (`BLOBS`, the move's `STAGE`), `assets` (`ASSETS`) | there, but its class need not be workerd's (celld's read as `Object`) | read by what it does (`js::by_what_it_does`), not by workers-rs's class check |
+| `browser` (`BROWSER`) | no cards | a live is skipped once, `card.skipped` `no_browser`; a shot asked for again is refused, typed (`host_failed`) |
+| `images` (`IMAGES`) | no icons drawn | an icon's making, and an upload that needs fitting, refused at once, typed (`host_failed`), before anything is asked or charged; a PNG at the icon's size is kept as it is |
+| `containers` | no computers (`FRAGMENT_COMPUTER_IMAGE` unset: a computer is refused, typed) | the container host reads no container as none running, so a person's wipe still empties their computer's rows |
+| `send_email` (`EMAIL`) | no mail | Mail, above |
