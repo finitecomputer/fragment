@@ -1403,7 +1403,7 @@ impl ComputerCell {
     /// that start was superseded.
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
-        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
+        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress(), self.platform_through_egress()]).await?;
         let done = armed.as_bool() == Some(true);
         if done {
             *self.armed.borrow_mut() = Some((generation, hosts));
@@ -1459,6 +1459,18 @@ impl ComputerCell {
     /// (`egress_codestorage`): a local fleet's, at a loopback address.
     fn codestorage_through_egress(&self) -> JsValue {
         JsValue::from_bool(fragment_core::codestorage::guest_api(&self.cfg.codestorage().api).is_some())
+    }
+
+    /// Where its egress catches the platform's own hosts
+    /// (`fragment_core::computer::platform_intercepts`, `egress_platform`):
+    /// on sandcastle nodes, whose VMs do not reach the box's own address
+    /// (docs/self-host.md, found 40); `null` on the runtime's containers,
+    /// which reach the platform as any client does.
+    fn platform_through_egress(&self) -> JsValue {
+        match &self.cfg.nodes {
+            Some(_) => js::to_js(&fragment_core::computer::platform_intercepts(&self.cfg.platform(), &self.cfg.host_suffix)),
+            None => JsValue::NULL,
+        }
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -3778,6 +3790,7 @@ impl ComputerEgress {
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
             "codestorage" => egress_codestorage(req, &env).await,
+            "platform" => egress_platform(req, &env, &ctx, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -4053,6 +4066,48 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
 /// connection's name: `Catalog::named`).
 fn vault_s(cfg: &Config, p: &Placeholder) -> bool {
     !p.connection && cfg.providers.named(&p.provider, false).is_none()
+}
+
+/// Headers only an edge sets, never a guest: the scheme is the URL's, and
+/// the address a limit counts by (`cf-connecting-ip`) the computer's.
+const EDGE_HEADERS: [&str; 4] = ["x-forwarded-proto", "x-forwarded-host", "x-forwarded-for", "forwarded"];
+
+/// A guest's request to one of the platform's own hosts on a sandcastle
+/// node (its origin, and every name under the fragments' suffix:
+/// `fragment_core::computer::platform_intercepts`; docs/self-host.md, found
+/// 40), which the router answers as it answers the same request from the
+/// internet: as whoever the guest's own cookies or signature name, or as no
+/// one. The intercept adds no one, neither its owner nor an agent (an
+/// agent's requests are `egress_api`'s, which its fragment signs), so a
+/// computer reaches nothing there a browser could not. It sets what an edge
+/// sets, and only that: the scheme and port of the platform's origin, as
+/// the guest's browser has the page (the node names the host alone, and an
+/// HTTP intercept caught it on 80: on a `.localhost` platform the guest's
+/// browser dialed the platform's port, on its loopback, and the bridge's
+/// forwarder brought it here: images/bridge `loopback`), so the app's
+/// origin is the one its page names, its socket's `Origin` included; and
+/// the address a limit counts the request by, the computer's id.
+async fn egress_platform(req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
+    let platform = Url::parse(&Config::from_env(env).platform()).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
+    let mut url = req.url()?;
+    let dialed = url.set_scheme(platform.scheme()).is_ok() && url.set_port(platform.port()).is_ok();
+    assert!(dialed, "http and https are special schemes with ports");
+    let headers = Headers::new();
+    for (name, value) in req.headers().entries() {
+        let socket = matches!(name.as_str(), "upgrade" | "connection");
+        let hop = HOP_HEADERS.contains(&name.as_str()) && !socket;
+        if !hop && !EDGE_HEADERS.contains(&name.as_str()) && !name.starts_with("cf-") {
+            headers.append(&name, &value)?;
+        }
+    }
+    headers.set("cf-connecting-ip", computer)?;
+    let method = req.method();
+    let mut init = RequestInit::new();
+    if !matches!(method, Method::Get | Method::Head) {
+        init.with_body(req.inner().body().map(JsValue::from));
+    }
+    init.with_method(method).with_headers(headers);
+    crate::route(Request::new_with_init(url.as_str(), &init)?, env, ctx).await
 }
 
 /// Headers a hop answers for itself, never sent on.

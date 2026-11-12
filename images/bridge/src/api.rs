@@ -123,6 +123,10 @@ pub struct Computer {
     /// server from a Cloudflare computer.
     #[serde(default)]
     pub relay: Option<RelayOffer>,
+    /// The computer's own origin, on the platform's scheme and port, under
+    /// its zone: where the loopback forwarder learns them (loopback.rs).
+    #[serde(default)]
+    pub origin: String,
 }
 
 /// The hosts and the port the platform's XFTP relay carries.

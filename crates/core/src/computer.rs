@@ -2402,10 +2402,73 @@ pub fn notices(life: &Lifecycle, saves: &Saves, images: &Images, rules: &Rules) 
     out
 }
 
+/// The platform's own hosts as a computer's intercepts catch them on a
+/// sandcastle node (docs/self-host.md, seam 2, found 40), so its guest
+/// reaches the apps it makes, and the platform, through the platform: on a
+/// self-hosted network the platform's address is the box's own, which a
+/// computer's VM does not reach. On Cloudflare's containers a guest reaches
+/// the platform over the internet, as any client does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlatformIntercepts {
+    /// On HTTPS (the platform's scheme is https), else plain HTTP.
+    pub https: bool,
+    /// The targets: the platform's origin's host, unless a name under the
+    /// suffix covers it, and `*.<suffix>`, with the platform's port on
+    /// HTTPS when it is not 443.
+    pub hosts: Vec<String>,
+}
+
+/// Where a computer's intercepts catch the platform's own hosts: its
+/// origin's (`FRAGMENT_PLATFORM_URL`) and every name under the fragments'
+/// suffix (fragments', computers' and no one's, which the router answers),
+/// on the platform's scheme. HTTPS takes a name with a port; HTTP takes a
+/// name on port 80 alone (Cloudflare's intercepts take no other), so an
+/// http platform on another port (dev, the e2e) is caught on 80, where the
+/// bridge's loopback forwarder dials it (images/bridge `loopback`). An
+/// address is never a target: a loopback platform is the guest's own
+/// loopback, and a guest's own server there is its own.
+pub fn platform_intercepts(platform_url: &str, suffix: &str) -> PlatformIntercepts {
+    let url = url::Url::parse(platform_url).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
+    let https = url.scheme() == "https";
+    let port = match (https, url.port()) {
+        (true, Some(p)) => format!(":{p}"),
+        _ => String::new(),
+    };
+    let mut hosts = vec![];
+    if let Some(url::Host::Domain(host)) = url.host() {
+        if !host.ends_with(&format!(".{suffix}")) {
+            hosts.push(format!("{host}{port}"));
+        }
+    }
+    hosts.push(format!("*.{suffix}{port}"));
+    PlatformIntercepts { https, hosts }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Goal: each deployment's shape catches its platform's hosts on its own
+    /// scheme and port, the apex once, a host under the suffix by the glob,
+    /// and never an address.
+    #[test]
+    fn the_platforms_hosts_are_caught_on_its_scheme_and_port() {
+        let caught = platform_intercepts;
+        let on = |https: bool, hosts: &[&str]| PlatformIntercepts { https, hosts: hosts.iter().map(|h| h.to_string()).collect() };
+        // the platform apart from the fragments' zone
+        assert_eq!(caught("https://finite.chat", "finite.place"), on(true, &["finite.chat", "*.finite.place"]));
+        // a branch: the platform under the zone, which the glob covers
+        assert_eq!(caught("https://claude-x.finite.place", "finite.place"), on(true, &["*.finite.place"]));
+        // a self-hosted zone's apex, which no glob covers
+        assert_eq!(caught("https://fragment.corp.example", "fragment.corp.example"), on(true, &["fragment.corp.example", "*.fragment.corp.example"]));
+        assert_eq!(caught("https://fragment.corp.example:9543", "fragment.corp.example"), on(true, &["fragment.corp.example:9543", "*.fragment.corp.example:9543"]));
+        // dev and the e2e: http on an address, never caught; names on 80
+        assert_eq!(caught("http://127.0.0.1:8790", "fragment.localhost"), on(false, &["*.fragment.localhost"]));
+        assert_eq!(caught("http://[::1]:8790", "fragment.localhost"), on(false, &["*.fragment.localhost"]));
+        assert_eq!(caught("http://fragment.localhost:41234", "boats.localhost"), on(false, &["fragment.localhost", "*.boats.localhost"]));
+        assert_eq!(serde_json::to_value(caught("https://finite.chat", "finite.place")).unwrap(), json!({ "https": true, "hosts": ["finite.chat", "*.finite.place"] }));
+    }
 
     const T: i64 = 1_800_000_000_000;
 

@@ -455,8 +455,10 @@ class ContainerHost {
   // caught on HTTPS and on plain HTTP alike: the swap always sends on over
   // HTTPS, so a credential never crosses the internet in the clear.
   // `codestorage`: a local fleet's code.storage, at a loopback address the
-  // container cannot reach, is reached through the egress too.
-  async arm(generation, computer, idleMs, swapHosts, codestorage) {
+  // container cannot reach, is reached through the egress too; `platform`
+  // (on sandcastle nodes, else null: computer.rs `platform_through_egress`)
+  // where the platform's own hosts are caught, `{https, hosts}`.
+  async arm(generation, computer, idleMs, swapHosts, codestorage, platform) {
     if (generation !== this.#generation) return false;
     const c = this.#c;
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
@@ -464,6 +466,9 @@ class ContainerHost {
       await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
       await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
       if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
+      for (const host of platform?.hosts ?? []) {
+        await this.#settled(() => (platform.https ? c.interceptOutboundHttps(host, egress("platform")) : c.interceptOutboundHttp(host, egress("platform"))));
+      }
       for (const host of swapHosts) {
         await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
         await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));

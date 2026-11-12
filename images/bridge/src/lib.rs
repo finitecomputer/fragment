@@ -6,7 +6,9 @@
 //! from the journal; `screen` each agent's screen, `screens` the image's
 //! map of their displays, `lease` who drives one; `simplex` an agent's link
 //! to its owner's SimpleX app (groundwork: nothing runs it yet); `transfer`
-//! a file's bytes, streamed, through a bounded `scratch` folder.
+//! a file's bytes, streamed, through a bounded `scratch` folder; `loopback`
+//! the platform's hosts on the guest's own loopback, on a `.localhost`
+//! platform.
 
 pub mod answer;
 pub mod api;
@@ -17,6 +19,7 @@ pub mod history;
 pub mod lease;
 pub mod limits;
 pub mod log;
+pub mod loopback;
 pub mod net;
 pub mod note;
 pub mod ready;
