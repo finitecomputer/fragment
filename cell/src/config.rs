@@ -91,6 +91,10 @@ pub struct Config {
     /// name in wrangler.jsonc's `containers` images). Unset, the deployment
     /// makes no computers.
     pub computer_image: Option<String>,
+    /// `FRAGMENT_NODES` (docs/self-host.md, seam 2): the sandcastle nodes
+    /// computers run on, and their images, in place of the runtime's own
+    /// containers (`fragment_core::placement`). Unset, the runtime's.
+    pub nodes: Option<fragment_core::placement::Nodes>,
     /// `FRAGMENT_COMPUTER_SNAPSHOTS=off`: computers sleep without a
     /// container snapshot and wake from their image and backup (local
     /// workerd takes no snapshots).
@@ -373,6 +377,16 @@ impl Config {
             host_suffix,
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
+            nodes: var(env, "FRAGMENT_NODES").map(|v| {
+                let nodes = fragment_core::placement::Nodes::parse(&v).unwrap_or_else(|e| panic!("{e}"));
+                let image = var(env, "FRAGMENT_COMPUTER_IMAGE");
+                assert!(
+                    image.as_deref().is_some_and(|i| nodes.image_names().contains(&i)),
+                    "FRAGMENT_COMPUTER_IMAGE names one of FRAGMENT_NODES' images ({}), not {image:?}",
+                    nodes.image_names().join(", ")
+                );
+                nodes
+            }),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))

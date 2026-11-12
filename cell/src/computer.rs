@@ -347,6 +347,13 @@ enum MetaKey {
     /// The test lever's takeover destroys still to fail
     /// (`fail-takeover-destroys`).
     FailTakeOverDestroys,
+    /// The sandcastle node it was placed on at its first start, for its
+    /// life (docs/self-host.md, seam 2): its container and snapshots are
+    /// that node's. None where computers run in the runtime's containers.
+    Node,
+    /// Why its node is down, as its container's watch last said
+    /// (`computer/node`): its view's `why` until the node answers.
+    NodeNote,
 }
 
 impl MetaKey {
@@ -373,6 +380,8 @@ impl MetaKey {
             MetaKey::FailStarts => "fail_starts",
             MetaKey::StallTakeOver => "stall_take_over",
             MetaKey::FailTakeOverDestroys => "fail_take_over_destroys",
+            MetaKey::Node => "node",
+            MetaKey::NodeNote => "node_note",
         }
     }
 }
@@ -454,6 +463,8 @@ pub struct ComputerCell {
     /// agents' Vault secrets name a host more. In memory only: a new
     /// isolate arms again at the next read.
     armed: RefCell<Option<(u64, Vec<String>)>>,
+    /// Whether this isolate's host was pinned to its node (`pinned`).
+    pinned: std::cell::Cell<bool>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -480,6 +491,7 @@ impl DurableObject for ComputerCell {
             heard_ms: std::cell::Cell::new(None),
             armed: RefCell::new(None),
             relays: RefCell::default(),
+            pinned: std::cell::Cell::new(false),
             schema,
         }
     }
@@ -726,6 +738,16 @@ struct Tab {
     open: bool,
 }
 
+/// `computer/node`'s body: what start `generation`'s watch says of its
+/// node (node.mjs `#look`): why it has been silent too long, or none once it
+/// answers again.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeSaid {
+    generation: u64,
+    down: Option<String>,
+}
+
 fn sha_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
@@ -828,7 +850,51 @@ impl ComputerCell {
     }
 
     async fn call(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
+        self.pinned().await?;
         js::invoke(&self.host()?, method, args).await
+    }
+
+    /// On sandcastle nodes (docs/self-host.md, seam 2), this isolate's host
+    /// pinned to the node its computer was placed on (entry.mjs `pin`),
+    /// once, before any other call reaches it: its container is that node's.
+    /// Not placed yet, nothing runs, and the host answers so; nor on a node
+    /// the deployment no longer lists, whose container no call reaches (a
+    /// wipe then empties its rows, and a start is refused: `place`).
+    async fn pinned(&self) -> CellResult<()> {
+        let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
+        if self.pinned.get() {
+            return Ok(());
+        }
+        let (Some(node), Some(id)) = (self.meta(MetaKey::Node)?, self.meta(MetaKey::Id)?) else { return Ok(()) };
+        let Some(pin) = nodes.pin(&node, &id) else { return Ok(()) };
+        js::invoke(&self.host()?, "pin", &[js::to_js(&pin)]).await?;
+        self.pinned.set(true);
+        Ok(())
+    }
+
+    /// Places a computer on sandcastle nodes at its first start
+    /// (`fragment_core::placement`: the rule, and why it then stays): every
+    /// node probed at once, and the best that answers taken, its host pinned
+    /// to it. Placed already, or on the runtime's containers, nothing more.
+    /// No node able to run it is an upstream's failure, each node's reason
+    /// said.
+    async fn place(&self, image: &str) -> CellResult<()> {
+        let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
+        if self.meta(MetaKey::Node)?.is_none() {
+            let probed = js::invoke(&self.host()?, "probe", &[js::to_js(&nodes.probes())]).await?;
+            let text = probed.as_string().ok_or_else(|| CellError::host("the nodes' probes answered no JSON text"))?;
+            let probes: Vec<fragment_core::placement::Probe> = crate::json_text(&text).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
+            let ranked = fragment_core::placement::rank(nodes, image, &probes).map_err(|why| CellError::new(ErrorCode::UpstreamFailed, why))?;
+            let node = ranked.first().expect("a ranking names a node or says why none");
+            self.set_meta(MetaKey::Node, node)?;
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "placed": node, "image": image, "ranked": ranked, "probes": text }));
+        }
+        // pinned for life: a node no longer listed runs it nowhere else
+        // (moving one is not built)
+        if let Some(node) = self.meta(MetaKey::Node)?.filter(|n| nodes.get(n).is_none()) {
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("its node {node} is no longer in FRAGMENT_NODES: it runs nowhere else")));
+        }
+        self.pinned().await
     }
 
     /// Applies `first` and every event its actions report back, each
@@ -998,7 +1064,11 @@ impl ComputerCell {
     /// pinned name.
     async fn look(&self) -> CellResult<Option<String>> {
         let Some(image) = self.meta(MetaKey::Image)? else { return Ok(None) };
-        let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
+        let reference = match &self.cfg.nodes {
+            // its node's, or before it is placed the first that runs it
+            Some(nodes) => nodes.reference_on(&image, self.meta(MetaKey::Node)?.as_deref()).map(str::to_string),
+            None => self.call("imageRef", &[image.as_str().into()]).await?.as_string(),
+        };
         if self.update_images(|i| i.looked(reference.as_deref()))? {
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "image": image, "looked": reference }));
         }
@@ -1441,9 +1511,12 @@ impl ComputerCell {
                     Ok(None) => {}
                     Err(e) => console_error!("{}", json!({ "computer": "restored", "generation": generation, "error": e.message })),
                 }
-                // a wake refused before (the ledger's why) is no longer so
-                if let Err(e) = self.delete_meta(MetaKey::Note) {
-                    console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
+                // a wake refused before (the ledger's why), or a node that
+                // was silent, is no longer so
+                for k in [MetaKey::Note, MetaKey::NodeNote] {
+                    if let Err(e) = self.delete_meta(k) {
+                        console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
+                    }
                 }
                 Event::Ready { generation }
             }
@@ -1484,6 +1557,8 @@ impl ComputerCell {
     /// way. Nothing awaits between reading the saves and recording it.
     async fn plan(&self, generation: u64) -> CellResult<Planned> {
         let image = self.must(MetaKey::Image)?;
+        // on sandcastle nodes it is placed first (docs/self-host.md, seam 2)
+        self.place(&image).await?;
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
@@ -2329,11 +2404,12 @@ impl ComputerCell {
         let saves = self.saves()?;
         // why it won't wake; else what its saves' failures say (a sleep that
         // kept its container, or slept unsaved); else why a wake was refused
+        // first why its node is silent (docs/self-host.md, found 39)
         let why = match why {
             Some(why) => Some(why),
-            None => match self.meta(MetaKey::SaveNote)? {
-                Some(note) => Some(note),
-                None => self.meta(MetaKey::Note)?,
+            None => match (self.meta(MetaKey::NodeNote)?, self.meta(MetaKey::SaveNote)?) {
+                (Some(note), _) | (None, Some(note)) => Some(note),
+                (None, None) => self.meta(MetaKey::Note)?,
             },
         };
         let images = self.images()?;
@@ -2637,6 +2713,7 @@ impl ComputerCell {
         }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
+            Some("node-egress") => return self.node_egress(req).await,
             Some("port") => return self.port(req).await,
             Some("api") => return self.api(req).await,
             _ => {}
@@ -2845,6 +2922,24 @@ impl ComputerCell {
                     self.schema.ready()?;
                 }
                 json_response(&self.lever(&b).await?)
+            }
+            // its node silent under its running start, or answering again
+            // (docs/self-host.md, found 39): what its view says, nothing
+            // more; its watch goes on either way
+            "computer/node" => {
+                let b: NodeSaid = body_json(&mut req).await?;
+                if self.lifecycle()?.running() == Some(b.generation) {
+                    let had = self.meta(MetaKey::NodeNote)?;
+                    match &b.down {
+                        Some(why) => self.set_meta(MetaKey::NodeNote, why)?,
+                        None => self.delete_meta(MetaKey::NodeNote)?,
+                    }
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "node": self.meta(MetaKey::Node)?, "generation": b.generation, "down": b.down }));
+                    if had != b.down {
+                        self.tell_owner().await;
+                    }
+                }
+                json_response(&json!({ "ok": true }))
             }
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
@@ -3114,7 +3209,10 @@ impl ComputerCell {
     async fn pin(&self, image: &str) -> CellResult<ComputerView> {
         // a computer made, never one a pin would leave half made
         self.must(MetaKey::Id)?;
-        let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
+        let images = match &self.cfg.nodes {
+            Some(nodes) => json!(nodes.image_names()),
+            None => js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?,
+        };
         if !images.as_array().is_some_and(|names| names.iter().any(|n| n == image)) {
             return Err(CellError::invalid(format!("no image {image:?} on this deployment (its images: {images})")));
         }
@@ -3374,6 +3472,56 @@ impl ComputerCell {
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
         Ok(Response::from(resp))
     }
+
+    /// A request its guest made to a host its egress catches, from the
+    /// sandcastle node it runs on (`node_egress_route`; docs/self-host.md,
+    /// seam 2). This isolate takes its container over first (a new one has
+    /// no bindings until it arms them), then its host checks the node's
+    /// signature and hands it to the binding its start set for that
+    /// intercept (node.mjs `nodeEgress`), as the runtime's own egress hands
+    /// one to `ComputerEgress`.
+    async fn node_egress(&self, req: Request) -> CellResult<Response> {
+        if self.cfg.nodes.is_none() {
+            return Err(CellError::new(ErrorCode::NotFound, "this deployment runs no computers on nodes"));
+        }
+        if !self.adopted.get() {
+            self.drive_events(None, None).await?;
+        }
+        let out = self.call("nodeEgress", &[JsValue::from(req.inner())]).await?;
+        let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the node's egress answered no Response"))?;
+        Ok(Response::from(resp))
+    }
+}
+
+/// `/api/nodes/egress` (docs/self-host.md, seam 2): a request a computer's
+/// guest made to a host its egress catches, from the sandcastle node it
+/// runs on (sandcastle's docs/node.md, Intercepts), sent on to that
+/// computer's object as it came, which checks the node's signature. The
+/// container's name on the node is the computer's id; any other is no
+/// computer here. Only on a deployment that lists nodes.
+pub(crate) async fn node_egress_route(req: Request, env: &Env) -> CellResult<Response> {
+    let computer = req.headers().get("x-sandcastle-container")?.unwrap_or_default();
+    if !valid_computer_id(&computer) {
+        return Err(CellError::new(ErrorCode::NotFound, "no such computer"));
+    }
+    let headers = Headers::new();
+    for (k, v) in req.headers().entries() {
+        // an edge's own headers are no guest's (the guest's own `x-fragment-`
+        // ones, its agent's name among them, pass: `routed::send` stamps
+        // the release over any, and this the kind)
+        if !k.starts_with("cf-") {
+            headers.append(&k, &v)?;
+        }
+    }
+    headers.set(KIND_HEADER, "node-egress")?;
+    let method = req.method();
+    let mut init = RequestInit::new();
+    if !matches!(method, Method::Get | Method::Head) {
+        init.with_body(req.inner().body().map(JsValue::from));
+    }
+    init.with_method(method).with_headers(headers);
+    let inner = Request::new_with_init("https://computer.internal/node-egress", &init)?;
+    crate::routed::send(env, "COMPUTER", &computer, inner).await
 }
 
 /// The internal call `path` with `body` on computer `id`.

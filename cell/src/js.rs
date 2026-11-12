@@ -65,8 +65,19 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 /// `ContainerHost`). A throw or a rejection is the host's failure, its
 /// message kept.
 pub(crate) async fn invoke(obj: &JsValue, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-    let out = call(obj, method, args).map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))?;
-    settle(out).await.map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))
+    let out = call(obj, method, args).map_err(|e| host_failure(method, &e))?;
+    settle(out).await.map_err(|e| host_failure(method, &e))
+}
+
+/// A host's throw or rejection as the cell's error: a sandcastle node that
+/// did not answer (node.mjs `NodeDown`) is an upstream's failure, the node
+/// named (docs/self-host.md, seam 2); anything else, the host's.
+fn host_failure(method: &str, e: &JsValue) -> CellError {
+    let message = format!("{method}: {}", js_message(e));
+    match e.dyn_ref::<js_sys::Error>().map(|e| String::from(e.name())) {
+        Some(name) if name == "NodeDown" => CellError::new(ErrorCode::UpstreamFailed, message),
+        _ => CellError::host(message),
+    }
 }
 
 /// `obj[key]`.

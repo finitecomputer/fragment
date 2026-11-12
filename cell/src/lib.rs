@@ -1366,6 +1366,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             export::route(req, env, cfg, &url, &rest).await
         }
         (Method::Post, ["api", "stripe", "webhook"]) => billing::webhook(req, env, cfg).await,
+        // a computer's intercepted request from the sandcastle node it runs
+        // on, signed by it (docs/self-host.md, seam 2): a deployment that
+        // lists no nodes has no such route
+        (_, ["api", "nodes", "egress"]) if cfg.nodes.is_some() => computer::node_egress_route(req, env).await,
         (_, ["api", "billing", rest @ ..]) => {
             let rest = rest.to_vec();
             billing::route(req, env, cfg, &url, &rest).await

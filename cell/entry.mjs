@@ -10,6 +10,7 @@ import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
 import * as rs from "./build/index.js";
+import { NodeContainer, nodeEgress, nodeOf, probe } from "./node.mjs";
 import { withSecrets } from "./secrets.mjs";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
@@ -299,32 +300,81 @@ async function bounded(step, ms, run) {
 // runtime call and its plumbing. Every call that touches the container
 // names the start it is for (its generation): a late call for an earlier
 // start (a sleep that finishes after a wake started another) touches
-// nothing.
+// nothing. The container is the runtime's (`ctx.container`), or, where the
+// deployment runs its computers on sandcastle nodes (`FRAGMENT_NODES`:
+// docs/self-host.md, seam 2), its node's (`NodeContainer`, node.mjs: the
+// same API), once computer.rs placed it and pinned this host to that node.
 class ContainerHost {
   #ctx;
   #env;
   #report;
   #generation = 0;
-  #backups;
+  #backups = null;
+  // on nodes: the node this computer runs on (node.mjs `nodeOf`) and its
+  // container there, once `pin` named them; null before
+  #nodeOf = null;
+  #node = null;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
+    if (ctx.container && !env.FRAGMENT_NODES) this.#backups = this.#backupsOf(ctx.container);
+  }
+
+  #backupsOf(container) {
+    return new DirectoryBackup(container, this.#ctx.exports.DirectoryBackupGateway, {
       binding: "BLOBS",
-      prefix: `computers/${ctx.id}/backups/`,
+      prefix: `computers/${this.#ctx.id}/backups/`,
     });
   }
 
-  // The container, absent where the runtime binds none (a deployment that
-  // makes no computers, as on celld: docs/self-host.md): then none runs,
-  // and a wipe's destroy finds nothing to do.
+  // The container: the runtime's, or on nodes its node's. Absent where the
+  // runtime binds none and the deployment lists no nodes (a deployment that
+  // makes no computers, as on celld without them: docs/self-host.md), and
+  // on nodes before the computer is placed: then none runs, and a wipe's
+  // destroy finds nothing to do.
   get #c() {
-    return this.#ctx.container;
+    return this.#env.FRAGMENT_NODES ? this.#node : this.#ctx.container;
   }
 
-  running() {
+  // This host runs its container on node `p` from now on (fragment_core::
+  // placement `Pin`: the node computer.rs placed the computer on, what
+  // this needs of it, and the container's name there), and has its node's
+  // word on that container first. Pinned already, the same node or a refusal.
+  async pin(p) {
+    if (!this.#node) {
+      const node = nodeOf(this.#env, p);
+      const container = new NodeContainer(node, p.container, p.images);
+      await container.refresh();
+      // a call that pinned it meanwhile keeps its own
+      if (!this.#node) {
+        this.#nodeOf = node;
+        this.#node = container;
+        this.#backups = this.#backupsOf(container);
+      }
+    }
+    if (this.#node.node !== p.id) throw new Error(`placed on ${this.#node.node}, never ${p.id}`);
+    return true;
+  }
+
+  // Each node as placing a computer needs it (node.mjs `probe`; `asked`,
+  // fragment_core::placement `Asked`): JSON text, as Rust reads it.
+  async probe(asked) {
+    return JSON.stringify(await probe(this.#env, asked));
+  }
+
+  // An intercepted request from the node it runs on (computer.rs
+  // `node_egress`, which took its container over first): checked and given
+  // to its binding (node.mjs `nodeEgress`).
+  nodeEgress(request) {
+    return nodeEgress(request, this.#nodeOf, this.#node);
+  }
+
+  // Whether its container runs: on a node, as the node says (one that did
+  // not answer as this isolate began is asked again first).
+  async running() {
+    if (this.#node) await this.#node.known();
     return this.#c?.running ?? false;
   }
 
@@ -340,21 +390,35 @@ class ContainerHost {
     return ref === undefined ? null : typeof ref === "string" ? ref : JSON.stringify(ref);
   }
 
-  // A new isolate finds the container of start `generation` (lesson 6):
-  // when it runs, this isolate takes it, watching its exit again. Answers
-  // whether it runs.
-  adopt(generation) {
-    if (!this.#c?.running) return false;
-    this.#generation = generation;
-    this.#c.monitor().then(
+  // Watches start `generation`'s container: its exit, for any reason, is
+  // reported as `computer/exited` for it. On a node, a start that failed is
+  // the start's to report (its `arm` throws it: computer.rs), never an exit
+  // too; and a node silent past its bound is no exit (docs/self-host.md,
+  // found 39): the watch says so (`computer/node`), and null once the node
+  // answers, and goes on.
+  #watch(generation) {
+    const said = (down) =>
+      this.#report("computer/node", { generation, down }).catch((e) => {
+        console.log(JSON.stringify({ computer: this.#ctx.id.toString(), generation, down, unreported: String((e && e.message) || e) }));
+      });
+    this.#c.monitor(said).then(
       () => this.#report("computer/exited", { generation }),
-      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
+      (e) => e?.startFailed || this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
+  }
+
+  // A new isolate finds the container of start `generation` (lesson 6):
+  // when it runs, this isolate takes it, watching its exit again; so it
+  // does when its node does not answer, since silence is no exit: the
+  // watch learns what became of it. Answers whether it took it.
+  async adopt(generation) {
+    if (!(await this.running()) && !this.#node?.presume()) return false;
+    this.#generation = generation;
+    this.#watch(generation);
     return true;
   }
 
-  // Starts `image` (or a snapshot of it), then watches it: its exit, for
-  // any reason, is reported as `computer/exited` for this generation.
+  // Starts `image` (or a snapshot of it), then watches it (`#watch`).
   start(generation, image, snapshot, env, instance) {
     this.#generation = generation;
     // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
@@ -364,11 +428,9 @@ class ContainerHost {
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
+    else if (this.#node) throw new Error(`its node ${this.#node.node} has no ${image} image for its architecture (FRAGMENT_NODES' images)`);
     this.#c.start(opts);
-    this.#c.monitor().then(
-      () => this.#report("computer/exited", { generation }),
-      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
-    );
+    this.#watch(generation);
   }
 
   // A start from a snapshot answers "temporarily unavailable" for a while
@@ -398,14 +460,19 @@ class ContainerHost {
     if (generation !== this.#generation) return false;
     const c = this.#c;
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
-    await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
-    await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
-    if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
-    for (const host of swapHosts) {
-      await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
-      await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
-    }
-    await this.#settled(() => this.#backups.intercept());
+    const set = async () => {
+      await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
+      await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+      if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
+      for (const host of swapHosts) {
+        await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
+        await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
+      }
+      await this.#settled(() => this.#backups.intercept());
+    };
+    // a node takes them as one list (NodeContainer's `intercepting`), not a
+    // call each through the node to its engine
+    await (this.#node ? c.intercepting(set) : set());
     await this.#settled(() => c.setInactivityTimeout(idleMs));
     return true;
   }
