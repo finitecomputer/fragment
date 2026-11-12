@@ -447,6 +447,18 @@ New with seam 2:
     Fixed in sandcastle (#12, `node-port-path`), installed as this box's
     node.
 
+58. **A crash that lands during an awake save can leave the next start
+    without execs** (the real-engine e2e's `computers`, once in three
+    runs): the lever's SIGKILL reached the guest while its awake save's
+    shim ran; its exit was heard and the next start's VM was up in 134 ms
+    (the engine's own account), yet none of that start's execs answered
+    in its 120 s, so the start failed, a strike, and the one after it came
+    up at once (a rollback to that save). The two runs before, the kill
+    landing outside a save, came back at once. Not explained yet: the
+    engine's exec path for a name whose last VM died mid-exec, or the
+    cell's, is the next look; the start's failure should name its last
+    exec's error to tell them apart.
+
 ## Where the time goes on the box's engine, 2026-11-11
 
 The dev stack on celld (`celld-selfhost-deps-2026-11-98d5272`), one node in
