@@ -10,7 +10,6 @@ import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError } from "@cloudflare/sandbox";
 import { readAgain } from "./backup-reads.mjs";
 import * as rs from "./build/index.js";
-import { withSecrets } from "./secrets.mjs";
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
@@ -23,21 +22,10 @@ export class DirectoryBackupGateway extends SandboxGateway {
   }
 }
 
-// Every class here that runs the platform's code takes its env through
-// `withSecrets` (secrets.mjs) before anything reads it: where the runtime
-// has no Secrets Store (celld), the deployment's secrets are stand-ins of
-// the store's bindings there, and the Rust reads them as it reads the
-// store's (docs/self-host.md, seam 12). Where it has one (Cloudflare,
-// wrangler dev), `FRAGMENT_SECRETS` is unset and the env is as it came.
-export default class extends rs.default {
-  constructor(ctx, env) {
-    super(ctx, withSecrets(env));
-  }
-}
+export default rs.default;
 
 export class Fragment extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.FragmentCell(ctx, env);
   }
@@ -50,7 +38,6 @@ export class Fragment extends DurableObject {
 
 export class Principal extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.PrincipalCell(ctx, env);
   }
@@ -60,7 +47,6 @@ export class Principal extends DurableObject {
 
 export class Ledger extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.LedgerCell(ctx, env);
   }
@@ -71,7 +57,6 @@ export class Ledger extends DurableObject {
 // A fragment life's search index (search_index.rs): its supervisor calls it.
 export class SearchIndex extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.SearchIndexCell(ctx, env);
   }
@@ -83,7 +68,6 @@ export class SearchIndex extends DurableObject {
 // platform's own code call it.
 export class Vault extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.VaultCell(ctx, env);
   }
@@ -93,7 +77,6 @@ export class Vault extends DurableObject {
 // The finite.computer move (migrations.rs): one object, the router's alone.
 export class Migrations extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.MigrationsCell(ctx, env);
   }
@@ -103,7 +86,6 @@ export class Migrations extends DurableObject {
 
 export class Registry extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.RegistryCell(ctx, env);
   }
@@ -118,10 +100,6 @@ export class Registry extends DurableObject {
 // expects and stamps it with this release (an object refuses another's:
 // docs/MODEL.md, "Calls between releases"): the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
-  constructor(ctx, env) {
-    super(ctx, withSecrets(env));
-  }
-
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
     return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/files/${op}`, JSON.stringify(body)));
@@ -149,10 +127,6 @@ export class Files extends WorkerEntrypoint {
 // none of a thrown Error's own fields, so platform.mjs's `searchIndex`
 // throws it on the app's side, its fields whole.
 export class Search extends WorkerEntrypoint {
-  constructor(ctx, env) {
-    super(ctx, withSecrets(env));
-  }
-
   async #answer(op, body) {
     const { fragment } = this.ctx.props;
     const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/search/${op}`, JSON.stringify(body)));
@@ -193,10 +167,6 @@ export class Search extends WorkerEntrypoint {
 // when its retries run out, the next advance carries its error, and the job
 // sees it and may catch it.
 export class Job extends WorkflowEntrypoint {
-  constructor(ctx, env) {
-    super(ctx, withSecrets(env));
-  }
-
   async run(event, step) {
     const { fragment, incarnation, run, attempt } = event.payload;
     const delay = Math.max(1, Number(this.env.FRAGMENT_JOB_RETRY_DELAY_S) || 10);
@@ -317,26 +287,23 @@ class ContainerHost {
     });
   }
 
-  // The container, absent where the runtime binds none (a deployment that
-  // makes no computers, as a self-hosted one: docs/self-host.md): then none runs,
-  // and a wipe's destroy finds nothing to do.
   get #c() {
     return this.#ctx.container;
   }
 
   running() {
-    return this.#c?.running ?? false;
+    return this.#c.running;
   }
 
   // The images the deployment declares (wrangler.jsonc `containers`).
   images() {
-    return Object.keys(this.#c?.images || {});
+    return Object.keys(this.#c.images || {});
   }
 
   // What the name `image` stands for in this deployment (its reference: a
   // redeploy that changes the image keeps the name and changes this).
   imageRef(image) {
-    const ref = this.#c?.images && this.#c.images[image];
+    const ref = this.#c.images && this.#c.images[image];
     return ref === undefined ? null : typeof ref === "string" ? ref : JSON.stringify(ref);
   }
 
@@ -344,7 +311,7 @@ class ContainerHost {
   // when it runs, this isolate takes it, watching its exit again. Answers
   // whether it runs.
   adopt(generation) {
-    if (!this.#c?.running) return false;
+    if (!this.#c.running) return false;
     this.#generation = generation;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
@@ -511,7 +478,7 @@ class ContainerHost {
   // Sends signal `n` to the guest's PID 1 (from outside its PID namespace,
   // so SIGKILL lands as a crash's would). Answers whether it was sent.
   signal(generation, n) {
-    if (generation !== this.#generation || !this.#c?.running) return false;
+    if (generation !== this.#generation || !this.#c.running) return false;
     this.#c.signal(n);
     return true;
   }
@@ -524,16 +491,16 @@ class ContainerHost {
     if (generation !== 0 && generation !== this.#generation) return false;
     if (!(ms > 0)) throw new Error("a destroy is bounded");
     const t0 = Date.now();
-    if (this.#c?.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
-    while (this.#c?.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
-    return !this.#c?.running;
+    if (this.#c.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
+    while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
+    return !this.#c.running;
   }
 
   // Waits up to `ms` for the container to exit on its own (after a signal).
   async exited(ms) {
     const t0 = Date.now();
-    while (this.#c?.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
-    return !this.#c?.running;
+    while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
+    return !this.#c.running;
   }
 
   // A request to one of the container's ports. A WebSocket is bridged
@@ -596,7 +563,6 @@ class ContainerHost {
 
 export class Computer extends DurableObject {
   constructor(ctx, env) {
-    env = withSecrets(env);
     super(ctx, env);
     const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(env, path, JSON.stringify(body)));
     Object.defineProperty(ctx, "computerHost", { value: new ContainerHost(ctx, env, report) });
@@ -615,10 +581,6 @@ export class Computer extends DurableObject {
 // it (`ComputerEgress.handle`); an XFTP relay it holds a place for is piped
 // here (`relay`).
 export class ComputerEgress extends WorkerEntrypoint {
-  constructor(ctx, env) {
-    super(ctx, withSecrets(env));
-  }
-
   async fetch(request) {
     const { computer, route } = this.ctx.props;
     // a relay only where one was asked for: its route, a GET that upgrades

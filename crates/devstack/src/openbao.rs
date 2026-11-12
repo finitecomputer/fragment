@@ -1,8 +1,10 @@
 //! OpenBao, the secrets service a self-hosted deployment reads its own
 //! secrets from (docs/self-host.md, seam 12): the open-source fork of
-//! HashiCorp Vault, used as it ships, behind the cell's secrets shim
-//! (cell/secrets.mjs, its `openbao` backend). The cell reads Vault's KV v2
-//! API, so a company's own Vault or OpenBao stands where this one does.
+//! HashiCorp Vault, used as it ships, read by celld, the node's secrets
+//! backend for the cell's `secrets_store_secrets` bindings (celld's
+//! `CELLD_SECRETS_FILE`, backend `openbao`: `celld::write_secrets_file`).
+//! celld reads Vault's KV v2 API, so a company's own Vault or OpenBao
+//! stands where this one does.
 //!
 //! **The binary** is pinned (openbao_release.rs), fetched once into
 //! `target/tools/openbao-<version>-<platform>/bao` from the release's
@@ -18,7 +20,8 @@
 //!   stack seeds the secrets and keeps the cell's token with. It can write
 //!   the mount, make and renew the cell's tokens, and nothing else.
 //! - `cell.token` (0600): the cell's token, "secret zero", the one secret
-//!   the cell is given outside OpenBao. Its policy reads the mount and
+//!   the node is given outside OpenBao (by path: celld reads the file at
+//!   every read, never the cell). Its policy reads the mount and
 //!   nothing else. Periodic (`CELL_TOKEN_PERIOD`), renewed at each start
 //!   and every `RENEW_EVERY` while the stack runs (`Renewer`); minted
 //!   again when it has lapsed.
@@ -78,8 +81,6 @@ pub const ADMIN_ROLE: &str = "fragment-admin";
 pub const CELL_TOKEN_PERIOD: &str = "720h";
 /// How often a running stack renews the cell's token (`Renewer`).
 pub const RENEW_EVERY: Duration = Duration::from_secs(3600);
-/// The Worker variable the shim reads the cell's token from (cell/secrets.mjs).
-pub const TOKEN_VAR: &str = "FRAGMENT_SECRETS_TOKEN";
 /// The static seal's key: AES-256-GCM's.
 pub const SEAL_KEY_BYTES: usize = 32;
 /// OpenBao answers, initialised and unsealed, within this of its start.
@@ -513,8 +514,8 @@ pub fn render_config(layout: &Layout, port: u16, audit: bool) -> Result<String, 
     Ok(c)
 }
 
-/// Where the deployment's secrets are: what the stack seeds and the cell's
-/// shim reads.
+/// Where the deployment's secrets are: what the stack seeds and the node
+/// reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     /// `http://127.0.0.1:<port>`.
@@ -638,7 +639,7 @@ impl Target {
             }
         }
         let what = "a token from the cell's role";
-        let body = json!({ "display_name": CELL_ROLE, "meta": { "for": "the cell's secrets shim (cell/secrets.mjs)" } });
+        let body = json!({ "display_name": CELL_ROLE, "meta": { "for": "the celld node's secrets backend (CELLD_SECRETS_FILE)" } });
         let (status, answer) = self.call(reqwest::Method::POST, &format!("auth/token/create/{CELL_ROLE}"), Some(&admin), Some(&body), what)?;
         let token = match (status, answer["auth"]["client_token"].as_str()) {
             (200, Some(t)) => t.to_string(),
@@ -676,11 +677,12 @@ impl Target {
         }
     }
 
-    /// `FRAGMENT_SECRETS` for the shim's `openbao` backend, for `bindings`
-    /// (each a binding and its secret's store name).
-    pub fn shim_config(&self, bindings: &[(String, &str)]) -> Value {
-        let secrets: Vec<Value> = bindings.iter().map(|(binding, name)| json!({ "binding": binding, "secret_name": name })).collect();
-        json!({ "backend": "openbao", "addr": self.addr, "mount": self.mount, "secrets": secrets })
+    /// The celld node's secrets file for its `openbao` backend
+    /// (`CELLD_SECRETS_FILE`): where OpenBao is, and the path of the
+    /// cell's token (`cell_token` makes it), which celld reads at every
+    /// read, so a renewal or a new token there is the one it sends.
+    pub fn node_config(&self) -> Value {
+        json!({ "backend": "openbao", "addr": self.addr, "mount": self.mount, "token_file": self.layout.cell_token() })
     }
 }
 
@@ -836,7 +838,7 @@ pub struct Audited {
     /// Every request OpenBao took.
     pub requests: usize,
     /// The reads of a secret under the mount by a token with the cell's
-    /// policy: the shim's.
+    /// policy: the node's, for the cell.
     pub cell_reads: usize,
     pub bytes: u64,
 }

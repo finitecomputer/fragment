@@ -63,7 +63,6 @@ mod sync;
 mod telegram_settings;
 mod templates;
 mod trials;
-mod unbound;
 mod vault;
 mod wipe;
 
@@ -178,7 +177,6 @@ const LANES: &[Lane] = &[
     moves::move_ui,
     moves::move_comp,
     restart::restart,
-    unbound::unbound,
 ];
 
 /// The suite split for CI (`--shard k/n`): each shard runs on a runner of
@@ -213,7 +211,7 @@ pub const SHARDS: [&[&str]; 5] = [
     ],
     &["auth", "create", "chat-seed", "reach", "effects", "appfiles", "sessions-ui", "schedules-ui", "ai", "admin", "shell", "chat", "chat-history"],
     &[
-        "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart", "unbound",
+        "identities", "signin", "native", "connections", "vault", "secrets", "files", "deploy", "frames", "ops", "notes", "ledger", "finite-private", "wipe", "restart",
         "members", "billing", "governance", "billing-page", "move", "move-import", "move-ui", "move-comp",
     ],
 ];
