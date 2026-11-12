@@ -283,3 +283,25 @@ test("Bring over into a move that imports at once (a kept stage's): the person i
   await settle();
   assert.deepEqual(p.opened, ["juniper-chat--k3x9"]);
 });
+
+test("a read the person left before it answered is not this opening's: an import they come back to is theirs to open, never a jump", async (t) => {
+  const own = { agents: [], ids: new Map(), chats: new Map([["npub1juniper", "juniper-chat--k3x9"]]) };
+  const p = page(t, own);
+  p.ui.open();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  p.timers.due();
+  const stale = p.next("GET", "/api/migrations/offers");
+  p.ui.close();
+  p.ui.open();
+  const fresh = p.next("GET", "/api/migrations/offers");
+  stale.ok({ offers: [offer("a", "staging", "Copying Old a…", { agent: "npub1juniper" })] });
+  await settle();
+  fresh.ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  p.timers.due();
+  p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "importing", "Bringing Old a over…", { agent: "npub1juniper" })] });
+  await settle();
+  assert.deepEqual(p.opened, [], "importing as they came back: the page stays");
+  assert.deepEqual(p.rows()[0].buttons, ["Open chat"]);
+});

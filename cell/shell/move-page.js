@@ -50,21 +50,29 @@ export function createMovePage(root, h) {
   let busy = false;
   let shown = false;
   let timer = null;
-  // the moves importing at this opening's first read (`arrive`)
+  // the moves importing at this opening's first read (`arrive`), and which
+  // opening it is: a read answered after the page closed is no one's
   let importingAtOpen = null;
+  let opening = 0;
   // what the person chose, kept across drawings, and Bring over as drawn
   const chosen = new Map();
   let go = null;
   const anyChosen = () => (offers ?? []).some((o) => ASKABLE.has(o.state) && (chosen.get(o.old) ?? true));
 
+  // whether it was this opening's
   async function read() {
+    const at = opening;
     try {
-      offers = (await api("GET", "/api/migrations/offers")).offers ?? [];
+      const got = (await api("GET", "/api/migrations/offers")).offers ?? [];
+      if (at !== opening) return false;
+      offers = got;
       readFailed = null;
       importingAtOpen ??= new Set(offers.filter((o) => o.state === "importing").map((o) => o.old));
     } catch (e) {
+      if (at !== opening) return false;
       readFailed = e?.status ? e.message : "Couldn't load your agents. Try again.";
     }
+    return true;
   }
 
   function row(o) {
@@ -155,8 +163,7 @@ export function createMovePage(root, h) {
     if (shown && !busy && offers?.some((o) => IN_FLIGHT.has(o.state))) {
       timer = timers.setTimeout(async () => {
         timer = null;
-        await read();
-        if (arrive()) return;
+        if (!(await read()) || arrive()) return;
         draw();
         follow();
       }, READ_EVERY_MS);
@@ -252,6 +259,7 @@ export function createMovePage(root, h) {
 
   async function open() {
     shown = true;
+    opening += 1;
     importingAtOpen = null;
     draw();
     await read();
@@ -261,6 +269,7 @@ export function createMovePage(root, h) {
 
   function close() {
     shown = false;
+    opening += 1;
     if (timer !== null) timers.clearTimeout(timer);
     timer = null;
   }
