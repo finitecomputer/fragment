@@ -689,6 +689,25 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// A held move asked again, as a new attempt
+    Retry {
+        old: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// The old agent started again, and the move offered again: a phase 1
+    /// move asked, staging, importing, or held from one of those
+    RestartOld {
+        old: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// A held move's old agent retired as migrated: the move done
+    Retire {
+        old: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
 }
 
 /// Pages of moves `fragment operator moves` reads at most (100 a page).
@@ -1794,6 +1813,27 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Operator { sub: OperatorCmd::Withdraw { old, why, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
             let v = move_act(&c, &old, "withdraw", Some(why))?;
+            json_exit(j, &v);
+            println!("{}", move_line(&v));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Retry { old, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "retry", None)?;
+            json_exit(j, &v);
+            println!("{}", move_line(&v));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::RestartOld { old, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "restart-old", None)?;
+            json_exit(j, &v);
+            println!("{}", move_line(&v));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Retire { old, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = move_act(&c, &old, "retire", None)?;
             json_exit(j, &v);
             println!("{}", move_line(&v));
             return Ok(());
