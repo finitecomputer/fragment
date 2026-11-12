@@ -27,7 +27,7 @@ its bindings. A mode flag is a design bug.
 | 6 | Blobs | nothing to port: celld's R2, over `celld dev`'s disk |
 | 7 | Preview cards: a renderer | not yet: a card is skipped, saying why |
 | 10 | Money: own hardware in points | not yet |
-| 12 | Secrets | the stand-in (below) |
+| 12 | Secrets | the stand-in, OpenBao 2.7.2 behind it (the default on celld), variables for local fleets alone |
 | — | Mail | debt: said and carried on |
 
 ## 1. The runtime: celld
@@ -59,7 +59,7 @@ Every binding and runtime API master's cell uses, against the fork's
 | An object's requests in flight | 64 at most by default | works, configured | devstack runs celld with 512 (found 50) |
 | `r2_buckets` (`BLOBS`) | yes; its class reads as `Object` | works | read by what it does (`js::by_what_it_does`, found 35) |
 | `assets` (`ASSETS`, `run_worker_first`, `html_handling`, `not_found_handling`) | yes; its class reads as `Object` | works | read by what it does (found 35) |
-| `secrets_store_secrets` | refused | stood in | the cell's stand-ins (seam 12); people's secrets stay in the Vault object |
+| `secrets_store_secrets` | refused | stood in | the cell's stand-ins (seam 12), OpenBao behind them; people's secrets stay in the Vault object |
 | `ai` (`AI`: Workers AI) | refused | degraded, typed refusal | text tiers on an OpenAI-compatible API (seam 3); a slot left on Workers AI, image steps, transcription and embeddings fail typed ("this node has no AI binding"). Dev and the e2e keep the fake (`FRAGMENT_AI_URL`) |
 | `send_email` (`EMAIL`) | refused | degraded, said | no mail: each send logs `mail.unsent` and answers no id, never an error |
 | `browser` (`BROWSER`) | refused | degraded, said | no cards: a live is skipped once, `card.skipped` `no_browser`; asking for a shot again is refused, typed (`host_failed`). Seam 7 brings a renderer |
@@ -77,7 +77,7 @@ Every binding and runtime API master's cell uses, against the fork's
 
 - **Dev:** `cargo xtask dev --runtime celld` (`CELLD_BIN`; esbuild from
   worker-build's cache or `CELLD_ESBUILD`): the same fakes and settings as
-  on wrangler, no computers, the secrets behind the stand-ins.
+  on wrangler, no computers, the secrets in OpenBao behind the stand-ins.
 - **The e2e:** `FRAGMENT_E2E_RUNTIME=celld`. Its rung (`needs::Rung::Celld`)
   has everything a local run has but the runtime's containers and the
   finite.computer move: a section that needs computers is a skip saying
@@ -103,6 +103,16 @@ by that name. Without `FRAGMENT_SECRETS` (Cloudflare, `wrangler dev`) the
 env is as it came; the Rust is the same on both and never knows which it
 read.
 
+- **`openbao`:** Vault's KV v2 API (OpenBao, or a company's own Vault):
+  `GET <addr>/v1/<mount>/data/[<prefix>/]<secret_name>`, the value its
+  field `value`, with the token in `FRAGMENT_SECRETS_TOKEN` (and
+  `X-Vault-Namespace` when `namespace` is set). The token is the one
+  secret given outside the service, and the stand-ins hide it from the
+  rest of the env. A read takes 5 s at most and follows no redirect; a
+  failure is typed, never a hang (`SecretsError
+  [missing|refused|sealed|down|failed|malformed]`). The shim caches
+  nothing: keys.rs keeps a value a minute per isolate, as it keeps the
+  store's.
 - **`vars`:** the Worker variable of the binding's own name, in
   `.dev.vars` (`devstack::Secrets::Shim`): a convenience for dev and the
   e2e alone. The shim refuses it on any fleet that is not local
@@ -112,8 +122,58 @@ read.
 - People's own secrets are not here: they stay in master's Vault Durable
   Object, sealed under keys derived from the host secret, as on
   Cloudflare.
-- The e2e checks the stand-ins on wrangler: `FRAGMENT_E2E_SECRETS=vars`
-  runs its node with them (its local config binds no store).
+- The e2e checks the stand-ins on wrangler too: `FRAGMENT_E2E_SECRETS=vars`
+  or `openbao` runs its node with them (its local config binds no store).
+
+**OpenBao is a self-hosted deployment's backend** (Paul, 2026-11-11): it
+stands in for Cloudflare's Secrets Store, holding the platform's root
+secrets (the host secret, the code store's key, sign-in's and the
+connections' client secrets, the model keys, the operator keys).
+
+**OpenBao** (crates/devstack/src/openbao.rs), used as it ships:
+
+- **The pin:** 2.7.2 (2026-10-26), the newest 2.x on 2026-11-11: each
+  platform's tarball by its SHA-256 in the release's `checksums.txt`, whose
+  signature (`checksums.txt.gpgsig`, by subkey E617 DCD4 065C 2AFC 0B2C
+  F7A7 BA8B C08C 0F69 1F94) checked good on 2026-11-11 against OpenBao's
+  key (primary 66D1 5FDD 8728 7219 C8E1 5478 D200 CD70 2853 E6D0, fetched
+  from openbao.org and identical to the release's copy). Fetched once
+  into `target/tools`; `FRAGMENT_OPENBAO_TARBALL` names an intranet's copy,
+  checked the same.
+- **Its state:** a directory of its own (0700): `seal.key`, 32 random
+  bytes (0600), the static seal's, so every start unseals itself
+  unattended; `data/`, pebbledb; the stack's AppRole ids (0600).
+- **Initialised once, by itself:** the config's `initialize` stanza runs on
+  the first start alone: KV v2 at `fragment/`, the two policies, the
+  cell's token role and the stack's AppRole; then it revokes its root
+  token.
+- **Seeded at each start:** what `Fleet::configure` would write to
+  wrangler's local store goes to `fragment/<its store name>`, a new
+  version only where a value changed.
+- **Secret zero:** the cell's token, policy `fragment-cell`: `read` on
+  `fragment/data/*` and nothing else. Periodic (30 days), renewed at each
+  start and hourly while `xtask dev` runs, minted again when it has
+  lapsed; in `.dev.vars` (0600).
+- **Loopback only**, no TLS: the cell and OpenBao share the box.
+- **Its audit log is on:** every request, its secrets HMAC'd by OpenBao,
+  in `audit.log` beside its data (the e2e counts the cell's reads from it).
+  A deployment rotates it as it rotates any log.
+- **Its unseal key** is the static seal's key file, `seal.key` in its
+  state directory (0600, beside its data): whoever reads that directory
+  can unseal it. The hardening path, not built: a TPM-held key, a PKCS#11
+  HSM, or a cloud KMS auto-unseal, each keeping the key off the disk that
+  holds the data.
+- **Choosing it:** the default on celld. `cargo xtask dev --runtime celld`
+  runs it (on :8802, its state in `target/devstack/openbao-8802`, which
+  `--clean` clears) unless `FRAGMENT_SECRETS_BACKEND=vars`; the e2e on
+  celld unless `FRAGMENT_E2E_SECRETS=vars`. `wrangler dev` keeps its own
+  store.
+- **A company's Vault:** `FRAGMENT_SECRETS` names it (`{"backend":
+  "openbao", "addr": "https://vault.corp.example:8200", "mount": "secret",
+  "prefix": "fragment", "namespace": "eng", "secrets": […]}`), each secret
+  a KV v2 entry whose field is `value`, the cell's token in
+  `FRAGMENT_SECRETS_TOKEN`, its CA in `CELLD_EXTRA_CA_FILE`. Only OpenBao
+  is tested.
 
 ## What celld does differently, still true
 
@@ -251,8 +311,9 @@ through the person's browser, so the tailnet is enough.
 2. TLS: a publicly trusted certificate and a wildcard (ACME DNS-01).
 3. The front door sets `CF-Connecting-IP` (found 48): without it every
    CLI code's ask counts as one address, and a client could name its own.
-4. Secrets: behind the cell's stand-ins (seam 12); the host secret, 32
-   or more random bytes, among the platform's root secrets there.
+4. Secrets: OpenBao (or the org's own Vault), its unseal key kept
+   safe (a TPM, an HSM or a KMS once built); the host secret, 32 or more
+   random bytes, among the platform's root secrets there (seam 12).
 5. WorkOS: its own environment and the redirects.
 6. code.storage: its own org and key (or macrofiche, once ported).
 7. Models: endpoints for every slot, and embeddings.
@@ -279,7 +340,9 @@ behind a tailnet name, and the Hermes `FRAGMENT_HOST` rebuild.
 ```sh
 # celld: the fork's selfhost line (cargo build --release -p celld)
 CELLD_BIN=…/celld cargo xtask dev --runtime celld
-# the e2e on celld
+# its secrets in .dev.vars instead of OpenBao (a local fleet's convenience)
+FRAGMENT_SECRETS_BACKEND=vars CELLD_BIN=… cargo xtask dev --runtime celld
+# the e2e on celld (OpenBao behind the stand-ins unless FRAGMENT_E2E_SECRETS=vars)
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… cargo xtask e2e --only auth,create,…
 ```
 

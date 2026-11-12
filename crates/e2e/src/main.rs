@@ -24,7 +24,9 @@
 //! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes: a section
 //! that needs the runtime's own containers is a skip (needs.rs), and so is
 //! a check of what celld has no part in (a card's shot: no Browser
-//! Rendering), each saying why.
+//! Rendering), each saying why. Its secrets are OpenBao's, behind the
+//! cell's stand-ins (docs/self-host.md, seam 12), unless
+//! `FRAGMENT_E2E_SECRETS=vars` puts them in `.dev.vars`.
 
 mod api;
 mod browser;
@@ -407,6 +409,11 @@ pub struct Suite {
     tools: Option<devstack::Tools>,
     /// celld's, when the local node runs on it (`FRAGMENT_E2E_RUNTIME=celld`).
     celld: Option<devstack::celld::CelldTools>,
+    /// OpenBao, the cell's secrets behind its stand-ins (celld's default,
+    /// or `FRAGMENT_E2E_SECRETS=openbao`; `vars` for the stand-ins'
+    /// variables: docs/self-host.md, seam 12), its state and audit log in
+    /// the run's scratch.
+    openbao: Option<devstack::openbao::OpenBao>,
     node: Option<devstack::Node>,
     /// The node's port, held for the whole run: each of the node's lives
     /// listens on it (`devstack::NodeOptions::listener`), so no other socket
@@ -487,6 +494,30 @@ impl Suite {
             ("WorkOS API key", WORKOS_KEY.into()),
             ("test secret", self.test_secret.clone()),
         ]
+        .into_iter()
+        // the cell's OpenBao token: secret zero, the one given outside it
+        .chain(self.openbao.as_ref().and_then(|b| std::fs::read_to_string(b.layout().cell_token()).ok()).map(|t| ("OpenBao token", t.trim().to_string())))
+        .collect()
+    }
+
+    /// Whether the cell's secrets are OpenBao's, behind its stand-ins.
+    pub fn has_openbao(&self) -> bool {
+        self.openbao.is_some()
+    }
+
+    /// OpenBao stops: to the cell, its secrets' service is down.
+    pub fn openbao_down(&mut self) -> Result<()> {
+        Ok(self.openbao.as_mut().context("the run's secrets are OpenBao's")?.down()?)
+    }
+
+    /// OpenBao starts again on its state: unsealed by its static seal.
+    pub fn openbao_up(&mut self) -> Result<Duration> {
+        Ok(self.openbao.as_mut().context("the run's secrets are OpenBao's")?.up()?)
+    }
+
+    /// How many times the run's OpenBao initialised its state.
+    pub fn openbao_initialisations(&self) -> Result<usize> {
+        Ok(devstack::openbao::initialisations(self.openbao.as_ref().context("the run's secrets are OpenBao's")?.layout())?)
     }
 
     /// Whether the run keeps the hosted lane's rules (on a preview, or its
@@ -855,9 +886,12 @@ impl Suite {
             swap_upstream: Some(self.upstream.node().url.clone()),
             // celld's: a self-hosted deployment links no Telegram (no inbound webhooks)
             connectors: self.on_celld().then(devstack::celld::connectors),
-            // wrangler's local store, or the cell's stand-ins (`secrets_of`;
-            // celld has no store: seam 12)
-            secrets: self.secrets,
+            // wrangler's local store, the cell's stand-ins over variables, or
+            // over OpenBao (`secrets_of`; celld has no store: seam 12)
+            secrets: match &self.openbao {
+                Some(bao) => devstack::Secrets::OpenBao(bao.target()),
+                None => self.secrets.clone(),
+            },
         };
         fleet.configure(tools, &self.project)?;
         let opts = devstack::NodeOptions {
@@ -1226,17 +1260,19 @@ fn make_scratch(dir: &Path) -> Result<()> {
     std::fs::create_dir(dir).with_context(|| format!("{}: this run's scratch, made by another run first", dir.display()))
 }
 
-/// The node's secrets by `FRAGMENT_E2E_SECRETS`: unset or `store`,
-/// wrangler's local Secrets Store, as a deploy binds the account's; `vars`,
-/// the cell's stand-ins for its bindings (cell/secrets.mjs), as a runtime
-/// with no store reads them (docs/self-host.md). celld has no store: its
-/// are the stand-ins.
-fn secrets_of(celld: bool, var: Option<&str>) -> Result<devstack::Secrets> {
+/// The node's secrets by `FRAGMENT_E2E_SECRETS`, and whether OpenBao holds
+/// them: `store`, wrangler's local Secrets Store, as a deploy binds the
+/// account's (wrangler's default); `vars`, the cell's stand-ins for its
+/// bindings (cell/secrets.mjs) over variables; `openbao`, the stand-ins
+/// over OpenBao (celld's default, as a self-hosted deployment's:
+/// docs/self-host.md, seam 12). celld has no store.
+fn secrets_of(celld: bool, var: Option<&str>) -> Result<(devstack::Secrets, bool)> {
     match (celld, var) {
-        (false, None | Some("store")) => Ok(devstack::Secrets::Store),
+        (false, None | Some("store")) => Ok((devstack::Secrets::Store, false)),
         (true, Some("store")) => bail!("FRAGMENT_E2E_SECRETS=store is wrangler's: celld has no Secrets Store"),
-        (_, Some("vars")) | (true, None) => Ok(devstack::Secrets::Shim),
-        (_, Some(other)) => bail!("FRAGMENT_E2E_SECRETS is store or vars, not {other:?}"),
+        (_, Some("vars")) => Ok((devstack::Secrets::Shim, false)),
+        (true, None) | (_, Some("openbao")) => Ok((devstack::Secrets::Shim, true)),
+        (_, Some(other)) => bail!("FRAGMENT_E2E_SECRETS is store, vars or openbao, not {other:?}"),
     }
 }
 
@@ -1291,6 +1327,10 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if let Some(c) = &celld {
         println!("runtime: celld dev ({})", c.celld.display());
     }
+    // the cell's secrets: the store, or behind its stand-ins, over
+    // variables or OpenBao (celld's default)
+    let (secrets, with_openbao) = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
+    let openbao = with_openbao.then(|| openbao(&scratch)).transpose()?;
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
@@ -1302,7 +1342,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
-    let secrets = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
     let listener = devstack::hold_port(0)?;
@@ -1328,6 +1367,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         chrome: browser::Shared::new(&scratch),
         tools: Some(tools),
         celld,
+        openbao,
         node: None,
         port: listener.local_addr()?.port(),
         listener: Some(listener),
@@ -1374,6 +1414,27 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     finish(&mut s)
 }
 
+/// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
+/// state in the run's scratch, on a free loopback port, every request in
+/// its audit log (read at the run's end: `openbao_reads`).
+fn openbao(scratch: &Path) -> Result<devstack::openbao::OpenBao> {
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir: scratch.join("openbao"), port: devstack::free_port()?, audit: true };
+    let (bao, took) = devstack::openbao::OpenBao::start(&bin, opts)?;
+    println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret behind the cell's stand-ins)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
+    Ok(bao)
+}
+
+/// What the run asked of OpenBao, from its audit log: the cell's reads of
+/// the secrets, and the log's size.
+fn openbao_reads(s: &Suite) {
+    let Some(bao) = &s.openbao else { return };
+    match devstack::openbao::audited(bao.layout()) {
+        Ok(a) => println!("      (OpenBao: {} reads of the secrets by the cell's token, {} requests in all, {} KiB of audit log)", a.cell_reads, a.requests, a.bytes / 1024),
+        Err(e) => println!("      (OpenBao's audit log: {e})"),
+    }
+}
+
 /// A run's end: a name `--only` or `--except` gave that no section has
 /// fails it; the node stops; the counts, each FAIL, and (hosted) what the
 /// run spent are printed. Non-zero when any check failed, the scratch kept.
@@ -1405,6 +1466,12 @@ fn finish(s: &mut Suite) -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
+    openbao_reads(s);
+    if let Some(mut bao) = s.openbao.take() {
+        if let Err(e) = bao.down() {
+            s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
+        }
+    }
     let skipped = match s.hosted() || s.on_celld() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
