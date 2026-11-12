@@ -30,7 +30,7 @@ which makes it a preview of Tailscale's rollout.
 
 ## 1. Names
 
-- MagicDNS subdomains: not live on Tailscale today (the box joining Paul's
+- MagicDNS subdomains: not live on Tailscale today (the box joining the real
   tailnet is pending; its CapMap gets checked then). Under a control plane
   that grants the cap (Headscale), quad-100 resolves them. That serves
   devices running the Tailscale app.
@@ -100,7 +100,7 @@ the box's names only.
 ### Option A (public wildcard cert by DNS-01)
 
 lego 5.6.0 is ready. The real certificate waits on a zone and a token from
-Paul. Its trust on iOS, macOS and the CLI is the platforms' default
+the owner. Its trust on iOS, macOS and the CLI is the platforms' default
 behaviour; to be shown. Everything else about A (DNS → 100.x → tailnet,
 through tsnet and through the box's dialer) is measured above.
 
