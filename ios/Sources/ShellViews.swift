@@ -123,6 +123,10 @@ struct SidebarView: View {
     /// The height of its glass controls: an agent's pill and the round
     /// buttons beside it and at its foot, drawn alike so they stay one size.
     static let control: CGFloat = 44
+    /// Every action's icon (close, new chat, search, its pages), one size and
+    /// weight that follow the person's text size; and the small marks on a pill.
+    static let icon = Font.body.weight(.medium)
+    static let mark = Font.caption.weight(.semibold)
     @State private var renamingChat: FragmentSummary?
     @State private var chatTitle = ""
     @State private var managingChat: FragmentSummary?
@@ -139,7 +143,7 @@ struct SidebarView: View {
                 Text("Finite.Computer").font(.headline)
                 Spacer()
                 Button { close() } label: {
-                    Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 44, height: 44).contentShape(.rect)
+                    Image(systemName: "xmark").font(Self.icon).frame(width: 44, height: 44).contentShape(.rect)
                 }
                 .buttonStyle(.plain).accessibilityLabel("Close").accessibilityIdentifier("sidebarClose")
             }.padding(20)
@@ -160,10 +164,10 @@ struct SidebarView: View {
                                     AgentAvatar(agent: agent, round: true)
                                     Text(agent.displayTitle).font(.headline)
                                     if agent.pinned == true {
-                                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
+                                        Image(systemName: "pin.fill").font(Self.mark).foregroundStyle(.tertiary).accessibilityLabel("Pinned")
                                     }
                                     Spacer()
-                                    Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+                                    Image(systemName: "chevron.down").font(Self.mark).foregroundStyle(.secondary)
                                 }
                                 // the new-chat button's glass, and its height
                                 .padding(.leading, 8).padding(.trailing, 14).frame(height: Self.control)
@@ -171,7 +175,7 @@ struct SidebarView: View {
                             }.buttonStyle(.plain).accessibilityIdentifier("agentMenu-\(agent.name)")
                             // a new chat with this agent: the launcher, its words to come
                             Button { library.selectedAgent = agent.name; navigate(.launcher) } label: {
-                                Image(systemName: "square.and.pencil").font(.system(size: 17, weight: .medium))
+                                Image(systemName: "square.and.pencil").font(Self.icon)
                                     .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                             }
                             .buttonStyle(.plain)
@@ -201,7 +205,7 @@ struct SidebarView: View {
                 }
                 // Search, or start a chat from what is typed: the launcher (the web's ⌘K)
                 Button { navigate(.launcher) } label: {
-                    Image(systemName: "magnifyingglass").font(.system(size: 17, weight: .medium))
+                    Image(systemName: "magnifyingglass").font(Self.icon)
                         .frame(width: Self.control, height: Self.control).glassEffect(.regular.interactive(), in: .circle)
                 }
                 .buttonStyle(.plain)
@@ -209,7 +213,7 @@ struct SidebarView: View {
                 .padding(.bottom, 4)
             }.padding(12)
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 40, style: .continuous))
         .padding(8)
         .alert("Name this chat", isPresented: Binding(get: { renamingChat != nil }, set: { if !$0 { renamingChat = nil } })) {
             TextField("Chat name", text: $chatTitle)
@@ -249,13 +253,16 @@ struct SidebarView: View {
                     }
                     Text(chat.preview ?? "No messages yet").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(page == .chat(chat.name) ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+            }.padding(.horizontal, 12).padding(.vertical, 9).frame(maxWidth: .infinity, alignment: .leading)
+                .background(page == .chat(chat.name) ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }.buttonStyle(.plain).accessibilityIdentifier("sidebarChat-\(chat.name)")
         .contextMenu { chatActions(chat) }
     }
     private func footer(_ title: String, icon: String, page destination: ShellPage) -> some View {
-        Button { navigate(destination) } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, alignment: .leading).padding(12) }
+        Button { navigate(destination) } label: {
+            Label { Text(title) } icon: { Image(systemName: icon).font(Self.icon) }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        }
             .buttonStyle(.plain).accessibilityIdentifier("sidebar-\(title.lowercased())")
     }
 }
