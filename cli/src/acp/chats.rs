@@ -11,6 +11,9 @@ use super::turn::Record;
 use crate::api::{Client, Code};
 use crate::ask::{self, Agent};
 
+/// A chat's records read back at most, for a session opened again: what
+/// `fragment ask` reads back for a replay (`ask::REPLAY_BACK_RECORDS`).
+pub const HISTORY_RECORDS_MAX: i64 = ask::REPLAY_BACK_RECORDS;
 /// A chat's newest records read as a prompt comes, for the turn that waits
 /// for an answer (`turn::asking`): a question older than this many records
 /// has gone on, or been answered, long since.
@@ -20,15 +23,16 @@ pub const ASKING_BACK_RECORDS: i64 = 200;
 const CHAT_NUMBER_MAX: u32 = 9_999;
 
 /// The agent `who` names, among the person's own, as `fragment ask` names
-/// one: by its label, its fragment, its identity or its name.
-pub fn agent(c: &Client, who: &str) -> Result<Agent> {
+/// one: by its label, its fragment, its identity or its name. With it,
+/// every agent of theirs, each as they call it.
+pub fn agent(c: &Client, who: &str) -> Result<(Agent, Vec<Agent>)> {
     if let Some(mode) = c.agent() {
         return Err(ask::coded(Code::InvalidUsage, format!("{} is an agent: `fragment acp` serves a person's agent to their own tools (an agent asks another with `fragment ask`)", mode.agent)));
     }
     let (_, mut agents) = ask::roster(c)?;
     ask::named(c, None, &mut agents);
     match ask::pick(&agents, who) {
-        Ok(a) => Ok(a.clone()),
+        Ok(a) => Ok((a.clone(), agents.clone())),
         Err(many) if many.len() > 1 => {
             let fragments: Vec<&str> = many.iter().map(|a| a.fragment.as_str()).collect();
             Err(ask::coded(Code::Conflict, format!("{who:?} names {} agents ({}): name one by its fragment", many.len(), fragments.join(", "))))

@@ -48,6 +48,12 @@ fn record(channel: &str, seq: i64, principal: &str, body: Value) -> Value {
     json!({ "channel": channel, "seq": seq, "at": seq * 1000, "principal": principal, "kind": "message", "body": body })
 }
 
+/// `record`, said at `ms`.
+fn at(ms: i64, mut record: Value) -> Value {
+    record["at"] = json!(ms);
+    record
+}
+
 /// A host with one person (paul), their agents fred and maple, and two
 /// chats with fred: `KEPT`, which holds `held`'s records, and `MADE`,
 /// which `POST /api/fragments` makes.
@@ -346,8 +352,8 @@ fn start(turn: &str, cause: i64) -> Value {
 }
 
 /// Goal: a client is told what the server speaks and may ask of it:
-/// protocol version 1 whatever it offers, words only, a session it can
-/// open again, and no sign-in of its own (the CLI's key).
+/// protocol version 1 whatever it offers, words only, sessions it can
+/// list, load and resume, and no sign-in of its own (the CLI's key).
 /// Invalid: an agent that is none of the person's refuses the session,
 /// naming theirs.
 #[test]
@@ -359,10 +365,10 @@ fn a_client_is_told_what_it_may_ask() {
         json!({
             "protocolVersion": 1,
             "agentCapabilities": {
-                "loadSession": false,
+                "loadSession": true,
                 "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
                 "mcpCapabilities": { "http": false, "sse": false },
-                "sessionCapabilities": { "resume": {} },
+                "sessionCapabilities": { "list": {}, "resume": {} },
             },
             "agentInfo": { "name": "fragment", "title": "Frederick", "version": crate::VERSION },
             "authMethods": [],
@@ -593,7 +599,7 @@ fn what_is_refused_and_how() {
     };
     let prompt = |session: &str, blocks: Value| json!({ "jsonrpc": "2.0", "id": 9, "method": "session/prompt", "params": { "sessionId": session, "prompt": blocks } });
     let (code, why) = refusal(&mut d, prompt(KEPT, json!([{ "type": "text", "text": "hi" }])));
-    assert!(code == INVALID_PARAMS && why.contains("session/resume"), "{code} {why}");
+    assert!(code == INVALID_PARAMS && why.contains("session/load"), "{code} {why}");
     let session = d.new_session();
     for (blocks, says) in [
         (json!([]), "words"),
@@ -642,6 +648,51 @@ fn a_session_resumed_is_the_same_chat() {
     let (updates, answer) = d.until_answer(5);
     assert_eq!(answer["result"], json!({ "stopReason": "end_turn" }));
     assert_eq!(updates[0]["update"]["content"]["text"], "(told: Bean)");
+    d.close();
+}
+
+/// Goal: a client lists the agent's chats as its sessions, and loading one
+/// replays what it said before answering, then goes on in it.
+#[test]
+fn sessions_are_listed_and_loaded() {
+    let held = Held {
+        chat: vec![record("chat", 1, &me(), json!({ "text": "hi fred", "to": [FRED] })), record("chat", 2, FRED, json!({ "text": "echo: hi fred", "turn": "t1" }))],
+        // each when it happened: the step between the message and its reply
+        work: vec![
+            at(1_100, record("work", 1, FRED, start("t1", 1))),
+            at(1_500, record("work", 2, FRED, json!({ "kind": "turn.step", "turn": "t1", "step": 1, "tool": "search", "category": "web", "args": "hi", "ok": true, "status": "completed" }))),
+            at(2_100, record("work", 3, FRED, json!({ "kind": "turn.end", "turn": "t1", "outcome": "idle" }))),
+        ],
+        ..Held::default()
+    };
+    let mut d = Driven::start(held, Bounds::default());
+    d.ask(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": 1 } }));
+    let listed = d.ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "session/list", "params": { "cwd": "/work/repo" } }));
+    assert_eq!(listed["result"], json!({ "sessions": [{ "sessionId": KEPT, "cwd": "/work/repo", "title": "Beans", "updatedAt": "2026-09-21T14:13:20Z" }] }));
+    let rootless = d.ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/list", "params": {} }));
+    assert_eq!(rootless["result"]["sessions"][0]["cwd"], "/", "a chat is in no folder: asked of none, the root");
+
+    d.send(json!({ "jsonrpc": "2.0", "id": 3, "method": "session/load", "params": { "sessionId": KEPT, "cwd": "/work/repo", "mcpServers": [] } }));
+    let (updates, answer) = d.until_answer(3);
+    assert_eq!(answer["result"], json!({}));
+    let told: Vec<(&str, &str)> = updates
+        .iter()
+        .map(|u| {
+            assert_eq!(u["sessionId"], KEPT);
+            let update = &u["update"];
+            (update["sessionUpdate"].as_str().unwrap_or(""), update["content"]["text"].as_str().or(update["title"].as_str()).unwrap_or(""))
+        })
+        .collect();
+    assert_eq!(told, [("user_message_chunk", "hi fred"), ("tool_call", "search: hi"), ("agent_message_chunk", "echo: hi fred")]);
+
+    d.prompt(4, KEPT, "and again");
+    assert_eq!(d.posts(1)[0]["body"]["text"], "and again");
+    d.work(4, json!({ "kind": "turn.start", "turn": "t2", "asker": &me(), "agent": FRED, "cause": { "fragment": KEPT, "channel": "chat", "seq": 3 }, "life": "0" }));
+    d.reply(4, json!({ "text": "echo: and again", "turn": "t2" }));
+    d.work(5, json!({ "kind": "turn.end", "turn": "t2", "outcome": "idle" }));
+    let (updates, answer) = d.until_answer(4);
+    assert_eq!(answer["result"]["stopReason"], "end_turn");
+    assert_eq!(updates[0]["update"]["content"]["text"], "echo: and again");
     d.close();
 }
 

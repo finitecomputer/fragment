@@ -11,9 +11,10 @@
 //!
 //! - **A session is a chat**, named in full: its id is the chat's name.
 //!   `session/new` makes one with the agent in it, as the shell's New chat
-//!   does, and `session/resume` opens one again. The server keeps nothing
-//!   of a session but that it is open: what a prompt must know of its chat
-//!   is read as the prompt comes.
+//!   does; `session/list` lists the person's chats with the agent;
+//!   `session/load` replays one and `session/resume` opens one untold
+//!   (history.rs). The server keeps nothing of a session but that it is
+//!   open: what a prompt must know of its chat is read as the prompt comes.
 //! - **A prompt is a message** to the agent in that chat, and the turn it
 //!   causes is the prompt's: its drafts, replies, calls and steps are the
 //!   session's updates as they come (turn.rs), over the chat's live socket
@@ -34,6 +35,7 @@
 
 mod chats;
 mod feed;
+mod history;
 mod turn;
 
 #[cfg(test)]
@@ -113,6 +115,8 @@ struct Session {
 /// Who a server serves.
 struct Served {
     agent: Agent,
+    /// Every agent of the person's, each as they call it.
+    agents: Vec<Agent>,
     /// The person: their identity, as their records name them.
     me: String,
 }
@@ -240,14 +244,14 @@ impl<'a, W: Write + Send> Server<'a, W> {
         }
     }
 
-    /// Who is served: the agent and the person.
+    /// Who is served: the agent, the person's agents, and the person.
     fn served(&self) -> Result<&Served, RpcError> {
         if let Some(served) = self.served.get() {
             return Ok(served);
         }
-        let agent = chats::agent(self.client, &self.who).map_err(refused)?;
+        let (agent, agents) = chats::agent(self.client, &self.who).map_err(refused)?;
         let me = chats::me(self.client).map_err(refused)?;
-        Ok(self.served.get_or_init(|| Served { agent, me }))
+        Ok(self.served.get_or_init(|| Served { agent, agents, me }))
     }
 
     /// The agent served.
@@ -255,10 +259,18 @@ impl<'a, W: Write + Send> Server<'a, W> {
         Ok(&self.served()?.agent)
     }
 
+    /// Who is who in a chat of the agent's: it, the person, and the
+    /// person's other agents by their names.
+    fn who(&self) -> Result<history::Who, RpcError> {
+        let served = self.served()?;
+        let names = served.agents.iter().map(|a| (a.identity.clone(), a.shown().to_string())).collect();
+        Ok(history::Who { agent: served.agent.identity.clone(), me: served.me.clone(), names: fragment_core::export::Names(names) })
+    }
+
     fn session(&self, params: &Value) -> Result<Arc<Session>, RpcError> {
         let id = params["sessionId"].as_str().ok_or_else(|| RpcError::new(INVALID_PARAMS, "a session is named (params.sessionId)"))?;
         let found = self.sessions.lock().expect("the sessions").get(id).cloned();
-        found.ok_or_else(|| RpcError::new(INVALID_PARAMS, format!("no session {id:?} is open: open it with session/resume, or make one with session/new")))
+        found.ok_or_else(|| RpcError::new(INVALID_PARAMS, format!("no session {id:?} is open: open it with session/load or session/resume, or make one with session/new")))
     }
 
     /// Opens `chat` as a session: the one open already, or a new one.
@@ -317,10 +329,10 @@ impl<'a, W: Write + Send> Server<'a, W> {
                 Ok(json!({
                     "protocolVersion": PROTOCOL_VERSION,
                     "agentCapabilities": {
-                        "loadSession": false,
+                        "loadSession": true,
                         "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
                         "mcpCapabilities": { "http": false, "sse": false },
-                        "sessionCapabilities": { "resume": {} },
+                        "sessionCapabilities": { "list": {}, "resume": {} },
                     },
                     "agentInfo": { "name": "fragment", "title": agent.shown(), "version": crate::VERSION },
                     // the CLI's own key signs: `fragment login`, before this runs
@@ -332,17 +344,23 @@ impl<'a, W: Write + Send> Server<'a, W> {
                 self.opened(&chat);
                 Ok(json!({ "sessionId": chat }))
             }
-            "session/resume" => self.reopen(params),
+            "session/resume" => self.reopen(params, false),
+            "session/load" => self.reopen(params, true),
+            "session/list" => {
+                let agent = self.agent()?;
+                let listed = chats::listed(self.client).map_err(refused)?;
+                Ok(json!({ "sessions": history::sessions(&listed, &agent.identity, params["cwd"].as_str().unwrap_or("/")) }))
+            }
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
-                format!("no method {other:?}: this agent serves initialize, session/new, session/resume, session/prompt and session/cancel"),
+                format!("no method {other:?}: this agent serves initialize, session/new, session/list, session/load, session/resume, session/prompt and session/cancel"),
             )),
         }
     }
 
-    /// Opens a chat the person already has as a session again
-    /// (`session/resume`): nothing of it is told.
-    fn reopen(&self, params: &Value) -> Result<Value, RpcError> {
+    /// Opens a chat the person already has as a session: `session/load`
+    /// tells what it said first (`replay`), `session/resume` nothing.
+    fn reopen(&self, params: &Value, replay: bool) -> Result<Value, RpcError> {
         let agent = self.agent()?;
         let chat = params["sessionId"].as_str().ok_or_else(|| RpcError::new(INVALID_PARAMS, "a session is named (params.sessionId)"))?;
         // a session's id goes into a path: only a fragment's name is one
@@ -354,8 +372,13 @@ impl<'a, W: Write + Send> Server<'a, W> {
             Some(false) => return Err(RpcError::new(INVALID_PARAMS, format!("{} does not answer in {chat}: add it to the chat, or start a session with session/new", agent.shown()))),
             Some(true) => {}
         }
-        // a chat it can be asked in: its two channels, the person's to post on
-        chats::seqs(self.client, chat).map_err(refused)?;
+        let seen = chats::seqs(self.client, chat).map_err(refused)?;
+        if replay {
+            let back = |seq: i64| (seq - chats::HISTORY_RECORDS_MAX).max(0);
+            let (said, _) = chats::records(self.client, chat, "chat", back(seen.chat)).map_err(refused)?;
+            let (work, _) = chats::records(self.client, chat, "work", back(seen.work)).map_err(refused)?;
+            self.tell(chat, history::replay(&said, &work, &self.who()?, &Links::of(&self.client.host, chat)));
+        }
         self.opened(chat);
         Ok(json!({}))
     }

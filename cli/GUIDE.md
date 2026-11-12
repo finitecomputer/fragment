@@ -1110,7 +1110,10 @@ arguments `acp` and the agent (`juniper`, or `juniper--k3x9`).
 
 - A session is a chat with the agent, made as the shell's New chat makes
   one (`juniper-chat-2`). It is a chat like any other: in your shell's
-  list, on your phone, in search and in your export.
+  list, on your phone, in search and in your export. The client's list
+  of sessions is your chats with the agent, and loading one replays what
+  was said (its newest 2,000 records). In a chat of several, anyone
+  else's words are told with who said them (`[Maple] …`).
 - A prompt is a message to the agent there. Its reply streams as it is
   written. Each tool call shows as it is asked for and as it ends, with
   what the chat keeps of it: its name, its arguments' first words, an
