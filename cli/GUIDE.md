@@ -310,7 +310,7 @@ from their label instead of a template placeholder such as "Blank".
 fragment rename meal-planner "Meals this week"     # changes meta.title, deploys; address stays put
 fragment icon generate meal-planner --hint "a cooking pot"   # generates and sets the best candidate
 fragment icon set meal-planner pot.png             # or upload an image
-fragment icon remove meal-planner                  # restore the default glyph
+fragment icon remove meal-planner                  # restore the default (a brain's icon, or the glyph)
 fragment preview meal-planner                     # request a new screenshot, returns immediately
 fragment address meal-planner                     # read its optional public address
 fragment address meal-planner family-meals        # claim one, first come first served
