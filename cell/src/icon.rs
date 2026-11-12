@@ -36,6 +36,16 @@ use crate::ledger::MaySpend;
 /// bytes (`icon::icon_path`), so a new one is a new address.
 const ICON_CACHE: &str = "private, max-age=86400";
 
+/// Images (`IMAGES`) cuts out and fits every icon: a runtime without it
+/// (a self-hosted one: docs/self-host.md) refuses a making, and an upload
+/// that needs fitting, at once, typed, before anything is asked or charged.
+fn images_bound(env: &Env) -> CellResult<()> {
+    match js::has_binding(env.as_ref(), "IMAGES") {
+        true => Ok(()),
+        false => Err(CellError::new(ErrorCode::HostFailed, format!("this deployment has no Images binding: it makes and fits no icons (a PNG of {0}×{0} is kept as it is)", icon::SIZE))),
+    }
+}
+
 fn refused(r: Refusal) -> CellError {
     let code = match r {
         Refusal::Busy => ErrorCode::RateLimited,
@@ -153,6 +163,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Editor)?;
         let hint = icon::hint(&body).map_err(refused)?;
         self.icon_taker()?;
+        images_bound(&self.env)?;
         let owner = self.must(MetaKey::Owner)?;
         // asked as a job's AI step is: a guest's fragment makes none, nor
         // one at its cap for anyone but its owner and their agents
@@ -276,6 +287,7 @@ impl FragmentCell {
         let png = if whole {
             bytes
         } else {
+            images_bound(&self.env)?;
             let fitted = js::images(self.env.as_ref(), &bytes, &icon::fit(None), icon::MEDIA_TYPE).await.map_err(|e| CellError::invalid(format!("the image could not be read: {}", e.message)))?;
             self.icon_charge(&self.meter_key()?, &operation(js::now_ms()), "upload", Usage::Images { count: 1 });
             fitted

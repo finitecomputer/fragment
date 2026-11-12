@@ -75,6 +75,11 @@ enum Shape {
     /// (`repinned_models`): another space, as a deployment that moved its
     /// embeddings model is.
     EmbeddingsRepinned,
+    /// As `Plain`, without the services a self-hosted runtime lacks
+    /// (docs/self-host.md): no Email Sending (no `send_email`, and no mail
+    /// fake: no mailer at all), no Browser Rendering, no Images, and no
+    /// containers (so it makes no computers).
+    Unbound,
 }
 
 /// Finite Private's key on a node shaped as the private tier (`Shape::PrivateTier`):
@@ -687,6 +692,20 @@ impl Suite {
         started
     }
 
+    /// Starts the node without what a self-hosted runtime lacks
+    /// (`Shape::Unbound`).
+    pub fn start_unbound(&mut self) -> Result<Api> {
+        self.shape = Shape::Unbound;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
+    /// This node boot's log, as written so far (`None`: no node runs).
+    pub fn node_log(&self) -> Option<String> {
+        self.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default())
+    }
+
     /// Starts the node with one operator key more in its catalog
     /// (`Shape::OneKeyMore`).
     pub fn start_with_a_key_more(&mut self) -> Result<Api> {
@@ -735,7 +754,7 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Unbound => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
@@ -753,8 +772,8 @@ impl Suite {
                     _ => vec![],
                 }
             },
-            mail_url: Some(self.mail.node().url.clone()),
-            mail_from: Some(MAIL_FROM.into()),
+            mail_url: (self.shape != Shape::Unbound).then(|| self.mail.node().url.clone()),
+            mail_from: (self.shape != Shape::Unbound).then(|| MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
@@ -777,7 +796,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Unbound => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -788,7 +807,7 @@ impl Suite {
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            computer_image: Some("stub".into()),
+            computer_image: (self.shape != Shape::Unbound).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // a run must not depend on public DNS (devstack::Fleet)
@@ -808,6 +827,10 @@ impl Suite {
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into()), (ORG_CONNECTION.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
             secrets: self.secrets,
+            unbound: match self.shape {
+                Shape::Unbound => &["send_email", "browser", "images", "containers"],
+                _ => &[],
+            },
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -832,7 +855,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Unbound => SUFFIX,
         }
     }
 

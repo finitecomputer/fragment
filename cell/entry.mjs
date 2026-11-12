@@ -317,23 +317,26 @@ class ContainerHost {
     });
   }
 
+  // The container, absent where the runtime binds none (a deployment that
+  // makes no computers, as a self-hosted one: docs/self-host.md): then none runs,
+  // and a wipe's destroy finds nothing to do.
   get #c() {
     return this.#ctx.container;
   }
 
   running() {
-    return this.#c.running;
+    return this.#c?.running ?? false;
   }
 
   // The images the deployment declares (wrangler.jsonc `containers`).
   images() {
-    return Object.keys(this.#c.images || {});
+    return Object.keys(this.#c?.images || {});
   }
 
   // What the name `image` stands for in this deployment (its reference: a
   // redeploy that changes the image keeps the name and changes this).
   imageRef(image) {
-    const ref = this.#c.images && this.#c.images[image];
+    const ref = this.#c?.images && this.#c.images[image];
     return ref === undefined ? null : typeof ref === "string" ? ref : JSON.stringify(ref);
   }
 
@@ -341,7 +344,7 @@ class ContainerHost {
   // when it runs, this isolate takes it, watching its exit again. Answers
   // whether it runs.
   adopt(generation) {
-    if (!this.#c.running) return false;
+    if (!this.#c?.running) return false;
     this.#generation = generation;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
@@ -508,7 +511,7 @@ class ContainerHost {
   // Sends signal `n` to the guest's PID 1 (from outside its PID namespace,
   // so SIGKILL lands as a crash's would). Answers whether it was sent.
   signal(generation, n) {
-    if (generation !== this.#generation || !this.#c.running) return false;
+    if (generation !== this.#generation || !this.#c?.running) return false;
     this.#c.signal(n);
     return true;
   }
@@ -521,16 +524,16 @@ class ContainerHost {
     if (generation !== 0 && generation !== this.#generation) return false;
     if (!(ms > 0)) throw new Error("a destroy is bounded");
     const t0 = Date.now();
-    if (this.#c.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
-    while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
-    return !this.#c.running;
+    if (this.#c?.running) await bounded("the destroy", ms, () => this.#c.destroy(reason)).catch(() => {});
+    while (this.#c?.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
+    return !this.#c?.running;
   }
 
   // Waits up to `ms` for the container to exit on its own (after a signal).
   async exited(ms) {
     const t0 = Date.now();
-    while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
-    return !this.#c.running;
+    while (this.#c?.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
+    return !this.#c?.running;
   }
 
   // A request to one of the container's ports. A WebSocket is bridged
